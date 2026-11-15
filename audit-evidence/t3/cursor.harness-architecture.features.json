@@ -1,0 +1,2667 @@
+[
+ {
+  "id": "cursor-harness-architecture-001",
+  "category": "Agent runtime",
+  "name": "Bounded step loop with explicit turn state machine",
+  "what": "One user turn is run as a bounded loop of model steps; each step streams a response, executes tool calls and then decides whether to stop, continue, absorb queued user input or break for a created plan.",
+  "how": "AgentRunner.runTurnLoop(maxSteps) iterates for d<maxSteps: (1) append a mode-change nudge if the mode changed, (2) executeStepWithMetrics, (3) applyPostStepProcessing (summarization triggers, todos, state), (4) peek the conversationActionReceiver for an async ask-question completion and apply it at once, (5) consumeQueuedUserMessagesAndMaybeCreateNewTurns, (6) optional CLI reflect-general forced follow-up every N tool-calling messages (default 10), (7) pre-final agent-store conflict barrier, (8) end-of-turn background-summarization persist or discard, (9) break when a CreatePlan call succeeded, or when the step had no tool call and nothing was injected. A distinct error is thrown when maxSteps is reached without a natural end (possible looping). Unfinished-todo counts and per-turn outcome metrics are emitted in the epilogue.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43942]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43964]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44036]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44042]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44107]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has a 13.5k-line ReAct loop in execution-core and a 3.7k-line gateway stream function; splitting them into explicit step states with typed exits (natural end, plan break, queued-input continue, max-steps) would make both testable (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": "The implementation is one very large async method with many flag-gated branches; a Rust port should split step phases into separate states. Names reconstructed from logger strings in beautified minified code."
+ },
+ {
+  "id": "cursor-harness-architecture-002",
+  "category": "Agent runtime",
+  "name": "Queue-and-inject mid-turn user messages and cancellable queued turns",
+  "what": "A user can keep typing while the agent works; queued messages are folded into the running turn (or start new turns) between steps, and a queued turn can be cancelled before it starts.",
+  "how": "Between steps the loop calls consumeQueuedUserMessagesAndMaybeCreateNewTurns, which pulls pending user actions from the conversation-action receiver and appends them so the next model call sees them. The agent-host API separately exposes SendMessage, InterruptTurn and CancelQueuedTurn, and the client message union carries conversation_action.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44107]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.AgentHostService methods CancelQueuedTurn, InterruptTurn, SendMessage; AgentClientMessage.conversation_action)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has mid-run input and cancel in the gateway chat loop; Do mode has no equivalent step-boundary injection, and cancel/plan state is process-local (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-003",
+  "category": "Agent runtime",
+  "name": "Streaming tool-call execution overlapped with generation",
+  "what": "Tool calls start executing as soon as their arguments finish streaming, while the model is still generating later content, and the UI receives partial arguments while they stream.",
+  "how": "Z1() tees the provider full stream: text, reasoning, redacted-reasoning and reasoning-signature chunks are accumulated into an assistant message while tool-call-streaming-start/delta/complete chunks feed a per-call WritableIterable (argsStream, completedArgs, completedArgsText). Each completed call is pushed on a toolCalls stream for the executor immediately; duplicate inbound tool-call ids are dropped or merged with a metric; argument parse failures are logged as nal.tool_call.args_parse_failure with invalid_args classification; on a mid-stream error the partial assistant content is preserved.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40901]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:41031]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Direct latency win for Verevon agent pages: dispatch tool calls when arguments complete, stream partial arguments to the UI, keep an idempotency guard on provider tool-call ids.",
+  "notes": "Ordering of dependent calls is handled in the executor layer, not traced here."
+ },
+ {
+  "id": "cursor-harness-architecture-004",
+  "category": "Agent runtime",
+  "name": "Tool-argument repair for malformed model JSON",
+  "what": "If a model emits slightly broken tool-call JSON (stray closing braces, duplicated keys, XML-style envelopes) the harness repairs it only when the repair is unambiguous, instead of failing the call.",
+  "how": "Strict JSON parse first; otherwise find stray closing-brace tokens, try removing each one, collect the distinct successful parses (deduped by JSON.stringify) and accept only if exactly one distinct result exists; a size guard (candidates x length > 250000) aborts repair. A second fallback parses an XML-style parameter envelope by regex and accepts a narrow key set. Result is {args, repaired}.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35318]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35345]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Cheap robustness for Rust tool-call parsing across many providers; unique-repair-or-fail avoids silently executing a guessed call.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-005",
+  "category": "Agent runtime",
+  "name": "Repetition (looping) detector on streamed assistant text",
+  "what": "The harness notices when a model repeats the same line or block and injects a corrective reminder instead of burning tokens.",
+  "how": "class gl consumes streamed text deltas line by line: single-line period/repetition thresholds, multi-line root detection, code-fence-aware state, box-border and binary-like line filters, and a ~500 ms check budget that fails open. When it trips, a user-role system_reminder (variants such as single_message_single_line) is appended and one retry occurs; AgentLoopError is non-retryable. Metrics agent.assistant_message_looping and agent.single_message_looping.check_for_loop.latency_ms.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23676]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23700]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23817]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23821]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A streaming repetition guard is cheap in Rust on the token stream and prevents runaway cost in long agent runs.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-006",
+  "category": "Agent runtime",
+  "name": "Recovery from output-token limit and empty responses",
+  "what": "When a model hits its output limit or returns nothing, the harness tells it what happened and retries a bounded number of times rather than failing the turn.",
+  "how": "runWithMaxTokensRetry (up to 5 iterations): on OutputTokensLimitExceededError it appends one user system_reminder asking the model to break the work into smaller pieces (once per turn) and re-runs; an empty-response retry (feature enableEmptyResponseRetry, budget 3 per turn, off for glass meta-parent and multitask) appends a continue prompt; the continuation-injector middleware adds a user continuation message whenever the message list ends with an assistant message.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43877]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43857]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22332]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23138]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon already types prompt-too-long overflow and retries after compaction; add the same typed recovery for max-output and empty responses in both loops (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-007",
+  "category": "Agent runtime",
+  "name": "Self-summarization compaction with error-classified retry",
+  "what": "When context nears the limit the same model summarizes the conversation into a checkpoint; failures fall back through cheaper strategies.",
+  "how": "VL() runs a summary pass through the same executor (same system prompt and tools) with a summary_request appended; up to 3 attempts with classified retry (requestShorterOutput, reduceInputs that drops the middle half while keeping a preserved prefix); the last real user message is kept as tail; skill blocks are re-injected; the result carries providerOptions.cursor.isSummary. Tokens are metered separately (self_summary.input_token/output_token). A self-summary that itself hits the input limit falls back to an external summarizer model.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:32488]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:32605]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:42124]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has two-tier compaction (clear stale tool results, summarise head) with reattach_context; Cursor adds same-prefix self-summary (cache-friendly), classified retry and a model-free fallback (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-008",
+  "category": "Agent runtime",
+  "name": "Provider-native compaction (Anthropic and OpenAI)",
+  "what": "Besides self-summary, the harness can use provider compaction paths and records their usage separately.",
+  "how": "Separate code paths and metrics for anthropic_compaction and openai_compaction (input, output, cache read/write tokens, status, time taken); the OpenAI path builds a CONTEXT CHECKPOINT COMPACTION prompt from the system message, user-info message and messages to summarize.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:32672]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:32800]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:32828]"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The Model Plane should abstract compaction behind a trait with provider-native and prompt-based implementations selected per model.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-009",
+  "category": "Agent runtime",
+  "name": "Background summarization with persist or discard at end of turn",
+  "what": "Summarization can run in the background while the turn continues and is only committed if the context really approached the limit.",
+  "how": "Modes Background, BackgroundAndPersistIfCompleted, WaitForCompletion, WaitForCompletionIfStarted; thresholds (unusedTokens/unusedPercent) start and persist it. At end of turn the loop either persists (used tokens beyond max + min(25%, 50k) or image count threshold, blocking on completion) or discards, recording the reason and flagging runs where used tokens were below 0.6 x the trigger as incorrectly_triggered_summarization. Metrics agent.background_summarization.persisted/discarded/time_saved_ms.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43904]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44012]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:42124]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon compaction is synchronous before the model call; speculative background summarization would hide its latency on long chat runs (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-010",
+  "category": "Agent runtime",
+  "name": "Deterministic truncation fallback with max-min fair allocation",
+  "what": "If model summarization keeps failing, the harness builds a truncated transcript deterministically, sharing a character budget fairly across messages.",
+  "how": "A fallback computes max-min fair character allocations across messages (budget constant 3.2e6 chars), timed by agent.summarization.compute_maxmin_fair_allocations_duration_ms and counted by agent.summarization.deterministic_fallback.used.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:20311]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A model-free last-resort compaction guarantees progress; max-min fairness avoids starving small messages.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-011",
+  "category": "Agent runtime",
+  "name": "Retry and backoff scheduler plus stream stall detection",
+  "what": "Transient provider and stream failures are retried with exponential backoff and jitter, and stalled streams are detected on the client.",
+  "how": "A BackoffScheduler validates baseDelayMs, maxDelayMs, multiplier and jitter in [0,1] and tracks consecutive failures; model-call retries (rde) use a 1000 ms base (100 ms in tests) doubling per attempt to a 60 s cap, plus up to 20% random jitter unless a fixed delay is given, and the sleep is abortable; the agent-client package has dedicated abort, retry, stall-detector and turn-runner modules and emits agent_client.stream.did_stall, stall.count and stall.duration_ms.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:164788]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:57819]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23138]",
+   "logger tags @anysphere/agent-client:stall-detector, :retry, :abort, :turn-runner (scratchpad/tmp/cursor-h/anysphere_modnames.txt)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Standard but well separated: keep retry classification (retryable, requestShorterOutput, reduceInputs) as data returned by an error classifier, not scattered conditionals.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-012",
+  "category": "Agent runtime",
+  "name": "Task tool with built-in, custom and forked subagents",
+  "what": "The agent can delegate to subagents that run with their own context and model; they can be foreground or background, resumed, or forked from the parent.",
+  "how": "The Task tool takes description, prompt, model, subagent_type, resume (an agent id or the literal self to fork), file_attachments, environment (local or cloud), cloud base branch and environment build id, machine (a new cloud VM, a self-hosted worker or a self-hosted pool), interrupt and run_in_background. Subagent type is a proto oneof (explore, shell, bash, mediaReview, browserUse, computerUse, vmSetupHelper, debug, cursorGuide, watchVideo, custom) with further flag-gated types (past-conversation explorer, CI investigator, bugbot, security review, best-of-N runner). Each subagent gets a role prompt injected as a system reminder, an optional tool override, subagentStart/subagentStop hooks (a deny blocks the spawn; ask is not implemented) and model policy checks (forced, blocked, valid).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:46431]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:46491]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:37514]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:27765]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon subagent.task is depth-1 with isolated history and a child ceiling; Cursor adds typed subagent kinds, resume or fork by id, background run with completion notification, and per-type tool sets and model policy (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-013",
+  "category": "Agent runtime",
+  "name": "Custom subagents from .cursor/agents",
+  "what": "Users and plugins can define their own subagents as markdown files with name, description, prompt, tools and model.",
+  "how": "The agent.v1 custom-subagent message carries fullPath, name, description, tools[], model, prompt, permissionMode (a readonly option), isBackground and forceDefaultModel; the request context sends the list as customSubagents; the Task tool normalizes them and merges them into the subagent_type choices shown to the model; plugin-sourced agents are supported.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:11982]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:27945]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:46431]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon agent pages can expose user-authored specialist agents with the same small schema; permissionMode and isBackground are the useful fields.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-014",
+  "category": "Agent runtime",
+  "name": "Subagent continuation control and background-children collection",
+  "what": "A parent can wait for background subagents and be re-woken with their results instead of polling; idle subagents are nudged a bounded number of times.",
+  "how": "ClientContinuationConfig (idle_threshold, max_loops, nudge_message, escape_message_template, collect_background_children, children_completed_message_template, continuation_round_delay_ms) travels with the subagent run; the Task tool description tells the model it will be notified when a background agent completes and must not poll; Await and subagent-await/force-background exec messages exist.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:12341]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:12356]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:46491]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ExecServerMessage.subagent_await_args and force_background_subagent_args)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon parents need consent to read child results; a typed continuation config (idle nudge, bounded rounds, collect children) would automate safe waiting (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-015",
+  "category": "Agent runtime",
+  "name": "UI actions compiled into templated agent turns (simulated messages)",
+  "what": "Buttons such as Commit, Push, Create PR, Fix merge conflicts, Babysit PR, Split into PRs, Apply locally, Start Multitasking and Build in Parallel become structured agent turns.",
+  "how": "A simulatedMsgReason enum selects a template: git actions produce step lists (compare with the base branch, follow a PR template file or directory, ask before destructive actions); MULTITASK produces a system reminder telling the agent to fork exactly one async subagent of itself with resume=self and a fixed sentinel prompt and then stop; BUILD_IN_PARALLEL tells it to implement the attached plan with todos already created.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34003]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34040]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34053]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Typed UI intents rendered into prompts on the server keep prompts out of the frontend and make UI actions auditable; Verevon page buttons should send an enum plus context, not prose.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-016",
+  "category": "Agent runtime",
+  "name": "Multitask coordinator mode",
+  "what": "A Multitask mode turns the main agent into a coordinator that delegates work to async subagents and ends its own turn, to be woken by completion notifications.",
+  "how": "The AgentMode enum includes MULTITASK, PROJECT, TRIAGE and CUSTOM beside AGENT, ASK, PLAN and DEBUG; the multitask reminder forks the agent into a background subagent; empty-response retry is disabled for multitask parents; the continuation config collects children summaries.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.AgentMode enum)",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34053]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43857]",
+   "scratchpad/tmp/cursor_raw/10_agent_modes.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A coordinator mode that must delegate and end its turn is a clean separation of orchestration from execution.",
+  "notes": "Behaviour beyond the system-reminder text is INF from flags and the continuation config."
+ },
+ {
+  "id": "cursor-harness-architecture-017",
+  "category": "Agent runtime",
+  "name": "Stateful background shell with Await and output-pattern notifications",
+  "what": "Long commands move to the background after a timeout; the agent can later await them or be notified when output matches a regex.",
+  "how": "Shell tool: stateful session; block_until_ms (default 30000, 0 means background); a command that exceeds it is moved to the background; notify_on_output {pattern, reason, debounce_ms >= 5000}; an Await tool (with a terminal path compatibility option) and write_shell_stdin; VM shells are tmux-backed (tmux -f /exec-daemon/tmux.portal.conf). Prompt variants per promptVersion adjust the description.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:53377]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:53402]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:53446]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34334]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:48270]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:54225]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon sandboxes need background jobs with output-triggered wakeups; the block_until_ms contract is a clean model-facing API.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-018",
+  "category": "Agent runtime",
+  "name": "Plan mode with plan files and guardrails",
+  "what": "Plan mode restricts the agent to markdown edits and produces a plan document that can be built later.",
+  "how": "The plan_mode_guardrails section says only markdown files may be edited and to stay in plan mode while the user refines; a CreatePlan interaction query produces plan files named <name>.plan.md with frontmatter (name, overview, todos, isProject); the loop breaks after a successful CreatePlan; ExecutePlan and a plan registry exist; plan-to-build in cloud is flag-gated.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36607]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23060]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44949]",
+   "logger tags @anysphere/agent:execute-plan, :backend-plan-utils (scratchpad/tmp/cursor-h/anysphere_modnames.txt)",
+   "out/vs/workbench/api/node/extensionHostProcess.js (InteractionQuery.create_plan)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has plan.propose and plan-approval with a linear plan_steps store; plan documents as files with todo frontmatter would add hand-off and editing (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-019",
+  "category": "Agent runtime",
+  "name": "Todo tool and unfinished-todo accounting",
+  "what": "The agent keeps a todo list through todo_write; the harness measures how often turns end with open items.",
+  "how": "TodoWrite and TodoRead tools; ConversationStateStructure.todos; at end of turn the harness counts PENDING and IN_PROGRESS todos and calls trackUnfinishedTodos plus variants for todos created this turn or open at start.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:54501]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23648]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44042]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Cheap progress state that doubles as an evaluation signal.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-020",
+  "category": "Agent runtime",
+  "name": "Goals and Grind phase machine",
+  "what": "A goal object can be created and continued across turns, and a Grind mode moves between planning, controller and execution phases through tools.",
+  "how": "CreateGoal and UpdateGoal tools (a goal is only created when explicitly requested; validated UUID ids; goal_state in conversation state; metrics agent.goal.created, continuation.started, terminal_transition); StartGrindPlanning and StartGrindExecution request phase transitions and are only offered in the right phase; aiserver GrindModeTrackingState tracks no-tool-turn streaks.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:51173]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:47611]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:47637]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:141292]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Explicit goal and phase objects are a good basis for long-running autonomous Verevon agents that must survive across turns.",
+  "notes": "Product maturity unknown; flags enable_grind_mode and agent_goal_continuation gate it."
+ },
+ {
+  "id": "cursor-harness-architecture-021",
+  "category": "Agent runtime",
+  "name": "Hypothesis-driven Debug mode with instrumentation logs",
+  "what": "Debug mode makes the agent add temporary logging, reproduce the bug and verify fixes by comparing before and after logs.",
+  "how": "The debug_mode_logging prompt section walks through understanding the logging configuration, instrumenting, reproducing, analysing, fixing and verifying; logs are NDJSON appended to a file or POSTed to a local ingest server (ports 7242-7942, cursor-ndjson-ingest); a debug subagent descriptor exists; Delete is allowed only to clear logs.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34777]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34785]",
+   "extensions/cursor-ndjson-ingest/package.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon could offer a runtime-evidence debug mode where the agent instruments code and reads logs back rather than guessing.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-022",
+  "category": "Agent runtime",
+  "name": "AskQuestion tool with durable asynchronous completion",
+  "what": "The agent can ask the user structured questions; answers may arrive after the turn paused and are injected as a tool result.",
+  "how": "AskQuestion tool (name configurable, with an anti-ask-question description variant); InteractionQuery.ask_question; the loop peeks for an asyncAskQuestionCompletionAction and applies it as a recorded tool call; completed_ask_question_tool_call_ids stored in conversation state.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43145]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:30306]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (InteractionQuery and ConversationStateStructure.completed_ask_question_tool_call_ids)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon approvals pause the run but the LLM loop does not resume reasoning after approval (only three effect kinds resume); injecting the answer as a recorded tool result is the missing piece (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-023",
+  "category": "Agent runtime",
+  "name": "Mode switching tool and mode-change nudges",
+  "what": "The agent may propose switching between Agent, Plan and Debug modes; mode changes inject a nudge into the next step.",
+  "how": "SwitchMode tool with allowed targetModes; mode_selection prompt section; the loop compares the current mode with the previous one and appends generateModeChangeContent as a user message; switch_mode appears as an InteractionQuery that needs user approval.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:54344]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36660]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43964]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Mode as explicit session state that the agent may request (with approval) fits the Verevon chat versus agent split.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-024",
+  "category": "Agent runtime",
+  "name": "Tool lifecycle hooks around every tool call",
+  "what": "User-defined hooks run before and after tools, shell and MCP calls, file reads and edits, prompts and sessions, and can deny, ask, rewrite input or add context.",
+  "how": "A generic wrapper fires preToolUse, then a tool-specific pre hook (for example beforeShellExecution), then the tool, then postToolUse or postToolUseFailure (duration, tool_use_id, error_message, failure_type, is_interrupt). Hook output: permission allow|deny|ask, user_message, additional_context (size-capped carrier, dropped if too large) and updated_input (mutates tool arguments). failClosed hooks reject the call on hook error; otherwise errors are logged and skipped. 21 event names: beforeShellExecution, afterShellExecution, beforeMCPExecution, afterMCPExecution, beforeReadFile, afterFileEdit, beforeTabFileRead, afterTabFileEdit, beforeSubmitPrompt, afterAgentResponse, afterAgentThought, stop, sessionStart, sessionEnd, preCompact, subagentStart, subagentStop, preToolUse, postToolUse, postToolUseFailure, workspaceOpen.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:209524]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:7040]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:7109]",
+   "scratchpad/findings/t3/cursor.inventory.md section 4 (hook list)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has a real hook engine but Do mode passes an empty hook_context and the registry is gateway-memory only; adopt the pre/post/failure envelope with updated_input and fail-closed, applied in both loops (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-025",
+  "category": "Agent runtime",
+  "name": "Content-addressed conversation checkpoints and resumable state",
+  "what": "Conversation state is stored as a graph of content-addressed blobs, so only new blobs are uploaded and any checkpoint can be restored or forked.",
+  "how": "ConversationStateStructure holds ids for root prompt messages, turns, todos, pending tool calls, token details, summary and archives, plans, file_states_v2, turn timings, subagent states/threads/runs, read_paths, goal_state and more; each element is serialized, SHA-256 hashed and stored via a layered blob store; the server sends conversation_checkpoint_update; the client restores with fetch concurrency and metrics (restore duration, phase ms, bytes, turn reference count).",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.ConversationStateStructure and AgentServerMessage.conversation_checkpoint_update)",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:33270]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:33355]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon session-core is the single writer for threads, runs and events but has no rewind or branching; content-addressed turn blobs make fork and rewind cheap and respect ZDR by storing nothing in NO_STORAGE mode (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-026",
+  "category": "Agent runtime",
+  "name": "Reflect tool and progress-update reminders",
+  "what": "The agent is nudged to reflect and to post concise status updates during long runs.",
+  "how": "Reflect and reflect_general tools (CLI forced follow-up every N tool-calling messages), a progress-update-reminder middleware, update_current_step state, send_to_user and final-summary tools; a reflect reminder prompt is injected.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:47857]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43951]",
+   "logger tag @anysphere/agent:progress-update-reminder-middleware (scratchpad/tmp/cursor-h/anysphere_modnames.txt)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Periodic reflection and status ticks help users trust long Verevon agent runs.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-027",
+  "category": "Agent runtime",
+  "name": "Background A/B response comparison for preference data",
+  "what": "After a turn the harness may silently generate an alternate response from another configuration and offer both to the user for preference feedback.",
+  "how": "runAgentResponseComparison runs only when privacyMode is USAGE_CODEBASE_TRAINING_ALLOWED; 60 s timeout; it skips when the alternate used a tool call, exceeded maxResponseChars, lacked a sufficient character diff or failed a cooldown; it streams responseComparison events (started, completed, skipped with reasons) to the UI with parent-first or alternate-first ordering; failures are swallowed (fail open). feedback_request updates carry feedback categories.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43648]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43700]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (InteractionUpdate.response_comparison and feedback_request)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Built-in preference collection must be gated by privacy mode (ZDR must disable it); the fail-open and cooldown design avoids hurting latency.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-028",
+  "category": "Agent runtime",
+  "name": "Eval and benchmark hooks inside the production loop",
+  "what": "The same runtime carries evaluation overrides and compatibility tool sets for external benchmark harnesses.",
+  "how": "Config keys evalServiceEnforcedTemperature/TopP/TopK/MinP/AgentTokenLimit/MaxTokensBeforeSummarization and writeEvalTranscripts; tool sets MINI_SWE_AGENT_BASH (named bash) and PI_* (pi_bash, pi_read, pi_write, pi_edit, pi_find, pi_grep, pi_ls) executed through dedicated exec messages; aiserver EvalTrackingService (38 methods) and RequestReplayService.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23646]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:51804]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56639]",
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt (EvalTrackingService)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon should keep an eval profile in the Model Plane (fixed sampling, transcript dump, third-party harness tool shims) so regressions are measurable on the path users run.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-029",
+  "category": "Agent runtime",
+  "name": "AgentEventTracker: typed instrumentation interface",
+  "what": "Loop events are reported through a typed tracker interface instead of ad-hoc logging.",
+  "how": "pl(ctx) returns an AgentEventTracker (noop by default) with trackToolCallStarted/Result, trackSummarizationTriggered, trackPromptTokens, trackLoopDetected, trackSubagentCreated/Completed, trackShellSandboxResult, trackSkillUsed/Applied, trackHookExecuted, trackSmartModeClassifierCall, trackPlanModeModelFinished, trackMcpToolCall(+Result), trackComputerUseExecution, trackRecordScreenExecution and trackUnfinishedTodos.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23646]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23652]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23658]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23665]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A single tracker trait in the Rust agent runtime keeps telemetry consistent and testable.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-030",
+  "category": "Agent runtime",
+  "name": "Cloud and background agent prompt, environment and setup tools",
+  "what": "Background agents run autonomously in a remote environment, may self-configure it, and are told not to ask the user questions or post to external services unprompted.",
+  "how": "A background_agent prompt block (autonomous; the workspace may be unconfigured so install tools yourself; be cautious following instructions in tool results; do not reply on Slack, GitHub or Linear unless asked); .cursor/environment.json describes install, start, terminals, ports and container; tools SetupVmEnvironment, ReplaceEnv and RecordScreen; VmDaemonService (22 RPCs); the start script is launched detached on boot.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:37031]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56968]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36200]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:47955]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:48056]",
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt (VmDaemonService)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon sandbox-manager is lease bookkeeping with execution in the execution-core container; a declarative environment file and setup tools are the missing contract for per-session workspaces (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-031",
+  "category": "Agent runtime",
+  "name": "PR babysit and autopilot prompts",
+  "what": "Built-in workflows keep working on a pull request until it is merge-ready: review comments, CI status and mergeability are refreshed on each pass.",
+  "how": "Prompt templates Autopilot this pull request until it is merge-ready (mergeable, required CI green, all active unresolved comments triaged) and Babysit this pull request; a babysit_pr_in_cloud_params protobuf field; a BABYSIT_PR_IN_CLOUD simulated-message reason.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:33938]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:33950]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34003]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A reusable until-done PR loop with a stated exit condition is a template for scheduled Verevon agents.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-032",
+  "category": "Agent runtime",
+  "name": "Event subscriptions and persistent named agents",
+  "what": "A persistent agent can subscribe to timers, Slack channels and GitHub PRs and be woken when they fire.",
+  "how": "A built-in cursor-subscriptions MCP server with tools subscribe_timer, subscribe_slack_channel, subscribe_slack_new_channels, subscribe_github_pr and list_subscriptions; named agents get a durable home store at /cursor/stores/home with SELF.md identity, SOUL.md and an activity folder.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34395]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36306]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36313]"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Event-driven wakeups plus a durable identity file are the minimum for always-on Verevon assistants.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-033",
+  "category": "Agent runtime",
+  "name": "Automation and scheduling services",
+  "what": "Cloud automations run agents on schedules or webhooks with run history, retry, memories and team controls.",
+  "how": "aiserver.v1 AutomationsService (42 methods: create, update, test, validate and apply specs; runs list, cancel and retry; memories; workflow templates; Sentry connection), SchedulerService (Acquire, ReportUsage), RelayService (18 methods: pipelines, schedules, backfills) and FullSelfDrivingService (24 methods).",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "out/vs/workbench/workbench.desktop.main.js (aiserver.v1 service descriptors, typeName entries)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon scheduled runs are a single no-tool 1,024-token call with no delivery; Cursor automations run full agent sessions with memories, retry and run history (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": "Server implementations are not in the install; only client descriptors are visible."
+ },
+ {
+  "id": "cursor-harness-architecture-034",
+  "category": "Agent runtime",
+  "name": "Best-of-N parallel attempts",
+  "what": "Several model attempts can be run in parallel for one task and compared.",
+  "how": "A bestOfNRunner subagent type and composer headers with isBestOfNSubcomposer; protobuf best_of_n_group_id; flag cloud_agent_best_of_n_disabled.",
+  "evidence": [
+   "out/vs/workbench/workbench.desktop.main.js (composer header utility b5t/VWg: isBestOfNSubcomposer)",
+   "scratchpad/findings/t3/cursor.inventory.md section 3 item 4 (best_of_n)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Parallel attempts as sibling sessions with a group id are easy to model in the Model Plane run table.",
+  "notes": "The bestOfNRunner subagent descriptor was taken from earlier working notes; not re-read in this pass."
+ },
+ {
+  "id": "cursor-harness-architecture-035",
+  "category": "Platform architecture",
+  "name": "Agent runtime delivered as dedicated extensions on a dedicated extension host",
+  "what": "The whole agent stack is not in the editor core: it ships as separate extensions (agent-exec, agent-host, always-local, retrieval, shadow-workspace, mcp, browser-automation, commits, worker) that talk to the workbench through proposed Cursor APIs.",
+  "how": "Manifests: cursor-agent-host (activation *, proposals control, cursor, cursorNoDeps, cursorAgentHost, cursorTracing, cursorPseudoterminal) hosts orchestration in the AgentExec extension host; cursor-agent-exec provides execution (shell, files, tools) with approvals; cursor-local-agent-runtime reuses the same module set as a ui-kind extension to host Private Inference outside workspace hosts; the workbench has AgentExecProvider/AgentExecSession/AgentExecDeferredActivation and a controlled exec manager that streams exec requests with a stream-start timeout error code AGENT_EXEC_STREAM_START_TIMEOUT.",
+  "evidence": [
+   "extensions/cursor-agent-host/package.json",
+   "extensions/cursor-agent-exec/package.json",
+   "extensions/cursor-local-agent-runtime/package.json",
+   "out/vs/workbench/workbench.desktop.main.js (AgentExecProvider, AgentExecSession, _applyCursorAgentExecDeferredActivation, SimpleControlledExecManager)",
+   "REA: trace_application_feature (module seed cursor-shadow-workspace/dist/extension.js) over ev_131baecb... returned 718 nodes with package nodes cursor-agent-exec, cursor-agent-host, cursor-local-agent-runtime, cursor-retrieval, cursor-mcp, cursor-commits, cursor-always-local, cursor-agent-worker"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Running the agent runtime in an isolated host with a narrow proposed API gives crash isolation and lets one runtime serve IDE, CLI and cloud; Verevon can mirror it as a Rust agent-runtime process behind a small RPC surface.",
+  "notes": "Seen in a VS Code fork; Verevon has no extension host, so the lesson is the process boundary and API shape, not the mechanism."
+ },
+ {
+  "id": "cursor-harness-architecture-036",
+  "category": "Platform architecture",
+  "name": "agent.v1 AgentService streaming contract with three transports",
+  "what": "One bidirectional streaming RPC carries the whole agent conversation, with server-sent-event and polling variants for networks that break HTTP/2 streaming.",
+  "how": "agent.v1.AgentService: Run (bidi streaming), RunSSE and RunPoll (server streaming), NameAgent, UpdateConversationMetadata, CreateTranscriptOverview, GetUsableModels, GetDefaultModelForCli, GetAllowedModelIntents, UploadConversationBlobs, UploadLocalAgentRunToPromptQuality, GetSignedUrlForAttachedMedia, NotifyConversationClone, GetPromptContextUsage. The client message union is run_request, exec_client_message, exec_client_control_message, kv_client_message, conversation_action, interaction_response, client_heartbeat, prewarm_request; the server union is interaction_update, exec_server_message, exec_server_control_message, conversation_checkpoint_update, kv_server_message, interaction_query, ttft_breakdown.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.AgentService typeName, methods Run/RunSSE/RunPoll)",
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.AgentClientMessage and AgentServerMessage field lists (extracted with tmp/cursor-h/svc.js))"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "The single multiplexed stream (events, tool execution requests, KV blobs, interaction queries, heartbeats) with SSE and poll fallbacks is a concrete wire design for the Verevon gateway-to-Model-Plane link.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-037",
+  "category": "Platform architecture",
+  "name": "Symmetric typed exec RPC: server asks, client executes",
+  "what": "Tool execution is a typed request/response pair per tool kind, so the model-side loop can run elsewhere from where files and shells live.",
+  "how": "ExecServerMessage has one field per tool (shell_args, write_args, delete_args, grep_args, read_args, redacted_read_args, ls_args, diagnostics_args, request_context_args, mcp_args, shell_stream_args, background_shell_spawn_args, fetch_args, record_screen_args, computer_use_args, write_shell_stdin_args, execute_hook_args, subagent_args, smart_mode_classifier_args, canvas_diagnostics_args, shell/mcp/web_fetch allowlist precheck args, git_diff_request, pi_*, conversation_search_args, agent_store_conflict_args, adopt_args, span_context) and ExecClientMessage mirrors with results plus local_execution_time_ms and hook_additional_contexts. In the runtime a registry maps each xxxArgs to its xxxResult handler.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.ExecServerMessage and ExecClientMessage field lists)",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:130962]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:130968]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:131128]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "This is the contract that lets the Verevon Model Plane propose actions while Quarry or a sandbox executes them: typed args/result pairs, an allowlist precheck request, and a span context for tracing.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-038",
+  "category": "Platform architecture",
+  "name": "AgentHostService session API (create, fork, watch, interrupt, respond)",
+  "what": "The host exposes sessions as a service: create or fork a session, send messages or actions, watch session lists, interactions, background work and turn lifecycle, interrupt or abort.",
+  "how": "agent.v1.AgentHostService: CreateSession, ForkSession, ListSessions, WatchSessions (stream), SendMessage, SendAction, DeleteSession, InterruptTurn, CancelQueuedTurn, RespondToInteraction, WatchSessionInteractions, WatchSessionBackgroundWork, WatchSessionTurnLifecycle, AbortBackgroundWork, AbortAllBackgroundWork, AttachSession. The extension implements it as an in-process object that wraps each RPC with trace logging (payloads truncated to 2048 chars) and event streaming.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.AgentHostService methods)",
+   "cursor-agent-host/dist/main.js [beaut/host_main.js:124049]",
+   "cursor-agent-host/dist/main.js [beaut/host_main.js:124062]",
+   "cursor-agent-host/dist/main.js [beaut/host_main.js:123737]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "A session API with explicit watch streams for interactions, background work and turn lifecycle is the natural surface for Verevon chat and agent pages (reconnectable UI over a long-running run).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-039",
+  "category": "Platform architecture",
+  "name": "Two interchangeable loop backends: server-side NAL and managed local loop",
+  "what": "The same agent product can run its loop on the Cursor backend or locally in the extension host, chosen by a feature gate.",
+  "how": "The host checks gate agent_host_local_loop; if true it loads the managed local-loop module (createAgentHost from a second bundle that contains runTurnLoop), otherwise it falls back to the backend NAL host (new agent loop, @anysphere/agent). ChatService.ConvertOALToNAL migrates the legacy loop (OAL). The exec bundle also contains LocalAgentClient with provider credentials, local classification and checkpoint-resume retries.",
+  "evidence": [
+   "cursor-agent-host/dist/main.js [beaut/host_main.js:123901]",
+   "cursor-agent-host/dist/477.js [beaut/host_477.js:3]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:62107]",
+   "aiserver.v1.ChatService ConvertOALToNAL in scratchpad/tmp/cursor-h/aiserver_services_full.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Keeping the loop behind a backend-agnostic host interface lets Verevon run the same agent in the Model Plane or on a user device without touching the UI.",
+  "notes": "Which backend is the default at 3.17.21 is unknown (gate value is server-side); INF that backend NAL is default from the fallback code path."
+ },
+ {
+  "id": "cursor-harness-architecture-040",
+  "category": "Platform architecture",
+  "name": "ControlService for remote and VM environments",
+  "what": "Cloud and remote workspaces are driven through a 26-method control API for files, diffs, exec, artifacts, secrets and updates.",
+  "how": "agent.v1.ControlService: Ping, GetCapabilities, Exec (stream), ListDirectory, Read/WriteTextFile, Read/WriteBinaryFile, ExportFile, GetDiff, BatchGetDiff, GetWorkspaceChangesHash, RefreshGithubAccessToken, WarmRemoteAccessServer, ListArtifacts, UploadArtifacts, PersistArtifactsToAgentStore, PersistArtifactsToParentStore, RestoreArtifacts, GetMcpRefreshTokens, DownloadCursorServer, UpdateEnvironmentVariables, ReloadAgentSkills, ReloadPlugins, InstallPluginArtifact, LoadMcpServers. Companion services: ExecService, PtyHostService (spawn, attach, input, resize, list, terminate), TmuxSessionService, LifecycleService (reset, renew, claim and release worker, open desktop session), PrivateWorkerApiService and PrivateWorkerBridgeExternalService (bidi Connect and DesktopStream).",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.ControlService, PtyHostService, TmuxSessionService, LifecycleService, PrivateWorkerBridgeExternalService methods)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A capability-negotiated control API (GetCapabilities, diff and workspace-hash calls, artifact persistence, env updates) is what a Verevon sandbox or Quarry worker should expose to the Model Plane.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-041",
+  "category": "Platform architecture",
+  "name": "Private worker bridge for self-hosted execution",
+  "what": "Customers can run the agent worker on their own machine and bridge it to the cloud control plane.",
+  "how": "cursor-agent-worker installs and starts a cursor-agent worker daemon with a user API key (worker start, --name, labels name= and cursor.private_worker.workspace_key=, --worker-api-socket), env CURSOR_AGENT_WORKER_ID and AGENT_CLI_CREDENTIAL_STORE=memory, deleting CURSOR_API_KEY from the child env; the protocol uses PrivateWorkerBridgeExternalService.Connect (bidi) and DesktopStream.",
+  "evidence": [
+   "cursor-agent-worker/dist/main.js [beaut/agentworker.js:10178]",
+   "extensions/cursor-agent-worker/package.json",
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.PrivateWorkerBridgeExternalService)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Outbound-connected private workers avoid inbound firewall holes for Verevon enterprise tenants; labels and a workspace key route sessions to the right worker.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-042",
+  "category": "Platform architecture",
+  "name": "Backend RPC surface: aiserver.v1 with 65 Connect services",
+  "what": "The client speaks to a large set of Connect-RPC services that mirror product areas (agents, cloud sandboxes, automations, repository indexing, review, admin, usage).",
+  "how": "65 service descriptors with method counts, for example BackgroundComposerService 212, DashboardService 593, AiService 192, AutomationsService 42, EvalTrackingService 38, SandBoxService 36, GrokBotService 36, FullSelfDrivingService 24, VmDaemonService 22, RepositoryService 19, RelayService 18, ChatService 14, ShadowWorkspaceService 13, EnterpriseAdminService 12, FileSyncService 9, GitGraphService 9, UploadService 9, ReviewService 7, CppService 5, CmdKService 6, FastApplyService 2.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "out/vs/workbench/workbench.desktop.main.js (typeName aiserver.v1.* entries and the service map near aiserver.v1.BidiService)",
+   "out/vs/workbench/api/node/extensionHostProcess.js (same descriptors, 78 aiserver.v1 service names counted in the bundle)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Shows how a mature AI product partitions backend APIs; Verevon planes already follow a similar separation, but the Model Plane should avoid a 200-method mega-service.",
+  "notes": "Scout counted 65 services in an earlier pass; this pass extracted 65 with method tables and counted 78 distinct names in the bundle (some referenced only)."
+ },
+ {
+  "id": "cursor-harness-architecture-043",
+  "category": "Platform architecture",
+  "name": "Legacy chat stack versus new agent loop (OAL to NAL)",
+  "what": "The older chat endpoint family still exists beside the new agent service and can convert old conversations.",
+  "how": "aiserver.v1.ChatService has StreamUnifiedChat, StreamUnifiedChatWithTools (bidi, SSE, poll, idempotent variants), GetConversationSummary, StreamSpeculativeSummaries, WarmStreamUnifiedChatWithTools, GetPromptDryRun, StreamFullFileCmdK, WarmFullFileCmdK and ConvertOALToNAL; the new stack is agent.v1.AgentService.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:15291]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Plan the migration path early: GetPromptDryRun (inspect the exact prompt) and idempotent stream variants are useful ideas to keep in the Verevon gateway.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-044",
+  "category": "Platform architecture",
+  "name": "Layered content-addressed blob store with client-side AES-GCM",
+  "what": "Conversation blobs pass through cache, write-through, retry, encrypted, lazy-reference and nearby layers before reaching storage.",
+  "how": "Blob ids are SHA-256 of serialized content; layered stores expose get/set/flush with per-layer metrics (agent_kv.in_memory, cached, writethrough, retry, encrypted, controlled, lazy_reference, nearby); the encrypted layer derives an AES-GCM key from SHA-256 of a key string with 12-byte random IVs and supports a fallback decrypt key for rotation (metric agent_kv.nearby.decrypt_fallback_success).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:33270]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:33355]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:33360]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Composable blob-store layers (cache, retry, encrypt) as traits are a clean Rust design and give Verevon client-side encryption hooks for ZDR.",
+  "notes": "Key management (where the key string comes from) is not visible in this layer."
+ },
+ {
+  "id": "cursor-harness-architecture-045",
+  "category": "Platform architecture",
+  "name": "Privacy-typed protobuf fields and RedactedString",
+  "what": "Every user-derived field is classified at the type level, and string values refuse to leak into logs or storage unless the privacy mode allows it.",
+  "how": "A RedactedString wrapper (toString/toJSON give [redacted:field]) is parameterized by data classification (SAFE, CODE, CREDENTIALS, PATH, PROVIDER_INFO, UNSPECIFIED); a per-proto-field table assigns classes to agent.v1 messages; unwrap(purpose) checks privacy mode (0-4) against purpose (STORAGE_FOR_TRAINING, STORAGE_FOR_LOGGING, STORAGE_FOR_USAGE, UNSAFE_ALWAYS_ALLOWED); enforcement is staged (log-only would-have-been-redacted mode).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22485]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22500]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23002]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Typed data classification plus a purpose-checked unwrap is the strongest ZDR enforcement pattern seen; a Rust newtype with a sealed unwrap(purpose) maps directly and satisfies the propagate-ZDR rule.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-046",
+  "category": "Platform architecture",
+  "name": "Shadow workspace server over Unix socket Connect",
+  "what": "A hidden second editor window serves tool and lint requests over a local socket so agent edits can be checked without touching the user window.",
+  "how": "cursor-shadow-workspace registers shadow client and server providers (cursor.registerShadowClientProvider/ServerProvider); the server is a Connect HTTP/1.1 server on a Unix socket (named pipe on Windows) serving aiserver.v1.ShadowWorkspaceService (GetLintsForChange, SwSyncIndex, SwCallClientSideV2Tool, SwWriteTextFileWithLints, SwGetLinterErrors, SwGetMcpTools, SwCallDiagnosticsExecutor and others); the workbench creates a transient workspace file under a shadow-workspaces home, keeps only the latest five, and disables it for remote authorities and unless a setting enables it.",
+  "evidence": [
+   "cursor-shadow-workspace/dist/extension.js [beaut/shadow.js:14985]",
+   "cursor-shadow-workspace/dist/extension.js [beaut/shadow.js:15169]",
+   "out/vs/workbench/workbench.desktop.main.js (Sjo class: shadowWorkspacesHome, createShadowWorkspace, available() checks remoteAuthority; ShadowWorkspaceService.enabled())",
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "A second isolated environment for validating agent edits is the same idea as a sandbox check before commit; in Verevon it would be a Rust sandbox worker, not a hidden window.",
+  "notes": "INF: appears de-emphasized (setting-gated, and the dedicated apply model that motivated it no longer exists as an RPC)."
+ },
+ {
+  "id": "cursor-harness-architecture-047",
+  "category": "Platform architecture",
+  "name": "Conversation search as an isolated utility process with FTS5",
+  "what": "Past agent conversations are indexed in a separate process into a full-text index and queried by users and by the agent.",
+  "how": "out/vs/code/electron-utility/conversationSearch/conversationSearchMain.js creates SQLite tables conversations (source local|cloud-cache, scope, title, branches, updated_at, is_archived, fingerprints), conversation_search_candidates, conversation_search_reconciliation (cursor, in_progress), conversation_search_settings (effective cap) and an FTS5 virtual table conversation_fts(title, body, branches) with unicode61 remove_diacritics 2 and prefix 2 3; ranking uses bm25 with column weights and snippet(); candidates are scanned incrementally from the composerData keys in the app key-value store, skipping subagent composers.",
+  "evidence": [
+   "out/vs/code/electron-utility/conversationSearch/conversationSearchMain.js (CREATE VIRTUAL TABLE conversation_fts; bm25(conversation_fts, 1.25, 1.0, ...))",
+   "tool SearchConversations at cursor-agent-exec/dist/main.js [beaut/exec_main.js:52821]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has no server-side chat search; a per-user FTS index (Postgres or SQLite) with an incremental reconciliation cursor fits the Application Plane (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": "Only program code was read; no user data store was opened."
+ },
+ {
+  "id": "cursor-harness-architecture-048",
+  "category": "Platform architecture",
+  "name": "MCP runtime in its own utility process with leases and elicitation",
+  "what": "MCP servers are managed outside the renderer and extension hosts in a dedicated process, exposed over named channels.",
+  "how": "out/vs/code/electron-utility/mcpProcess/mcpProcessMain.js registers channels mcp.servers, mcp.tools, mcp.snapshots, mcp.proxy, mcp.structuredLogs plus events mcp.progressNotification, mcp.elicitationRequest, mcp.leaseElicitationRequest and mcp.op.outcome, and bundles stdio, SSE and streamable-HTTP client transports; the agent runtime reads server state through lease keys cursor_mcp_lease_snapshot_store, _server_status, _settings and _providers.",
+  "evidence": [
+   "out/vs/code/electron-utility/mcpProcess/mcpProcessMain.js (registerChannel, \"mcp.snapshots\", \"mcp.elicitationRequest\")",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:130923]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "One MCP supervisor process shared by all agents (with leases so multiple runtimes do not fight over OAuth refresh) is the right model for a Verevon MCP gateway.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-049",
+  "category": "Platform architecture",
+  "name": "Agent store sync ledger on SQLite with etags",
+  "what": "Per-agent file stores (identity, notes, artifacts) are synchronized between local and cloud using a small SQLite ledger with optimistic concurrency.",
+  "how": "better-sqlite3 database (WAL, synchronous NORMAL, busy_timeout 5000) with meta (schema_version 3), files (rel_path, last_synced_sha, last_seen_etag, size, last_synced_ms, direction) and pending_deletes (rel_path, base_etag, requested_at_ms, mutation_id); migrations v1 to v3; file modes restricted; a conflict barrier injects a notice before the agent finishes a turn (agent.store.conflict_barrier/eager_barrier metrics) and a conflict hook event exists.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:166315]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:166326]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:164791]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "File-based agent memory needs this exact sync model (sha plus etag plus pending deletes) once it is shared between sandboxes and a cloud copy.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-050",
+  "category": "Platform architecture",
+  "name": "Per-project .cursor state directory and file contracts",
+  "what": "Agent configuration and runtime state live in a documented set of project-local files that agents can also read and write.",
+  "how": "Paths seen in code: .cursor/rules, skills, skills-cursor, cloud-skills, agents, commands, plans, worktrees and worktrees.json, plugins and plugins/cache, mcp.json, hooks.json, permissions.json, sandbox.json and sandbox-policies, environment.json, settings.json, projects/<p>/{agent-transcripts, agent-tools, terminals, canvases, mcps, agent-notes}, debug logs, screenshots, hooks/state, managed/team_*.",
+  "evidence": [
+   "scratchpad/tmp/cursor_raw/11_dot_cursor_path_literals.txt",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:108813]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:112775]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:118068]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Making config and runtime artifacts plain files that both users and agents can inspect is a large part of Cursor transparency; Verevon can expose the equivalent as workspace files in the Data Plane.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-051",
+  "category": "Platform architecture",
+  "name": "Monorepo package decomposition of the agent stack",
+  "what": "The shared runtime is built from small workspace packages that several products (IDE, CLI, Grok Bot) reuse.",
+  "how": "Grok Bot (internal name sand) declares workspace dependencies on @anysphere/agent, agent-client, agent-core, agent-exec, agent-kv, agent-store-sync, agent-summarization, agent-transcript, chat-inference, chat-inference-proto, context, context-rpc, cursor-config, cursor-plugins, local-exec, shell-exec, mcp-agent-exec, mcp-core, model-selection, metrics, otel-proto, proto, redacted-protos, canvas-shared, grok-bot-harness, orbit-client and others; the Cursor extension bundles show the same package names in logger tags (@anysphere/agent, agent-client, agent-kv, chat-inference, tree-chunk-napi).",
+  "evidence": [
+   "scratchpad/extract/grokbot/package.json (dependencies)",
+   "scratchpad/tmp/cursor-h/anysphere_modnames.txt",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:19981]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "A concrete crate-level split to emulate in Rust: agent (loop), agent-client (transport), agent-kv (blob store), agent-exec (tool exec), shell-exec, mcp-core, summarization, transcript, model-selection, redacted-protos.",
+  "notes": "The Grok Bot manifest is a pre-extracted separate app; sharing with Cursor is confirmed by identical package names, not by diffing code."
+ },
+ {
+  "id": "cursor-harness-architecture-052",
+  "category": "Platform architecture",
+  "name": "Rust native helpers inside a Node/Electron product",
+  "what": "Performance and security sensitive pieces are Rust binaries or N-API modules.",
+  "how": "resources/helpers: crepectl.exe (5.3 MB, regex n-gram index builder, gitoxide, rkyv, mimalloc), cursorsandbox.exe (3.5 MB, filesystem and network sandbox helper with built-in HTTP CONNECT and SOCKS5 proxy) and a bundled node.exe (87 MB); N-API modules @anysphere/file-service (file_service.node), tree-chunk-napi (tree-sitter chunking) and whichlang (language detection); tree-sitter-bash for shell parsing; better-sqlite3.",
+  "evidence": [
+   "REA: inspect_pe_resources on helpers/crepectl.exe: PE32+ x64, 5,331,752 bytes, sha256 9b309ab5..., no resources (evidence ev_e2aa61ec...)",
+   "scratchpad/tmp/cursor-h/crepectl.strings.txt",
+   "scratchpad/tmp/cursor-h/cursorsandbox.strings.txt",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:22323]",
+   "out/vs/workbench/workbench.desktop.main.js (bundledNodePath getter: resources/helpers/node)"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Confirms that Rust is used where Verevon would use it: indexing, sandboxing and chunking; keep the Model Plane in Rust and expose these as sidecar binaries or crates.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-053",
+  "category": "Platform architecture",
+  "name": "Local and BYOK model provider with credential helper",
+  "what": "The agent can run against a local HTTP provider or customer-managed AWS Bedrock credentials instead of Cursor-hosted inference.",
+  "how": "A local provider config (kind http, base URL, endpoints) may specify an apiKeyHelper script executed with /bin/sh with a TTL cache that sets X-Api-Key and Authorization; LocalAgentClient supports a Bedrock credential chain (SSO, ini, process, token file, IMDS) with an awsAuthRefresh command, local smart-mode classification, local agent naming, and an attempt retry loop that resumes from the latest checkpoint; run snapshots are uploaded for prompt-quality only when privacy mode allows.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:57899]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:57944]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:20083]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:62107]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:62127]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A credential-helper command with TTL cache is a simple, auditable way to support customer-owned model endpoints in Verevon without storing keys.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-054",
+  "category": "Platform architecture",
+  "name": "Remote authority resolver and always-local extension",
+  "what": "Cloud (background composer) workspaces appear as a remote authority; a UI-side extension supplies experimentation, validation and redaction services locally.",
+  "how": "cursor-always-local (ui kind) activates on onStartupFinished and onResolveRemoteAuthority:background-composer, validates .cursor/environment.json (JSON schema plus dockerfile references), hosts a git worker, registers the telemetry redaction command cursor.internal.recordBrowserTelemEvent and a glass agentWorkspace role; cursor-resolver and cursor-resolver-helper provide the remote authority and connection tokens; the build description message anyrun.v1.Build (dockerfile, context) shows container builds.",
+  "evidence": [
+   "extensions/cursor-always-local/package.json",
+   "cursor-always-local/dist/main.js [beaut/alwayslocal.js:131465]",
+   "cursor-always-local/dist/main.js [beaut/alwayslocal.js:131550]",
+   "cursor-always-local/dist/main.js [beaut/alwayslocal.js:131529]",
+   "cursor-always-local/dist/main.js [beaut/alwayslocal.js:22978]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Treating a cloud sandbox as a remote workspace authority lets the same UI drive local and cloud agents.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-055",
+  "category": "Platform architecture",
+  "name": "Telemetry plumbing: OpenTelemetry metrics with ownership labels",
+  "what": "The runtime emits hundreds of metrics tagged by tool, team, client version and privacy-safe labels.",
+  "how": "219 OpenTelemetry metric names in the agent bundle (agent.* 116, agent_kv.* 24, mcp.* 22, chat_inference.*, summarization, compaction, tool-specific); tool_call.duration_ms carries labels toolName, outcome, team, mcp_version, clientversion, clienttype, remoteType, isdynamic; every tool has an owner team (async, core, bugbot, data-infra, agent-quality, extensibility) in a static map.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40730]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40738]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Tool-owner labels and per-tool latency/outcome histograms make a Verevon tool catalog operable; adopt the naming scheme in the Model Plane metrics.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-056",
+  "category": "Platform architecture",
+  "name": "Rust-portable architecture summary: what to copy",
+  "what": "Condensed design that maps cleanly to a Rust Model Plane.",
+  "how": "Process split (UI, runtime host, exec sandbox, MCP supervisor, index worker); protobuf plus Connect streaming contract with typed exec pairs; content-addressed state DAG; trait-based middleware chain over a model executor; typed tool registry with prompt-versioned descriptions; policy engine with shell AST parsing; sidecar Rust binaries for indexing and sandboxing; OTel metrics with owner labels.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56482]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:33355]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:103962]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116779]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22332]"
+  ],
+  "provenance": "INF",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Use as the Rust design brief: tonic/prost or Connect for the stream, an Arc<dyn ModelExecutor> middleware stack, a content-addressed state store, a policy crate that owns shell parsing (tree-sitter-bash bindings) and decisions.",
+  "notes": "INF: synthesis across the records in this file; basis is the cited code."
+ },
+ {
+  "id": "cursor-harness-architecture-057",
+  "category": "Coding capability",
+  "name": "StrReplace edit engine with whitespace-tolerant matching and fuzzy hints",
+  "what": "The primary edit tool replaces an exact old string with a new one, but retries with relaxed whitespace and, on failure, tells the model the closest matching lines.",
+  "how": "Matching order: exact match, then whitespace-insensitive line match (each line trimmed; first line endsWith, last line startsWith); if nothing matches the error says the string was not found (even after relaxing whitespace) and includes a fuzzy did-you-mean block located from the longest line with plus or minus two context lines; if more than one match exists and replace_all is not set the call fails with a message asking for more context or replace_all; an empty old_string is rejected; deletions remove blank-line remnants; results report changedLineRange, occurrencesModified, linesAdded, linesRemoved and whether whitespace-insensitive matching was used (metric agent.tools.str_replace.whitespace_insensitive).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:49297]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:49308]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:49366]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:49370]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:50247]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon code-capable agents should use exact-match replacement with a constrained fallback and an actionable error, not an LLM apply model.",
+  "notes": "Client-visible and model-visible error messages are separate classes (earlier notes); only the model-visible text was re-read here."
+ },
+ {
+  "id": "cursor-harness-architecture-058",
+  "category": "Coding capability",
+  "name": "Vendor-switched edit toolset: Write+StrReplace versus ApplyPatch",
+  "what": "Different model families get different edit tools: Anthropic, Gemini and xAI models get Write plus StrReplace; OpenAI GPT-5-family and Cursor-trained models get an ApplyPatch tool in the Begin Patch format.",
+  "how": "aue() switches on modelInfo.vendor: anthropic, gemini, xai, unknown push Write and StrReplace; openai and cursor with isGpt5Family push ApplyPatch, whose description defines a stripped-down file-oriented patch language (Add/Update/Delete File headers) parsed client-side with a file-lock manager and a diff string generator. Even within the Write+StrReplace pair the contract varies by promptVersion: for dsv3-1018 the replace tool is named search_replace with a file_path argument, otherwise StrReplace with path, old_string, new_string and replace_all; Write has its own versioned description.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56480]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56495]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:50240]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:50412]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Tool shape should be chosen per model family (training distribution) rather than forcing one edit tool; the Model Plane model registry needs a toolset profile field.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-059",
+  "category": "Coding capability",
+  "name": "File operation lock manager and off-thread diff computation",
+  "what": "Concurrent tool calls cannot corrupt a file, and large diffs do not block the runtime.",
+  "how": "Edit tools receive a fileOperationLockManager shared across parallel tool calls; diff generation uses the diff library with context 3 and moves to a Piscina worker pool (half the cores) when original plus new text exceeds 262144 characters (diff-worker, unified-diff-worker, diff-patch-worker).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:49393]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56470]",
+   "piscina in extensions/cursor-agent-exec/dist/node_modules (REA package node, ev_131baecb...)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Per-file locking for parallel tool calls and CPU-heavy diffing off the async runtime are needed in the Rust executor too (tokio spawn_blocking).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-060",
+  "category": "Coding capability",
+  "name": "Read tool with versioned schemas, partial reads, line numbers, images and PDFs",
+  "what": "Reading files supports offsets and negative offsets, optional line numbers, and returns images and PDFs in a model-readable form; coverage is measured.",
+  "how": "The tool name, description and schema all depend on promptVersion (dsv3-1018 uses target_file/offset/limit; cursor-0226 adds negative offset and include_line_numbers; haiku uses path plus line_range [start,end]; a minimal harness exposes only a path to view images); descriptions mention batch speculative reads, empty-file messages, jpeg/png/gif/webp images and PDF text conversion; metrics agent.tools.read.* record file size, returned bytes and lines, errors and coverage_percent.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52150]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52214]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Versioned tool contracts per model family plus coverage telemetry are worth copying; Verevon needs a ToolSpec registry keyed by (tool, promptVersion).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-061",
+  "category": "Coding capability",
+  "name": "Grep and Glob tools wrapping ripgrep semantics with guards",
+  "what": "The search tools take ripgrep-shaped arguments and add guards that steer the model toward semantic search for broad queries.",
+  "how": "Grep arguments: pattern, path, glob, type, output_mode, -A/-B/-C, -i, multiline, head_limit; options enableBroadGlobGuard, boostSemanticSearch and semanticSearchReminderMinPatterns; a Glob tool with an empty-pattern fallback metric (glob.empty_pattern_fallback); results go through the same large-output offload as shell.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:51075]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:51483]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56911]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon can keep a ripgrep-compatible grep schema (models know it) and add server-side guard rails for oversized patterns.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-062",
+  "category": "Coding capability",
+  "name": "SemanticSearch as the default search tool with a warm index",
+  "what": "The prompt makes semantic codebase search the default entry point (reads from a warm index, about 10 ms) and tells the model when to fall back to exact text search.",
+  "how": "A semantic_search_instructions section is rendered only when both SemanticSearch and Grep tools exist; the tool (SEMANTIC_SEARCH) calls the retrieval extension through exec messages; semSearchFast and semSearch are streaming RPCs on RepositoryService.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36641]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:53084]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23014]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Prompt-level routing between semantic and lexical search measurably changes agent behaviour; Verevon Data Plane retrieval should expose both with explicit guidance.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-063",
+  "category": "Coding capability",
+  "name": "Crepe: Rust sparse n-gram regex index and ripgrep fallback storm monitor",
+  "what": "Exact-text grep over large repositories is accelerated by an on-disk n-gram index; when the index cannot serve a query the client falls back to ripgrep and alarms if too many fall back.",
+  "how": "crepectl (Rust) builds index.bin, metadata.json and postings.bin with u32 n-gram tables, a github-sparse-freq frequency table, memory-bounded spilling and gitoxide to read worktrees (crepectl build --worktree --commit --cache-path --filter --memory-limit). The TypeScript GrepClient (napi file-service) serves queries and also registers as a TextSearchProvider2 and grep provider; fallback reasons are no_index, unsupported_shape, index_no_snapshot, index_busy, index_unavailable, exec_failure, timeout, no_overlap; a windowed fallback-rate alarm captures an exception when the storm threshold is hit.",
+  "evidence": [
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:22155]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:22169]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:22185]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:22323]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:27809]",
+   "REA: inspect_pe_resources on helpers/crepectl.exe, 5.3 MB PE32+ with no resource table (ev_e2aa61ec...)",
+   "scratchpad/tmp/cursor-h/crepectl.strings.txt (crepe crate paths, gix-odb 0.82, rkyv 0.8.15, regex-automata 0.4.14)"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "A regex n-gram index plus a measured fallback path is a model for Verevon workspace grep at scale; the crate list (gix, rkyv, regex-automata, aho-corasick, memmap2, rayon) is a ready Rust recipe.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-064",
+  "category": "Coding capability",
+  "name": "Merkle-tree codebase sync for semantic indexing",
+  "what": "Local files are synced to a server-side embedding index by comparing Merkle subtrees, uploading only changed files.",
+  "how": "RepositoryService handshake (FastRepoInitHandshake/V2) sends the root of a client Merkle tree (Rust MerkleClient, nodes with hash, children and encrypted relative paths), then SyncMerkleSubtree(V2) walks mismatched subtrees, FastUpdateFile(V2) uploads changed files, FastRepoSyncComplete closes; file-watcher increments run, and a full pass periodically (indexingPeriodSeconds 600); limits: 50 concurrent uploads, 100000 absolute max files, auto-indexing only below 10000 files, batch 2 MiB, 20 sync concurrency, retry 20; embedding models enumerated as VOYAGE_CODE_2, TEXT_EMBEDDINGS_LARGE_3 and a custom QWEN_1_5B variant.",
+  "evidence": [
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23455]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23547]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23560]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23686]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:24069]",
+   "cursor-agent-worker/dist/main.js [beaut/agentworker.js:7102]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Merkle diffing is the right sync primitive for Verevon workspace retrieval; the numeric limits are a useful starting configuration.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-065",
+  "category": "Coding capability",
+  "name": "Index reuse through codebase similarity hash and path encryption",
+  "what": "A new clone of a known repository can attach to an existing index; file paths are encrypted before they leave the machine.",
+  "how": "The handshake sends a simhash vector of the Merkle tree and a path-encryption key hash; the server can answer with a query-only repository (queryOnlyRepoAccess) or copy an existing index (GetCopyStatus polling, copyTimeoutSeconds 3600); tree nodes carry encryptedRelativePath produced by a pathEncryptionScheme; admin allow/block repo lists and a codebase protection policy gate indexing.",
+  "evidence": [
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23394]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23457]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23488]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:23124]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:24069]",
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Path encryption plus similarity-based index reuse reduces privacy exposure and indexing cost; relevant to Verevon Data Plane ZDR modes.",
+  "notes": "Server-side copy semantics are INF from RPC names (GetCopyStatus, QueryOnlyRepoAccess)."
+ },
+ {
+  "id": "cursor-harness-architecture-066",
+  "category": "Coding capability",
+  "name": "Tree-sitter chunking and context rendering in tools",
+  "what": "Search and read results are rendered as positioned code chunks (ranges, columns, bytes) so the model sees exact locations.",
+  "how": "The exec bundle loads the Rust N-API module @anysphere/tree-chunk-napi and trims positionedText elements (range start/end line, column, byte) before rendering tool output; tree-sitter and tree-sitter-bash are also packaged.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52888]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52890]",
+   "extensions/cursor-agent-exec/package.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Byte and line ranges on every chunk make citations and later edits precise; Verevon chunk objects should carry positions from the start.",
+  "notes": "Exact use of the chunker in indexing versus tool rendering was not traced; medium confidence."
+ },
+ {
+  "id": "cursor-harness-architecture-067",
+  "category": "Coding capability",
+  "name": "Lint feedback after edits (ReadLints) with timeout and shadow fallback",
+  "what": "The agent can read language-server diagnostics for files it edited, bounded by a timeout.",
+  "how": "ReadLints tool; config read_lint_timeout_ms default 10000; diagnostics_args exec message; ShadowWorkspaceService GetLintsForChange/SwGetLinterErrors for checks outside the user window; canvas_diagnostics_args for TypeScript diagnostics on agent-authored canvases.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52596]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23646]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ExecServerMessage.diagnostics_args, canvas_diagnostics_args)",
+   "cursor-shadow-workspace/dist/extension.js [beaut/shadow.js:15169]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Fast diagnostics feedback closes the edit loop without running the full build; Verevon can proxy LSP diagnostics from the sandbox.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-068",
+  "category": "Coding capability",
+  "name": "Apply model removed: FastApply reduced to telemetry and warmup",
+  "what": "The historical speculative apply model is no longer an inference service; the apply path is deterministic client-side edit tools.",
+  "how": "aiserver.v1.FastApplyService now has only ReportEditFate and WarmApply; CmdKService (StreamCmdK, StreamHypermode, rerank, terminal CmdK) and CppService (tab: MarkCppForEval, StreamHoldCpp, AvailableModels, RecordCppFate) remain; edit correctness comes from StrReplace/ApplyPatch plus lints.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56480]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Evidence that a mature product moved away from a dedicated apply model toward exact edit tools; Verevon should not invest in a custom apply model.",
+  "notes": "Conclusion (apply model retired) is INF from the shrunken RPC surface."
+ },
+ {
+  "id": "cursor-harness-architecture-069",
+  "category": "Coding capability",
+  "name": "AI code attribution and online metrics tracker",
+  "what": "The IDE snapshots files at the start and end of each agent request and scores commits to measure how much AI-written code survives.",
+  "how": "cursor-commits listens for cursor.action.startTrackingRequest, writes per-request storage (initial file snapshots, line-id maps and diffs, metadata.json) with retention and size limits from server config (maxRequestRetentionSeconds, maxRequestsTracked, maxRequestsTrackedMb), queues snapshots to OnlineMetricsService, and after each commit on the same branch runs developer.aiCodeTracking.scoreCommitInternal; it can also trigger a local Bugbot review for fresh unpushed commits authored by the user (merge commits and pushed commits are excluded).",
+  "evidence": [
+   "cursor-commits/dist/main.js [beaut/commits.js:15297]",
+   "cursor-commits/dist/main.js [beaut/commits.js:15345]",
+   "cursor-commits/dist/main.js [beaut/commits.js:15365]",
+   "cursor-commits/dist/main.js [beaut/commits.js:15630]",
+   "extensions/cursor-commits/package.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "AI attribution (what share of a commit came from the agent) is a strong enterprise metric; Verevon agent sessions that touch repos could record request-scoped snapshots the same way.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-070",
+  "category": "Coding capability",
+  "name": "Review, PR code tour and bug-finding services",
+  "what": "Server-side review features stream findings and guided PR tours; agents have tools to publish tour content.",
+  "how": "ReviewService (StreamReview, StreamReviewChat, StreamSlowReview, StreamCodeTour, BugConfig, StreamBugBotLinter, StreamBugFinding); BugbotService and BugbotAdminService; tools UpdatePrCodeTour and GetPrCodeTour; report_bug, report_bugfix_results and record_ci_investigation_findings tools; GitIndexService (PR history index: RepoHistoryInitHandshake, SyncOne, SyncComplete, SearchPRHistory) and GitGraphService.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:50813]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:50919]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52739]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Review is a separable agent profile with its own streaming API and persisted findings; useful pattern if Verevon adds code review for connected repos.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-071",
+  "category": "Tools, plugins & extensibility",
+  "name": "Tool registry built per request from model, agent type, mode and flags",
+  "what": "The set of tools the model sees is computed for each run, not static.",
+  "how": "Builder functions (cue and the larger composition around line 56482-56911) assemble tools from: model vendor and family (edit toolset), agent type (IDE, CLI, BACKGROUND), mode (Ask filters edit tools), feature flags (explore subagent, debug subagent, grind, record screen, replace env, VM setup, web fetch, image generation, goals, reflect), permissions (readonly shell), MCP state (direct MCP tools versus meta tools versus file-system descriptors) and subagent type (computer use drops MCP servers); the result is wrapped by Yce into a tool set that can transform tools in place.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56470]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56482]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56880]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56911]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon builds catalogues per loop (chat built-ins, Do capability-bound); one typed composition function keyed by run profile would unify them without merging the two loops (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-072",
+  "category": "Tools, plugins & extensibility",
+  "name": "Typed tool definition builder with zod schemas and dynamic descriptions",
+  "what": "Each tool is a small declarative object with a name, a description generator, a zod parameter schema, a context contract and an execute function.",
+  "how": "pL(identifier, {name, descriptionGenerator, parameters (zod), contextType (static or dynamic with conciseStaticContext), execute: kL(schema, fn)}) is used for Shell, Read, Grep, Glob, StrReplace, SemanticSearch, TodoWrite, AskQuestion, SwitchMode, Task, Await, GenerateImage, MCP meta tools and others; tool identifiers (SHELL, READ, STR_REPLACE, TASK ...) are stable analytics keys separate from the model-visible name, which can be renamed per model (for example mcp_task, Subagent or Task).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52214]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:54344]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:54225]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35770]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Separating a stable tool identifier from the model-visible name and schema lets Verevon rename or re-describe tools per model without breaking telemetry.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-073",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP client with OAuth leases, sandboxed stdio servers and cache redirection",
+  "what": "MCP servers run through the official SDK with patches for robust OAuth and with optional sandboxing for stdio servers.",
+  "how": "cursor-mcp patches @modelcontextprotocol/sdk (union offline_access into scope; refresh-lease hooks prepareForRefresh and releaseRefreshLeaseOnError; SiblingAlreadyRefreshedError; OAuthRefreshTransientError that avoids interactive re-auth on transient failures); stdio servers can run under the sandbox helper with admin mcpNetworkMode allow_all, allowlist, deny_all or no_sandbox; sandbox cache environment variables are redirected (NPM_CONFIG_CACHE, PNPM_STORE_PATH, GOCACHE, CARGO_TARGET_DIR and more) to a temp directory; hardcoded readable system paths per platform; sandbox policies live in sandbox-policies with one-hour TTL cleanup.",
+  "evidence": [
+   "cursor-mcp/dist/main.js [beaut/mcp.js:1126]",
+   "cursor-mcp/dist/main.js [beaut/mcp.js:1133]",
+   "cursor-mcp/dist/main.js [beaut/mcp.js:3305]",
+   "cursor-mcp/dist/main.js [beaut/mcp.js:3416]",
+   "cursor-mcp/dist/main.js [beaut/mcp.js:5822]",
+   "cursor-mcp/dist/main.js [beaut/mcp.js:8917]",
+   "cursor-mcp/dist/main.js [beaut/mcp.js:8978]",
+   "extensions/cursor-mcp/package.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon supports Streamable HTTP MCP with OAuth 2.1 and DCR but stdio is quarantined; Cursor shows how to run stdio servers under the same sandbox policy as shell with cache redirection (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-074",
+  "category": "Tools, plugins & extensibility",
+  "name": "Dynamic tool discovery through MCP meta-tools and namespaces",
+  "what": "Instead of putting every MCP tool schema in the prompt, the agent gets discovery and call meta-tools and reads schemas on demand.",
+  "how": "Meta tools GetMcpTools/CallMcpTool (or GetDynamicTools/CallDynamicTool with namespaces) plus FetchMcpResource and ListMcpResources; dynamicToolProfile all-static, minimal or final; the prompt lists available servers or dynamic_tool_namespaces in user_info and tells the model to check current availability; error classes MCP_AUTH_ERROR, INVALID_ARGS, UNEXPECTED_ENVIRONMENT, TIMEOUT, OTHER; metrics mcp.meta.* (get_tools payload bytes, call_tool_without_read_def, output_spill, search_then_call_result) and mcp.discovery.prompt_tool_tokens.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36666]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56445]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56482]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35430]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:31996]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon already collapses catalogues above 40 tools into mcp_catalog and mcp_call; the bigger gap is that the final dispatch is denied by the capability gate (no trusted binding for mcp__*), so fix the binding before adding Cursor-style read-schema-first rules (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-075",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP descriptors materialized as files for the agent",
+  "what": "MCP servers, tools and resources are written under the project directory so the agent can read schemas with its normal file tools; a status file explains auth or error states.",
+  "how": "Per server: .cursor/projects/<p>/mcps/<server>/tools/*.json, resources, prompts and STATUS.md written atomically through ~staging and ~prev directories; the prompt requires reading the tool JSON schema before calling a tool and authenticating one server at a time via an mcp_auth tool; a managed ignore block un-ignores these paths so grep and glob reach them.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:112775]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:113202]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36985]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36666]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Context-as-files makes tool catalogs greppable and cacheable and avoids bespoke discovery APIs; consider it for Verevon connector catalogs in the sandbox filesystem.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-076",
+  "category": "Tools, plugins & extensibility",
+  "name": "Hooks configuration compatible with Claude Code settings",
+  "what": "hooks.json defines command or prompt hooks per event with matcher, timeout, loop_limit and failClosed; Claude Code hook settings are translated automatically.",
+  "how": "Format {version:1, hooks:{event:[{type command|prompt, command|prompt, matcher regex, timeout seconds, loop_limit int|null, failClosed bool, model}]}}; the translator maps PreToolUse/PostToolUse matchers (tool name mapping, mcp__server__tool to MCP:tool, unsupported tools warned), SessionStart and PreCompact matcher values, and ignores unsupported events with a warning; hook-provided text is sanitized (system_reminder tags neutralized) before reaching the model.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:209524]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:209612]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Supporting Claude Code hook/skill/plugin formats lowers migration cost; Verevon can ingest the same files.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-077",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin packaging format with marketplace manifests",
+  "what": "Plugins bundle commands, agents, skills, rules, hooks and MCP servers and can be installed from git sources, pinned by commit.",
+  "how": "Manifests .cursor-plugin/plugin.json, .claude-plugin/plugin.json or plugin.json; marketplace.json under .cursor-plugin or .claude-plugin; fields name (kebab case), displayName, source (github repo/ref/sha, git url or git-subdir), version, author, license, keywords, category, tags, minClientVersions, strict, commands, agents, skills, rules, hooks, mcpServers, variable schemas with writeOnly secrets; 10 MiB cap; 40-hex sha pin; cache under .cursor/plugins/cache; ControlService has ReloadPlugins and InstallPluginArtifact.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:68298]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.ControlService InstallPluginArtifact, ReloadPlugins)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon plugin registry is inert (no host loads a manifest); Cursor shows the minimal host: a directory with a manifest that registers skills, commands, agents, hooks and MCP servers (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-078",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skills: SKILL.md roots, catalog with budget, built-in skills and publishing",
+  "what": "Skills are discovered from several roots, summarized in the prompt within a budget, and can be published as plugins.",
+  "how": "Roots .cursor/skills, .cursor/skills-cursor (built-in, synced every 24 hours or 3 days), .agents/skills, .claude/skills, .codex/skills, plugin caches; the agent_skills prompt block lists skill paths and descriptions with a budget strategy and an omitted-count notice; manually attached skills are separate; skill reads are counted (skill.applied metric tagged by catalog truncation); skill blocks are re-injected after summarization; durable_skill_blocks stored in conversation state.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:38638]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:38907]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23648]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ConversationStateStructure.durable_skill_blocks)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon injects up to 3 skills under a character budget with reattach_skill; reading SKILL.md from claude, codex and agents roots would add instant ecosystem compatibility (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-079",
+  "category": "Tools, plugins & extensibility",
+  "name": "Rules: .mdc frontmatter, team rules and agent-requestable rules",
+  "what": "Rules are markdown files that are always applied, glob-attached or described for the agent to fetch on demand; teams can require rules.",
+  "how": "Rules from .cursor/rules/*.mdc (gray-matter frontmatter), legacy .cursorrules, AGENTS.md and CLAUDE.md; the prompt includes always_applied_workspace_rules inline and agent_requestable_workspace_rules as path plus description; team rules are deduplicated by file name, can be disabled unless required (disabledTeamRules), and cloud rules exist; rules can be excluded entirely by a dropCustomPromptContext flag.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:38491]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:42495]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:14823]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Three rule tiers (always, requestable, team-required) map directly to Verevon org, space and user instructions.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-080",
+  "category": "Tools, plugins & extensibility",
+  "name": "Compatibility tool sets for external agent harnesses",
+  "what": "The runtime can expose the tool vocabulary of other open agent harnesses for evaluation.",
+  "how": "MINI_SWE_AGENT_BASH (name bash) and PI_READ/PI_BASH/PI_EDIT/PI_WRITE/PI_GREP/PI_FIND/PI_LS tools with dedicated exec messages; executors exist in exec_main with matching ExecServerMessage fields.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:51804]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56639]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ExecServerMessage.pi_*_args and mini_swe_agent_bash_args)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Harness-compat tool profiles let Verevon benchmark the same model on third-party scaffolds without forking the runtime.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-081",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP registry and marketplace services",
+  "what": "Known MCP servers and marketplace publishing are backed by RPC services; install links use deep links.",
+  "how": "aiserver.v1.MCPRegistryService.GetKnownServers, MarketplaceService.CreateMarketplaceExtensionPublisher; trusted extension protocol handlers include cursor-deeplink and cursor-mcp; MCP install via mcp.deeplinkInstall.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "extensions/cursor-mcp/package.json",
+   "extensions/cursor-deeplink/package.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "An org-curated MCP registry endpoint is useful for governance in Verevon (allowlisted servers per organization).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-082",
+  "category": "Computer & environment control",
+  "name": "Native sandbox helper with workspace policies (Rust)",
+  "what": "Shell commands can run inside a filesystem and network sandbox defined by a JSON policy, implemented by a small Rust binary.",
+  "how": "cursorsandbox.exe (Rust, packages/sandbox-helper/native/sandbox/src/{main,win32,network/*}.rs) takes a unified policy file: sandbox {type workspace_readwrite | workspace_readonly | insecure_none, cwd, readBoundary, hardcodedReadPaths, additionalReadonlyPaths, additionalReadwritePaths, ignoreMapping, networkAccess, disableTmpWrite, blockGitWrites}, networkPolicy {version 1, default, allow, deny, logging.decisionLogPath} and networkPolicyStrict; a Linux preflight (--preflight-only) probes kernel support; Linux isolation uses bubblewrap, macOS uses sandbox-exec, Windows provides only the network proxy (no filesystem isolation, so isSandboxHelperSupported returns false); a built-in HTTP CONNECT and SOCKS5 proxy enforces allow/deny with decision logging and a forwarder socket for Linux network mode.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/cursorsandbox.strings.txt (lines 14337, 14340, 14166, 14173, 14247, 14342)",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:159895]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:160046]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:13352]",
+   "REA: inspect_pe_resources on cursorsandbox.exe (earlier pass in this task): PE32+ with no resources; and REA inspect on crepectl.exe in this pass"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon uses bubblewrap plus Landlock/seccomp inside the execution-core container with no per-session VM; adopt the policy schema (read boundary, extra paths, default-deny egress with decision log) and proxy-based egress control (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": "Windows has no filesystem isolation in this build: a cross-platform sandbox story needs a container or VM fallback."
+ },
+ {
+  "id": "cursor-harness-architecture-083",
+  "category": "Computer & environment control",
+  "name": "Cloud sandbox as Docker inside Firecracker with a shared tmux setup session",
+  "what": "Cloud agents run in a container inside a microVM and set up the environment in a shared tmux session the user can watch.",
+  "how": "Prompt text states the sandbox is a Docker container inside a Firecracker VM (hence fuse-overlayfs and iptables-legacy workarounds for Docker-in-Docker); a shared tmux session is a first-class product surface for environment setup; the agent finishes by saving an update script (run on VM startup) via SetupVmEnvironment, keeps durable notes in AGENTS.md, and may emit structured env_setup_actions (add_secrets, add_test_login, add_egress_allowlist_domain) for the user to act on.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36909]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36900]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36908]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:48056]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "MicroVM isolation plus a user-visible shared terminal and structured setup actions (secrets, test login, egress domain) is a good UX contract for Verevon cloud agents.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-084",
+  "category": "Computer & environment control",
+  "name": "Terminals as files and large-output offload to disk",
+  "what": "Terminal state and big tool outputs are stored as files the agent can grep rather than being pasted into context.",
+  "how": "A terminals folder holds N.txt files per session with a header (pid, running_for_ms updated about every 5 s) and a footer (exit_code, elapsed_ms) (terminal_files_information prompt section); tool results above a threshold (40000 bytes, shell file_output_threshold_bytes) are written to .cursor/projects/<p>/agent-tools/<uuid>.txt (cap 50 MB) and the result carries outputLocation (path, size, lines); a garbage collector deletes agent-transcripts and agent-tools files older than 30 days.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:10892]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36985]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:108813]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:118068]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Filesystem-backed context for terminals and big outputs is a robust way to keep tokens low; Verevon sandboxes should adopt the same convention plus a retention GC tied to ZDR.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-085",
+  "category": "Computer & environment control",
+  "name": "Browser automation MCP server with accessibility snapshots and element refs",
+  "what": "A bundled MCP server drives an in-app browser using accessibility-tree snapshots and opaque element refs, with CDP available only for a safe subset.",
+  "how": "cursor-browser-automation exposes browser_navigate, browser_snapshot (options: interactive only, max depth, compact, CSS-selector scope, diff versus the previous snapshot, screenshot after), browser_click, browser_mouse_click_xy, browser_type, browser_fill, browser_select_option, browser_press_key, browser_scroll, browser_drag, browser_get_bounding_box, browser_highlight, browser_tabs, browser_cdp, browser_take_screenshot and browser_lock; tool descriptions tell the model to use ref-based click instead of CDP Input.* and to avoid focus-sensitive input in Electron webviews; browser_cdp denies cookie, storage, permission, download, target-management, filesystem and system-level commands; each tab records ownerAgentId (the composer id); page and navigation origins are checked through cursor.browserOriginAllowlist.ensurePageOriginAllowed and ensureNavigationAllowed; iframes are not accessible.",
+  "evidence": [
+   "cursor-browser-automation/dist/extension.js [beaut/browserauto.js:4032]",
+   "cursor-browser-automation/dist/extension.js [beaut/browserauto.js:1544]",
+   "cursor-browser-automation/dist/extension.js [beaut/browserauto.js:2543]",
+   "cursor-browser-automation/dist/extension.js [beaut/browserauto.js:1543]",
+   "cursor-browser-automation/dist/extension.js [beaut/browserauto.js:1315]",
+   "cursor-browser-automation/dist/extension.js [beaut/browserauto.js:3992]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon holds Model proposes, Quarry executes; Cursor tool shape (snapshot with refs, diff snapshots, restricted CDP, per-agent tab ownership) is a candidate observation and action vocabulary for Quarry, independent of the current grant bug (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-086",
+  "category": "Computer & environment control",
+  "name": "Computer use through provider-native tools and a dedicated subagent",
+  "what": "Desktop control uses each provider native computer-use tool definition and runs in a restricted subagent.",
+  "how": "Anthropic provider-defined tool anthropic.computer_20250124 (name computer, 1280x800 display), Gemini and OpenAI computer-use variants (tool identifiers GEMINI_COMPUTER_USE, OPENAI_COMPUTER_USE) and an internal ComputerUseAction proto; the computerUse subagent prompt forbids writing code and receives only shell, read, grep, glob plus computer; MCP servers are filtered for it; RecordScreen controls screen recording on the VM; default models include a Claude Sonnet thinking-high variant; ExecServerMessage has computer_use_args and record_screen_args.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34692]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34770]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36628]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36422]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40730]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:47731]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56921]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no OS computer use (parked by the owner); if revived, use provider-native tools behind one internal action type and a VM per session (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-087",
+  "category": "Computer & environment control",
+  "name": "PTY host and tmux session services",
+  "what": "Terminals and long-lived shells are served by host services that can be attached from other clients.",
+  "how": "agent.v1.PtyHostService (SpawnPty, AttachPty stream, SendInput, ResizePty, ListPtys, TerminatePty) and TmuxSessionService (CreateSession, ListSessions, KillSession, AttachSession); node-pty and xterm packages in the IDE.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.PtyHostService and TmuxSessionService methods)",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Attachable PTY sessions are what lets a web page show and take over a running agent terminal.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-088",
+  "category": "Computer & environment control",
+  "name": "Git-aware context: active branch tracking and git state in request context",
+  "what": "The agent runtime tracks the active branch and git status and receives them as structured context rather than discovering them by shell.",
+  "how": "SetActiveBranch tool and active_branch_change interaction updates; ConversationStateStructure.active_branch_name and tracked_git_repo_branches; the retrieval extension pushes tracked git state (status and branch, truncated to 262144) into request context; a git_status section appears in the first user message; ControlService has GetDiff, BatchGetDiff and GetWorkspaceChangesHash; GitHub and forge CLI guidance is added to the prompt for background agents.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56301]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:39064]",
+   "cursor-retrieval/dist/main.js [beaut/retrieval.js:22150]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (InteractionUpdate.active_branch_change; ControlService.GetDiff)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Structured git context avoids shell round trips and keeps cloud agents consistent with the UI branch.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-089",
+  "category": "Safety, permissions & governance",
+  "name": "Layered shell permission engine with sandbox escalation",
+  "what": "Every shell command passes through a decision pipeline combining parsed commands, user and team allowlists, blocklists, delete protection, sandbox policy and hooks.",
+  "how": "Evaluation order: parse command (executableCommands, redirects) -> if the parser found no commands or failed, prompt as possible bypass -> hard-deny check -> allowlist match per command (user/project/dashboard/permissions file, team allowlist, smart-allowlist classifier suggestions) -> team blocklist and soft denylist -> delete protection (rm denied) -> readonly mode block -> hook-forced approval -> auto-approval policy by approval mode (allowlist, unrestricted, auto-review) with allowlisted commands escalating out of the sandbox (insecure_none with allowlistEscalated) -> otherwise request approval with suggested allowlist patterns and reasons; sandbox policies from the request and user config are merged (read boundary, additional read paths, network allow lists).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116779]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116848]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116876]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:117016]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:117048]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116634]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon has capability, hook, permission and HITL stages but a substring risky-tool classifier; Cursor decides on parsed commands with explicit facts and reasons, which is the upgrade path for EC/permission (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-090",
+  "category": "Safety, permissions & governance",
+  "name": "Shell command AST analysis with tree-sitter-bash",
+  "what": "Commands are parsed into executable commands and redirects so allowlists match real programs, not strings; parse failures are treated as possible bypass.",
+  "how": "A tree-sitter bash parser produces legacy simpleCommands plus a structured result (parsingFailed, executableCommands, hasRedirects, hasCommandSubstitution, redirects) with fd-target tracking (stdin, stdout, stderr, dev-null, unsafe), heredoc handling and an allRedirectsAreDevNull flag; if the native module is unavailable the analysis degrades to parsingFailed (which forces a prompt).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:103962]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:103975]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:104064]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116835]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon execution-core risk classification is a substring list that can mis-class names; AST-based command analysis closes that gap for any future shell tool (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-091",
+  "category": "Safety, permissions & governance",
+  "name": "Smart mode: LLM auto-review classifier for risky actions",
+  "what": "An auto-review model classifies pending shell, MCP, web fetch and computer actions as allow or block using user-written instructions, optionally in shadow mode.",
+  "how": "tj classifier gets action kind (shell, mcp, sand_computer, web_fetch, fetch_mcp_resource), the target arguments and execution surface (host_machine or isolated_box), a 10 s timeout and 2 attempts; permissions.json autoRun/autoReview supplies allow_instructions and block_instructions as natural language; shadow mode classifies without enforcing; not used for background agents; a block returns a system reminder telling the agent it may retry with requestSmartModeApproval and smartModeBlockReason to raise a native approval card; the shell classifier also suggests allowlist entries.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35107]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35211]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35737]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35763]",
+   "extensions/cursor-always-local/schemas/permissions.schema.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Natural-language policy instructions evaluated by a model, with shadow mode for rollout and a user-approval escape hatch, suit Verevon org-level agent policies; keep deterministic checks first.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-092",
+  "category": "Safety, permissions & governance",
+  "name": "Admin command denylist, team blocklist and delete protection",
+  "what": "Organizations can hard-block commands and protect against file deletion regardless of user settings.",
+  "how": "adminCommandDenylist flows through request context into ShellArgs and is enforced at execution time as a hard block (with parser-failure handling); team auto-run controls provide allowlist and blocklist; getDeleteFileProtection makes rm always denied; team settings can override dashboard terminal allowlists and block run mode entirely.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:53832]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:117048]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116848]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:150349]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Enforce org denylists at the executor, not only in the prompt: they must survive prompt injection and misconfigured agents.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-093",
+  "category": "Safety, permissions & governance",
+  "name": "MCP permission model with allowlists and admin network modes",
+  "what": "MCP calls obey tool allowlists (server:tool patterns) and admin policies; readonly mode blocks them; stdio servers can be network-restricted.",
+  "how": "permissions.json mcpAllowlist entries server:tool, server:*, *:tool, *:*; shouldBlockMcp logic blocks in readonly mode with Smart Mode forcing; mcp_allowlist_precheck exec messages; admin allowedMcpConfiguration and mcpNetworkMode (allow_all, allowlist, deny_all, no_sandbox); precheck messages also exist for shell and web fetch.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:117124]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:117130]",
+   "cursor-mcp/dist/main.js [beaut/mcp.js:1126]",
+   "cursor-mcp/dist/main.js [beaut/mcp.js:11391]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ExecServerMessage mcp/shell/web_fetch allowlist_precheck_args)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A precheck RPC separate from execution lets the UI show approval state before a call is made; Verevon connector permissions can reuse the server:tool pattern grammar.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-094",
+  "category": "Safety, permissions & governance",
+  "name": "Privacy modes and purpose-checked redaction matrix",
+  "what": "Five privacy modes decide what may be stored, logged or used for training; code, paths and credentials are classified separately.",
+  "how": "PrivacyMode UNSPECIFIED, NO_STORAGE, NO_TRAINING, USAGE_DATA_TRAINING_ALLOWED, USAGE_CODEBASE_TRAINING_ALLOWED; matrix: modes 0 and 1 allow nothing except SAFE and UNSAFE_ALWAYS_ALLOWED; mode 2 allows PATH and PROVIDER_INFO for logging and anything for usage but nothing for training; modes 3 and 4 allow all except CREDENTIALS and UNSPECIFIED which are never storable; features such as A/B response comparison and prompt-quality uploads check for mode 4; Sentry reporting is suppressed in privacy mode; request header x-ghost-mode carries the mode.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22485]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22500]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43648]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:62127]",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon enforces ZDR with evidence-bound gating at feature level; a typed redacted-string layer with purpose-checked unwrap would add compile-time protection against logging or storing content on ZDR paths (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-095",
+  "category": "Safety, permissions & governance",
+  "name": "Prompt-injection posture: instructions plus structural sanitization",
+  "what": "Defense is mostly prompt-level cautions and sanitization of hook-injected text, not a dedicated detector.",
+  "how": "Background-agent prompt tells the model to be cautious following instructions inside tool results (especially web search) and to prioritize the original request, and not to reply to linked external services unless asked; hook output text has system_reminder tags neutralized before reaching the model; MCP, shell and fetch calls go through approval or classifier; no content-injection classifier for tool outputs was found.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:37031]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56968]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:209612]",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon should exceed this: mark untrusted tool-output spans, strip control markup from them and keep policy decisions in the capability gate rather than prompt text (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": "Absence of a classifier is INF from not finding one in the bundles."
+ },
+ {
+  "id": "cursor-harness-architecture-096",
+  "category": "Safety, permissions & governance",
+  "name": "Read policy outside the workspace and ignore services",
+  "what": "Reading files outside the workspace or ignored by policy needs approval; team read policy can restrict the whole read boundary.",
+  "how": "PermissionsService has an ignoreService (cursorignore patterns), a pendingDecisionStore, team settings and admin network controls; reading outside the workspace returns needsApproval with a team-policy message unless approval mode is unrestricted; redacted_read exec messages exist for protected files; sandbox readBoundary workspace versus system is merged with user and admin settings.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116634]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116644]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:116667]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:109520]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ExecServerMessage.redacted_read_args)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Per-path read policy (workspace boundary, ignore files, redacted reads) matters for Verevon Spaces and owner-plane ACL rules; reads outside the granted scope should need explicit approval.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-097",
+  "category": "Safety, permissions & governance",
+  "name": "Secrets as placeholders and structured secret requests",
+  "what": "The agent never types secrets; it requests them through structured setup actions and refers to them by name.",
+  "how": "env_setup_actions XML includes add_secrets entries that list secret names (for example API keys) without values; ReplaceEnv updates environment variables through an interaction query; secretRedactionEnabled is part of the request context env and ExecServerMessage has redacted_read results; MCP refresh tokens are fetched through ControlService.GetMcpRefreshTokens rather than embedded in prompts.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36909]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:47955]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:27893]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.ControlService GetMcpRefreshTokens)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Secrets should be named handles resolved by the sandbox runtime; Verevon connectors must never put token values in prompts.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-098",
+  "category": "Transparency, observability & control",
+  "name": "Per-request TTFT breakdown sent to the client",
+  "what": "Latency to first token is decomposed into server and client stages and returned with the stream.",
+  "how": "AgentServerMessage.ttft_breakdown carries server_first_token_ms, pre_stream_setup_ms, wait_for_first_event_ms, provider_ttft_ms and slow_pool_wait_ms; client-side agent.ttft.* metrics cover conversation init, blob hydration, context enrichment (blob store, documentation, external links), middleware chain, system prompt generation, user message blob, state snapshot and first step setup.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.TtftBreakdown and AgentServerMessage.ttft_breakdown)",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23646]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon has SLO harnesses (mp-slo) offline only; per-request stage timing in the stream would give live latency attribution in agent pages (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-099",
+  "category": "Transparency, observability & control",
+  "name": "Prompt token breakdown and context usage API",
+  "what": "The runtime estimates tokens per prompt category and exposes context usage for UI display.",
+  "how": "Metric agent.prompt_token_breakdown.category_estimated_tokens; trackPromptTokens; AgentService.GetPromptContextUsage; ChatService.GetPromptDryRun returns the exact prompt; flags context_visualizer and context_usage_canvas.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:42632]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:41255]",
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A prompt dry-run and per-category token accounting make agents explainable; Verevon pages should offer a context inspector.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-100",
+  "category": "Transparency, observability & control",
+  "name": "Trace-level RPC logging in the host with privacy-aware truncation",
+  "what": "The agent host can trace every RPC and stream event as JSON with long strings truncated.",
+  "how": "When trace is enabled the host logs each RPC (toJson), stream events (event case, value, eventId) and createSession parameters, truncating strings above 2048 chars; a privacy log channel routes logs; the extensions request the cursorTracing proposed API; settings cursor.rpcFileLogger.* and cursor-rpc-devtools exist.",
+  "evidence": [
+   "cursor-agent-host/dist/main.js [beaut/host_main.js:123700]",
+   "cursor-agent-host/dist/main.js [beaut/host_main.js:123711]",
+   "cursor-agent-host/dist/main.js [beaut/host_main.js:123737]",
+   "extensions/cursor-agent-host/package.json",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A per-session trace of typed events (with truncation) is an easy and valuable debugging surface for Model Plane runs.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-101",
+  "category": "Transparency, observability & control",
+  "name": "Tool-call telemetry with owner team labels and arg-size histograms",
+  "what": "Each tool call is measured by name, outcome, owner team, client type and whether the tool is dynamic.",
+  "how": "tool_call.duration_ms and tool_call.result carry labels toolName, outcome, team, mcp_version, clientversion, clienttype, remoteType, isdynamic, user.is_dev; argument size histograms estimate tokens as length/4; per-tool metrics for read, str_replace, edit_common perform_edit/perform_write, generate_image, mcp meta.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40730]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40738]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40895]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Same labeling scheme is recommended for Verevon tool metrics.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-102",
+  "category": "Transparency, observability & control",
+  "name": "Hook execution tracking and response comparison feedback surfaces",
+  "what": "Hooks and feedback prompts are observable events, not hidden side effects.",
+  "how": "trackHookExecuted records hook step, source (local or remote), type, status (success, blocked, failed, timeout), latency and failClosed; hook state files live under .cursor/hooks/state; feedback_request updates carry categories and category groups for in-line feedback; customize_hooks_execution_log_detail flag.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:31631]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:23648]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (InteractionUpdate.feedback_request)",
+   "scratchpad/tmp/cursor_raw/11_dot_cursor_path_literals.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Hook outcomes must be visible in the run trace so admins can debug policy behaviour.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-103",
+  "category": "Transparency, observability & control",
+  "name": "NDJSON log ingest server for agent-driven debugging",
+  "what": "A local HTTP server receives NDJSON logs from instrumented user code and writes them where the agent can read them.",
+  "how": "cursor-ndjson-ingest (5 commands; settings ndjson.port in 7242-7942 and ndjson.bindAddress with a warning for non-localhost) writes workspace/.cursor/debug.log; the Debug mode prompt tells the agent to POST there or append to the file.",
+  "evidence": [
+   "extensions/cursor-ndjson-ingest/package.json",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34777]",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "A tiny log sink makes runtime evidence available to agents without attaching a debugger.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-104",
+  "category": "Models & routing",
+  "name": "Model family detection driving prompt variants and toolsets",
+  "what": "The harness derives vendor and family flags from the model slug and picks prompts, tool descriptions and edit tools accordingly.",
+  "how": "mde(slug) lowercases and substring-matches into flags (isSonnet45, isGemini3, isGpt51, isGpt52, isGpt54, isGpt55, isCodexFamily, isGpt53Codex, isClaude4X, isOpus45/46/48, isOpus5, isGpt5Family, isComposer1/15/2, isComposerMatterhorn, isRawTrainingSlug); Cursor models map to promptVersion dsv3-1018, dsv3-1205 or cursor-0226 (matterhorn and composer-2 use cursor-0226), everything else uses latest; system prompt components branch on these flags (for example the identity line, citing code, inline line numbers only for GPT-5 family).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:57883]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:57885]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:57890]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36590]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36637]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon routes across Azure OpenAI, Anthropic, Cohere and OpenAI-compatible endpoints; a model profile record (prompt variant, edit toolset, reasoning options) beats slug matching (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": "String-matching on slugs is brittle; treat it as the anti-pattern to avoid."
+ },
+ {
+  "id": "cursor-harness-architecture-105",
+  "category": "Models & routing",
+  "name": "Anthropic prompt caching with rolling cache-control markers",
+  "what": "Prompt caching is managed by the harness: the last message always gets an ephemeral cache marker and older markers roll off at a block limit.",
+  "how": "A message-list wrapper applies cacheControl ephemeral to the last message and trims to maxCacheBlocks (4), removing cacheControl from older messages; the provider shim maps cacheControl to cache_control on text, image, document and tool_result blocks; cache read and write tokens are tracked in usage and summarization metrics.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22245]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22270]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22277]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:59705]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:59746]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon supports Anthropic-native clear_tool_uses optionally; explicit rolling cache breakpoints with read/write token accounting should be a default for Anthropic routes (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-106",
+  "category": "Models & routing",
+  "name": "Executor middleware chain around the model call",
+  "what": "Model calls pass through composable middleware that fix up messages and add tracing.",
+  "how": "An executor base class wraps an inner executor (getMessages, appendMessages, clearMessages, stream); middleware include continuation-injector (adds a continuation user message after a trailing assistant), trailing-empty-assistant-removal, image-resizing and effort-level (present as stubs in this build); a tracing middleware records agent.ttft.middlewareChainMs and chat_inference.* metrics; providers (Anthropic, OpenAI) are executed through a vendored Vercel AI SDK streamText.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22332]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22345]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22347]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:22348]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:21441]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A decorator chain over a ModelExecutor trait is the idiomatic Rust structure for provider quirks (empty assistant messages, continuation, image limits).",
+  "notes": "effort-level and image-resizing middleware appear as logger stubs here; real behaviour may live server-side."
+ },
+ {
+  "id": "cursor-harness-architecture-107",
+  "category": "Models & routing",
+  "name": "Reasoning block preservation and model-switch handling",
+  "what": "Reasoning text, signatures and redacted reasoning are preserved across turns, and the model is warned when earlier turns came from a different model.",
+  "how": "The stream accumulator keeps reasoning, reasoning-signature and redacted-reasoning chunks with providerOptions.cursor.modelName; summarized thinking is flagged; on a model change a system reminder tells the model that earlier turns were produced by a different AI model, may have used tools no longer available, and that it must call only currently defined tools with current schemas.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40895]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:40901]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:39615]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon lacks reasoning-effort control on the OpenAI/Azure route and has no Gemini or native DeepSeek provider; preserving reasoning blocks with model provenance is needed before adding them (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-108",
+  "category": "Models & routing",
+  "name": "Usable-model, model-intent and routed-model APIs",
+  "what": "The client asks the backend which models and intents are allowed and is told which model auto-routing chose.",
+  "how": "AgentService.GetUsableModels, GetDefaultModelForCli, GetAllowedModelIntents and new-chat nudges for the model picker; InteractionUpdate.routed_model reports the chosen model; AgentRunRequest carries requested_model, model_details and selected_subagent_models; admin blockedModels and byokDisabled settings.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.AgentService methods and InteractionUpdate.routed_model)",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:31180]",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Return the effective routed model in the stream so pages can show it; allowed-model lists should come from org policy.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-109",
+  "category": "Models & routing",
+  "name": "Specialist perception subagents on specific models (video)",
+  "what": "A coding agent without video understanding delegates to a subagent running a video-capable model that acts as its eyes.",
+  "how": "watchVideo and mediaReview subagents (models limited to Gemini variants) with a long role prompt describing the agent as having no ability to watch videos; flags gemini_video_developer_api, enable_watch_video_in_ide and agent_video_signed_url_uploads; GetSignedUrlForAttachedMedia RPC for media upload.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:37517]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:37495]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.AgentService.GetSignedUrlForAttachedMedia)",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Perception as a subagent on a different provider is a clean way to add video or audio to any Verevon model without changing the main loop.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-110",
+  "category": "Models & routing",
+  "name": "Warm-up and prewarm to cut time to first token",
+  "what": "The client can warm the backend while the user is still typing.",
+  "how": "AgentClientMessage.prewarm_request mirrors the run request without an action; ChatService has WarmStreamUnifiedChatWithTools and WarmFullFileCmdK; FastApplyService.WarmApply; ShadowWorkspace and VmDaemon warm calls (WarmCursorServer, WarmRemoteAccessServer).",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (AgentClientMessage.prewarm_request)",
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Prewarm (provider connection, cache priming) when the user focuses the composer is a cheap latency win for Verevon chat.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-111",
+  "category": "Memory, learning & personalization",
+  "name": "Continual learning by transcript search, not an automatic memory store",
+  "what": "Agents are told to recognize preferences and corrections and to ask whether they should apply globally; past conversations are searched by a subagent.",
+  "how": "continual_learning prompt section for cloud agents: a past_conversation_explorer subagent searches earlier transcripts; the model should notice preferences, corrections, tips and codebase knowledge, and clarify global versus local scope; agent transcripts are stored as JSONL files in agent-transcripts; no automatic memory writer was found for cloud agents.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36816]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:108813]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34785]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon already has Letta memory and Dreaming extraction (ahead of Cursor here); copy only the explicit global-versus-local scope question and transcript search tool (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": "Absence of an automatic store is INF from bundle search."
+ },
+ {
+  "id": "cursor-harness-architecture-112",
+  "category": "Memory, learning & personalization",
+  "name": "Persistent agent identity files and agent stores",
+  "what": "Named agents keep durable files for identity and memory and sync them between environments.",
+  "how": "Home store /cursor/stores/home with SELF.md (identity, embedded in user_info via an agent_self_document block with tag escaping), SOUL.md and an activity folder; agent store mounts with a principal alias; agent-store-sync keeps local and cloud copies consistent; AgentStoreService is part of the Grok Bot service set.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34395]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36306]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:41381]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:166315]",
+   "scratchpad/tmp/grokbot_part1.txt (AgentStoreService, 24 methods)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "File-based identity and memory is simple, inspectable and syncable; map to Verevon per-user memory documents in the Data Plane.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-113",
+  "category": "Memory, learning & personalization",
+  "name": "Conversation search tool for the agent",
+  "what": "The agent can search past conversations with a tool backed by the local FTS index.",
+  "how": "SearchConversations tool (exec message conversation_search_args/result) backed by the conversation search process; flags agent_conversation_search_tool and local_agent_transcript_search_in_glass; subagent type pastConversationExplorer.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52821]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ExecServerMessage.conversation_search_args)",
+   "out/vs/code/electron-utility/conversationSearch/conversationSearchMain.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Chat history as a searchable tool for agents is cheap personalization; scope it by space and ACL in Verevon.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-114",
+  "category": "Memory, learning & personalization",
+  "name": "Automation memories",
+  "what": "Scheduled automations keep their own memories that can be listed and edited.",
+  "how": "AutomationsService ListAutomationMemories, GetAutomationMemory, UpdateAutomationMemory, DeleteAutomationMemory; a memory-instructions placeholder is substituted into automation prompts.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34395]"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Per-automation memory as an editable object keeps long-running scheduled agents consistent.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-115",
+  "category": "Chat experience",
+  "name": "Agent-authored interactive canvases (React TSX) with a host SDK",
+  "what": "The agent can create interactive visual pages as TSX canvas files that render in the host with themed components and charts, and share them as artifacts.",
+  "how": "Canvases live at .cursor/projects/<p>/canvases/*.canvas.tsx; a canvas-server-provider compiles them (esbuild-wasm) after each edit with TypeScript diagnostics (jsx react-jsx, strict) fed back to the agent (canvas_diagnostics_args); sharing calls cursor.shareCanvasArtifact({title, visibility, appJs, dataJson, canvasPath}); the bundled SDK cursor/canvas offers Card, Grid, Row, Stack, Table, Stat, Callout, Pill, Code, Button, BarChart, LineChart, PieChart, DiffView, DiffStats, computeDAGLayout, TodoList, UsageBar, form primitives and hooks useHostTheme, useCanvasState, useCanvasAction; design rules are delivered through a built-in canvas skill.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:214479]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:216374]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:48819]",
+   "extensions/cursor-agent-exec/dist/agent-sdk/cursor/canvas/index.d.ts, chart-primitives.d.ts, hooks.d.ts",
+   "extensions/cursor-agent-exec/dist/canvas-runtime/canvas-runtime.esm.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon has artifacts and canvas in the gateway loop; a typed component SDK and compile-diagnose loop would raise artifact quality and safety (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-116",
+  "category": "Chat experience",
+  "name": "Prompt suggestions, post-request prompts and shareable agent links",
+  "what": "After a run the UI can show suggested next prompts, and agent sessions can be shared by link.",
+  "how": "InteractionUpdate includes prompt_suggestion, post_request_prompt and user_message_appended; aiserver CreateAgentShare returns share_id and share_url and GetAgentSharePreview can include a preview image; flag cloud_glass_shared_sessions.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.InteractionUpdate oneof)",
+   "out/main.js (CreateAgentShare descriptor)",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Server-generated follow-up prompts and share links are common chat features; keep them in the stream contract as typed updates.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-117",
+  "category": "Chat experience",
+  "name": "Markdown output rules: inline images, preview cards and citations",
+  "what": "The chat renders images inline from file paths and URLs and shows a Preview card when a local app is running; code citation formats are model-specific.",
+  "how": "Prompt bullets (flag-gated) tell the model that the chat UI renders images via markdown with absolute local paths or URLs and that a preview tag on its own line shows a Preview card; citing_code section defines CODE REFERENCES versus MARKDOWN CODE BLOCKS for GPT-5-family; terminal output files are cited by path rather than described.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36614]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36621]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36634]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36637]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:37031]"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Server-side rules for what the UI can render (images, preview, code references) should be derived from a UI capability list sent by the page.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-118",
+  "category": "Multimodal & creation",
+  "name": "Image generation tool with concurrency limiter and abuse guards",
+  "what": "The agent can generate images; calls are rate-limited per run and screened.",
+  "how": "GenerateImage tool with a concurrency limiter (2), a suspicious-keywords check, restriction by model, mode gating (Ask mode) and metrics for execute duration, errors, render finished and short prompts; results are written to files and rendered inline.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:50564]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56883]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Per-run concurrency limits and abuse keyword screens belong in the Model Plane tool layer for Verevon image creation.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-119",
+  "category": "Research & web",
+  "name": "Web search and fetch tools with hooks and allowlist precheck",
+  "what": "Web search and fetch run through the same hook, permission and classifier pipeline as shell and MCP.",
+  "how": "WebSearch and WebFetch tools (fetch enabled by availability and user setting), execute-hook integration (enableExecuteHookExec, configuredSteps), web_fetch_allowlist_precheck exec messages, smart-mode classification for web_fetch, and InteractionQuery.web_search and web_fetch for client-side execution.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56880]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56889]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ExecServerMessage.web_fetch_allowlist_precheck_args; InteractionQuery.web_search/web_fetch)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Treat web access as a governed tool with allowlist prechecks; in Verevon this call should be executed by Quarry, not the model runtime.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-120",
+  "category": "UI/UX & product design",
+  "name": "Agent-first Glass window and UI intents",
+  "what": "A separate agent-first window (Glass) hosts cloud projects, diff tabs and side chats beside the classic editor.",
+  "how": "out/vs/workbench/workbench.glass.main.js renders the agent window with 111 glass_* flags (sidebar, projects, diffs, PDF, video, themes); the same runtime and services are reused; simulated message reasons wire diff-tab buttons to agent turns.",
+  "evidence": [
+   "scratchpad/findings/t3/cursor.inventory.md",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34003]",
+   "scratchpad/tmp/cursor/flags_client.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A dedicated agent surface separate from the code editor validates the Verevon direction (agent pages not an IDE); the shared runtime keeps both surfaces consistent.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-121",
+  "category": "Agent runtime",
+  "name": "System prompt as a JSX component tree with named sections and per-model gating",
+  "what": "The system prompt is not a template string: it is a tree of components (System, User, Assistant, Tool, section) rendered to chat messages, with sections switched on by model family, agent type, mode and flags.",
+  "how": "A tiny JSX-style renderer (EO/TO element constructors, class xO.renderToMessages/renderElement/renderIntrinsicElement) turns an element tree into role messages; sections render as XML-like tags (section title becomes the tag). Sections seen: task_management, tool_calling, making_code_changes, plan_mode_guardrails, tone_and_style, citing_code, maximize_context_understanding, semantic_search_instructions, browser_tools, inline_line_numbers, terminal_files_information, mode_selection, debug_mode_logging, continual_learning, background_agent, git_and_submission, testing, markdown_spec, status_update_spec, summary_spec, grep_spec, todo_spec, linter_errors, plus reducedSystemPrompt variants; the identity line even changes wording per model (agent versus assistant).",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:32908]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:32932]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:32936]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36590]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36596]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36599]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36602]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36607]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36641]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36660]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34777]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36816]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Composable prompt components with typed props (mode, toolInfo, modelInfo, flags) are testable and diffable; in Rust use an enum tree rendered by a PromptBuilder per model profile and snapshot-test the output.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-122",
+  "category": "Agent runtime",
+  "name": "Per-step system prompt generation and a persisted user_info snapshot with staleness check",
+  "what": "The system prompt is regenerated each step, but the large first user message (user_info) is persisted and only re-rendered when something relevant changed, which keeps the prompt prefix cache-stable.",
+  "how": "Each step unshifts a system message from systemPromptGenerator({requestContext, cursorRules, env, browserTools, cloudRule, mode,...}); the first user message contains a user_info block (OS, shell, workspace paths, git state, date, terminals folder, mounted stores, rules catalog, skills catalog, subagent models and types, MCP servers); shouldRerenderUserInfo re-renders it only if the agent type changed from persisted state, the available subagent models or types description changed, or the MCP meta-tool options changed; request-context completeness and a summarization epoch are stored in the message providerOptions.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44922]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:46939]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:46941]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:38474]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:38491]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:39064]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:39095]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon Do mode starts with a fresh history and no persona, org or Space instructions; a persisted environment and instruction snapshot with explicit invalidation fixes seeding and improves cache hits (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-123",
+  "category": "Agent runtime",
+  "name": "Per-turn tagged context blocks (attachments, open files, rules, docs, notes)",
+  "what": "Each user turn carries structured, XML-tagged context blocks rather than free-form text.",
+  "how": "Blocks built per turn include <user_query>, <attached_files> (files, code selections, terminal output and terminal selections with path and line attributes), <attached_folders> (directory trees), <documentation_context>, <open_and_recently_viewed_files> (with a note that they may be irrelevant), <agent_notes> (conversation and shared notes listing), <cursor_rules_context> (rules framed as extra documentation to use only if relevant), manually attached skills, plus <system_reminder>, <timestamp> and notification tags; summaries and recent changes can also be injected.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:37926]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:38114]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:38278]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36420]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36396]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon pages should send structured context items (typed attachments, selections, open documents) and let the runtime render the tags, so the same items work for any model.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-124",
+  "category": "Agent runtime",
+  "name": "Client-supplied RequestContext with progressive hydration flags",
+  "what": "The client builds a large structured context object for each run and marks which parts are complete, so the first model call can start before slow facts are ready.",
+  "how": "agent.v1.RequestContext carries rules, env (os_version, workspace_paths, shell, sandbox_enabled/supported, sandbox network defaults, secret_redaction_enabled, computer_use_supported, time_zone, terminals/transcripts/artifacts folders, mounted_agent_stores), repository_info, git_repos, project_layouts, mcp_instructions and file-system options, skill and plugin info, hooks_config and hooks_additional_context, custom_subagents, commit and PR attribution messages, precomputed_human_changes, permission sets from user, project and admin (auto-run), disabled_team_rules, admin_command_denylist, system_prompt_override and many *_info_complete booleans (rules, env, repository, git status, MCP, skills, custom subagents). AgentRunRequest adds client capability flags (client_supports_inline_images, preview card, prompt context usage RPC, routed model update, send_to_user).",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.RequestContext, RequestContextEnv and AgentRunRequest field lists (extracted into notes))",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:27950]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:44927]",
+   "metric agent_client.request_context_blob.* in metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon BFF resolves instruction hierarchy server-side for chat only; a typed RequestContext sent by the page, with completeness flags, is the clean way to pass it into Do runs too (baseline: findings/t3/v-modelplane.baseline.md).",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-125",
+  "category": "Agent runtime",
+  "name": "System prompt override and append, plus mode-specific base prompts",
+  "what": "Hosts can replace or extend the system prompt, and some modes use entirely different base prompts.",
+  "how": "AgentRunRequest has custom_system_prompt and system_prompt_spec (replace or append); RequestContext has system_prompt_override; the prompt generator returns a custom prompt verbatim if present, otherwise chooses per mode (Project Agent Mode has its own long prompt) and per agent identity (named persistent agents).",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (AgentRunRequest.custom_system_prompt, system_prompt_spec)",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:61450]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:61451]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:27950]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Org-level and app-level prompt overrides should be first-class (replace/append) fields, audited and versioned.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-126",
+  "category": "Agent runtime",
+  "name": "Project Agent Mode: orchestrator that only delegates and keeps a progress.md scratchpad",
+  "what": "A long-horizon mode where the main agent never edits files itself, runs a phase-gated workflow through subagents and externalizes state into a durable progress file.",
+  "how": "The Project Agent Mode prompt (X 61455) states hard rules: orchestrate, do not execute (all workspace changes by Task subagents), task-first for research/implementation/review, no work without clarity (use AskQuestion), a phase gate Clarify, Research, Plan, User Review, Implement, Review Panel, Iterate, Finalize, safe parallelism (never run two write-capable subagents with overlapping scope), a durable progress.md in the conversation notes folder that is regularly compacted with an archive, and a high engineering bar. Context may be condensed at any time, so state must be written to files.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:61455]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:61457]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:38859]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (RequestContextEnv.agent_conversation_notes_folder, agent_shared_notes_folder)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "This is a ready blueprint for a Verevon long-running project agent: file-based state, write-scope locking between subagents, and phase gates with a user review step.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-127",
+  "category": "Agent runtime",
+  "name": "Human-change awareness and read tracking in conversation state",
+  "what": "The runtime tracks which files the agent has read and what the human changed since, so it can warn about stale reads or attribute edits.",
+  "how": "ConversationStateStructure includes read_paths, file_states and file_states_v2, previous_workspace_uris and tracked_git_repo_branches; RequestContext includes precomputed_human_changes; metrics record read coverage; Read results include coverage telemetry.",
+  "evidence": [
+   "out/vs/workbench/api/node/extensionHostProcess.js (ConversationStateStructure.read_paths/file_states_v2; RequestContext.precomputed_human_changes)",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:30892]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:30900]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:39876]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:39883]"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Tracking what the agent has seen and what the user changed since lets Verevon detect conflicting edits across co-editing humans and agents.",
+  "notes": "How file_states_v2 is consumed (stale-read warnings versus attribution) was not traced; medium confidence."
+ },
+ {
+  "id": "cursor-harness-architecture-128",
+  "category": "Platform architecture",
+  "name": "Composer headers as a table with derived columns plus JSON value",
+  "what": "Conversation metadata is stored in a keyed table with indexable derived columns, while the full object is a JSON value.",
+  "how": "composerHeaders rows have primary key composerId and columns workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent (task- prefixed ids or subagentInfo.parentComposerId), recency, checkpointAt, plus value JSON; a migration flag moves from a single JSON blob (allComposers) to the table; subagent conversations are separate composers excluded from search; best-of-N sub-composers are flagged.",
+  "evidence": [
+   "out/vs/workbench/workbench.desktop.main.js (composerHeaderStorageUtils.js: b5t(), VWg(), wZ=\"composerHeaders\", migration keys)",
+   "out/vs/code/electron-utility/conversationSearch/conversationSearchMain.js (reads composerData rows, skips isSubagent)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Derived columns for list views (recency, archived, subagent, checkpoint) avoid scanning JSON; mirror in the Model Plane sessions table.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-129",
+  "category": "Transparency, observability & control",
+  "name": "Post-turn labeling and follow-up classification services",
+  "what": "The backend records classifications of how a turn ended and whether the next user message was a follow-up, for quality analysis.",
+  "how": "aiserver.v1.InferenceService has Stream, RecordAgentFollowupClassification and RecordAgentPostTurnLabeling; ConversationsService has GetCommitMetrics; UploadLocalAgentRunToPromptQuality uploads runs for prompt-quality analysis only in the allowed privacy mode.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.AgentService.UploadLocalAgentRunToPromptQuality)",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:62127]"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Closed-loop quality signals (follow-up and post-turn labels) feed model and prompt tuning; Verevon needs them as opt-in, ZDR-aware events.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-130",
+  "category": "Transparency, observability & control",
+  "name": "Client telemetry stack: Statsig gates, Sentry and OpenTelemetry",
+  "what": "Feature gating, crash reports and traces use standard SaaS and OTel components, switched by privacy mode.",
+  "how": "Statsig SDK with 641 client-side gate names and an event proxy URL in product.json; Sentry (electron SDK and replay worker) suppressed when privacy mode is on; OpenTelemetry OTLP trace and metric exporters with auto-instrumentations packaged; enabledTelemetryLevels {error, usage}.",
+  "evidence": [
+   "scratchpad/findings/t3/cursor.inventory.md sections 3 and 6",
+   "APP/product.json (statsigLogEventProxyUrl, enabledTelemetryLevels; value not recorded)",
+   "scratchpad/tmp/cursor/flags_client.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Flags are heavily used for rollout (agent_host_local_loop, enable_* subagents); Verevon should keep a typed flag registry owned by the Model Plane.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-131",
+  "category": "Safety, permissions & governance",
+  "name": "OS-level enterprise policies (ADMX) and sign-in enforcement",
+  "what": "IT administrators can set policy through operating system policy mechanisms.",
+  "how": "ADMX policy names include WorkspaceTrustEnabled, AllowedTeamId, SignInEnforcement, AllowedOrganizationIds, AllowedTeamIds, AllowedLoginEmails, AllowedLoginDomains, NetworkDisableHttp2, UpdateMode, ExtensionGalleryServiceUrl and AllowedExtensions; a native @anysphere/policy-watcher module reads them.",
+  "evidence": [
+   "scratchpad/tmp/cursor_raw/19_admx_policy_names.txt",
+   "resources/app/node_modules/@anysphere/policy-watcher/build/Release/vscode-policy-watcher.node"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Org enforcement (allowed orgs and login domains, network protocol options) should be representable as signed policy for Verevon desktop clients as well as server-side tenancy rules.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-132",
+  "category": "Coding capability",
+  "name": "Tab completion, next-edit prediction and inline edit as separate low-latency services",
+  "what": "Inline features use their own services and models, not the agent loop.",
+  "how": "aiserver.v1 CppService (MarkCppForEval, StreamHoldCpp, AvailableModels, RecordCppFate, AddTabRequestToEval), CursorPredictionService (CursorPredictionConfig), CmdKService (StreamCmdK, StreamHypermode, RerankCmdKContext, StreamTerminalCmdK, GetRelevantChunks), LinterService and settings cursor.cpp.disabledLanguages.",
+  "evidence": [
+   "scratchpad/tmp/cursor-h/aiserver_services_full.txt",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon is not an IDE, but the split (agent loop versus lightweight completion services with eval hooks) shows where latency budgets differ.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-133",
+  "category": "Computer & environment control",
+  "name": "Git worktrees as parallel agent workspaces with retention limits",
+  "what": "Parallel local agents work in git worktrees that are limited in count and size and cleaned up periodically.",
+  "how": "Settings cursor.worktreeMaxCount, cursor.worktreeCleanupIntervalHours and cursor.worktreesGlobalMaxSizeGb; .cursor/worktrees.json and .cursor/worktrees; the agent host createSession accepts worktreeMainPath; composer.openTerminalInWorktree command.",
+  "evidence": [
+   "scratchpad/tmp/cursor_raw/07_settings_and_command_keys.txt",
+   "cursor-agent-host/dist/main.js [beaut/host_main.js:123737]",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Worktree-per-agent with global size and age caps is the practical way to run many agents on one repo; relevant for Verevon repo-connected sandboxes.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-134",
+  "category": "Tools, plugins & extensibility",
+  "name": "Slash commands and cursor commands passed to subagents",
+  "what": "User-defined commands live in files and are visible to subagents spawned by the Task tool.",
+  "how": "The request context carries cursorCommands; Task spawns pass parentCursorCommands to the subagent so slash commands remain usable; plugin manifests list commands; .cursor/commands directory.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:45857]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:46381]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:28401]",
+   "scratchpad/findings/t3/cursor.inventory.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Commands propagate through subagent boundaries; Verevon should define which user-level resources a subagent inherits.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-135",
+  "category": "Platform architecture",
+  "name": "Distribution and updates for client runtimes",
+  "what": "The product updates itself through a vendor update service and can download matching server components to remote machines.",
+  "how": "updateUrl api2.cursor.sh/updates with Inno-based updater on Windows, a UpdateMode policy, and ControlService.DownloadCursorServer for remote hosts; remote server releases hosted on a blob store.",
+  "evidence": [
+   "scratchpad/findings/t3/cursor.inventory.md",
+   "out/vs/workbench/api/node/extensionHostProcess.js (agent.v1.ControlService.DownloadCursorServer)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Version-matched runtime download to remote sandboxes avoids skew between UI and runtime; Verevon sandbox images should pin the runtime version.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-136",
+  "category": "Agent runtime",
+  "name": "Typed tool-failure taxonomy with split client-visible and model-visible messages",
+  "what": "Every tool failure carries a failure type and two messages: a short generic one for the UI and an actionable one for the model.",
+  "how": "Tool errors derive from a base class (gL) constructed with a failure type from a fixed enum (noop, invalid_args, unexpected_environment, user_rejected, timeout, provider_error, bad_user_device_state, aborted, exec_backend_unavailable, hook_denied, mcp_auth_error, error) plus clientVisibleErrorMessage and modelVisibleErrorMessage; for example an ambiguous replace string shows the user a generic message while the model receives the exact instruction to add context or use replace_all; failure types feed postToolUseFailure hooks and metrics; a toolExecutionTimeoutSuspension context allows pausing timeouts while waiting for approvals.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:31996]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:49027]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:49032]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:31760]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:31884]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon already pins a shared failure vocabulary in both loops (per the audit baseline); adding the split between what the user sees and what the model is told lets error text be actionable for the model without leaking internals to the page.",
+  "notes": "Baseline reference: scratchpad/findings/t3/v-modelplane.baseline.md section 4 (tool-call retry row)."
+ },
+ {
+  "id": "cursor-harness-architecture-137",
+  "category": "Agent runtime",
+  "name": "Parallel tool calls encouraged in descriptions and measured per invocation",
+  "what": "Tool descriptions tell the model to batch independent reads, and the harness measures how many parallel calls each model invocation produced.",
+  "how": "The Read description for the GPT-5-codex, codex-cloud and latest versions says it is always better to speculatively read multiple files as a batch; metrics agent.unified_handler.model_invocation.number_of_parallel_tool_calls (and the variant counting only invocations with at least one call), agent.unified_handler_number_of_tool_calls and tool_call.args.output_tokens (per tool name) quantify behaviour.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52153]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:52163]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43522]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Parallelism is a prompt behaviour plus a metric, not only an executor feature; Verevon already dispatches in parallel (join_all) and should add the same measurement to tune prompts per model.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-138",
+  "category": "Agent runtime",
+  "name": "Entry-point aware agent behaviour (IDE, CLI, background, Slack, Linear, GitHub, API, SDK)",
+  "what": "The same runtime adapts prompt, tools and final-message rules to where the request came from.",
+  "how": "agentType (IDE, CLI, BACKGROUND) and backgroundAgentSource (SLACK, LINEAR, GITHUB, API, SDK) drive prompt branches: terminal-output UI differences, a rule that the last message is always shown to the user (glanceable summary, at most three paragraphs) for Linear/Slack/GitHub/API/SDK sources, Slack-specific peer-instruction handling, Slack tool names (SendSlackMessageV2, start_slack_streaming, set_slack_status), Teams and PR comment posting tools, and repoless runs that must not push or open PRs.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36726]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36754]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36847]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:34395]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56976]"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The Channel Plane is docs-only today; Cursor shows the minimum a channel adapter must pass into the agent: source id, final-message contract and channel-specific tool allowlist.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-139",
+  "category": "Tools, plugins & extensibility",
+  "name": "Large MCP and tool results spill to files with an outputLocation result",
+  "what": "When a tool result is too large for the context it is written to disk and the model gets a pointer instead of the content.",
+  "how": "The tool-result post-processor writes oversized MCP and tool output to the agent-tools directory (cap 50 MB, 40000-byte threshold) and replaces the inline content with outputLocation (path, size, lines); metrics mcp.meta.output_spill and mcp.meta.get_tools_file_output count the spills; MCP discovery payloads can also be written as files rather than inlined.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:35067]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:36051]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:55394]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:10892]",
+   "metric names in scratchpad/tmp/cursor-h/metrics.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon uses queryable result handles (result_query) for large MCP results; file-backed spill is the sandbox-native equivalent and works with grep and read tools.",
+  "notes": ""
+ },
+ {
+  "id": "cursor-harness-architecture-140",
+  "category": "Agent runtime",
+  "name": "Pre-final agent-store conflict barrier",
+  "what": "Before an agent finishes a turn, the runtime checks whether the shared agent store changed underneath it and gives the agent a chance to reconcile.",
+  "how": "When a step produced no tool call and the agent-store conflict notices flag is on, maybeInjectPreFinalConflictBarrier injects a notice (max 2 times per turn) and continues the loop instead of ending; an AGENT_STORE_CONFLICT event file and hook event name exist; ExecServerMessage.agent_store_conflict_args carries the conflict to the client.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:43989]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:164791]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:215583]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (ExecServerMessage.agent_store_conflict_args)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "When several agents or a human share files, a last-chance reconcile step before finishing avoids lost updates; relevant to Space co-editing.",
+  "notes": "Exact trigger line approximate (barrier code sits just before the end-of-turn handling in runTurnLoop)."
+ },
+ {
+  "id": "cursor-harness-architecture-141",
+  "category": "Agent runtime",
+  "name": "Subagent model policy and per-type model overrides",
+  "what": "Which model a subagent uses is governed by policy: inherit, forced model, blocked-model checks and requires-Max checks.",
+  "how": "The Task tool config evaluates subagentModelForcePolicy, forceModelId, isModelBlocked, isModelValid and requiresMaxMode against the parent requested model and parameters; AgentRunRequest carries selected_subagent_models, selected_subagent_model_details and subagent_model_overrides; custom subagents may set forceDefaultModel; the prompt lists available_subagent_models for the parent to choose from.",
+  "evidence": [
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:56911]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:46431]",
+   "cursor-agent-exec/dist/main.js [beaut/exec_main.js:11982]",
+   "out/vs/workbench/api/node/extensionHostProcess.js (AgentRunRequest.selected_subagent_models, subagent_model_overrides)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Per-subagent model policy (inherit, force, block) lets Verevon route cheap exploration to small models while orgs enforce allowed models.",
+  "notes": ""
+ }
+]

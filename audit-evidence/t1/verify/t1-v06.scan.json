@@ -1,0 +1,259 @@
+[
+  {
+    "finalId": "F-t1-041",
+    "title": "One command layer on the typed action registry: Cmd/Ctrl+K palette and quick switcher, platform slash commands, shortcut sheet, then a unified 'To:' picker",
+    "searches": [
+      "Grep 'command palette|CommandPalette|cmdk|kbar|quick switch|switcher' in verevonv3/src (only workspace and language switchers, no palette)",
+      "Grep 'shortcut sheet|ShortcutSheet|keyboard shortcuts|kbd' in verevonv3/src (only a static cmd-K kbd hint in knowledge search)",
+      "Grep 'metaKey|ctrlKey' in verevonv3/src (CoreNavbar Cmd/Ctrl+K opens search; chat shortcuts module)",
+      "Grep 'slash|builtin:|matchDraftCommand|skill picker' in DashboardComposer and SpaceRoomComposer (slash builtins in home/chat composer; skill-only in Space)",
+      "Grep 'To:|recipient|people picker|PeoplePicker|searchPeople' in verevonv3/src (only inbox 'Til:' reply label)",
+      "Read shared/actions/action-registry.ts and ActionCommand.tsx (typed registry with ids, schemas and risk; per-button wrapper)",
+      "git grep -i 'palette' repo-wide in tracked code (no command palette; only colour and unrelated hits)",
+      "Grep 'searchNavbar|navbar/search' in verevonv3 and gateway (Cmd+K overlay is knowledge search only)",
+      "NOT FOUND: command palette, quick switcher across rooms/threads/agents, shortcut help sheet, unified To: people picker, custom key bindings"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx", "line": 122, "why": "Cmd/Ctrl+K and bare slash open the search overlay; no command palette.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx", "line": 434, "why": "Overlay search calls searchNavbar, which returns knowledge records only.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs", "line": 263, "why": "Navbar search proxies knowledge retrieval only; no room or agent search.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts", "line": 93, "why": "Chat shortcuts: Cmd/Ctrl+Shift+O new chat, Cmd/Ctrl+I composer, arrows select threads.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 465, "why": "Slash builtin menu entries: file, image, web search, deep research, schedule.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 581, "why": "matchDraftCommand resolves a leading slash command against the catalogue.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx", "line": 273, "why": "Room composer: @ picks people or agents; slash opens the skill picker only.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts", "line": 1296, "why": "Typed actionRegistry with ids, schemas and risk: a possible palette source.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts", "line": 1991, "why": "Space actions (spaces.*) are registered, for example create_personal_space.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/ActionCommand.tsx", "line": 20, "why": "Per-button wrapper: preview then execute; not a palette or switcher.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/ConversationPanel.tsx", "line": 842, "why": "'To:' label in the inbox reply only; no unified people picker.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx", "line": 87, "why": "Create-agent flow is a separate dialog; bind-agent is another.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/UI_UX_AUDIT_2026-09-29.md", "line": 71, "why": "Audit: CTRL+K overlay lacks focus trap and arrow or Enter result keys.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-068",
+    "title": "Screen sharing in calls with a sharing indicator, sensitive-surface redaction, and the same cue for agents acting in a room",
+    "searches": [
+      "git grep repo-wide 'getDisplayMedia|screenShare|RTCPeerConnection|livekit|mediasoup' (only a one-frame capture in DashboardComposer and a demo guard)",
+      "Grep 'getUserMedia|MediaStream|startCall|joinCall|CallPanel|videoCall' in verevonv3/src (audio-only voice recorder; no call code)",
+      "Grep 'redact|sharing|screen.?share' in features/spaces and shared (no screen-share redaction; command redaction only)",
+      "Grep 'human_takeover|takeover|live-view' in features/dashboard/home and features/agents (agent-browser takeover and run live views exist)",
+      "Grep 'rustdesk|RustDesk|remote-support' in apps/gateway/src (remote support is config-only)",
+      "Grep 'screen.?share' in docs and plans (chat audit records screen share as a gap)",
+      "NOT FOUND: Space or call screen share, sharing indicator, sensitive-surface redaction, Space cue for agent actions"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 1915, "why": "Screen capture grabs one still frame via getDisplayMedia; no stream publishing.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts", "line": 351, "why": "getUserMedia is used for audio-only voice recording, not screen or calls.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/demo/product-demo/guard.ts", "line": 233, "why": "Demo guard refuses getDisplayMedia; demo-only, not a feature.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx", "line": 497, "why": "Human takeover of the agent browser: a controlMode toggle, not screen share.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx", "line": 116, "why": "Live-view grid for agent runs; no Space entry point seen.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/remote_support.rs", "line": 1, "why": "RustDesk config-only domain; live sessions bypass the gateway.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md", "line": 55, "why": "Chat audit lists live window or screen share as a gap; one-shot path only.", "kind": "doc"}
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-032",
+    "title": "Composer for real work: rich text, persistent drafts, queue and steer while a turn runs, attachments and paste chips, scheduled send, and ref-based context chips with a pre-send preview",
+    "searches": [
+      "Grep 'draft|Draft' in features/spaces (SpacePage draft is the agent-instructions editor; composer has no persistence)",
+      "Grep 'localStorage|sessionStorage' in features/spaces, features/dashboard/home and features/chat (home-draft.ts sessionStorage; none in the Space composer)",
+      "Grep 'queueInvocationInput|queue_invocation|steer|queued_input' in verevonv3/src (chat controller and client; SpaceRoomComposer does not import it)",
+      "Grep 'onPaste|paste|clipboard|dataTransfer|onDrop|type=file' in features/spaces (none) and DashboardComposer (paste chips present)",
+      "Grep 'schedul|send_at|scheduled_send' in features/spaces (agent schedules read-only; no human scheduled send)",
+      "Grep 'tiptap|prosemirror|lexical|slate|contenteditable' in verevonv3 src and package.json (no rich-text editor)",
+      "Grep 'idempotency_key|idempotencyKey' in gateway spaces.rs and chat-client.ts (server generates key when absent; chat sends none)",
+      "Grep 'contextChip|context_chip|contextPack' in verevonv3/src (context packs used by inbox assist only)",
+      "NOT FOUND: rich-text composer, persisted Space draft, Space attachments and paste chips, human scheduled send, ref-based context chips with pre-send preview, Space queue or steer, client-supplied idempotency key"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx", "line": 727, "why": "Space composer is a plain textarea, not rich text; rows=2 at line 745.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx", "line": 387, "why": "Composer clears text on send; no restore or persisted draft.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx", "line": 4, "why": "Space composer imports streamChat and cancelInvocation, not queueInvocationInput.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx", "line": 657, "why": "Picked skills render as removable chips (skill chips, not context refs).", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts", "line": 2000, "why": "queueInvocationInput client for mid-run queued input (chat).", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts", "line": 2221, "why": "Chat controller queues mid-run input via queueInvocationInput.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts", "line": 2849, "why": "chat.queue_invocation_input action contract in the typed registry.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 887, "why": "allowMidRunSubmit: chat opt-in routes mid-run sends into deliverMidRun (queued).", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/home-draft.ts", "line": 15, "why": "Home/chat draft kept in sessionStorage, text only, 400 ms debounce.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 2619, "why": "onPaste routes pasted images and long text into attachment chips.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 835, "why": "Long pasted text becomes a .txt-equivalent attachment file.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 175, "why": "ComposerAttachmentSource tracks connector, upload and paste provenance.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 465, "why": "Slash builtin array: file, image, web_search, deep_research, schedule.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 2412, "why": "/schedule opens ScheduleDialog; schedules AI runs, not deferred human sends.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx", "line": 2489, "why": "Attachments pass prepareChatAttachments before send.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts", "line": 347, "why": "Work tab lists agent schedules read-only; no human scheduled send in Spaces.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 136, "why": "Space append generates an idempotency_key when the client omits one.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs", "line": 594, "why": "Event insert carries idempotency_key; replay checks compare the claimed key.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0002_events_and_ordinals.sql", "line": 35, "why": "Unique index on (org, idempotency_key): server-side dedupe for events.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/package.json", "line": 24, "why": "No tiptap, prosemirror or lexical entry in package.json; @kobalte/core listed.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md", "line": 240, "why": "Dated audit: composer disables while streaming; no stop or queue (pre-dates chat wiring).", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-063",
+    "title": "Agent identity in the room: surface the persisted avatar colour (then shape) and add a hover card that leads with blocking state",
+    "searches": [
+      "Grep 'avatarColor|avatar_color|avatar_shape|AgentAvatar' in apps (colour persisted in Application Plane; no shape)",
+      "Grep 'avatar' in src/shared/api/spaces-client.ts (SpaceAgent type has no avatar field)",
+      "git grep repo-wide 'HoverCard|hover_card|hovercard' (no HoverCard component)",
+      "Grep 'initial|avatar' in features/spaces/components/SpacePage.tsx (avatar is a first-letter initial)",
+      "Grep 'avatar_color' in apps/gateway/src/domains/spaces.rs (create path forwards it; composition field map does not)",
+      "Grep '@kobalte' in package.json (kobalte listed; HoverCard usage absent)",
+      "NOT FOUND: avatar shape, persisted avatar shown on posts, roster or sidebar, hover card with blocking state"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts", "line": 89, "why": "Agent projection includes avatarColor from the stored definition.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts", "line": 441, "why": "Mutation stores trimmed avatarColor on the agent definition.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts", "line": 330, "why": "Schema field avatarColor persisted on space agent records.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx", "line": 115, "why": "Create-agent dialog collects a colour and sends avatarColor.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts", "line": 772, "why": "createSpaceAgent sends avatar_color when a colour is set.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts", "line": 704, "why": "SpaceAgent client type has no avatar or colour field.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 3324, "why": "Create path forwards avatar_color into the agent create args.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 4121, "why": "Agent composition field map has no avatarColor entry (INF: colour dropped on read).", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts", "line": 280, "why": "Action schema validates avatarColor as a six-digit hex value.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs", "line": 5489, "why": "Action dispatcher maps avatarColor to avatar_color.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx", "line": 911, "why": "Agent cards show the first letter of the name as the avatar.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.test.tsx", "line": 800, "why": "Test asserts avatarColor is sent when an agent is created.", "kind": "test"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/package.json", "line": 24, "why": "@kobalte/core listed; no HoverCard component used in src.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md", "line": 236, "why": "Dated audit: agent avatar is an initial only; no duplicate or share actions.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-035",
+    "title": "Attention outside the open tab: installable PWA, content-free Web Push with service-worker Open/Reply, in-tab toasts, tab-title and app badge",
+    "searches": [
+      "Grep 'serviceWorker|registerSW|service-worker|sw.js|workbox|vite-plugin-pwa|webmanifest' in verevonv3 (only a demo guard and product-demo probe)",
+      "git grep repo-wide 'PushManager|serviceWorker.register|registerSW|web-push|VAPID|setAppBadge|workbox|webmanifest' (no tracked code hits)",
+      "Grep 'PushSubscription|push_subscription|VAPID' across apps (only a dated audit JSON in plans)",
+      "Grep 'new Notification(|requestPermission|setAppBadge|document.title' in verevonv3/src (no hits beyond unrelated property names)",
+      "Grep 'toast|Toaster|sonner' in verevonv3/src and git grep repo-wide (only a comment in ticket-bulk-actions)",
+      "Grep 'unread' in features/core and navbar-client (navbar and sidebar unread counts, in-tab only)",
+      "Grep 'AudioContext|new Audio(|notification sound' in verevonv3/src (voice recorder and playback only)",
+      "Read notifications.rs routes and notification-core channels, delivery worker and feed types (no push route or subscription store)",
+      "NOT FOUND: manifest, service worker, Push API, Notification API, toast stack, dynamic tab title, app badge"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/index.html", "line": 5, "why": "Only an icon link in head; no manifest link.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/index.html", "line": 10, "why": "Static title 'verevonv3'; no dynamic tab-title updates in src.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx", "line": 86, "why": "Navbar unread counts for messages and notifications; in-tab only.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx", "line": 278, "why": "Unread badge buttons render counts in the open tab.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx", "line": 316, "why": "Per-thread unread dot in the sidebar, rendered in-tab.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts", "line": 86, "why": "Space unread thread-id store published for room and sidebar.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs", "line": 17, "why": "Notification routes: preferences, unread count, read, list, delete; no push route.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/runtime/client.go", "line": 201, "why": "Novu channel vocabulary lists push; no web-push subscription store found.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/feed/types.go", "line": 19, "why": "ChannelPush constant defined for feed channels.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/delivery_worker.go", "line": 91, "why": "ZDR delivery attempts are marked failed; no async push for ZDR orgs.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/demo/product-demo/guard.ts", "line": 241, "why": "Demo guard stubs navigator.serviceWorker; a demo shim, not a real worker.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/tickets/lib/ticket-bulk-actions.ts", "line": 21, "why": "Only 'toast' mention in src is a comment; no toast component.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md", "line": 101, "why": "Dated parity audit: no packaged desktop app or PWA manifest.", "kind": "doc"}
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-030",
+    "title": "Room content hardening: read authorization for attachments and transcripts, stricter CSP, anti-spoofing, link and download safety",
+    "searches": [
+      "Grep 'Content-Security-Policy|trusted-types|require-trusted-types-for|Report-Only|report-uri|report-to|connect-src|img-src' in verevonv3 (enforced CSP in nginx.conf; no Trusted Types or report-only)",
+      "Grep 'DOMPurify|dompurify|sanitize-html|createPolicy|TrustedHTML|SRI|vite-plugin-sri' in verevonv3 (only pnpm-lock entries)",
+      "git grep repo-wide 'trusted-types|Trusted Types|report-to|Reporting-Endpoints' (no code hits beyond CSP strings)",
+      "Grep 'Content-Disposition|nosniff|X-Content-Type-Options' in apps/gateway/src (nosniff in several files; attachment disposition only in leads.rs)",
+      "Grep 'sandbox=|allow-scripts|allow-same-origin|srcdoc' in verevonv3/src (agent HTML sandboxed; some iframes weaker)",
+      "Grep '403|Forbidden|restricted|not_found' in features/spaces (approvals only; transcript errors swallowed in timeline)",
+      "Grep 'attachment|transcript|download' in gateway spaces.rs (transcript route only; no room attachment route)",
+      "Grep 'space.*attachment|room.*attachment' across apps (no Space attachment code)",
+      "Grep 'rel=|noopener|javascript:|isSafe' in verevonv3 chat markdown (links carry rel noopener noreferrer)",
+      "Grep 'spoof|impersonat|agent-sourced|author_kind|source_kind' in features/spaces (no hits)",
+      "Grep 'shared.read|audience|deny.by.default' in gateway spaces.rs (deny-by-default shared-read gate present)",
+      "NOT FOUND: Trusted Types policy, report-only CSP and report endpoint, SRI on build chunks, per-room attachment ACL, room download headers, agent-link marking"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/nginx.conf", "line": 70, "why": "Enforced CSP: connect-src https:, img-src https:, no Trusted Types, no report-only or SRI.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts", "line": 11, "why": "Agent HTML preview CSP: default-src none, connect-src none, meta-tag CSP.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx", "line": 518, "why": "Agent HTML iframe: sandbox allow-scripts, no allow-same-origin, srcdoc.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAttachmentCanvas.tsx", "line": 180, "why": "Chat PDF attachment iframe has no sandbox attribute (chat, not Space).", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAttachmentCanvas.tsx", "line": 187, "why": "Chat HTML attachment preview: srcdoc, sandbox allow-scripts, no-referrer.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx", "line": 184, "why": "Iframe sandbox combines allow-scripts with allow-same-origin, weakening isolation.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/EmailBody.tsx", "line": 129, "why": "Email HTML iframe uses allow-same-origin, without allow-scripts.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 2616, "why": "Room transcript route: Control recipient check gates shared reads, deny by default.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 201, "why": "Transcript fetch swallows errors via catch to null, so refusals show as empty.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 327, "why": "Agent styling keyed on role === assistant, not on verified author identity.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.ts", "line": 82, "why": "Rule: custom event envelope must never impersonate terminal or message events.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs", "line": 157, "why": "Gateway-wide nosniff header setting.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/leads.rs", "line": 357, "why": "Only Content-Disposition attachment found in gateway: leads CSV export.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs", "line": 43, "why": "Chat text attachments persisted as documents; no Space attachment route.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx", "line": 1275, "why": "Markdown links render with target _blank and rel noopener noreferrer.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-markdown.test.ts", "line": 378, "why": "Test asserts chat links carry rel noopener noreferrer.", "kind": "test"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.test.tsx", "line": 121, "why": "Security test: model HTML payload targets parent.document.title; sandbox isolation.", "kind": "test"},
+      {"path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/common/middleware/security-headers.middleware.ts", "line": 28, "why": "Control auth-core security-headers middleware sets its own CSP (not room-scoped).", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Infra Plane/core-infra-gateway/internal/httpapi/server.go", "line": 104, "why": "Infra gateway sets default-src none CSP on its own responses.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md", "line": 30, "why": "Plan records preview CSP wrapper with connect-src none and sandbox allow-scripts.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-069",
+    "title": "Search operators with Verevon-native filters, typed result tabs and recent-search history",
+    "searches": [
+      "Grep 'searchOperators|search operator|parseSearchQuery|from:|has:|before:' in verevonv3 and apps (no operator grammar; mail operand quoting only)",
+      "Grep 'threads/search|messages/search|search_messages|searchThreads|searchMessages' in gateway and shared/api (no thread or message search)",
+      "Grep 'recentSearches|search_history|searchHistory|web-history' in verevonv3/src (browser-local web search history)",
+      "Grep 'SearchResultTab|role=tab' in features/dashboard/home (typed tabs for web search results)",
+      "Grep 'typeFilter|searchQuery' in features/knowledge (knowledge search with one type filter)",
+      "Grep 'textquery|field selector|websearch_to_tsquery|quickwit' in apps/Data Plane v2 (keyword arm; colon field selectors stripped)",
+      "Grep '/api/v1/search|/api/v1/navbar/search|/api/v1/knowledge/search' in gateway (web-only search, knowledge-only navbar search)",
+      "NOT FOUND: operator grammar in UI or gateway, search over threads, messages, runs, approvals or artifacts, Space knowledge search"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs", "line": 39, "why": "Gateway search routes cover web, similar, suggest, images, videos, answer; no thread or message search.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs", "line": 263, "why": "Navbar search proxies knowledge retrieval only; no typed Verevon object search.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/retrieval.rs", "line": 102, "why": "Knowledge search proxies to retrieval-engine /v1/knowledge/search.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/knowledge/components/KnowledgePage.tsx", "line": 280, "why": "Knowledge search with one type filter signal; no operators.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/dashboard-home-types.ts", "line": 5, "why": "SearchResultTab union: Info, Videos, Map, Images, Shopping.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx", "line": 491, "why": "Typed result tabs drive the web search results panel (activeTab).", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts", "line": 12, "why": "Browser-only recent web searches and opened pages; no server search history.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts", "line": 32, "why": "Keeps 10 most recent entries, searches and pages together.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx", "line": 270, "why": "Records recent web queries when the remember setting is on.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx", "line": 392, "why": "Home search panel also calls searchNavbar (knowledge results).", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx", "line": 82, "why": "Space knowledge panel is read-only; no search input or filters.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Data Plane v2/services/retrieval-engine-rs/src/search/textquery.rs", "line": 127, "why": "Strips ':' Quickwit field selectors from queries; no operator grammar.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Data Plane v2/services/retrieval-engine-rs/src/search/textquery.rs", "line": 13, "why": "Keyword arm uses knowledge_units.content_tsv full-text search.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Data Plane v2/services/quickwit-adapter-rs/src/quickwit.rs", "line": 259, "why": "Adapter forwards raw query text to the Quickwit search API.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/mail_read.go", "line": 111, "why": "Mail search builds from: operands and quotes operator-like text (adjacent grammar).", "kind": "code"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-039",
+    "title": "Entry references and permalinks: one entity router for message, thread and run links, deep links honoured, Space-role pins, visibility-preserving fork, quote and forward",
+    "searches": [
+      "Grep 'permalink|deep.?link|entry_seq|message_id|quoted_entry|forked_from|boundary_seq' in verevonv3/src (chat deep link and AG-UI ids only)",
+      "Grep 'thread_id|useSearchParams|searchParams|URLSearchParams' in features/spaces (activity rows build thread_id links; no page reads them)",
+      "Grep 'pin|pinned|room_pins' in features/spaces and gateway spaces.rs (thread-level pin; author-only)",
+      "Grep 'fork|forward|quote' in features/spaces (none); git grep repo-wide 'forkThread|forked_from|quoted_entry|forward_message' (artifact fork only)",
+      "Grep 'fork|quote|forward' in Model Plane proto and session-core, Application Plane convex (no thread or entry fork RPC)",
+      "Grep 'audience' in session-core grpc.rs (audience-filtered thread and message reads exist)",
+      "Grep route paths in App.tsx (only /spaces/:spaceId; no entry or thread routing)",
+      "NOT FOUND: entry permalink route, Space deep-link reader, fork RPC, quote or forward, Space-role room pins"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts", "line": 200, "why": "Activity rows link to /spaces/owner?thread_id, which the room page never reads.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/app/App.tsx", "line": 182, "why": "Only /spaces/:spaceId route; no entry or thread parameter routing.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-deep-link.ts", "line": 6, "why": "Validated thread deep-link reader for chat; pattern to copy for entries.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 229, "why": "Pin control shown only to the post starter; others see a pinned flag.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 2216, "why": "Thread PATCH accepts title or pinned flag; pin is a thread-level flag.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 2303, "why": "Only the member who started the post can retitle or pin it.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx", "line": 122, "why": "Reply target is a thread id and title; no entry or quote reference.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts", "line": 1150, "why": "Chat turns can carry pinned_message_ids into the request.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-pinned-messages.ts", "line": 49, "why": "Pinned chat messages persisted per browser in localStorage.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs", "line": 4716, "why": "SQL filters thread rows by space and recipient audience ref, revision, hash.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs", "line": 184, "why": "Artifact fork_thread copies one authorized thread into a private run workspace (adjacent, not entry fork).", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md", "line": 1726, "why": "Open S1.7 item: visibility-preserving fork/share still unchecked.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md", "line": 67, "why": "Audit row marks room pin Done (4b); a separate row says pin is no.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  }
+]

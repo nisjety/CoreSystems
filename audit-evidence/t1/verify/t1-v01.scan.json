@@ -1,0 +1,898 @@
+[
+  {
+    "finalId": "F-t1-009",
+    "title": "Cross-room attention: a server-side unread/working aggregate stream, then a Home 'needs you' inbox with Agents and Activity destinations",
+    "searches": [
+      "publishSpaceUnread|spaceUnread|spaceReadMarker|read_marker|lastReadAt",
+      "latest_activity|latestActivity|lastSeq|last_seq|latestSeq",
+      "unreadCount|unread_count|markAllRead|mark_all_read|mark-all-read",
+      "unreadByRoom|roomUnread|unreadCounts|mention_count|mentionCount (no Space hits)",
+      "needs[ _-]?you|needs_action|NeedsAttention|waiting on you (case-insensitive)",
+      "HomeDestination|CoreSidebarHome|crossRoom|cross_room|cross-room",
+      "snooze|snoozed_until|dismissed_at (support Inbox hits only)",
+      "spacePresence|PRESENCE_TTL|typingDecay|typing_lease",
+      "ActivityItem|SpaceActivityItem|/spaces/:space_ref/activity",
+      "docs: cross-room | needs-you | unread dot"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceReadMarkers.ts",
+        "line": 52,
+        "why": "Per-member lastReadAt marker decides which threads are unread",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceReadMarkers.ts",
+        "line": 96,
+        "why": "Read-marker query for the gateway, scoped to one room and member",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceReadMarkers.ts",
+        "line": 138,
+        "why": "Mark-read advances one room marker per member, not all rooms",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 845,
+        "why": "spaceReadMarkers table: durable per-member, per-room read state",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts",
+        "line": 86,
+        "why": "publishSpaceUnread: browser-local unread store, filled by the open room",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+        "line": 174,
+        "why": "Open room publishes its unread set; other rooms get no count",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts",
+        "line": 38,
+        "why": "Browser mirror derives per-thread latest activity from timestamps",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx",
+        "line": 22,
+        "why": "Sidebar imports the live-work store for working and unread dots",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spacePresence.ts",
+        "line": 42,
+        "why": "Presence TTL of 30 s; heartbeat is room-scoped and content-free",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 725,
+        "why": "Presence beat route; answers only for the room being viewed",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go",
+        "line": 81,
+        "why": "GET space activity endpoint: room-scoped recent activity read",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx",
+        "line": 66,
+        "why": "Room Activity panel lens filter over a single room's items",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts",
+        "line": 86,
+        "why": "SpaceActivityItem type: room activity items (conversation, run), not threads",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs",
+        "line": 25,
+        "why": "Generic unread-count route; no Space-specific counts found",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs",
+        "line": 26,
+        "why": "Generic mark-all-read route; not Space-aware",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts",
+        "line": 118,
+        "why": "Home group entry links to the dashboard, not a needs-you inbox",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts",
+        "line": 129,
+        "why": "Overview Agents entry links to the run console (/agents/runs)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/app/App.tsx",
+        "line": 182,
+        "why": "Spaces index and room routes; no cross-room needs-you route",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/app/App.tsx",
+        "line": 187,
+        "why": "Existing support /inbox route, a naming clash risk for a Home inbox",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/lib/chief-core-routing.ts",
+        "line": 30,
+        "why": "groupInstallationsBySpace: cross-room agent view re-keyed by Space",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/app/App.tsx",
+        "line": 214,
+        "why": "Route /agents/chief-core: cross-room agent routing view",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+        "line": 853,
+        "why": "Verevon needs-you callout exists in chat, not in a cross-room inbox",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/http/handlers.go",
+        "line": 556,
+        "why": "Support ticket snooze handler: the existing support Inbox, not Space",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+        "line": 1789,
+        "why": "Doc: no sidebar presence; cross-room aggregate recorded as open",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+        "line": 75,
+        "why": "Doc: says one surface alone shows an agent across rooms",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-003",
+    "title": "Space realtime substrate: typed seq-numbered event projection, resumable per-Space SSE through the gateway, and authorization at subscribe and at every delivery",
+    "searches": [
+      "Last-Event-ID|last_event_id|lastEventId|cursor_too_old|resume_cursor",
+      "EventSource|text/event-stream|KeepAlive::|Sse<",
+      "WebSocketUpgrade|new WebSocket(|socket.io",
+      "SPACE_TIMELINE_POLL_MS|TIMELINE_POLL|poll fallback",
+      "outbox|Outbox in spaces, spaceLifecycle and membership sync files",
+      "aqencia.controlplane.space|SPACE_EVENT|space.event",
+      "filter_fanout|fanout|audience_revision|audienceRevision",
+      "heartbeat|watchdog|stall_timeout|silence timeout",
+      "stream or SSE routes in gateway domains/spaces.rs (none)",
+      "convex/react|ConvexClient|useQuery( in verevonv3 src (none)",
+      "nats.ws|wss:// for Space traffic (none)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+        "line": 87,
+        "why": "SPACE_TIMELINE_POLL_MS of 6000: the Space room is polled, not pushed",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+        "line": 298,
+        "why": "Timer loop re-fetches the room timeline on each poll tick",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/sse.ts",
+        "line": 25,
+        "why": "Generic fetch-based SSE reader with Last-Event-ID resume support",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 689,
+        "why": "Chat stream resumes with Last-Event-ID and tracks the highest applied frame",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/run-console-client.ts",
+        "line": 383,
+        "why": "Run console stream accepts a lastEventId resume token",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+        "line": 146,
+        "why": "Gateway reads last-event-id and forwards it to the model resume endpoint",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/session-core/internal/http/handlers.go",
+        "line": 257,
+        "why": "Session SSE replays from NATS using a sequence cursor",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/session-core/internal/http/handlers.go",
+        "line": 290,
+        "why": "Session SSE falls back to Postgres replay from a sequence cursor",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs",
+        "line": 7,
+        "why": "Replay keeps only events with seq greater than Last-Event-ID",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts",
+        "line": 1322,
+        "why": "Atomically claims one due lifecycle outbox row: a reusable leased pattern",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceLifecycle.ts",
+        "line": 84,
+        "why": "Lifecycle outbox claim-lease rule; reusable for Space event projection",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/space_membership_nats.rs",
+        "line": 30,
+        "why": "Membership-change NATS subject used for revocation; best-effort delivery",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/nats/shared_publisher.go",
+        "line": 208,
+        "why": "Publishes membership_changed on roster sync, feeding revocation",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/shared_thread_read_decision.go",
+        "line": 57,
+        "why": "Space-scoped Control read decision: the authority primitive a stream would check",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/shared_thread_read_decision_test.go",
+        "line": 44,
+        "why": "Test: read decision carries the caller's current audience revision",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spacePresence.ts",
+        "line": 38,
+        "why": "Presence window is five times the 6 s poll, per code comment",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 1922,
+        "why": "Comment: presence rides the six-second poll, not a push channel",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql",
+        "line": 106,
+        "why": "Comment: watch notifications lack an outbox for at-least-once delivery",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 1865,
+        "why": "WebSocket upgrade for browser sessions; no Space socket exists",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 990,
+        "why": "Client WebSocket to a browser stream; precedent, not Space traffic",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/tests/e2e/product-recovery.spec.ts",
+        "line": 56,
+        "why": "E2E test: chat stream resumes with Last-Event-ID after reconnect",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+        "line": 1710,
+        "why": "Doc: realtime and shared-thread continuity marked Not built; 6 s poll only",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-008",
+    "title": "Space notifications: typed signals for mentions, replies, approvals and agent completions, refs-only payload, rate limits, per-room levels and thread follow/mute",
+    "searches": [
+      "isNotificationTypeAuthorized|producer allowlist",
+      "mention.received|mention_received|user-mentioned|mentionReceived",
+      "thread_follow|follow_thread|mute_thread|auto_follow|watch_thread (case-insensitive; none in Spaces)",
+      "notification_level|hide_preview|hidePreview|room_level (none)",
+      "space_watch|SpaceWatch|watch_decision|run_watcher",
+      "MentionCandidate|@person|@everyone|mention picker (features/spaces)",
+      "notification|Notification in features/spaces and features/settings",
+      "rate limit in notification-core (none found)",
+      "preference routes in gateway notifications.rs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/http/handlers.go",
+        "line": 199,
+        "why": "Producer allowlist: gateway, support-worker and capability-core only; no Space types",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/http/handlers.go",
+        "line": 154,
+        "why": "Each notification request is checked against the caller's allowed types",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/migrations/005_create_channel_configs.up.sql",
+        "line": 60,
+        "why": "mention.received seeded as a channel config, with no producer found",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go",
+        "line": 81,
+        "why": "Run-completed notify type sent to notification-core: agent-done precedent",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql",
+        "line": 38,
+        "why": "space_watches: standing intent to be told when a Space resource changes",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/cmd/main.go",
+        "line": 329,
+        "why": "Watch sweeper claims due space_watches and polls their sources",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs",
+        "line": 54,
+        "why": "Per-user run-watch routes: notify me when this run finishes",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs",
+        "line": 20,
+        "why": "Preference routes exist per event type and channel, not per room",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 69,
+        "why": "Mention candidate type drives the composer @ picker for roster and agents",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 34,
+        "why": "Agent mention injects persona server-side; a mention never grants access",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/AccountSettingsPage.tsx",
+        "line": 40,
+        "why": "Account-wide email and push toggles only; no per-room level",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.test.tsx",
+        "line": 1047,
+        "why": "Test rule: @ offers the roster; agent mention may invoke, person mention never does",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/http/server_test.go",
+        "line": 509,
+        "why": "Test: allowlist is per service; support-worker cannot send billing types",
+        "kind": "test"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-023",
+    "title": "Enterprise identity: stop the fake-success SCIM stub, real SCIM 2.0 with deprovisioning that suspends a person's agents, per-org SSO enforcement and domain verification; linked identities later",
+    "searches": [
+      "SCIM|scim (code and docs)",
+      "SSO_ENABLED|sso( plugin in auth-core",
+      "enforce_sso|enforceSso|sso_enforce|sso_required (none)",
+      "domain_verif|verifiedDomain|verify_domain|txt_record (none for orgs; Resend DNS docs only)",
+      "allowed_domain|allowedDomain|auto_join|autoJoin (none for orgs)",
+      "deprovision|suspended_at|disable_user (none for users)",
+      "principal_link|linked_identit|identity_link (ADR only)",
+      "break.?glass|idp_group|group_sync (unrelated hits only)",
+      "scim_event_received consumer search (producer only)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 1237,
+        "why": "SCIM intake accepts requests, stores a webhook event, changes no identity",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 1271,
+        "why": "Publishes scim_event_received; no Control Plane consumer found",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 2758,
+        "why": "SCIM responses are stubs: empty list, 204 on delete, 201 on post",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 1145,
+        "why": "SCIM token create: durable hashed token, audited",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 1208,
+        "why": "SCIM token revoke route, audited",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/db/migrations/0005_scim_tokens.sql",
+        "line": 1,
+        "why": "Durable per-organization SCIM token table",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/store/types.go",
+        "line": 165,
+        "why": "SCIMToken record type",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts",
+        "line": 1019,
+        "why": "SSO plugin enabled only when SSO_ENABLED is true; global, not per org",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts",
+        "line": 1022,
+        "why": "provisionUser hook sits on the SSO path",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+        "line": 1238,
+        "why": "SSO section renders an honest not-configured state; no live SSO source",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+        "line": 211,
+        "why": "Comment: SSO and org-security not wired to a real source; empty list",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+        "line": 540,
+        "why": "Verified-domains panel is static: no domains verified text",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs",
+        "line": 837,
+        "why": "scim appears only as an ingestion source label",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/providers/catalog_test.go",
+        "line": 121,
+        "why": "Test: SCIM is not an OAuth connect provider",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/docs/architecture/adr-surface-neutral-ingress-delivery.md",
+        "line": 21,
+        "why": "ADR: Control owns verified external identity links; principal linking later",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/Verevon-ai-first.md",
+        "line": 188,
+        "why": "Stale doc: claims fabricated SSO Configured/Verified UI; code now honest",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/endpoint-map.md",
+        "line": 380,
+        "why": "SCIM token management route marked later in the endpoint map",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-011",
+    "title": "Personal agents with an owner-controlled access list and add policy, a private assistant beside the room, and configurable room bindings",
+    "searches": [
+      "personal_agent|personalAgent|primary_agent|personal agent (none)",
+      "access_list|accessList|add_policy|addPolicy|owner_only (none for agents)",
+      "PrivateAssistant|private assistant|share_to_room|shareToRoom (none)",
+      "thread_policy|knowledge_scope|default_thread_policy|proactivity|binding_config",
+      "listInstallableSpaceAgentsForGateway|upsertSpaceAgentBinding|installable agents route",
+      "agent_visibility|owner_subject_id|visibility (no agent visibility field)",
+      "docs: personal agent|primary agent|access list|add policy|private assistant (none relevant)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 694,
+        "why": "Room agent routes: list Space agents and create a Space agent",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 698,
+        "why": "Installable-agent list route gated only by the caller room role",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts",
+        "line": 486,
+        "why": "listInstallableSpaceAgentsForGateway returns the org agent definitions to room managers",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts",
+        "line": 319,
+        "why": "upsertSpaceAgentBinding writes the binding row; per-binding config not stored",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts",
+        "line": 744,
+        "why": "Agent subjects synced to Control memberships with role editor",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 625,
+        "why": "Binding omits knowledge_scope and default_thread_policy by design",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceBindAgentDialog.tsx",
+        "line": 26,
+        "why": "Bind-agent dialog for room managers; the flow has no access-list step",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx",
+        "line": 87,
+        "why": "Create-agent dialog inside a room: the room-level agent creation UI",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 624,
+        "why": "Registration seeds one membership, the owner; personal Spaces stay single-subject",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.test.tsx",
+        "line": 984,
+        "why": "Test fixture: agent trigger mode mention with require_confirmation approval",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/BLUEPRINT_ACTIVATION_DESIGN.md",
+        "line": 176,
+        "why": "Doc: activation is org-scoped; binding an activated agent is a separate step",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-022",
+    "title": "Room administration basics: change and choose member roles with an owner guard, rename, topic, archive and restore, and keep the organization room roster in sync",
+    "searches": [
+      "changeRole|updateMemberRole|set_member_role|member_role (org-level only)",
+      "canGrant|canChangeRole|canLeave|lastOwner|last-owner (org-level only)",
+      "renameSpace|spaceTopic|archiveSpace|restoreSpace|archived_at (none in Spaces)",
+      "syncAllOrganizationRooms|syncOrganizationRoom|cronJobs|crons (no crons file in convex-core/convex)",
+      "addSpaceMemberForGateway and role editor literal in spaceMembers.ts",
+      "spaces.rs route table: members POST and member-id only; no patch( route",
+      "docs: per-member role changes | rename | archive"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembers.ts",
+        "line": 45,
+        "why": "addSpaceMemberForGateway takes no role argument",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembers.ts",
+        "line": 85,
+        "why": "New member inserted with fixed role editor",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql",
+        "line": 63,
+        "why": "Membership role CHECK: viewer, editor, manager, owner",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 646,
+        "why": "ReplaceMemberships converges a declared roster including roles",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 677,
+        "why": "Space members route; route table shows no role-change route",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 681,
+        "why": "Member-id route; spaces.rs has no patch route at all",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/rbac_handlers.go",
+        "line": 180,
+        "why": "Precedent: org-level assignMemberRole handler for member role change",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/migrations/027_membership_mutation_intents.sql",
+        "line": 259,
+        "why": "Precedent: org membership mutations include last-owner checks",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembershipSync.ts",
+        "line": 135,
+        "why": "syncAllOrganizationRooms defined; no scheduled caller in convex-core",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembershipSync.ts",
+        "line": 140,
+        "why": "Only internal caller: per-room syncOrganizationRoom inside the all-rooms action",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts",
+        "line": 1441,
+        "why": "Roster sync is scheduled only when a room moves to active",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts",
+        "line": 298,
+        "why": "ensureOrganizationRoomForGateway mutation: org room entry point",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+        "line": 1713,
+        "why": "Doc: per-member role changes in a room remain open",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-006",
+    "title": "Space governance admin: effect-policy admin UI with safe presets and typed denials first, then posting rules, agent/model allowlist, locked switches, autonomy posture and rollout flags",
+    "searches": [
+      "effect-policy|EffectPolicy|space_effect_polic (user-core only; no gateway or frontend hits)",
+      "policy_denied|DenialReason|denied_reason|denialReason",
+      "autonomy|AutonomyRung|DangerFullAccess|posture",
+      "feature_flag|FeatureFlags|kill_switch|rollout_ring|preview_ring",
+      "allowlist|allow_list|allowed_models|allowedModels",
+      "principal_kind|agent_rate (none)",
+      "policy preset|locked_by_org|lock_reason (none for Spaces)",
+      "docs: effect policy | posture | space governance"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/spaces.go",
+        "line": 1359,
+        "why": "upsertSpaceEffectPolicy: the effect-policy write handler (service-side)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/service_auth.go",
+        "line": 134,
+        "why": "Effect-policy route restricted to the policy service principal",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/space_capability_decision.go",
+        "line": 35,
+        "why": "Comment: a promised policy allowlist was never built",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/028_space_process_registry_effect_policy.up.sql",
+        "line": 9,
+        "why": "Per-org space_effect_policies row extended with process registry flag",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 19,
+        "why": "Missing org policy returns an error: deny-by-default posture",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 8899,
+        "why": "Test: room-born binding strips autonomy and tools from the turn",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 8965,
+        "why": "Test: nonempty binding allowlist narrows tool specs by name",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 22,
+        "why": "Org settings field allowedModels exists; no reader found",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/billing-core/internal/billing/types.go",
+        "line": 35,
+        "why": "Plan-level FeatureFlags map of booleans; no rings or kill switches",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/server/errors.go",
+        "line": 28,
+        "why": "Policy-denied errors map to a policy_denied code (Model Plane)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/server/server.go",
+        "line": 539,
+        "why": "Capability block reason from rollout state: a rollout gate precedent",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs",
+        "line": 10,
+        "why": "Rate-limit key is org or user; no agent or human principal kind",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/runs.proto",
+        "line": 11,
+        "why": "Autonomy rung ladder per run, enforced per call in execution",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+        "line": 105,
+        "why": "AutonomyRung enum: DangerFullAccess, WorkspaceWrite, ReadOnly",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/profile.rs",
+        "line": 9,
+        "why": "deployed_agent profile maps to an ask posture for risky tools",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/BLUEPRINT_ACTIVATION_DESIGN.md",
+        "line": 34,
+        "why": "Doc: deployed-vs-chat execution posture is real and enforced",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-016",
+    "title": "Direct messages and group DMs on Space authority, with conversation kind deciding agent scope and history window",
+    "searches": [
+      "group_dm|direct_message|DirectMessage|participant_hash|dm kind (none in Spaces)",
+      "space kind CHECK and kind unions (personal, room, project, case)",
+      "unsupported_space_kind (create route check)",
+      "history_window|visible_from|joined_at_seq|history_visibility (none)",
+      "startDirect|openDm|direct message UI (none)",
+      "scope_ref|agent_scope|personal_scope|group_scope (none in Spaces)",
+      "docs: group DM | direct message | DM kind | participant_hash | personal scope"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql",
+        "line": 20,
+        "why": "space_kind CHECK: personal, room, project, case; no DM kind",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 2873,
+        "why": "Create route rejects every kind except personal and room",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 3058,
+        "why": "Comment: an active Space at any kind: personal, room, project, case",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 549,
+        "why": "Convex spaces kind union: personal, room, project, case; no DM",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 624,
+        "why": "Personal Space registration seeds only the owner membership",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go",
+        "line": 355,
+        "why": "External provider bot DMs for the shared inbox; not Verevon-internal DMs",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/TicketQueue.tsx",
+        "line": 163,
+        "why": "Slack inbox copy about direct messages; external source only",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/space + qm style improvements.md",
+        "line": 24,
+        "why": "Doc: QM maps DMs to personal scope and groups to group scope",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 2561,
+        "why": "Doc plan: one personal Space per organization and principal",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  }
+]

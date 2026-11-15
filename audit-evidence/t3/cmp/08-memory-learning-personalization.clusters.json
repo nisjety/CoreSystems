@@ -1,0 +1,2135 @@
+{
+  "category": "Memory, learning & personalization",
+  "excluded": [],
+  "clusters": [
+    {
+      "id": "C-t3-08-001",
+      "name": "Account long-term memory with user view, edit, delete, reset and pause controls",
+      "description": "A persistent per-user memory the assistant writes and reads across chats, with a management surface: list/browse, edit or correct entries, delete, reset all, and switch memory on, off or paused; in-chat 'remember/forget this'.",
+      "prevalence": {
+        "sourcesWith": [
+          "antigravity",
+          "claude",
+          "codexagent",
+          "cursor",
+          "manus",
+          "web-chatgpt",
+          "web-claudeai",
+          "web-manus",
+          "web-perplexity"
+        ],
+        "n": 9,
+        "of": 12,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "claude-product-ux-066",
+        "claude-runtime-architecture-068",
+        "web-claudeai-web-product-071",
+        "web-perplexity-web-product-076",
+        "manus-product-ux-098",
+        "web-manus-web-product-069"
+      ],
+      "bestInClass": {
+        "source": "web-claudeai",
+        "recordIds": [
+          "web-claudeai-web-product-071",
+          "claude-product-ux-066"
+        ],
+        "why": "q5 topic-based entries saved during chat (not a nightly blob), each visible and editable, 'remember/forget this' in chat, pause vs reset distinction, org opt-in on Team, and a transcript indicator when memory is read or written (desktop strings corroborate the web docs)."
+      },
+      "mechanism": "Entry-level memory store keyed (org,user,scope,topic) with is_latest lineage; write paths: explicit in-chat command, model tool, background extractor. Settings page lists entries with search/filter; PATCH corrects (writes a superseding row), DELETE erases all tiers. Account flags memory_enabled (generate) and memory_use (reference) give on/off/paused states; paused keeps rows but skips prefetch and extraction. Transcript shows 'reading/saved to memory' chips.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-modelplane-110",
+          "v-chat-agents-ui-104",
+          "v-planned-decisions-111",
+          "v-planned-decisions-099",
+          "v-planned-decisions-102"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:350",
+          "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:444",
+          "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:524",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.tsx",
+          "apps/Frontend Plane/verevonv3/src/shared/api/memory-client.ts:16-175",
+          "apps/Model Plane/rust/services/session-core/src/memory_erasure.rs"
+        ],
+        "gap": "Store, list/correct/delete, in-place correct/forget on the recall notice and two-tier erasure are shipped. Missing (SRC grep for memory_enabled/pause/use_memory in model-gateway, session-core and the SPA found nothing): a user-level memory on/off/pause switch, 'reset all memory', and an explicit in-chat 'remember this' path in Ask mode (save_memory is Do-only; chat has recall_memory only). Memory injection is unconditional server-side.",
+        "strengths": "Two-tier store (agent_memory + letta-bridge semantic tier with RRF fusion) and erasure propagation to the semantic tier are stronger than most references document."
+      },
+      "benefit": "Users expect to be able to stop the assistant learning about them; a pause/off switch and reset are trust prerequisites for a product that learns, and they make GDPR-style control visible.",
+      "approach": "Model Plane session-core: add user memory_settings (generate, reference) checked by the Dreaming loop, prefetch (memory_prefetch.rs) and save_memory; a ResetMemory RPC reusing memory_erasure. Frontend: toggles plus Reset in MemorySection; a chat-scoped 'remember this' that calls a gateway write route (refused under ZDR).",
+      "effort": "S",
+      "dependencies": [
+        "session-core memory_grpc",
+        "memory_prefetch.rs",
+        "Dreaming loop"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Paused state must also stop the background extractor, or users will see memories appear while paused.",
+      "tier": "recommended",
+      "significance": 4,
+      "rationale": "Core store is shipped; the missing controls are cheap and directly visible to users.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-002",
+      "name": "Automatic memory extraction and consolidation from past conversations",
+      "description": "The system extracts durable facts from conversations in the background, de-duplicates and consolidates them into a maintained memory (list or synthesised summary).",
+      "prevalence": {
+        "sourcesWith": [
+          "antigravity",
+          "claude",
+          "codexagent",
+          "cursor",
+          "manus",
+          "web-chatgpt"
+        ],
+        "n": 6,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "web-chatgpt-web-product-090",
+        "codexagent-plugins-and-extensibility-087",
+        "cursor-ai-features-071"
+      ],
+      "bestInClass": {
+        "source": "codexagent",
+        "recordIds": [
+          "codexagent-plugins-and-extensibility-087"
+        ],
+        "why": "Most fully specified pipeline: per-thread raw extraction, rate-limit-aware global consolidation by a separate model, rollout age and idle gates, a polluted state, memory citations with file/line, reset and import (SRC from shipped binary strings). ChatGPT's continually re-synthesised summary (DOC) is the best user-facing shape."
+      },
+      "mechanism": "Stage 1: after a thread is idle N hours, an extract model writes raw_memory + rollout_summary rows. Stage 2: when enough raw rows exist and rate-limit headroom is above a floor, a consolidation model merges them into a workspace of memory files (diffed, symlink-safe). Gates: max_rollout_age_days, max_unused_days (prune), disable_on_external_context (marks memory 'polluted' when untrusted content was in context). Answers cite memory entries.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-modelplane-113",
+          "v-planned-decisions-103",
+          "v-planned-decisions-104",
+          "v-planned-decisions-105",
+          "v-modelplane-114"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/session-core/src/dreaming.rs:1-8",
+          "apps/Model Plane/rust/services/session-core/src/dreaming.rs:145-160",
+          "apps/Model Plane/rust/services/session-core/src/dreaming.rs:197",
+          "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs:128-140",
+          "apps/Model Plane/rust/services/session-core/src/memory_grounding.rs:90",
+          "apps/Model Plane/rust/services/session-core/src/memory_dedup.rs",
+          "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:137-143"
+        ],
+        "gap": "Write-time grounding (ADD/EXTEND/SUPERSEDE/NOOP) is behind MEMORY_GROUNDING_ENABLED, default off; the Temporal MemoryConsolidationWorkflow is reachable only via StartWorkflow (no schedule); no 'polluted by untrusted context' flag found (INF from baseline, not grepped).",
+        "strengths": "Dreaming = deterministic phrase matcher + LLM extractor with supersession, provenance and user-edit precedence; extractor prompt excludes transient state, secrets, payment and special-category data (SRC dream_extractor.rs:128-140). Equal to the references."
+      },
+      "benefit": "Keep; turning grounding on by default and scheduling consolidation removes duplicate/contradicting memories that degrade recall.",
+      "approach": "Flip MEMORY_GROUNDING_ENABLED after an eval; schedule MemoryConsolidation per user with an idle gate; add a 'derived from untrusted content' flag on extraction inputs (web/tool output) so injected text cannot become memory.",
+      "effort": "S",
+      "dependencies": [
+        "memory_grounding.rs",
+        "orchestrator-core Temporal"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Consolidation by LLM can drop user-stated facts; keep user-edited rows immutable.",
+      "tier": "n/a",
+      "significance": 3,
+      "rationale": "Verevon is at parity; only tuning remains.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-003",
+      "name": "Scoped memory: project, space and repo memory with isolation",
+      "description": "Memory partitioned by scope (global, project, space/workspace, repo) so a project keeps its own memory and summary, optionally isolated so nothing flows in or out.",
+      "prevalence": {
+        "sourcesWith": [
+          "antigravity",
+          "claude",
+          "web-chatgpt",
+          "web-claudeai",
+          "web-perplexity"
+        ],
+        "n": 5,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "antigravity-agent-ux-and-gemini-077",
+        "antigravity-architecture-095",
+        "claude-product-ux-068",
+        "web-claudeai-web-product-072",
+        "web-chatgpt-web-product-093"
+      ],
+      "bestInClass": {
+        "source": "web-chatgpt",
+        "recordIds": [
+          "web-chatgpt-web-product-093",
+          "antigravity-agent-ux-and-gemini-077"
+        ],
+        "why": "ChatGPT project-only memory defines the isolation contract (no outside memory in, nothing out, shared projects always isolated, enterprise projects always contained); Antigravity adds typed scopes with activation triggers and globs (SRC)."
+      },
+      "mechanism": "Memory rows carry scope {global|project|space} and scope_id; retrieval filters by the active scope plus allowed parents; an isolation flag on the project blocks parent scopes in and blocks extraction out. Project summary regenerated on a schedule from that project's chats only.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-planned-decisions-113",
+          "v-modelplane-110"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:486-494",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:141"
+        ],
+        "gap": "Memory rows have topic-derived scopes (user vs org/workspace/policy; SRC memory_grpc.rs:486-494) but there are no server-side Projects (planned I21, Wave 6, blocked on ADR-0003 precedence), so no project memory or isolation; Space-scoped memory not verified (check session-core for space_id on agent_memory).",
+        "strengths": "Owner derived from the verified thread, never the caller, so scoping cannot be forged."
+      },
+      "benefit": "Business users mix clients and projects; scoped memory prevents cross-project leakage and matches the rule that Space access never widens an owner-plane ACL.",
+      "approach": "session-core: add scope_kind/scope_id to agent_memory and letta tags; filter in SearchMemory by Control-signed scope decision; Space memory only for Space turns. Build together with server Projects (I21).",
+      "effort": "M",
+      "dependencies": [
+        "Server-synced Projects (I21)",
+        "ADR-0003 precedence",
+        "Control-signed Space decisions"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Scope widening via Space membership; must fail closed.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Needed once Projects exist; not before.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-004",
+      "name": "Memory and history import from other AI tools",
+      "description": "Bring existing memory or past sessions from another assistant: guided prompt to export, paste, re-synthesise into entries; or import other agents' session logs as searchable history.",
+      "prevalence": {
+        "sourcesWith": [
+          "claude",
+          "codexagent",
+          "hermes",
+          "manus",
+          "web-claudeai"
+        ],
+        "n": 5,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "claude-product-ux-067",
+        "web-claudeai-web-product-075",
+        "hermes-learning-and-memory-035"
+      ],
+      "bestInClass": {
+        "source": "claude",
+        "recordIds": [
+          "claude-product-ux-067",
+          "web-claudeai-web-product-075"
+        ],
+        "why": "Complete guided flow (copy prompt, paste result, re-synthesise, analytics for success/failure) shipped in desktop strings and documented on web; Hermes adds read-only import of Claude Code/Codex session logs with wrapper-tag stripping."
+      },
+      "mechanism": "UI shows a fixed export prompt for the other tool; user pastes the answer; a model call splits it into candidate entries tagged source=import, which go through the normal grounding/dedup path and are shown for review before commit.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "SRC grep for import_memor|memory_import in apps/Model Plane and verevonv3/src: none"
+        ],
+        "gap": "No import path for memory or foreign sessions.",
+        "strengths": ""
+      },
+      "benefit": "Lowers switching cost from ChatGPT/Claude: day-one personalisation instead of a cold start.",
+      "approach": "Frontend modal + gateway route -> session-core ImportMemory that runs entries through dream_extractor grounding with provenance 'imported'; ZDR-refused.",
+      "effort": "S",
+      "dependencies": [
+        "memory grounding"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Pasted text is untrusted; treat as data, drop instructions, never import secrets.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Cheap acquisition lever with an existing pipeline to reuse.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-005",
+      "name": "Memory provenance on responses (which memories personalised this answer)",
+      "description": "Each answer shows which memories, past chats or instructions shaped it; users can open, correct or delete them from there.",
+      "prevalence": {
+        "sourcesWith": [
+          "claude",
+          "codexagent",
+          "web-chatgpt",
+          "web-perplexity"
+        ],
+        "n": 4,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "web-chatgpt-web-product-091"
+      ],
+      "bestInClass": {
+        "source": "web-chatgpt",
+        "recordIds": [
+          "web-chatgpt-web-product-091"
+        ],
+        "why": "q5 per-response Sources list covering saved memories, past chats, instructions, files and Gmail, with correct/delete/not-relevant actions, hidden in shared links (DOC)."
+      },
+      "mechanism": "Retrieval returns ids; the server emits a memory-recall event with ids and provenance; the client renders a sources chip with per-item actions bound to memory CRUD.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-chat-agents-ui-104",
+          "v-modelplane-111",
+          "v-planned-decisions-100"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs:103",
+          "apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs:168",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5191",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2907-3243"
+        ],
+        "gap": "Covers memories only; past chats and instructions are not itemised in the same disclosure (the context inspector shows them as segments).",
+        "strengths": "memory_recall SSE event with three-state provenance (stated / inferred / unrecorded), persisted on the turn, with correct and forget in place: equal to ChatGPT and ahead of Claude/Perplexity on provenance granularity. Keep."
+      },
+      "benefit": "Already a transparency differentiator (DeepSeek-style).",
+      "approach": "Keep; extend the disclosure to instructions and future session-search hits.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "n/a",
+      "significance": 4,
+      "rationale": "Strength: shipped and live_proven (DOC). Provenance: supported only by DOC/INF reference records.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-006",
+      "name": "Incognito / temporary chat and per-chat memory off",
+      "description": "A chat that is not saved to history or memory (optionally choosing whether existing memory and instructions apply), or a normal chat with memory off for that thread.",
+      "prevalence": {
+        "sourcesWith": [
+          "claude",
+          "web-chatgpt",
+          "web-claudeai",
+          "web-perplexity"
+        ],
+        "n": 4,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "claude-product-ux-069",
+        "web-chatgpt-web-product-094",
+        "web-claudeai-web-product-074"
+      ],
+      "bestInClass": {
+        "source": "web-chatgpt",
+        "recordIds": [
+          "web-chatgpt-web-product-094",
+          "web-claudeai-web-product-074"
+        ],
+        "why": "Temporary chat with a Personalized/Unpersonalized choice before start and save-later; Claude adds per-chat memory off before the first message while still saving the chat."
+      },
+      "mechanism": "Conversation flag {ephemeral, personalize}; ephemeral writes no history, memory or caches; personalize controls read access to memory and instructions; write-path extraction is skipped either way.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8411",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8513",
+          "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12",
+          "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs:146"
+        ],
+        "gap": "Temporary chat (ZDR path) writes no thread, run, event, cache, memory or idempotency record (SRC per v-modelplane baseline narrative). Missing: a Personalized vs Unpersonalized choice and 'memory off for this chat' on a saved thread (only persona has a per-thread toggle).",
+        "strengths": "Stronger than references: the ZDR path is an enforced, typed-refusal persistence-free turn, not just a UI flag."
+      },
+      "benefit": "Keep; a per-thread memory toggle is a small addition next to persona_enabled.",
+      "approach": "Add memory_enabled to thread presentation (like persona_enabled, migration 0042 pattern) and skip prefetch/extraction for that thread.",
+      "effort": "S",
+      "dependencies": [
+        "thread presentation"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "n/a",
+      "significance": 3,
+      "rationale": "Strength; one small gap.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-007",
+      "name": "Sensitive-topic exclusion policy for memory writes",
+      "description": "Memory never stores some categories (IDs, financial numbers, criminal history) and by default skips sensitive topics (health, politics, religion) unless the user opts in, with a notice when saved.",
+      "prevalence": {
+        "sourcesWith": [
+          "web-claudeai",
+          "web-perplexity"
+        ],
+        "n": 2,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "web-claudeai-web-product-073"
+      ],
+      "bestInClass": {
+        "source": "web-claudeai",
+        "recordIds": [
+          "web-claudeai-web-product-073"
+        ],
+        "why": "q5 two-tier policy: hard never-store list plus opt-in sensitive topics with a save notice (DOC only; classifier gating inferred)."
+      },
+      "mechanism": "Classifier (or extractor prompt + post-check) labels candidate memories; deny-list categories are dropped; sensitive-topic categories dropped unless user setting include_sensitive=true, in which case the write emits a notice.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs:134-137"
+        ],
+        "gap": "The Dreaming extractor prompt forbids secrets, credentials, payment details, health or other special-category data and facts about other people (SRC). It is prompt-only: no post-write classifier check, no user opt-in, no notice, and save_memory/manual corrections bypass it (INF from code structure; verify).",
+        "strengths": "Special-category exclusion by default already matches GDPR art. 9 intent."
+      },
+      "benefit": "Norwegian/EU customers: a deterministic deny-check on every memory write path is a compliance argument, not just UX.",
+      "approach": "session-core: shared memory_policy check (regex for IDs/account numbers + cheap classifier) applied in Dreaming, save_memory and import; optional per-user opt-in setting with a recall-notice label.",
+      "effort": "M",
+      "dependencies": [
+        "C01 memory settings"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "False positives drop useful facts; log drops for review.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Partial already; hardening is cheap and compliance-relevant. Provenance: supported only by DOC/INF reference records.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-008",
+      "name": "Organisation-level memory governance",
+      "description": "Admins can disable memory (and derived knowledge) org-wide, memories belong to the organisation, and member opt-in is controlled per plan.",
+      "prevalence": {
+        "sourcesWith": [
+          "claude",
+          "web-claudeai",
+          "web-perplexity"
+        ],
+        "n": 3,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "web-perplexity-web-product-081"
+      ],
+      "bestInClass": {
+        "source": "web-perplexity",
+        "recordIds": [
+          "web-perplexity-web-product-081"
+        ],
+        "why": "Explicit org ownership and an org switch that derived 'Brain' features follow by default (DOC); Claude shows 'Enable memory for your team' strings (SRC)."
+      },
+      "mechanism": "Control Plane org policy {memory_allowed, member_default}; Model Plane reads it with each memory decision and refuses writes and recall when off.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No baseline record. Check Control Plane org policy and session-core memory authorisation (memory_grpc.rs authorize_memory_preflight) for an org-level memory switch; none was found by the memory_enabled grep.",
+        "strengths": ""
+      },
+      "benefit": "Enterprise buyers require it; fits the Control Plane authority model.",
+      "approach": "Control Plane org setting signed into the session token/decision; session-core and the Dreaming loop enforce it; admin UI in Frontend settings.",
+      "effort": "S",
+      "dependencies": [
+        "Control Plane org settings",
+        "C01"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Must also stop the learning review (skills) or the switch is misleading.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Small, B2B-critical. Provenance: supported only by DOC/INF reference records.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-009",
+      "name": "Layered custom instructions (global, organisation, space, project) applied everywhere",
+      "description": "Instructions at several scopes merged by a defined precedence and appended to the system prompt for every surface, including agent tasks.",
+      "prevalence": {
+        "sourcesWith": [
+          "antigravity",
+          "claude",
+          "codexagent",
+          "cursor",
+          "web-chatgpt",
+          "web-claudeai",
+          "web-manus",
+          "web-perplexity"
+        ],
+        "n": 8,
+        "of": 12,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "claude-product-ux-070",
+        "web-claudeai-web-product-076",
+        "web-manus-web-product-071",
+        "web-perplexity-web-product-079"
+      ],
+      "bestInClass": {
+        "source": "claude",
+        "recordIds": [
+          "claude-product-ux-070",
+          "web-claudeai-web-product-076"
+        ],
+        "why": "Widest scope set (global, folder, space, project, channel, profile, organisation) with documented org > user precedence, org limit 3,000 chars and propagation within an hour; folder instructions are edited by Claude as it learns (SRC + DOC)."
+      },
+      "mechanism": "Prompt assembler resolves the scope chain for the turn (org -> space/project -> agent -> user persona), applies precedence and per-scope character budgets, and emits one instructions block; the same resolver runs for chat and agent runs.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-chat-agents-ui-105",
+          "v-chat-agents-ui-106",
+          "v-planned-decisions-113"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs:1-60",
+          "apps/Frontend Plane/verevonv3/src/shared/api/persona-client.ts:9-40",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1855",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6375-6440",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9527-10128",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1185-1200"
+        ],
+        "gap": "ADR-0003 hierarchy (platform -> org -> Space -> agent -> persona) is applied in Ask turns only; agentic_run_stream (sse.rs:9527-10128) contains no persona, org or Space instructions, so Do runs ignore them (absent). Persona capped at 1,500 chars; no project instructions (Projects planned, Wave 6).",
+        "strengths": "Server-side resolution with an explicit precedence ADR and the context inspector segment are ahead of most references."
+      },
+      "benefit": "A user who sets 'answer in Norwegian, I am a CFO' and then runs an agent gets a context-blind agent: the most visible personalisation failure in the product.",
+      "approach": "Model Plane: move the ADR-0003 resolver into a shared crate used by both invoke_stream_sse and agentic_run_stream; pass the resolved block into execution-core run start (agent.rs preamble) with the same budgets; show it in the run inspector.",
+      "effort": "M",
+      "dependencies": [
+        "ADR-0003 resolver",
+        "execution-core run start contract"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Org instructions must keep precedence over persona in Do runs too; ZDR runs need the same block without persistence.",
+      "tier": "priority",
+      "significance": 5,
+      "rationale": "Table-stakes capability already half-built; the Do-mode gap is called out in three baselines.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-010",
+      "name": "Workspace instruction files (AGENTS.md hierarchy) with budget notice",
+      "description": "Coding agents read AGENTS.md/CLAUDE.md-style files from user and project directories under a byte budget, with a visible notice of omitted or truncated files.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexagent",
+          "deepseek",
+          "t3code"
+        ],
+        "n": 3,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "codexagent-plugins-and-extensibility-043",
+        "deepseek-transparency-and-customization-110",
+        "t3code-architecture-080"
+      ],
+      "bestInClass": {
+        "source": "deepseek",
+        "recordIds": [
+          "deepseek-transparency-and-customization-110"
+        ],
+        "why": "Most transparent: 64 KiB budget, broader files dropped before the most specific is truncated, visible notice naming omitted/truncated paths, reconciliation on resume (DOC)."
+      },
+      "mechanism": "Walk from project root markers to cwd collecting instruction files; most specific last; enforce budget by dropping outermost first; emit a context notice listing omitted/truncated files.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No file-based instruction chain; Verevon is not an IDE and its analogue is authored Space/org instructions (C09). The budget-notice idea is already covered by the context inspector (tokens vs budget per segment).",
+        "strengths": ""
+      },
+      "benefit": "Low for a web product; only relevant to sandbox code tasks over a user repo.",
+      "approach": "If needed, read AGENTS.md inside sandbox repos at run start as a Space-scoped segment; reuse the inspector notice.",
+      "effort": "S",
+      "dependencies": [
+        "sandbox repo checkout"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Repo files are untrusted content.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "IDE-oriented; Verevon is not an IDE.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-011",
+      "name": "Personality, tone and output-style presets",
+      "description": "User-selectable base styles or personalities (concise, friendly, professional, candid...), sliders for warmth, emoji, lists, and saved profiles bundling model and effort defaults.",
+      "prevalence": {
+        "sourcesWith": [
+          "claude",
+          "codexagent",
+          "hermes",
+          "web-chatgpt",
+          "web-manus"
+        ],
+        "n": 5,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "claude-product-ux-073",
+        "codexagent-plugins-and-extensibility-120",
+        "hermes-learning-and-memory-052",
+        "web-chatgpt-web-product-095",
+        "web-manus-web-product-070"
+      ],
+      "bestInClass": {
+        "source": "web-chatgpt",
+        "recordIds": [
+          "web-chatgpt-web-product-095",
+          "claude-product-ux-073"
+        ],
+        "why": "Seven base styles plus characteristic sliders applied immediately to all chats (DOC); Claude adds output styles, writing-style matching from documents and default model/effort (SRC)."
+      },
+      "mechanism": "Each preset or slider maps to a short system directive appended after instructions; profiles persist {model, effort, style}; directives are stable strings so prompt caching is unaffected.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/verbosity.rs:1-25"
+        ],
+        "gap": "verbosity.rs maps operator-selectable profiles (concise, detailed, minimal) to a system directive (SRC), but no user-facing personality/tone presets, sliders or 'match my writing style' were found in the settings UI (unverified beyond the baseline).",
+        "strengths": "Directive design never trades correctness, only presentation."
+      },
+      "benefit": "Cheap, visible personalisation that does not need memory.",
+      "approach": "Expose verbosity profiles plus 4-6 tone presets in Settings/Persona; store in Convex next to persona; resolve in the same instruction resolver as C09 so Do runs get it.",
+      "effort": "S",
+      "dependencies": [
+        "C09 shared resolver"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Silly personas (pirate, kawaii) do not fit a business product; keep to professional tones.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "High visibility, low cost, mostly already built.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-012",
+      "name": "Default assistant identity spec and shareable persona profiles",
+      "description": "A shipped identity/persona text that sets reply length, reporting style and anti-sycophancy; per-profile isolated personas that can be packaged and shared without the owner's learned state.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "hermes-learning-and-memory-050",
+        "hermes-learning-and-memory-051",
+        "hermes-learning-and-memory-053"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-051",
+          "hermes-learning-and-memory-050",
+          "hermes-learning-and-memory-053"
+        ],
+        "why": "About 120-word default SOUL that encodes match-length-to-ask, changed/verified/left reporting and agree-only-when-right; read only from the home dir (never cwd), scanned and truncated; profile distributions exclude memories and sessions."
+      },
+      "mechanism": "Identity file loaded first in prompt assembly from a trusted location only, content-scanned for injection; profiles are directories {SOUL, config, skills} with a manifest; export excludes user-owned learned state.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No baseline record for Verevon's platform preamble wording; check the platform tier of the ADR-0003 resolver (MG/sse.rs:6375) for anti-sycophancy/length guidance. Shareable persona packages correspond to Space agents / preset agents (FE shared/actions/preset-agents.ts) but distribution without learned state is not verified.",
+        "strengths": ""
+      },
+      "benefit": "A good default voice is product IP and reduces verbosity cost.",
+      "approach": "Review the platform preamble against the Hermes spec; keep in Model Plane as a versioned prompt asset.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Cheap polish; verify first.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-013",
+      "name": "Named persistent agents with their own identity and memory",
+      "description": "Long-lived agents with a name, a self-document they maintain, their own memory store or memory tab, and triggers that wake them.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexagent",
+          "cursor",
+          "web-chatgpt",
+          "web-manus"
+        ],
+        "n": 4,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "cursor-ai-features-066",
+        "cursor-harness-architecture-112",
+        "web-chatgpt-web-product-096",
+        "web-manus-web-product-072",
+        "codexagent-agent-runtime-and-models-079"
+      ],
+      "bestInClass": {
+        "source": "cursor",
+        "recordIds": [
+          "cursor-ai-features-066",
+          "cursor-harness-architecture-112"
+        ],
+        "why": "Home store with SELF.md injected into context (tag-escaped, refreshed), SOUL.md, an activity folder and subscriptions (timers, Slack, PRs) that wake the agent (SRC); Codex shows the per-agent Memory tab UX."
+      },
+      "mechanism": "Agent principal owns a small file store; SELF.md is injected each run; the agent may edit it via a file tool; a Memory tab lists saved files with source labels; subscriptions create runs.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/actions/preset-agents.ts"
+        ],
+        "gap": "Space agents with personas and run watchers exist (baseline); per-agent memory stores and an agent-maintained self document were not found in the baselines. Check session-core agent_memory for an agent principal and the agents feature for a memory tab.",
+        "strengths": ""
+      },
+      "benefit": "Fits the Manus-style 'agent that works for you over time'; per-agent memory keeps personal memory clean.",
+      "approach": "Model Plane: agent principal scope on agent_memory (C03) plus an agent notes document; Frontend agents page memory tab.",
+      "effort": "M",
+      "dependencies": [
+        "C03 scoped memory",
+        "C14 memory in runs"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Agent memory under ZDR; agent identity must not escalate authority.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "After C09/C14 land.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-014",
+      "name": "Memory and notes available to agent tasks and automations",
+      "description": "Agent runs and scheduled automations read user memory and keep their own notes across runs (per-automation memory files, shared notes folders for later agents).",
+      "prevalence": {
+        "sourcesWith": [
+          "cursor",
+          "hermes",
+          "web-claudeai"
+        ],
+        "n": 3,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "cursor-ai-features-067",
+        "cursor-harness-architecture-114",
+        "hermes-learning-and-memory-091",
+        "web-claudeai-web-product-079",
+        "cursor-ai-features-136"
+      ],
+      "bestInClass": {
+        "source": "cursor",
+        "recordIds": [
+          "cursor-ai-features-067",
+          "cursor-harness-architecture-114",
+          "cursor-ai-features-136"
+        ],
+        "why": "Per-automation memory files with list/get/update/delete and optimistic concurrency (expected_version), a memory-instructions placeholder in prompts, plus shared and per-conversation notes folders listed in context (SRC). Hermes contributes the rule that cron runs read memory but never write learned state."
+      },
+      "mechanism": "Each automation has memory_enabled and a small file set; at run start the files are listed and injected; updates use compare-and-swap on version; users can inspect/edit; unattended runs are read-only for global memory.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-planned-decisions-101",
+          "v-modelplane-112"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4235",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:808-809",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1185-1200",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9135-9150"
+        ],
+        "gap": "Do runs have save_memory/recall_memory tools (attested, ZDR-refused, blocked in plan mode and subagents), but no memory prefetch, no prior thread turns and no persona at run start (baseline known gap 'Do mode is context-blind'); scheduled runs have no per-automation notes.",
+        "strengths": "Memory writes are capability-bound and attested, safer than file-based notes."
+      },
+      "benefit": "Agents that forget who the user is and what the last run found make scheduled work feel dumb; this is the Hermes 'learns and tailors itself' goal applied to agents.",
+      "approach": "Model Plane: reuse fetch_chat_memory_context (sse.rs:5191) at agentic run start under the same trivial gate and provenance event; add per-task notes (session-core table keyed by task id, CAS version) exposed as a capability; unattended runs read-only on user memory.",
+      "effort": "M",
+      "dependencies": [
+        "C09 shared resolver",
+        "capability-core task executor"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Context bloat in long runs; budget the block.",
+      "tier": "priority",
+      "significance": 5,
+      "rationale": "Directly blocks the agent-page vision; mechanism exists in chat already.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-015",
+      "name": "Full-text search over past conversations (user UI and agent tool)",
+      "description": "Search all past chats by keyword with snippets, and give the agent a tool to find and read relevant past messages; compaction keeps original rows searchable.",
+      "prevalence": {
+        "sourcesWith": [
+          "cursor",
+          "deepseek",
+          "hermes"
+        ],
+        "n": 3,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "cursor-ai-features-065",
+        "cursor-harness-architecture-113",
+        "hermes-learning-and-memory-030",
+        "hermes-learning-and-memory-031",
+        "hermes-learning-and-memory-033",
+        "hermes-learning-and-memory-036"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-030",
+          "hermes-learning-and-memory-031",
+          "hermes-learning-and-memory-033"
+        ],
+        "why": "q5: one tool with four shapes (discover, scroll around an anchor, read, browse) and no LLM calls; BM25 with lineage dedup, adaptive hydration (best hit full, others anchor only), time bounds, demotion of cron sessions; compaction archives rows instead of deleting. Cursor adds the user-facing FTS5 index with recency-weighted BM25 and highlighted snippets."
+      },
+      "mechanism": "Index messages (user/assistant) in an FTS table (Postgres tsvector + GIN for Verevon) with thread lineage. Discover: BM25 rank * recency decay, dedupe by lineage root, hydrate top hit, return anchors for the rest with stable links. Scroll: window of 1-20 messages around message id. Read: capped per message (head/tail). Archive compacted rows (active=0) so they stay searchable.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-chat-agents-ui-108",
+          "v-modelplane-120"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7753-7766",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:49-56"
+        ],
+        "gap": "ListThreadsQuery has no query field and no FTS index exists in the 45 migrations; the SPA does substring match over loaded titles/previews only; no recall_conversations tool. Planned as I12.",
+        "strengths": ""
+      },
+      "benefit": "Every reference chat product has history search; it is also the cheapest recall mechanism for agents (zero model cost).",
+      "approach": "session-core (owner of threads/events): generated tsvector column + GIN index on message text, SearchThreads RPC with org/user filter from the verified bearer; gateway /api/v1/chat/search; SPA search box; agent tool recall_conversations with discover/scroll/read shapes and bounded output; ZDR threads never indexed.",
+      "effort": "M",
+      "dependencies": [
+        "session-core migrations",
+        "gateway route",
+        "tool_loop builtin"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Norwegian stemming (use 'norwegian' text search config plus 'simple'); index size; must respect Space ACLs and deletion.",
+      "tier": "priority",
+      "significance": 5,
+      "rationale": "Users notice immediately; design is proven and portable.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-016",
+      "name": "Past-conversation reference as context for new work",
+      "description": "New chats or tasks draw on bounded summaries of past conversations or explicit @session references, and corrections are generalised by asking 'always or only now'.",
+      "prevalence": {
+        "sourcesWith": [
+          "antigravity",
+          "cursor",
+          "deepseek",
+          "web-chatgpt"
+        ],
+        "n": 4,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "antigravity-agent-ux-and-gemini-078",
+        "deepseek-harness-architecture-082",
+        "web-chatgpt-web-product-092",
+        "cursor-ai-features-064",
+        "cursor-harness-architecture-111"
+      ],
+      "bestInClass": {
+        "source": "deepseek",
+        "recordIds": [
+          "deepseek-harness-architecture-082",
+          "antigravity-agent-ux-and-gemini-078"
+        ],
+        "why": "DeepSeek: @label references inject an immutable, bounded snapshot explicitly flagged as untrusted background, ranked by workspace affinity, labels from projections; Antigravity: config-driven per-field caps for history summaries (SRC). Cursor contributes the 'ask whether a correction applies always' prompt and a past-transcript subagent."
+      },
+      "mechanism": "Composer @-mention resolves a past thread; server builds a snapshot (title, intent, key turns, artifacts) under char caps and injects it as a fenced untrusted block; optional setting auto-includes the N most relevant past summaries.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-chat-agents-ui-108"
+        ],
+        "evidence": [],
+        "gap": "No reference-chat-history toggle, no @thread references, no past-conversation subagent (baseline: no recall tool).",
+        "strengths": ""
+      },
+      "benefit": "Continuity across chats without growing memory; transparent because the user picks the reference.",
+      "approach": "Build on C15: session-core snapshot RPC; composer @thread mention; gateway injects fenced snapshot segment visible in the context inspector.",
+      "effort": "M",
+      "dependencies": [
+        "C15"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Prompt injection via old content; keep snapshot flagged as data.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Natural follow-on to search.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-017",
+      "name": "Background self-improvement loop (review completed work into skills and memory)",
+      "description": "After turns or runs, a hidden review reads the transcript and decides to save memory or create/patch a skill; user corrections become rules in the skill for that task class.",
+      "prevalence": {
+        "sourcesWith": [
+          "cursor",
+          "hermes"
+        ],
+        "n": 2,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "hermes-learning-and-memory-057",
+        "hermes-learning-and-memory-098",
+        "hermes-learning-and-memory-102",
+        "cursor-ai-features-068"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-057",
+          "hermes-learning-and-memory-102",
+          "hermes-learning-and-memory-098"
+        ],
+        "why": "q5: cadence-driven fork (memory every 10 user turns; skills after 10 tool iterations without a skill write; counters reset when the model already wrote), runs after the reply on a message snapshot, max 16 iterations, three prompt variants; corrections routed into task-scoped skill rules. Weakness (INF): no outcome evaluation."
+      },
+      "mechanism": "turn finalizer: if a final response exists, not interrupted and not unattended, spawn review(snapshot, prompt in {memory, skill, combined}) on a cheap model with whitelisted tools (memory, skill_manage) and read-before-write; results logged to a ledger and usage telemetry.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-modelplane-115",
+          "v-planned-decisions-106",
+          "v-chat-agents-ui-107"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/session-core/src/learning_events.rs:1-12",
+          "apps/Model Plane/rust/services/session-core/src/learning_events.rs:55",
+          "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go:1-30",
+          "apps/Model Plane/go/services/capability-core/internal/learning/learning.go:39",
+          "apps/Model Plane/go/services/capability-core/cmd/main.go:742-808"
+        ],
+        "gap": "RUN_COMPLETED -> sessionreview LLM -> UpsertAgentSkill is wired and on by default (SRC), but no skill has ever been proven from a real run (I23 deferred, DOC); it reviews Do runs only (no Ask-turn cadence); review uses a paid model with only a global kill switch (per-route rule OD4 pending).",
+        "strengths": "Confidence floor (MinConfidence 0.5), protected user skills, and implicit-dissatisfaction quarantine go beyond Hermes, which has no outcome signal."
+      },
+      "benefit": "This is the 'learns and tailors itself to its user' goal; unproven it is a claim, proven it is the main differentiator against ChatGPT/Claude.",
+      "approach": "Prove I23 on a seeded run with an eval; add an Ask-turn cadence trigger (every N user turns) routed to memory review; use a cheap model; make RUN_COMPLETED ZDR-stamped so ZDR runs are never reviewed.",
+      "effort": "M",
+      "dependencies": [
+        "C19 approval gate",
+        "ZDR-stamped RUN_COMPLETED"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Learned skills applied org-wide without review (see C19); cost of paid reviews.",
+      "tier": "priority",
+      "significance": 5,
+      "rationale": "Built but unproven; the product vision depends on it.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 1
+      }
+    },
+    {
+      "id": "C-t3-08-018",
+      "name": "User-directed learning commands (/learn, /refine, distil rules from history)",
+      "description": "The user asks the agent to turn a session, a source (URL, folder, notes) or recent corrections into a skill or rules, optionally with a focus.",
+      "prevalence": {
+        "sourcesWith": [
+          "antigravity",
+          "cursor",
+          "hermes"
+        ],
+        "n": 3,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "hermes-learning-and-memory-042",
+        "hermes-learning-and-memory-063",
+        "antigravity-agent-ux-and-gemini-079",
+        "cursor-ai-features-070"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-042",
+          "hermes-learning-and-memory-063"
+        ],
+        "why": "/learn takes directory, URL, notes or 'what we just did' plus requirements and writes a lean index + per-chapter references; /refine runs the review with a user focus string as an attended review (no downgrading to proposals) (SRC)."
+      },
+      "mechanism": "Slash command builds one normal-turn prompt: inventory sources with existing tools, honour requirements, extend an existing skill rather than duplicate; for /refine pass explicit=true so writes are attended.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/go/services/capability-core/internal/commands/handler.go:1-60"
+        ],
+        "gap": "Slash command catalogue has only /models and /compact (baseline); skills can be created manually in Settings but there is no 'make a skill from this chat' or 'learn from this URL' flow.",
+        "strengths": ""
+      },
+      "benefit": "Gives users explicit control over learning, complementing the background loop; cheap because it reuses the agent loop.",
+      "approach": "capability-core command 'learn' -> Do run with skill_manage capability; chat message action 'Save as skill'; results go through the C19 proposal path.",
+      "effort": "S",
+      "dependencies": [
+        "C19",
+        "skill CRUD"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Low effort, visible.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-019",
+      "name": "Proposed learning with user approval (staged diffs, accept or reject)",
+      "description": "Learned knowledge, skills or project-instruction changes are proposed with reasons and applied only after the user accepts; unattended processes may add but never replace or delete.",
+      "prevalence": {
+        "sourcesWith": [
+          "claude",
+          "hermes",
+          "manus",
+          "web-manus"
+        ],
+        "n": 4,
+        "of": 12,
+        "cls": "common"
+      },
+      "members": [
+        "web-manus-web-product-068",
+        "manus-product-ux-097",
+        "hermes-learning-and-memory-049",
+        "hermes-learning-and-memory-009",
+        "claude-product-ux-072"
+      ],
+      "bestInClass": {
+        "source": "manus",
+        "recordIds": [
+          "manus-product-ux-097",
+          "hermes-learning-and-memory-009",
+          "hermes-learning-and-memory-049"
+        ],
+        "why": "Manus q5: KnowledgeEvent {CREATE/UPDATE/DELETE, PENDING/ACCEPTED/REJECTED, trigger, session_uid, session_event_uid} links each proposal to its origin, accepted items can be enabled/disabled (SRC). Hermes q5: unattended reviews are fail-closed for replace/remove (staged as proposals even when approval is globally off) and an opt-in gate stages every skill write with /skills diff, approve, reject."
+      },
+      "mechanism": "Learning writer emits a proposal row {kind, target, diff, reason, origin_run, origin_event, status=PENDING}; UI inbox renders diffs; accept applies via the normal write path with provenance; reject records a negative example. Unattended writers: add allowed (still flagged 'agent-created'), destructive ops always staged.",
+      "verevon": {
+        "status": "planned",
+        "baselineIds": [
+          "v-planned-decisions-107",
+          "v-planned-decisions-106"
+        ],
+        "evidence": [
+          "claude-hermes-deepseek.md:1352",
+          "apps/Model Plane/go/services/capability-core/internal/learning/learning.go:39"
+        ],
+        "gap": "Confirmed gap (DOC): background_review candidates become org-wide matchable skills with no review; the promotion gate and three-tier (vendor/org/user) library are deliberately not built pending a product/UX decision; PromoteSkill RPC removed.",
+        "strengths": ""
+      },
+      "benefit": "Without a gate, one user's run can change how the agent behaves for the whole org: an authority-model problem, not only UX. A proposal inbox also makes learning visible, which sells the feature.",
+      "approach": "capability-core: learned skills start status=proposed and scope=user; promotion to org needs an org admin decision signed by Control; Frontend inbox (Settings > Learning) with diff, reason and source-run link; unattended reviewer limited to add.",
+      "effort": "M",
+      "dependencies": [
+        "C17",
+        "Control Plane decision signing",
+        "skills CRUD"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Approval fatigue; batch proposals weekly and auto-expire.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Blocks safe rollout of the learning loop (C17) and closes a confirmed governance gap.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-020",
+      "name": "Skill authoring quality: atomic skill tool, linter and lessons-not-logs doctrine",
+      "description": "The model edits skills through one atomic operations tool, gets advisory lint findings, and follows a written doctrine that keeps skills as reusable procedures rather than incident logs.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "hermes-learning-and-memory-039",
+        "hermes-learning-and-memory-040",
+        "hermes-learning-and-memory-041"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-041",
+          "hermes-learning-and-memory-039",
+          "hermes-learning-and-memory-040"
+        ],
+        "why": "q5 doctrine (procedure first, pitfall = one rule + why, no ticket numbers or dates) plus skill_manage operations[] with per-action schemas and full rollback, and a linter for frontmatter, PR-reference sprawl, more than 60 reference files or about 24k-char bodies (SRC)."
+      },
+      "mechanism": "Single tool skill_manage(operations[]) where each op is create|patch(old,new)|write_file|delete; executed on copies, all-or-nothing; post-write linter returns advisory findings in the tool result; review prompts embed the doctrine blocks.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-modelplane-115"
+        ],
+        "evidence": [
+          "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go:1-30"
+        ],
+        "gap": "Learned skills are upserted whole by the review (UpsertAgentSkill); no patch-level atomic tool, no linter and no documented authoring doctrine found in the baselines (check sessionreview prompt text).",
+        "strengths": ""
+      },
+      "benefit": "Learned skills are only valuable if they stay short and general; a linter and doctrine are cheap quality controls for C17 output.",
+      "approach": "capability-core: port the doctrine into the sessionreview prompt; add a Go linter run on every UpsertAgentSkill with findings stored on the skill; later a patch-op RPC.",
+      "effort": "S",
+      "dependencies": [
+        "C17"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Cheap and raises learned-skill quality.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-021",
+      "name": "Skill lifecycle curation (usage telemetry, staleness, archive, consolidation, ownership)",
+      "description": "Track how often each skill is used, mark unused agent-created skills stale and archive them, merge narrow skills into umbrellas, and never touch user-created or installed skills.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "hermes-learning-and-memory-043",
+        "hermes-learning-and-memory-045",
+        "hermes-learning-and-memory-064",
+        "hermes-learning-and-memory-065"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-064",
+          "hermes-learning-and-memory-043",
+          "hermes-learning-and-memory-045",
+          "hermes-learning-and-memory-065"
+        ],
+        "why": "Weekly curator (after two idle hours in CLI) marks stale at 14 days, archives at 30, reactivates on use, deletes nothing; usage sidecar counts load/view/patch and reuse-after-patch; created_by provenance limits curation to agent skills; optional LLM consolidation with tar.gz snapshot and structured report (SRC)."
+      },
+      "mechanism": "skill_usage {use_count, view_count, patch_count, last_used_at, created_by, pinned}; periodic job: state transitions active->stale->archived by idle days; consolidation job clusters agent skills by prefix/similarity and proposes umbrellas (via C19).",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-modelplane-116",
+          "v-planned-decisions-110",
+          "v-planned-decisions-106"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs:184",
+          "apps/Model Plane/rust/services/model-gateway/src/implicit_feedback.rs:1-15",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md:286"
+        ],
+        "gap": "Wilson-bounded quarantine after implicit dissatisfaction is shipped and protected user skills exist; staleness/retirement lifecycle is planned (lowest priority, flag/log-only first); no usage telemetry or consolidation pass found.",
+        "strengths": "Outcome-based quarantine (dissatisfaction signals) is something Hermes lacks."
+      },
+      "benefit": "Without retirement, learned skills accumulate and crowd the 3-4 skill injection budget.",
+      "approach": "capability-core: add usage counters from the gateway skill match (skills.rs) and a weekly Temporal job for stale/archive; consolidation proposals through C19.",
+      "effort": "M",
+      "dependencies": [
+        "C17",
+        "C19"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Archiving a skill a scheduled task relies on; protect referenced skills.",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Needed once C17 produces volume.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-022",
+      "name": "Learning by demonstration (record a workflow, turn it into a skill)",
+      "description": "The user records a workflow on screen (actions, screenshots, optional narration); the product summarises it and creates a reusable skill.",
+      "prevalence": {
+        "sourcesWith": [
+          "claude",
+          "cursor",
+          "manus"
+        ],
+        "n": 3,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "claude-product-ux-071",
+        "cursor-ai-features-069",
+        "manus-computer-control-architecture-048",
+        "manus-product-ux-099"
+      ],
+      "bestInClass": {
+        "source": "manus",
+        "recordIds": [
+          "manus-product-ux-099",
+          "manus-computer-control-architecture-048",
+          "claude-product-ux-071"
+        ],
+        "why": "Manus ships an end-to-end recorder addon (MCP server shared with computer use, LiveKit data topic, review before delivery, task that builds the skill) (SRC); Claude Cowork has watch-record plus a teach overlay."
+      },
+      "mechanism": "Recorder captures action events + periodic screenshots + optional voice transcript; uploads a recording bundle; a task summarises into steps/frames and drafts SKILL.md; user reviews before save.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No baseline record; a bounded grep did not complete. Check Ingestion Plane (Quarry browser sessions) and Model Plane for a recording-to-skill flow; likely absent.",
+        "strengths": ""
+      },
+      "benefit": "Strong fit with the Manus-like computer-use vision: users teach the agent a browser procedure once.",
+      "approach": "Record inside a Quarry-hosted browser session (Quarry captures, Model Plane only receives the trace), then a Model Plane run drafts a skill proposal via C19. Desktop recording is out of scope for a web product.",
+      "effort": "L",
+      "dependencies": [
+        "Quarry browser session traces",
+        "C19"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Recordings contain personal data; ZDR orgs must be refused; never replay credentials.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "Differentiator but large; after core learning is proven.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-023",
+      "name": "Feedback as a learning signal (rating reasons, preference picks, implicit dissatisfaction)",
+      "description": "Ratings with fixed reason taxonomies, Best-of-N preference choices and implicit signals (regenerate, edit, frustration) feed back into skill and model quality.",
+      "prevalence": {
+        "sourcesWith": [
+          "antigravity"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "antigravity-agent-ux-and-gemini-080",
+        "hermes-learning-and-memory-083"
+      ],
+      "bestInClass": {
+        "source": "antigravity",
+        "recordIds": [
+          "antigravity-agent-ux-and-gemini-080"
+        ],
+        "why": "Only reference with a structured taxonomy (positive and negative reason chips) and battle-mode preference reasons recorded via dedicated RPCs (SRC). Hermes is a negative finding: no implicit-feedback learning in core (hermes-learning-and-memory-083, INF)."
+      },
+      "mechanism": "Feedback event {rating, reasons[], message_id, skill_ids, model}; regenerate/edit flags as implicit negatives; aggregate per skill with a Wilson lower bound to quarantine or credit.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-modelplane-116",
+          "v-modelplane-117",
+          "v-modelplane-118",
+          "v-planned-decisions-112"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs:1-15",
+          "apps/Model Plane/rust/services/model-gateway/src/implicit_feedback.rs:1-15",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6571",
+          "apps/Model Plane/rust/services/model-gateway/src/calibration.rs:133",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:486-509"
+        ],
+        "gap": "Live quality loop unproven (DOC); no Best-of-N preference capture.",
+        "strengths": "Ahead of every reference: tiered thumbs + reason category in the UI, server-side skill credit, implicit dissatisfaction classifier with Wilson-bounded quarantine, and calibration rows from ratings. Keep."
+      },
+      "benefit": "Keep; prove the loop live alongside C17.",
+      "approach": "Keep; add a dashboard of quarantined/credited skills.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "n/a",
+      "significance": 3,
+      "rationale": "Verevon strength. Note: hermes record is a negative finding (capability absent there) and is not counted in sourcesWith.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 1
+      }
+    },
+    {
+      "id": "C-t3-08-024",
+      "name": "Learning from outcomes through model post-training",
+      "description": "The vendor post-trains or fine-tunes models on successful trajectories to reduce tool errors.",
+      "prevalence": {
+        "sourcesWith": [
+          "web-perplexity"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "web-perplexity-web-product-080"
+      ],
+      "bestInClass": {
+        "source": "web-perplexity",
+        "recordIds": [
+          "web-perplexity-web-product-080"
+        ],
+        "why": "Only reference; DOC-only research blog, details not fetched, low confidence."
+      },
+      "mechanism": "Collect successful trajectories, filter, supervised fine-tune or preference-tune a model, deploy behind the router.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-modelplane-119",
+          "v-modelplane-118"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/finetune_routes.rs:1-20",
+          "apps/Model Plane/rust/services/model-gateway/src/finetune_azure.rs:1-15",
+          "apps/Model Plane/rust/services/model-gateway/src/finetune_poller.rs:1-10",
+          "apps/Model Plane/rust/services/model-gateway/src/trajectory.rs:1-10"
+        ],
+        "gap": "Trajectory recording is an in-memory ring buffer, not persisted (baseline), so trajectory-based post-training lacks durable data.",
+        "strengths": "Admin-gated Azure OpenAI fine-tuning lifecycle with a monthly cap is shipped; ahead of the references' user-visible features."
+      },
+      "benefit": "Keep; persist trajectories (ZDR-aware) if post-training on agent runs becomes a goal.",
+      "approach": "Keep.",
+      "effort": "M",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "Training on customer data needs explicit consent and ZDR exclusion.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Strength; reference is DOC-only. Provenance: supported only by DOC/INF reference records.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-025",
+      "name": "Pluggable memory-provider architecture with lifecycle hooks",
+      "description": "One provider contract (initialise, prefetch, sync per turn, session end/switch, pre-compress checkpoint, mirrored writes) lets external memory backends (knowledge graph, fact store with trust scores, server-side extraction) plug in.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "hermes-learning-and-memory-012",
+        "hermes-learning-and-memory-019",
+        "hermes-learning-and-memory-020",
+        "hermes-learning-and-memory-021",
+        "hermes-learning-and-memory-025",
+        "hermes-learning-and-memory-026",
+        "hermes-learning-and-memory-027"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-012",
+          "hermes-learning-and-memory-020",
+          "hermes-learning-and-memory-019",
+          "hermes-learning-and-memory-021"
+        ],
+        "why": "About 20 hooks in one ABC with a one-external-provider cap; fail-closed pre-compress checkpoint (API v2) that aborts compaction if extraction fails; post-commit write mirroring with provenance; serialized session-boundary commits (SRC). Provider backends (Honcho excluded, holographic, Hindsight, others) are DOC-only."
+      },
+      "mechanism": "MemoryManager holds builtin store + at most one external provider; hooks called at fixed lifecycle points on one serialized worker; writes mirrored after commit with {origin, session, previous_content}.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-planned-decisions-108",
+          "v-planned-decisions-099"
+        ],
+        "evidence": [
+          "apps/Model Plane/docs/decisions/ledger.md:1390"
+        ],
+        "gap": "Memory-adapter registry deliberately deferred (ledger 2026-05-30); letta-bridge already fronts three stores (agentmemory, pgstore, memstore) with RRF; holographic memory and RetainDB rejected (LEF section 1).",
+        "strengths": "letta-bridge with RRF fusion is a working multi-store design."
+      },
+      "benefit": "Little: Verevon is a hosted product with one memory owner (session-core); a plugin contract mainly serves self-hosters.",
+      "approach": "Do not build the registry; adopt only the pre-compress checkpoint idea (extract memory before compaction drops turns) inside session-core.",
+      "effort": "L",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "Third-party memory backends conflict with ZDR and no-cross-plane-DB rules.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Owner decision already deferred it; architecture rules argue against.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-026",
+      "name": "Standing user model (dialectic profile of the user)",
+      "description": "A maintained representation of who the user is (peer card, preferences, goals) refreshed across sessions and queried dialectically each turn.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes",
+          "web-chatgpt"
+        ],
+        "n": 2,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "hermes-learning-and-memory-024"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-024"
+        ],
+        "why": "Honcho provider: base layer (session summary + user representation + peer card, refreshed every N turns) plus an LLM dialectic supplement with depth 1-3 and self-audit (DOC only, external Plastic Labs service). ChatGPT's continually updated summary (web-chatgpt-web-product-090, in C02) is the mainstream analogue."
+      },
+      "mechanism": "Periodic job synthesises a bounded profile document from memories and recent sessions; injected as a stable block; optional per-turn question to a profile model ('what does this user likely want here?').",
+      "verevon": {
+        "status": "planned",
+        "baselineIds": [
+          "v-planned-decisions-109"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md:87"
+        ],
+        "gap": "Mental-model profile is top-5 item #4 in LEF, not started; Honcho as a dependency rejected.",
+        "strengths": ""
+      },
+      "benefit": "A short, stable profile is cheaper and more cache-friendly than per-turn semantic recall and makes tailoring visible ('what Verevon knows about you').",
+      "approach": "session-core: nightly per-user profile synthesis from agent_memory (Temporal job reusing MemoryConsolidation), stored as one editable memory of topic PROFILE, injected first; editable in MemorySection.",
+      "effort": "M",
+      "dependencies": [
+        "C02 consolidation",
+        "C01 controls"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Stale or wrong profile; must be user-editable and ZDR-free.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Already chosen by the owner; moderate cost. Provenance: supported only by DOC/INF reference records.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-027",
+      "name": "Self-maintained knowledge wiki/graph from user activity (Brain)",
+      "description": "Background runs turn sessions, connectors and files into linked wiki pages about projects, people and decisions, browsable as a graph, shared per project.",
+      "prevalence": {
+        "sourcesWith": [
+          "web-perplexity"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "web-perplexity-web-product-077",
+        "web-perplexity-web-product-078"
+      ],
+      "bestInClass": {
+        "source": "web-perplexity",
+        "recordIds": [
+          "web-perplexity-web-product-077",
+          "web-perplexity-web-product-078"
+        ],
+        "why": "q5 Brain: overnight refresh, stale marking, source-linked entries in their own git repositories, Concepts/Entities/Workstreams views, shared project Brain with owner-controlled auto/manual updates and personal-memory opt-in (DOC only, research preview)."
+      },
+      "mechanism": "Scheduled job reads new activity, extracts entities/decisions, upserts markdown pages with source links into a versioned store, marks pages stale when sources change; graph view over page links.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-chat-agents-ui-109",
+          "v-planned-decisions-114"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4323",
+          "apps/Frontend Plane/verevonv3/src/features/knowledge/components/KnowledgePage.tsx:1"
+        ],
+        "gap": "Org knowledge base is shipped as a grounding corpus and Data Plane owns wiki/graph tools, but nothing generates pages automatically from user activity; graph validity intervals planned (Graphiti rejected).",
+        "strengths": "Data Plane graph/wiki ownership is the right home."
+      },
+      "benefit": "Strong team feature, but large and overlaps Data Plane roadmap.",
+      "approach": "Data Plane: activity-to-wiki generator fed by session-core events via contract (no cross-plane DB); Model Plane proposes page edits; Space ACLs govern visibility.",
+      "effort": "XL",
+      "dependencies": [
+        "Data Plane wiki/graph",
+        "C19 proposals"
+      ],
+      "planeOwner": "Data Plane",
+      "risks": "Cost (owner credits), privacy of personal memory in shared Brains.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "Single DOC-only source; large effort. Provenance: supported only by DOC/INF reference records.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-028",
+      "name": "Per-conversation working memory (plan and task entries maintained by the agent)",
+      "description": "The agent keeps a plan and task list for the conversation and updates it on triggers.",
+      "prevalence": {
+        "sourcesWith": [
+          "antigravity"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "antigravity-agent-ux-and-gemini-076"
+      ],
+      "bestInClass": {
+        "source": "antigravity",
+        "recordIds": [
+          "antigravity-agent-ux-and-gemini-076"
+        ],
+        "why": "BrainEntry PLAN/TASK with TaskDelta ops (ADD, PRUNE, DELETE, UPDATE, MOVE) and update triggers (system-forced, user-requested) (SRC)."
+      },
+      "mechanism": "Structured plan/task document per conversation updated by delta ops; rendered as a panel.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6796-6806",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx"
+        ],
+        "gap": "Plan mode, plan.propose and PlanPanel are shipped (baseline category 5/9); not a memory feature as such.",
+        "strengths": "Plan approval grants autonomy and is prepended to the next run."
+      },
+      "benefit": "Keep.",
+      "approach": "Keep.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Covered by planning features.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-029",
+      "name": "Recall pipeline engineering (bounded prefetch, trivial-prompt gate, fenced context, query rewrite)",
+      "description": "Per-turn memory recall that never stalls the turn, skips trivial prompts, wraps recalled memory as fenced reference data, and rewrites the query for better recall.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "hermes-learning-and-memory-013",
+        "hermes-learning-and-memory-014",
+        "hermes-learning-and-memory-015",
+        "hermes-learning-and-memory-028"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-013",
+          "hermes-learning-and-memory-015",
+          "hermes-learning-and-memory-028",
+          "hermes-learning-and-memory-014"
+        ],
+        "why": "8 s bounded prefetch on a daemon thread, queued prefetch for the next turn, one serialized sync worker; fenced memory-context block with duplicate suppression and streaming scrubber; LLM query rewrite with injection hardening (SRC)."
+      },
+      "mechanism": "At turn start: if not trivial, run recall with a timeout; wrap results in a <memory-context> block marked 'reference data, not user input', drop repeated bullets, scrub fence tags from output; optional cheap-model rewrite of the last message into one retrieval question.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-modelplane-111",
+          "v-planned-decisions-100"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs:1-10",
+          "apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs:90",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1655",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5191-5256"
+        ],
+        "gap": "Prefetch (400 ms bound, trivial-prompt skip including Norwegian, outcome metrics) is shipped and is a Hermes port. Not found: LLM query rewrite and a fenced 'reference data' memory block (memory is injected as a system message; CHD judged the scrubber non-transferable).",
+        "strengths": "Tighter latency budget than Hermes and Norwegian trivial words."
+      },
+      "benefit": "Query rewrite would improve recall on pronoun-heavy follow-ups; low priority.",
+      "approach": "Optional rewrite via a cheap model behind a flag, measured against the existing prefetch outcome metric.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "Extra latency and cost per turn.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Strength; rewrite is an optional tune.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-030",
+      "name": "Bounded curated memory as a frozen, cache-safe prompt snapshot",
+      "description": "Small human-readable memory and user-profile stores with character budgets and a usage meter, injected once per session so the prompt prefix stays cacheable; compaction reloads them.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "hermes-learning-and-memory-001",
+        "hermes-learning-and-memory-002",
+        "hermes-learning-and-memory-075"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-001",
+          "hermes-learning-and-memory-002",
+          "hermes-learning-and-memory-075"
+        ],
+        "why": "MEMORY.md 2,200 chars and USER.md 1,375 chars with a fullness meter; snapshot frozen at session start so writes do not invalidate the prefix cache; compaction summary states memory remains authoritative and reloads it (SRC)."
+      },
+      "mechanism": "Load memory at session start into a cached block; writes go to disk and the tool result only; rebuild the block at compaction or new session; header shows used/limit so the model curates.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-modelplane-111"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5191",
+          "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:173-361"
+        ],
+        "gap": "Verevon recalls memory per turn by semantic search (query-dependent), so the memory block changes every turn; Anthropic cache breakpoints exist but memory is not a stable cached segment (INF from baseline).",
+        "strengths": ""
+      },
+      "benefit": "Cost and latency: a stable profile block (see C26) caches well; per-turn recall stays for long-tail facts.",
+      "approach": "Combine with C26: put the profile in the cached system prefix, keep per-turn recall after the cache breakpoint.",
+      "effort": "S",
+      "dependencies": [
+        "C26"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Optimisation, not a user-visible gap.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-031",
+      "name": "Robust memory-write tool mechanics (atomic batches, self-healing errors, tolerant matching, integrity guards)",
+      "description": "The model edits memory through a tool that applies batched add/replace/remove atomically against the final budget, returns fix-it errors, matches entries tolerantly, and guards against concurrent writers and hand edits.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "hermes-learning-and-memory-003",
+        "hermes-learning-and-memory-004",
+        "hermes-learning-and-memory-005",
+        "hermes-learning-and-memory-006"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-003",
+          "hermes-learning-and-memory-004",
+          "hermes-learning-and-memory-005",
+          "hermes-learning-and-memory-006"
+        ],
+        "why": "q5 atomic batch checked on final state; error payloads with closest entries and chars to free plus a 3-failure per-turn cap; quote/dash/whitespace-tolerant exact-first matching; file lock, atomic rename, drift detection with backup (SRC)."
+      },
+      "mechanism": "Tool memory(operations[]) applied to a copy under a lock; budget checked once at the end; errors carry repair hints; after N failures return a terminal result so a side effect cannot loop the turn.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-planned-decisions-101",
+          "v-modelplane-112"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4235",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:808-809"
+        ],
+        "gap": "save_memory is a single-entry write into Postgres (concurrency handled by the DB); no batch/replace/remove operations for the model, no repair-hint errors, no per-turn failure cap found (INF; verify in agent.rs).",
+        "strengths": "DB-backed writes already avoid the file-integrity problems Hermes guards against."
+      },
+      "benefit": "Lets the agent correct its own memory instead of only appending; minor.",
+      "approach": "Extend save_memory to operations[] (add/supersede/forget) mapped to existing correct/delete RPCs; add a failure cap.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "Model-initiated deletes; route deletes through C19 when unattended.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Useful hygiene, low visibility.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-032",
+      "name": "Memory-writing doctrine and routing (declarative facts; memory vs skills)",
+      "description": "Prompts tell the model to store memory as declarative facts, keep task knowledge in skills, and put each fact in exactly one store (who the user is vs how to do a task).",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "hermes-learning-and-memory-010",
+        "hermes-learning-and-memory-011"
+      ],
+      "bestInClass": {
+        "source": "hermes",
+        "recordIds": [
+          "hermes-learning-and-memory-011",
+          "hermes-learning-and-memory-010"
+        ],
+        "why": "q5 explicit one-fact-one-place routing shared by review prompts; schema lists WHEN/IF FULL/TARGETS/SKIP; complaints about how a task was handled go into that task's skill, not global memory (SRC)."
+      },
+      "mechanism": "Shared routing block embedded in memory and skill review prompts; tool schema descriptions encode skip rules (trivial facts, easily rediscovered facts).",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-modelplane-113"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs:128-140"
+        ],
+        "gap": "Dreaming extractor already writes one short third-person declarative sentence and skips task/transient facts (SRC); no explicit routing between memory and learned skills across the two pipelines (Dreaming vs sessionreview), so the same preference can land in both (INF).",
+        "strengths": "Extractor prompt is already declarative and conservative."
+      },
+      "benefit": "Prevents duplicated or conflicting personalisation as both loops mature.",
+      "approach": "Shared routing paragraph in dream_extractor and sessionreview prompts; sessionreview checks memory before writing a preference rule.",
+      "effort": "S",
+      "dependencies": [
+        "C17"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Cheap prompt work once C17 is live.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-033",
+      "name": "Onboarding and context-aware defaults (bootstrap the user model, local time/location, personalised suggestions)",
+      "description": "First-run setup asks how to address the user and passes environment facts; the assistant knows local time and optional location and shows home suggestions based on history and connected tools.",
+      "prevalence": {
+        "sourcesWith": [
+          "hermes",
+          "web-chatgpt"
+        ],
+        "n": 2,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "hermes-learning-and-memory-054",
+        "web-chatgpt-web-product-097"
+      ],
+      "bestInClass": {
+        "source": "web-chatgpt",
+        "recordIds": [
+          "web-chatgpt-web-product-097",
+          "hermes-learning-and-memory-054"
+        ],
+        "why": "ChatGPT: time-of-day awareness, opt-in precise location deleted after use, personalised homepage suggestions (DOC); Hermes: setup-card onboarding with a machine-fact JSON block (SRC)."
+      },
+      "mechanism": "Client sends timezone/locale each turn; onboarding writes initial profile memories with provenance 'stated'; home suggestions ranked from recent threads and connected integrations.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/onboarding/components/OnboardingPage.tsx",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/home-updates.ts"
+        ],
+        "gap": "An onboarding page and dashboard home exist (SRC file listing) but whether onboarding seeds memory/persona, and whether timezone reaches the prompt, is not verified.",
+        "strengths": ""
+      },
+      "benefit": "Faster time-to-personalisation for new users.",
+      "approach": "Let onboarding answers write 'stated' memories and persona via existing routes; pass timezone (settings.update_preferences already stores it) into the platform prompt block.",
+      "effort": "S",
+      "dependencies": [
+        "C01"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Small polish; verify first.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-034",
+      "name": "Usage reflection, recaps and wellbeing nudges",
+      "description": "Periodic recaps of themes and usage (year in review, monthly AI-fluency reflection) and self-set break reminders or quiet hours.",
+      "prevalence": {
+        "sourcesWith": [
+          "web-chatgpt",
+          "web-claudeai"
+        ],
+        "n": 2,
+        "of": 12,
+        "cls": "differentiator"
+      },
+      "members": [
+        "web-chatgpt-web-product-098",
+        "web-claudeai-web-product-077",
+        "web-claudeai-web-product-078"
+      ],
+      "bestInClass": {
+        "source": "web-claudeai",
+        "recordIds": [
+          "web-claudeai-web-product-077",
+          "web-claudeai-web-product-078"
+        ],
+        "why": "Monthly Reflect with AI-fluency observations and next steps, generated only when opened, excluding incognito; break reminders and quiet hours across surfaces (DOC)."
+      },
+      "mechanism": "On-demand aggregation over the user's own threads and memory; client-side wellbeing timers.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/actions/insights-user-report.ts"
+        ],
+        "gap": "Insights views and an insights user report action exist (org analytics, SRC file listing); a personal recap or wellbeing feature was not found.",
+        "strengths": ""
+      },
+      "benefit": "Low for a B2B work tool; an 'AI fluency' recap could help adoption programmes.",
+      "approach": "If wanted, generate a personal monthly report from cost/insights data in the Frontend.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Consumer-oriented. Provenance: supported only by DOC/INF reference records.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-035",
+      "name": "Self-configuring product: model reads and sets app preferences",
+      "description": "The assistant can read and change an allow-listed set of user preferences, each described with a model-facing meaning and lock reasons.",
+      "prevalence": {
+        "sourcesWith": [
+          "claude"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "claude-product-ux-074"
+      ],
+      "bestInClass": {
+        "source": "claude",
+        "recordIds": [
+          "claude-product-ux-074"
+        ],
+        "why": "q5 preferences schema {label, meaning, toolKey} exposed as get_settings/set_setting tools with value lists and locked reasons (SRC, observed live in this session)."
+      },
+      "mechanism": "Preference registry with model-facing descriptions; two tools (get, set) restricted to an allow-list; locked values return the reason; changes audited.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2387",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:127-134"
+        ],
+        "gap": "Typed action registry has settings.update_preferences / settings.update_setting with owner plane, risk and approval metadata (SRC), but they are not in the model-eligibility allowlist (only tickets.create, inbox.*, chat.submit_feedback and a few others), so the agent cannot change preferences.",
+        "strengths": "The governed action registry (owner contract, forged-call denial) is a stronger foundation than Claude's allow-list."
+      },
+      "benefit": "'Make answers shorter from now on' or 'notify me when runs finish' handled by the assistant directly; good for the AI-first claim.",
+      "approach": "Admit settings.update_preferences to model eligibility through the documented proof steps (Control-signed decision, owner forged-call denial); add model-facing meaning strings per preference.",
+      "effort": "S",
+      "dependencies": [
+        "Control Plane run-action decisions"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Must not include security or billing settings.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Cheap given the registry; distinctive.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t3-08-036",
+      "name": "Computer activity history feeding memory (Chronicle)",
+      "description": "Opt-in text summaries of what the user does in allowed apps and sites so the assistant can answer 'what was I working on'.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexagent"
+        ],
+        "n": 1,
+        "of": 12,
+        "cls": "unique"
+      },
+      "members": [
+        "codexagent-agent-runtime-and-models-080"
+      ],
+      "bestInClass": {
+        "source": "codexagent",
+        "recordIds": [
+          "codexagent-agent-runtime-and-models-080"
+        ],
+        "why": "Only reference: consent dialog, include/exclude apps and sites, browse/delete items, requires Memories on, native recorder service (SRC, medium confidence)."
+      },
+      "mechanism": "Native recorder summarises on-screen activity into text items stored locally; items feed memory retrieval.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not present; Verevon is a web app with no desktop recorder.",
+        "strengths": ""
+      },
+      "benefit": "Low; conflicts with ZDR posture and privacy expectations for business users.",
+      "approach": "Do not build.",
+      "effort": "XL",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Privacy, regulatory exposure.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Does not fit a web product or ZDR.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    }
+  ]
+}

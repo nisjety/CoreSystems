@@ -1,0 +1,2579 @@
+{
+ "category": "Models & routing",
+ "excluded": [
+  {
+   "id": "t3code-architecture-051",
+   "reason": "Local CLI maintenance (package-registry version advisories and one-click npm/brew installers for agent CLIs); implementation trivia of a desktop CLI wrapper with no relevance to hosted model routing."
+  },
+  {
+   "id": "t3code-ui-and-multimodel-011",
+   "reason": "Provider CLI update advisories and one-click CLI updates; same CLI-installation trivia as t3code-architecture-051, no hosted-routing relevance (the hosted analogue, model deprecation notices, is covered by the lifecycle cluster)."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t3-09-001",
+   "name": "Rich per-model capability record served to clients",
+   "description": "Each model is described by data, not code: context window and max output, input modalities, tool strategy, supported reasoning levels with default, verbosity and summary support, parallel tool calls, service tiers, plan availability, prompt-template and tool-format choices. Clients and the harness gate controls and prompts from this record, so a new model needs no client change.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "t3code",
+     "web-chatgpt"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-081",
+    "antigravity-agent-ux-and-gemini-083",
+    "codexagent-agent-runtime-and-models-029",
+    "codexagent-agent-runtime-and-models-098",
+    "web-chatgpt-web-product-104",
+    "t3code-architecture-073",
+    "t3code-ui-and-multimodel-089"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-029",
+     "codexagent-agent-runtime-and-models-098"
+    ],
+    "why": "q5 SRC: an embedded and remotely refreshed models.json where every entry declares about 40 fields (context_window, max_context_window, auto_compact_token_limit, input_modalities, truncation_policy, supported_reasoning_levels with descriptions, supports_reasoning_effort_updates, service tiers, available_in_plans, minimal_client_version, prompt templates); model/list projects the same tuple to clients with cursor pagination. Antigravity (081, 083) is equally rich on quota fraction, credit multiplier and prompt/tool formatter enums; T3 Code (073, 089) shows how to normalise static, live-listed and ACP-advertised catalogues into one descriptor."
+   },
+   "mechanism": "Define a ModelRecord (serde + JSON Schema) in mp-contracts: id, display_name, provider, family, lifecycle, context_window, max_output, auto_compact_limit, input_modalities[], tool_mode, parallel_tools, reasoning {levels:[{id,wire,description}], default, supports_mid_session_update}, verbosity {supported, default}, service_tiers[], prompt_template_id, tool_formatter, price_ref, privacy_tier, residency, plan_gates. inference-core owns the table and ListModels returns it whole; model-gateway /v1/models proxies it unchanged; the Solid picker and composer render controls only from fields that are present. Unknown fields default conservatively (no effort control, text-only).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-127",
+     "v-chat-agents-ui-110"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7593-7640",
+     "apps/Model Plane/rust/services/inference-core/src/grpc.rs:394"
+    ],
+    "gap": "ListModels returns only id, provider, modality, streaming, feature families, privacy_tier and residency (http_routes.rs ModelDescriptor). No context window, max output, reasoning ladder, service tiers, lifecycle, price or plan gating per model, so the SPA cannot gate effort or show context budgets per model.",
+    "strengths": "The catalogue already has a single owner (inference-core) and carries privacy tier and residency per model, which no reference exposes as cleanly."
+   },
+   "benefit": "One record drives the picker, effort control, context budgeting, compaction triggers and router decisions; adding Gemini or a new GPT generation becomes a data change. Keeps the capability owner in Model Plane (no duplicated catalogue in the gateway or SPA).",
+   "approach": "Extend the inference-core ListModels proto with the fields above, seed it from the existing per-model feature list and cost-core price ids, and render the composer controls from it in the Solid picker. Version the record so the gateway can pass it through without interpretation.",
+   "effort": "M",
+   "dependencies": [
+    "mp-contracts proto change",
+    "cost-core price catalogue ids",
+    "C-t3-09-002 distribution (optional)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Records drift from provider reality; mitigate with a startup probe and a test that every routable model has a complete record.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Foundation for the priority effort and Gemini work; not user-visible by itself.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-002",
+   "name": "Remote, versioned and signed catalogue distribution with fallback",
+   "description": "The model list, capabilities and prices are fetched at runtime from a signed or versioned artifact with ETag caching, TTL, stale-while-revalidate and a bundled fallback, so model launches and price changes ship without a release and a failed fetch never breaks the app.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "hermes",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-runtime-architecture-069",
+    "codexagent-agent-runtime-and-models-031",
+    "t3code-architecture-016",
+    "t3code-ui-and-multimodel-058",
+    "hermes-architecture-and-surfaces-101"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-069"
+    ],
+    "why": "q5 SRC: a signed catalog (catalog.json plus a .raw-sig.json sidecar, size caps 2 MiB and 16 KiB, 10 s timeout) that carries context, output, effort levels, capabilities, knowledge cutoff and per-surface scope, with a custom URL for managed deployments. Codex (031) adds an ETag + client-version cache with per-account refresh; Hermes (101) adds stale-while-revalidate and quarantine of corrupt caches."
+   },
+   "mechanism": "Publish the catalogue as a versioned JSON artifact signed with a deployment key. inference-core loads it at startup and on a timer: conditional GET with ETag, verify the signature and schema version before swapping an Arc pointer, keep the last good copy on disk, fall back to a compiled-in default when nothing valid exists, and quarantine a file that fails validation. Expose the catalogue version and fetched_at in ListModels so clients can show staleness. Enterprise or sovereign deployments point at their own URL.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-127",
+     "v-modelplane-126"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs:127-222",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7600-7604"
+    ],
+    "gap": "The routing table is editable at runtime (RoutingPolicy), but model capability metadata lives in code; there is no versioned or signed catalogue artifact, no ETag cache and no catalogue version exposed to clients.",
+    "strengths": "Clients already read the catalogue from the server (no SPA hard-coding), so only the server side needs the artifact loader."
+   },
+   "benefit": "Model launches, retirements and price changes without a Model Plane redeploy; a signed artifact fits the release-posture gap (no signed artifacts today) and lets sovereign customers pin their own catalogue.",
+   "approach": "Add a catalogue loader to inference-core (Rust) with signature verification and an on-disk last-good cache; keep RoutingPolicy as the routing overlay on top of the catalogue.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-09-001 record schema",
+    "signing key management (Control Plane or deploy pipeline)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "A bad catalogue push could hide every model; require schema validation, staged rollout and a compiled-in floor.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Valuable operationally but Verevon is server-hosted, so a redeploy of inference-core is an acceptable interim path.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-003",
+   "name": "Model lifecycle: deprecation, retirement date, upgrade target and legacy grouping",
+   "description": "Models carry lifecycle states (default-on, hidden, end-of-life) and an upgrade target; the client shows a migration notice and retirement date, groups old models as legacy and switches long-lived threads automatically after retirement.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "web-claudeai"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-035",
+    "cursor-ai-features-072",
+    "web-claudeai-web-product-085"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-035"
+    ],
+    "why": "q4 SRC: catalogue upgrade {model, migration_markdown, retirement_at} drives a migration card, a banner above the composer and an automatic per-thread switch after retirement. Cursor (072) adds explicit lifecycle enums and upgradeModelId; Claude.ai (085) maps voice to the latest generation of the last text model."
+   },
+   "mechanism": "Add lifecycle {state: active|default_off|hidden|deprecated|retired, retire_at, successor_id, migration_note} to the model record. Router and picker hide retired models; a thread whose stored model is retired resolves to successor_id at the next turn and the gateway emits a model_switched event with the reason; the picker shows deprecated models in a Legacy fold with the retirement date.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/config.rs:83"
+    ],
+    "gap": "No baseline record. A grep of inference-core for deprecat/retire finds only a comment about a retired Cohere model name (config.rs:83); check whether intent defaults or stored thread models are migrated when a provider retires a model id (for example GPT-5.5 retiring 2026-10-14 per WC-099).",
+    "strengths": ""
+   },
+   "benefit": "Verevon pins concrete defaults behind Budget/Balance/Genius; provider retirements (about 90 days after a successor) will otherwise break saved threads, agents and scheduled runs silently.",
+   "approach": "Lifecycle fields in the catalogue (C-t3-09-001), a resolver in inference-core that maps retired ids to successors, and a model_switched SSE event rendered by the served-by line.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Automatic successor mapping can change cost or behaviour; record it per run and show it.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap insurance against fast-rotating provider ids; agents and schedules make it more important than in plain chat.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-004",
+   "name": "Plan, role and org model entitlements with admin defaults and caps",
+   "description": "Which models and effort levels a member can use is decided by plan, organisation role or group, with admin-set default model, effort and speed, an efficient mode that forces cheap models, access-program gating for sensitive specialty models, and a tool that explains a member's effective access.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "t3code",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-045",
+    "claude-product-ux-152",
+    "web-chatgpt-web-product-105",
+    "web-claudeai-web-product-080",
+    "web-claudeai-web-product-083",
+    "codexagent-agent-runtime-and-models-043",
+    "t3code-ui-and-multimodel-090",
+    "claude-product-ux-139"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-105"
+    ],
+    "why": "q4 DOC: admins set starting model, reasoning level, speed and Fast Mode availability separately per surface, new models are off by default in Enterprise, roles are additive, and a Model Test tool shows a member's effective access. Claude desktop (152) adds per-role effort caps where the most permissive role wins; Codex (045, 043) encodes plan lists and access programs as catalogue data."
+   },
+   "mechanism": "Control Plane owns an entitlement policy: rules {subject: org|role|group|plan, allow_models[], deny_models[], max_effort, default_model, default_effort, speed_tiers_allowed}. Resolution: union of allows across roles, intersect with plan, then the most permissive effort cap. Model Plane receives the resolved entitlement in the signed request context and filters ListModels and admission (refuse with a typed reason, never silently substitute). An explain endpoint returns the matching rules for one member.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-114",
+     "v-chat-agents-ui-115"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:148-160"
+    ],
+    "gap": "There is no per-org or per-role model allowlist: model-gateway refuses the OrgPolicy allowed_models field by name because no service owns it (grpc.rs:151-157). Router policy and the privacy floor exist, but no role-level model or effort caps, no admin default per surface and no effective-access explainer.",
+    "strengths": "The refusal of an unowned allowlist is the right fail-closed behaviour; the privacy-tier floor already gives a policy-shaped hook in admission."
+   },
+   "benefit": "Enterprise buyers expect to restrict expensive or non-EU models per role; it closes a governance gap that the code itself flags and fits the authority model (Control decides, Model enforces).",
+   "approach": "Give allowed_models a home in Control Plane (org/role policy with an explain API), carry the resolved entitlement in the Model Plane auth context, filter ListModels and refuse at admission in inference-core. Solid admin page under settings next to the router-policy page.",
+   "effort": "M",
+   "dependencies": [
+    "Control Plane policy schema",
+    "mp-authctx claims extension",
+    "C-t3-09-001"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Entitlement must never widen an owner-plane ACL or a Space's rights; resolution order must be documented and tested.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Code-confirmed hole that enterprise customers will hit first; small surface area because admission already fails closed.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-005",
+   "name": "Per-model reasoning-effort ladder validated and mapped to each wire vocabulary",
+   "description": "One canonical effort scale (for example none to ultra) is mapped per model to what the provider accepts; unsupported values are clamped to the nearest weaker level or refused before any network call, effort is clamped per surface and role, and the composer only shows levels the selected model supports.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "deepseek",
+     "hermes",
+     "t3code",
+     "web-claudeai"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-032",
+    "codexagent-plugins-and-extensibility-073",
+    "deepseek-harness-architecture-039",
+    "deepseek-transparency-and-customization-092",
+    "hermes-architecture-and-surfaces-096",
+    "web-claudeai-web-product-081",
+    "claude-runtime-architecture-070",
+    "t3code-architecture-091",
+    "t3code-ui-and-multimodel-005",
+    "claude-product-ux-105"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-096"
+    ],
+    "why": "q4 SRC: EFFORT_LADDER plus named per-generation wire vocabularies and clamp_effort() that picks the nearest weaker level instead of sending a value that 400s, with capability probes cached per (model, base_url). Codex (032, q5) has the best declared per-model ladder with descriptions; DeepSeek (092) refuses unsupported values pre-dispatch; T3 Code (005) renders the controls generically from descriptors."
+   },
+   "mechanism": "Canonical enum Effort {None, Minimal, Low, Medium, High, XHigh, Max}. Each model record declares levels as {canonical -> wire value} (OpenAI reasoning.effort, Anthropic output_config.effort or thinking.budget_tokens, Codex reasoning_effort, Gemini thinking_level/budget). Resolution in inference-core: requested -> clamp by surface and role cap -> clamp to nearest weaker supported -> map to wire; log the clamp on the run. Composer renders a select from the record; max levels show a limit-cost warning.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-129",
+     "v-chat-agents-ui-112",
+     "v-planned-decisions-120"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/thinking.rs:1-36",
+     "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:402-428",
+     "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:142-156"
+    ],
+    "gap": "Quick/Standard/Deep profiles map to Anthropic thinking budget and Codex reasoning_effort only; the OpenAI and Azure chat path sends no reasoning effort at all. No per-model declared ladder, no clamp-to-nearest rule, no per-role or per-surface cap.",
+    "strengths": "The composer already exposes effort (Auto / Raskt svar / Dyp research) and streams reasoning as reasoning_delta into a collapsible trace."
+   },
+   "benefit": "Most Budget/Balance/Genius defaults are OpenAI-family models, so the main route currently ignores the user's depth choice; mapping it fixes answer quality and cost on the most-used path.",
+   "approach": "Add the effort map to the model record, implement a single resolve_effort() in inference-core used by every provider adapter (OpenAI/Azure first), and keep the composer's three-step dial as presets over the canonical scale.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-001 (can start with a static table)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Higher effort raises cost and latency; tie it to budget posture and show the cost multiplier.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Code-verified gap on the default route with a small, well-understood fix that every reference implements.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-006",
+   "name": "Intent presets and aliases that hide concrete models (Auto, Best, Lite/Standard/Max, effort slider)",
+   "description": "Users pick a preset or alias (Auto, Recommended, Best, Lite/Standard/Max, Light to Ultra) that the server resolves to a concrete model, reasoning level, step budget and tools; defaults can change without a client update.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "manus",
+     "web-chatgpt",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-140",
+    "web-chatgpt-web-product-100",
+    "web-perplexity-web-product-083",
+    "manus-product-ux-100",
+    "web-manus-web-product-073",
+    "web-perplexity-web-product-087"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-083",
+     "web-perplexity-web-product-087"
+    ],
+    "why": "q5 DOC: one Effort slider maps to an eval-maintained (coordinating model, reasoning) pair with a Custom escape hatch, and the Agent API presets expand to model, max_steps, reasoning, tools and instructions within published bands. Antigravity (140) shows the server-pushed versioned alias override."
+   },
+   "mechanism": "Preset table {preset -> model or routing mode, effort, max_steps, tool set, instructions} owned server-side and versioned; the client sends only the preset id; the served model and preset version are stamped on the answer.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-126",
+     "v-planned-decisions-121",
+     "v-chat-agents-ui-112",
+     "v-planned-decisions-116"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/intent.rs:1-60",
+     "apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs:127-222",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:808-866"
+    ],
+    "gap": "Presets resolve model but not step budget or tool set; the preset version is not stamped on the answer.",
+    "strengths": "Budget/Balance/Genius combine task complexity with the org's cost-core budget posture, a tool-use floor and a fallback ladder, editable at runtime; this is more adaptive than fixed presets in most references."
+   },
+   "benefit": "Keep: it gives non-expert users one choice and lets Verevon tune routing centrally.",
+   "approach": "Keep the intent router; optionally extend presets with max_steps and tool bundles for agent runs (Perplexity-style bands).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Hidden model choice reduces transparency; keep the served-by line.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is equal or ahead here.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-007",
+   "name": "Auto-routing transparency: routed model, reroute reason and routing feedback",
+   "description": "When the service picks or substitutes a model, the stream says which model actually answered and why (auto choice, fallback, safety, verification), and users can rate the routing.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-073",
+    "cursor-harness-architecture-108",
+    "codexagent-plugins-and-extensibility-110"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-073",
+     "cursor-harness-architecture-108"
+    ],
+    "why": "q4 SRC: the agent stream emits routed_model with a display name when the client declares support, and ReportAutoRoutingResultFeedback collects ratings. Codex (110) adds model/rerouted and model/verification notifications plus an allowProviderModelFallback thread flag."
+   },
+   "mechanism": "inference-core returns RoutingDecision {requested, resolved_model, provider, reason: intent|fallback|refusal|limit|policy, complexity_score, budget_posture} per call; model-gateway emits it as a routed_model SSE event and persists it on the run step; the SPA shows it in the served-by line with a thumbs control that posts feedback to a router-feedback table used for policy tuning.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-116",
+     "v-modelplane-138"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:39-60",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:290-297"
+    ],
+    "gap": "The served-by line carries provider deployment, residency and privacy tier but no resolved model id or routing reason (ServedBy struct), routing is request-level only (step-level RoutingDecision is planned) and there is no routing feedback.",
+    "strengths": "Provenance is stamped server-side and omitted rather than faked when unknown."
+   },
+   "benefit": "Directly serves the DeepSeek-style transparency goal and gives the router-policy page real data to tune Budget/Balance/Genius.",
+   "approach": "Implement the planned step-level RoutingDecision in inference-core, add model and reason to ServedBy, and a small feedback endpoint in model-gateway.",
+   "effort": "S",
+   "dependencies": [
+    "v-modelplane-138 RoutingDecision"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Exposing model names may conflict with abstraction choices; allow an org setting to show tier names only.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Low effort, high trust value, unblocks router tuning.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-008",
+   "name": "Role and task-specific model slots (planner, subagent, utility, memory, safety)",
+   "description": "Different jobs run on different configurable models: planner versus worker, subagent types, titles and follow-ups, compaction, memory extraction, approval review, safety classification and scheduled automations, each with its own provider, model and effort.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "hermes",
+     "t3code",
+     "web-perplexity"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-084",
+    "codexagent-agent-runtime-and-models-040",
+    "codexagent-plugins-and-extensibility-072",
+    "hermes-architecture-and-surfaces-099",
+    "t3code-architecture-048",
+    "t3code-ui-and-multimodel-006",
+    "web-perplexity-web-product-084",
+    "cursor-ai-features-078"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-099"
+    ],
+    "why": "q5 SRC: auxiliary.<task>.{provider, model, base_url, reasoning_effort} for about 20 side tasks resolved through the same runtime resolver, with observer hooks per physical attempt and a stall watchdog. Antigravity (084, q5) adds a ModelTier enum (INHERIT, FLASH_LITE, FLASH, PRO) per subagent and per system job."
+   },
+   "mechanism": "A role table in RoutingPolicy: roles {chat, planner, worker, subagent:<type>, title, follow_ups, verification_judge, compaction, memory_extract, safety, scheduled} -> {model or intent mode or INHERIT, effort, fallback}. Every inference call carries its role; inference-core resolves through the same intent/fallback path, so privacy floor and ZDR apply equally. Admin edits it in the router-policy page.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-126",
+     "v-chat-agents-ui-114"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:7839-7894",
+     "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:263",
+     "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:113-148"
+    ],
+    "gap": "Side tasks exist but their models are hard-coded constants (TITLE_MODEL, FOLLOW_UPS_MODEL and VERIFICATION_JUDGE_MODEL = gpt-4o-mini in sse.rs; deep-research PLAN_MODEL = verevon-budget) and the Do planner resolves its own model; there is no named role table an admin can edit.",
+    "strengths": "Utility calls already go to a cheap model and the planner defaults to a Verevon intent mode."
+   },
+   "benefit": "Lower cost and consistent policy for background inference; lets Verevon route perception or long-context subagents to the provider that does them best (for example Gemini for video) without touching the main loop.",
+   "approach": "Add a role dimension to RoutingPolicy in inference-core and replace the constants with role lookups; expose it in the existing router-policy admin page.",
+   "effort": "S",
+   "dependencies": [
+    "RoutingPolicy schema"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Misconfigured roles can raise cost; default every role to today's constant.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small refactor with clear cost and quality benefit.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-009",
+   "name": "Multimodal input routing and per-model media budgets",
+   "description": "Images and files are handled per model: native vision parts when the model supports them, an auxiliary vision model that describes them first when it does not, provider-grid image resizing and upload caching, logged offload of old images under byte or count budgets, file handles instead of raw files, and perception subagents on a different provider (for example video on Gemini).",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-104",
+    "codexagent-agent-runtime-and-models-046",
+    "deepseek-harness-architecture-041",
+    "deepseek-transparency-and-customization-098",
+    "deepseek-harness-architecture-042",
+    "cursor-harness-architecture-109"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-104"
+    ],
+    "why": "q4 SRC: decide_image_input_mode picks native versus describe-first once per turn (auto|native|text) based on the main model capability and an optional auxiliary vision backend, so any model can take images. DeepSeek (041, 098) has the most careful budget and offload accounting; Cursor (109) shows perception-as-subagent on a video-capable model."
+   },
+   "mechanism": "Per turn: read input_modalities from the model record; if the model accepts images send native parts resized to the provider grid and referenced by content-addressed upload id; otherwise call the vision role model to produce a description block. Keep an image budget per request (bytes, count, tokens); when exceeded, replace the oldest images with named placeholders and emit an image_offload event the UI and model both see. Non-image files become a stable handle line read on demand through a document tool. Video or audio go to a perception subagent routed by role.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record in this category. Reference notes (HA-104, CX-046 rel fields) say a Verevon vision answer replaces the normal pipeline for that turn; check model-gateway for how attachments reach tool loops, whether non-vision models get a describe pre-step, and whether image budgets or offload notices exist.",
+    "strengths": ""
+   },
+   "benefit": "Lets images and documents participate in agent tool loops on any routed model and keeps Data Plane documents as handles (no copy into prompts), which also helps ZDR and cache stability.",
+   "approach": "Model Plane gateway pre-processor driven by the model record and a vision role slot (C-t3-09-008); Data Plane documents passed as handles resolved by a read tool.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-09-001",
+    "C-t3-09-008"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Describe-first loses detail; show which path was used.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Multimodal parity is part of the chat-plus-agent vision; exact current state must be verified.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-010",
+   "name": "Provider-neutral inference layer: adapters, middleware chain and canonical event stream",
+   "description": "One neutral request and response model is converted per provider by adapters or transports; quirks (image resize, effort mapping, continuation injection, trailing empty assistant messages, closed role map) are handled by composable middleware; every backend is normalised into one runtime event vocabulary.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "t3code"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-architecture-084",
+    "cursor-ai-features-077",
+    "cursor-harness-architecture-106",
+    "hermes-architecture-and-surfaces-092",
+    "deepseek-harness-architecture-035",
+    "deepseek-harness-architecture-135",
+    "deepseek-harness-architecture-046",
+    "t3code-architecture-031",
+    "t3code-ui-and-multimodel-055",
+    "t3code-ui-and-multimodel-056"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-056",
+     "t3code-ui-and-multimodel-055",
+     "t3code-architecture-031"
+    ],
+    "why": "q5 SRC: a 48-type canonical provider runtime event taxonomy (session, turn, item, content delta, approvals, tasks, hooks, token usage, raw payload escape) over five agent protocols, behind a driver SPI that yields per-instance probe, session adapter and text-generation objects. Cursor (106) gives the cleanest decorator chain over an executor; DeepSeek (035) keeps a first-party adapter beside a neutral multi-provider one."
+   },
+   "mechanism": "Rust: trait ModelExecutor { async fn stream(&self, req: NeutralRequest) -> EventStream }. Decorators wrap it (ImageResize, EffortMap, ContinuationInject, TrailingEmptyAssistantStrip, Metered, Tracing). Adapters per wire protocol (OpenAI Chat/Responses, Anthropic Messages, Gemini generateContent, Codex app-server). Output is one closed event enum (text_delta, reasoning_delta, tool_call, usage, served_by, error{code}) plus a raw escape hatch, with a closed role set {system, developer, user, assistant, tool}.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-117",
+     "v-modelplane-122"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:471",
+     "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:505-700",
+     "apps/Model Plane/rust/services/inference-core/src/metered.rs:1-8",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:20-80"
+    ],
+    "gap": "ModelFamily is only OpenAiCompatible or Anthropic, so a native Gemini or DeepSeek adapter needs a new family; provider quirks are handled inside adapters rather than as named middleware.",
+    "strengths": "inference-core already has a provider trait, a metered decorator so no RPC goes unmetered, typed SSE events and the Codex subscription adapter; this seam is as good as the references."
+   },
+   "benefit": "Keep: it is the seam every gap in this category plugs into.",
+   "approach": "Keep; when adding Gemini, introduce a third family and lift recurring quirks into named decorators.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Leaking provider-specific fields into the neutral model; keep a raw escape hatch instead.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is equal here; only breadth is missing (see lineup cluster).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-011",
+   "name": "Pre-dispatch capability validation of the call (model, provider, effort, IDs)",
+   "description": "Before any provider I/O the harness resolves the exact model metadata, validates the call (effort level, modalities, model/provider pairing, provider-specific id syntax such as Bedrock ARNs) and refuses with typed suggestions, binding the validated call to the adapter that will dispatch it.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-036",
+    "hermes-architecture-and-surfaces-110",
+    "claude-runtime-architecture-071"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-036"
+    ],
+    "why": "q5 SRC: ctx.llm.prepareCall resolves context window, output default, efforts, modalities and update modes, validates the config and returns a frozen call bound to the adapter generation, so capability checks happen before spend and hot config changes cannot split a call."
+   },
+   "mechanism": "inference-core: fn prepare(req, catalogue) -> Result<PreparedCall, Refusal>; validates model exists and is routable for the caller, effort is in the declared ladder (or clamps), modalities match, max_tokens fits, then freezes the resolved provider, deployment and wire params. Refusals are typed (INVALID_ARGUMENT with suggestions[]).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-135",
+     "v-planned-decisions-124"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/config.rs:259-283",
+     "apps/Model Plane/rust/services/inference-core/src/provider/overflow.rs:100"
+    ],
+    "gap": "Privacy tier, residency and ZDR are gated before the network and overflow is typed, but there is no general prepared-call object that validates effort, modality or model/provider pairing up front with suggestions.",
+    "strengths": "Pre-network privacy gating that fails closed is already stronger than most references."
+   },
+   "benefit": "Fewer wasted provider calls and clearer errors; pairs naturally with the effort ladder.",
+   "approach": "Extend admission in inference-core into a PreparedCall step once the model record exists.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-001",
+    "C-t3-09-005"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Over-strict validation can block valid provider ids; allow an unverified-but-allowed state.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Hygiene that falls out of the priority effort work.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-012",
+   "name": "Declarative provider registry with custom endpoints, compat switches and model discovery",
+   "description": "A provider is a data record (auth type, base URL, models URL, wire protocol, capability flags, retry and timeout budgets, quirks such as developer-role or max_tokens field name) that admins add through a validated form or wizard; any OpenAI-compatible or Anthropic-compatible gateway can be added and its models discovered.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "deepseek",
+     "hermes",
+     "t3code"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-091",
+    "codexagent-agent-runtime-and-models-037",
+    "codexagent-plugins-and-extensibility-071",
+    "deepseek-harness-architecture-047",
+    "deepseek-transparency-and-customization-090",
+    "deepseek-transparency-and-customization-091",
+    "deepseek-transparency-and-customization-093",
+    "antigravity-agent-ux-and-gemini-085",
+    "t3code-ui-and-multimodel-008",
+    "t3code-ui-and-multimodel-009"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-091"
+    ],
+    "why": "q5 SRC: 41 bundled ProviderProfile plugins, each a dataclass with api_mode, auth_type, base and models URLs, classify_api_error and vision/tool-message quirks, discovered lazily and overridable by a same-name user profile. DeepSeek (090, 093) is best on the user-facing form and on documenting compat switches as unverified claims; Codex (037) has the tightest 21-field provider record."
+   },
+   "mechanism": "ProviderProfile {id, display, wire: openai_chat|openai_responses|anthropic_messages|gemini, base_url, models_url, auth: platform_secret|integration_connection|helper, compat {developer_role, max_tokens_field, thinking_format}, capabilities, retry {max, backoff}, timeouts, residency, privacy_tier}. Stored by inference-core (secrets referenced, never stored in the profile); discovery calls GET /models and proposes entries without mutating config until saved; profiles flow into the same fallback chain and privacy gates.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-122",
+     "v-planned-decisions-117",
+     "v-modelplane-125"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/config.rs:209-214",
+     "apps/Model Plane/rust/services/inference-core/src/config.rs:286-326"
+    ],
+    "gap": "Providers are registered from environment configuration (INFERENCE_PROVIDER_ORDER plus fixed adapters); an operator can point OPENAI_API_BASE at a compatible server, but there is no admin-defined provider record, compat switches, discovery or add-provider UI.",
+    "strengths": "Every registered provider declares residency and privacy tier, which keeps added endpoints inside the privacy-tier gate."
+   },
+   "benefit": "Enterprise and sovereign customers can add their own gateway or on-prem endpoint without a Verevon release, which also covers the local-model need in a cloud-appropriate way.",
+   "approach": "Model Plane: a provider-profile table in inference-core with a schema-annotated admin form in the Solid settings (generated from JSON Schema, T3 Code style); credentials referenced via Integration Core or a platform secret store.",
+   "effort": "M",
+   "dependencies": [
+    "Integration Core credential references",
+    "C-t3-09-001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Unverified endpoints can claim residency or ZDR they do not have; customer-declared profiles must default to the lowest privacy tier until attested.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Unlocks BYO gateway, on-prem and new vendors with one mechanism.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-013",
+   "name": "Bring-your-own keys, cloud accounts and customer LLM gateway",
+   "description": "Users or enterprises run models on their own provider accounts: API keys, Amazon Bedrock, Google Vertex, Azure Foundry or a customer-owned LLM gateway, with credential helpers that mint short-lived tokens, health probes, separate primary and side-task models, and strict separation between account sign-in and API-key routes.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "deepseek",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "cursor-ai-features-074",
+    "manus-product-ux-101",
+    "web-chatgpt-web-product-106",
+    "web-claudeai-web-product-086",
+    "claude-product-ux-107",
+    "claude-runtime-architecture-072",
+    "deepseek-transparency-and-customization-099",
+    "cursor-ai-features-096"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-107",
+     "claude-runtime-architecture-072"
+    ],
+    "why": "q4 SRC: a provider-agnostic third-party inference setup (Bedrock, Vertex, Foundry, gateway) with about 35 IPC methods, OIDC sign-in, custom headers, model discovery, price multipliers, token caps, health states, and helper-script credentials with TTL, timeout and silent refresh. Cursor (096) adds a team-level gateway with per-provider routing; DeepSeek (099) states the no-silent-fallback rule between credential kinds."
+   },
+   "mechanism": "A BYO connection is an Integration Core credential (key, cloud role or helper command) referenced by a provider profile; Model Plane receives only an opaque connection id and a short-lived token minted per call. Health probe on save; per-connection primary and side-task model; billing marks those calls as customer-billed in cost-core. Platform credentials and customer credentials never fall back to each other.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-111",
+     "v-modelplane-128"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:1-60",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chatgpt-subscription-client.ts:1"
+    ],
+    "gap": "Only the user-owned ChatGPT subscription route exists (chat; Do off by default). No API-key BYOK, no Bedrock/Vertex/Foundry customer accounts, no customer gateway and no credential helper.",
+    "strengths": "The subscription route already follows the right authority model: Integration Core holds the OAuth token and Model Plane sees only a connection id."
+   },
+   "benefit": "Removes the cost objection for heavy users and lets regulated customers keep inference in their own cloud tenancy; extends a pattern Verevon already has.",
+   "approach": "Generalise the subscription connection to a BYO connection kind in Integration Core and a provider profile in inference-core (C-t3-09-012); mark ZDR and residency from the customer contract, not assumed.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-09-012",
+    "Integration Core credential kinds",
+    "cost-core customer-billed flag"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Customer endpoints may log prompts; ZDR must not be claimed for BYO routes unless attested.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Strong enterprise ask, but depends on the provider registry first.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-014",
+   "name": "Subscription-login providers and model-only bridges",
+   "description": "Users sign in with an existing AI subscription (ChatGPT/Codex, Copilot, Nous, Kimi) through OAuth, PKCE or device flows; the harness either hands turns to the vendor runtime (Codex app-server) or exposes a model-only OpenAI-compatible proxy over that login.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-106",
+    "hermes-architecture-and-surfaces-107",
+    "hermes-architecture-and-surfaces-108",
+    "hermes-architecture-and-surfaces-111",
+    "deepseek-harness-architecture-048"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-107",
+     "hermes-architecture-and-surfaces-111"
+    ],
+    "why": "q4 SRC/DOC: a broad auth family (PKCE, device code, browser OAuth, external ACP processes) and a Codex app-server runtime that projects Codex events back into Hermes shape while exposing Hermes tools over MCP."
+   },
+   "mechanism": "Integration Core owns the login and token refresh; the inference adapter talks to the vendor runtime (Codex app-server) with an opaque connection id and maps its events to the neutral stream; tools can be offered back to the vendor runtime over MCP when policy allows.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-128",
+     "v-chat-agents-ui-111"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:1-60",
+     "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:142-156",
+     "apps/Model Plane/rust/services/model-gateway/src/subscription_failure.rs:1-10"
+    ],
+    "gap": "Chat only: tools, browsing, images, deep research, skills and attachments are stripped on this route, and Do is off and read-only by default.",
+    "strengths": "Live-proven chat route with typed refusals (usage limit, reauth, rate limit, context too long) and tokens held only by Integration Core; equal to Hermes on the core idea and stricter on token custody."
+   },
+   "benefit": "Keep; next step is the Hermes-style reverse bridge so Verevon tools reach the subscription route under the capability gate.",
+   "approach": "Keep; expose Verevon tools to the Codex app-server through the execution-core capability gate (MCP callback) rather than stripping them.",
+   "effort": "M",
+   "dependencies": [
+    "execution-core capability gate for MCP tools"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Vendor terms of service for subscription use; tool exposure must stay inside the capability pipeline.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is equal here on the provider side.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-015",
+   "name": "Local and on-device model runtimes",
+   "description": "The agent runs on local open-weight models (llama.cpp, LiteRT, Ollama, LM Studio, vLLM) with hardware-aware presets, a supervised local server and a lightweight harness preset for small context windows.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-086",
+    "hermes-architecture-and-surfaces-105"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-105"
+    ],
+    "why": "q4 SRC: installs a pinned llama.cpp build, picks a quantisation for the hardware, supervises a router-mode server with real readiness checks and grows the context window as sessions deepen. Antigravity (086, DOC) adds a lightweight() preset with fewer tools and a shorter prompt."
+   },
+   "mechanism": "Local runtime supervisor plus an OpenAI-compatible provider profile; a lightweight harness profile trims tools and system prompt for small windows.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-125",
+     "v-planned-decisions-119",
+     "v-planned-decisions-125"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/config.rs:287",
+     "apps/Model Plane/docs/decisions/ledger.md:1990"
+    ],
+    "gap": "No local provider; the self-hosted Needle path was cancelled after Phase 0 (2048-token context, 47 percent accuracy).",
+    "strengths": ""
+   },
+   "benefit": "Low for a hosted web product; the sovereign story is better served by a customer or on-prem endpoint profile (C-t3-09-012).",
+   "approach": "Do not build a local runtime; allow on-prem OpenAI-compatible endpoints through the provider registry, and reuse the lightweight-preset idea for small models.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-09-012"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Quality on small models was already measured as too low.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Verevon is a cloud web app (not a desktop agent); a prior self-hosted attempt was cancelled with measured reasons.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-016",
+   "name": "Multiple credentialed instances per provider (work and personal accounts)",
+   "description": "A user configures several instances of one provider (for example a work and a personal Codex, or two regions or keys), each with its own credentials, config and accent badge; threads and runtime events route by instance id rather than vendor kind.",
+   "prevalence": {
+    "sourcesWith": [
+     "t3code"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "t3code-ui-and-multimodel-001",
+    "t3code-architecture-032",
+    "t3code-ui-and-multimodel-007",
+    "t3code-ui-and-multimodel-010"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-001",
+     "t3code-architecture-032"
+    ],
+    "why": "q5 SRC: contracts split ProviderDriverKind from a user-chosen ProviderInstanceId; sessions route by instance; Claude instances isolate via CLAUDE_CONFIG_DIR and Codex via an auth-overlay shadow home, with a continuation group key so a conversation can move between instances that share state."
+   },
+   "mechanism": "Key every session and run on provider_instance_id (not provider kind); an instance references one credential connection; the picker badges instances when several share a driver; a continuation_group lets a thread move between instances that can share state.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:40-41"
+    ],
+    "gap": "No baseline record. Provider deployments already have registry ids (ServedBy.provider_used), but check whether a user or org can hold several connections of one provider (for example two ChatGPT subscriptions) and pick one per thread.",
+    "strengths": ""
+   },
+   "benefit": "Useful when users mix org-managed and personal access; mostly relevant once BYOK exists.",
+   "approach": "Route by connection id in inference-core once BYO connections exist; badge in the picker.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-013"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Confusing which account paid; show the instance on the served-by line.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Follows from BYOK; low standalone value for a hosted product.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-017",
+   "name": "Cross-provider failover with retry policy, credential rotation and a typed failure vocabulary",
+   "description": "When the primary model fails, the harness retries by a per-route policy, rotates through pooled credentials with model-scoped cooldowns, then swaps to the next provider and model mid-session without losing the conversation, benches the primary until its declared reset, and routes on stable failure codes rather than message text.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-095",
+    "hermes-architecture-and-surfaces-094",
+    "deepseek-transparency-and-customization-095",
+    "deepseek-harness-architecture-126"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-095",
+     "hermes-architecture-and-surfaces-094"
+    ],
+    "why": "q5/q4 SRC: try_activate_fallback() from error, response-check and recovery paths rebuilds the client in place and re-evaluates caching; cooldowns follow the provider-declared reset (exponential 60 s to 4 h when absent) with a skip-switch-if-reset-is-near rule; credential pools rotate on plan-limit 429s before switching provider. DeepSeek (126, 095) supplies the closed LlmFailure code set and per-route retry modes with stated billing consequences."
+   },
+   "mechanism": "Classify every provider error into a closed code set {AUTH, INVALID_CREDENTIAL, QUOTA, ACCOUNT_QUOTA, RATE_LIMIT, CONTEXT_TOO_LONG, SERVER, TIMEOUT, TRANSPORT, REFUSAL, EMPTY_RESPONSE} with retry_after and request_id. Retry policy per route (eligible codes, max, backoff with jitter, honour retry_after). Then rotate credential within the pool (cooldown keyed by credential and model), then move down the fallback chain filtered by privacy floor and entitlements; bench the failed primary until reset_at; record each hop in RoutingDecision and emit a reroute event.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-122",
+     "v-chat-agents-ui-118",
+     "v-modelplane-139",
+     "v-planned-decisions-124"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:505-700",
+     "apps/Model Plane/rust/services/inference-core/src/provider/overflow.rs:100"
+    ],
+    "gap": "The fallback chain with bounded retries and retry-after is shipped and context overflow is typed, but there is no credential pool, no reset-aware benching of the primary, no auth-profile failover (backlog #25 planned), no failover on the subscription route and the UI failover handling is DOC-only.",
+    "strengths": "Fallback already respects privacy tier and residency before the network, which the references do not."
+   },
+   "benefit": "Fewer failed answers during provider incidents or quota exhaustion, especially for Azure deployment quotas and scheduled agents that run unattended.",
+   "approach": "inference-core: closed failure enum, pooled deployments per provider with cooldown map, benching; emit reroute events into RoutingDecision.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-09-007 RoutingDecision"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Failover can silently cross privacy or cost lines; filter every hop through the same gates and show it.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Reliability matters more for agents than chat; the base exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-018",
+   "name": "Usage-limit handling: fallback model, reset time and automatic switch-back",
+   "description": "When a model hits its usage window the product offers or performs a switch to a declared fallback model, shows the reset time and a reason-specific message (plan upgrade, credits, spend cap, ask admin), and switches back when normal usage returns.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-036",
+    "web-chatgpt-web-product-102"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-036"
+    ],
+    "why": "q5 SRC: backend banners carry reset_at, blocked_model_slug and fallback_model_slugs; the client shows automatically switched to X and switched back to X messages and distinguishes model limits, plan upgrades, workspace credits, spend caps and admin requests."
+   },
+   "mechanism": "Limit error carries {window, reset_at, blocked_model, fallback_models[], reason}. Router switches to the first permitted fallback for the thread (recorded), schedules a switch-back check at reset_at, and the UI renders a banner with the reason-specific call to action.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-128",
+     "v-chat-agents-ui-118"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/subscription_failure.rs:195-215"
+    ],
+    "gap": "Subscription-route refusals are typed and show a reset time (resets_at re-rendered locally), but the explanation states no other model was used: there is no automatic fallback model and no switch-back. Platform-route org quota exhaustion is handled by Control quotas, without a fallback model.",
+    "strengths": "Typed, localised refusal messages with reset time already exist."
+   },
+   "benefit": "Keeps conversations and agent runs going at the limit instead of stopping them; easy to explain to users.",
+   "approach": "Add declared fallback models to the subscription route (platform model when the user allows it, with cost disclosure) and to org quota exhaustion; implement in inference-core with the reroute event.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-017",
+    "user consent setting"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Falling back from a user subscription to platform billing must be opt-in.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Visible friction on the live-proven subscription route.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-019",
+   "name": "Refusal and safety-driven model rerouting with explicit, reversible labelling",
+   "description": "When a provider refuses or a safety classifier flags a request, the session switches to a fallback or specialised model with a visible band explaining why, records the original model and refused message, and can undo the swap on rewind, retry or edit; accounts may opt into automatic fallback.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-112",
+    "claude-product-ux-106",
+    "web-claudeai-web-product-082",
+    "web-chatgpt-web-product-107"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-112",
+     "claude-product-ux-106"
+    ],
+    "why": "q4 SRC: a model_refusal_fallback system message {original_model, fallback_model} switches the session model, remembers the pre-refusal model and message, and unwinds on rewind, clear or retry; the UI shows a fallback band with switch-models and why links and a per-account auto-fallback preference."
+   },
+   "mechanism": "Detect refusal (provider stop reason or classifier) -> RoutingDecision reason=refusal|safety -> choose a policy-defined fallback that satisfies privacy and entitlement gates -> emit model_fallback event with original and fallback -> store the swap on the thread so rewind or edit restores the original model.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. A grep of inference-core for a refusal stop-reason fallback found nothing specific; check how a provider refusal surfaces in model-gateway (error, empty answer or retry) and whether any safety reroute exists.",
+    "strengths": ""
+   },
+   "benefit": "Transparent handling of refusals avoids dead ends and keeps the user in control; fits the authority model when the fallback list is policy-owned.",
+   "approach": "Model Plane: refusal classification in the failure vocabulary (C-t3-09-017), fallback list in RoutingPolicy, labelled event in the served-by line.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-017",
+    "C-t3-09-007"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Safety routing that bypasses user choice must always be disclosed.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Low effort once failure codes and reroute events exist.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-020",
+   "name": "Mid-thread model switching semantics (next turn, snapshots, notices, capability-gated restart)",
+   "description": "Changing model mid-conversation applies from the next request while a running step keeps its model; each step records the selected route; the new model is told earlier turns came from another model; providers that cannot hot-swap restart the session with a resume cursor, and some switches are blocked or require a new thread.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-transparency-and-customization-094",
+    "deepseek-harness-architecture-134",
+    "t3code-ui-and-multimodel-003",
+    "t3code-ui-and-multimodel-057"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-094",
+     "deepseek-harness-architecture-134"
+    ],
+    "why": "q4 SRC: model/selection events and request headers record the route per step, a durable notice tells the new model that earlier assistant turns came from another model (none for effort-only changes), and a composer whose saved model vanished is blocked instead of silently substituted. T3 Code (057, 003) adds a sessionModelSwitch capability and continuation groups."
+   },
+   "mechanism": "Persist {provider, model, effort} on every run step. A change takes effect at the next step; if provider family differs, insert a system notice and strip provider-private replay state (see reasoning replay cluster); if the adapter cannot switch in-session, restart with the persisted history. Missing models block send with an explanation.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-chat-agents-ui-110"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:808-866"
+    ],
+    "gap": "The picker remembers a per-org choice, but no record covers mid-thread switching. Check whether model is stored per message or per thread in Session Core, whether a switch inserts any notice, and what happens when a saved model is no longer routable.",
+    "strengths": ""
+   },
+   "benefit": "Verevon invites users to switch modes freely; explicit semantics avoid mixed-route requests and confusing answers.",
+   "approach": "Session Core stores per-step route; model-gateway inserts the notice and strips replay state on family change.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-021"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Notices consume tokens and can break caches; insert only on family change.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small, prevents subtle quality bugs in a multi-model chat.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-021",
+   "name": "Provider-native reasoning replay (thinking signatures, thought circulation) with route-scoped stripping",
+   "description": "Opaque reasoning state (Anthropic signed or redacted thinking, Gemini thought signatures, Copilot reasoning_opaque) is captured, persisted with model provenance and replayed only to the route that understands it; it is dropped with a warning on model change, and a rejected signature degrades once instead of failing every turn.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-097",
+    "cursor-harness-architecture-107",
+    "deepseek-harness-architecture-040",
+    "antigravity-agent-ux-and-gemini-092"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-097"
+    ],
+    "why": "q4 SRC: reasoning_carriers stores carriers as typed private records lifted back only for the matching route, and anthropic_thinking_replay persists fingerprints of signature-rejected blocks per session (through compression) and filters them from rebuilt requests. DeepSeek (040) validates the replay envelope kind, version and model; Cursor (107) tags reasoning chunks with the model name."
+   },
+   "mechanism": "Store each assistant message with a ReplayEnvelope {adapter, model, blocks:[{type: thinking|redacted|signature|opaque, data}]}. When building the next request, include envelopes only if adapter and model match; otherwise drop them and keep text and tool history. On a 400 for an invalid signature, fingerprint the block, exclude it and retry once.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-129"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:378-396"
+    ],
+    "gap": "The Anthropic stream splitter discards signature_delta content (anthropic.rs:383-394), so signed thinking cannot be replayed; reasoning is streamed for display only. INF: multi-turn thinking with tool use on Anthropic (and any future Gemini thought signatures) cannot preserve reasoning state.",
+    "strengths": "Reasoning is already kept out of the answer channel and shown in a separate trace."
+   },
+   "benefit": "Required for correct multi-turn tool use with thinking models and for adding Gemini; protects quality on Genius-mode agent runs.",
+   "approach": "inference-core: capture signature and redacted blocks into a ReplayEnvelope persisted by Session Core with the step; replay per route; strip on family change.",
+   "effort": "M",
+   "dependencies": [
+    "Session Core step schema",
+    "C-t3-09-020"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Reasoning content retention must follow ZDR (do not persist on ZDR turns).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Hidden today but becomes a blocker for Gemini and for thinking inside tool loops.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-022",
+   "name": "Layered default model resolution (explicit, last used, project or space, org, provider default)",
+   "description": "A new thread starts from the model last used (remembered with its options), then the project default, then the provider default; one resolver with a fixed precedence serves every surface (chat, scheduled runs, subagents, auxiliary calls) so a stale environment value can never silently redirect calls.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "t3code-ui-and-multimodel-097",
+    "hermes-architecture-and-surfaces-093"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-093"
+    ],
+    "why": "q4 DOC: a single runtime resolver used by CLI, gateway, cron, ACP and auxiliary calls with precedence explicit request > saved config > environment > provider defaults. T3 Code (097) shows the sticky last-choice per provider instance with options."
+   },
+   "mechanism": "resolve_model(ctx) = explicit request ?? thread last step ?? space default ?? user last used ?? org default ?? intent default; the same function is called by chat, Do, scheduled runs and subagents; org policy can override and entitlements filter the result.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-110"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:808-866"
+    ],
+    "gap": "A per-org remembered choice exists in the SPA; there is no Space default, and the Model Plane baseline notes scheduled runs use a separate no-tool path, so one resolver for all surfaces is not evident.",
+    "strengths": ""
+   },
+   "benefit": "Predictable defaults across chat, agents and schedules.",
+   "approach": "Single resolver in model-gateway; Space default stored by the Application Plane projection and passed in the request.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-004"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Space defaults must not widen entitlements.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Polish; current per-org memory covers the common case.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-023",
+   "name": "Provider prompt-cache management: stability tiers, rolling breakpoints and lineage-scoped cache keys",
+   "description": "Requests are assembled so the provider prompt cache is reused: a stable-to-volatile prompt order (identity and tools, then project context, then memory, time and hints), rolling Anthropic cache_control breakpoints with a block limit, checksums per breakpoint, TTL-expiry recorded as a truncation reason, cache keys that survive compaction but isolate branches, and cache savings shown to users.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "web-claudeai"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-089",
+    "antigravity-architecture-086",
+    "cursor-harness-architecture-105",
+    "cursor-ai-features-076",
+    "hermes-learning-and-memory-056",
+    "hermes-architecture-and-surfaces-112",
+    "deepseek-transparency-and-customization-097",
+    "web-claudeai-web-product-084"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-learning-and-memory-056",
+     "hermes-architecture-and-surfaces-112"
+    ],
+    "why": "q5/q4 SRC: a three-tier system prompt (stable, context, volatile) rebuilt only on compaction keeps the longest prefix byte-identical for the whole session, and resolve_prompt_cache_scope keys the provider cache on the compression-lineage root so compaction does not reset it while branches and delegates get their own scope. Cursor (105, 076) gives the rolling four-breakpoint rule and summary calls that reuse the same prefix."
+   },
+   "mechanism": "Prompt builder emits ordered segments with a stability class; the provider adapter places cache breakpoints at segment boundaries (Anthropic: up to four, last message always marked, older ones rolled off; OpenAI: stable prefix plus prompt_cache_key). prompt_cache_key = hash(org, lineage_root, tools_hash). Record cache_read and cache_write tokens per call and a cache_miss_reason (ttl_expired, prefix_changed, tools_changed) for telemetry.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-130",
+     "v-planned-decisions-122",
+     "v-chat-agents-ui-119"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:173-361",
+     "apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs:1-23",
+     "apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs:243",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:926-940"
+    ],
+    "gap": "Anthropic cache_control is set on tools, system and history, but the OpenAI stable-prefix order is off by default and, per the cache audit (DOC), no cache hit has been measured on any route; no lineage-scoped cache key, no cache-miss reasons, and memory or time blocks are not placed in a volatile tail by contract.",
+    "strengths": "Cache-read tokens are already shown in the Work panel and priced in cost-core (cache_creation and cache_read tokens in pricing.rs)."
+   },
+   "benefit": "Large cost and latency savings on long agent runs and Space-heavy prompts; directly improves the Budget posture the router depends on.",
+   "approach": "model-gateway prompt_context: enforce stability tiers (org and Space blocks in the shared prefix, per-user memory late); turn the OpenAI prefix order on by default; add prompt_cache_key from lineage root; measure hits per route before and after.",
+   "effort": "M",
+   "dependencies": [
+    "compaction lineage id from Session Core"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "ZDR turns must not use provider-side caching where that implies retention; check each provider contract.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Built but unmeasured and partly undeployed; high cost leverage for modest work.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-024",
+   "name": "Cache-preserving in-band changes (append-only system updates, deferred tool additions, in-band effort change, cache-parity forks)",
+   "description": "Changes during a conversation are appended rather than rewritten so the cached prefix survives: a changed system prompt is appended after history, tools added mid-chat are announced by a developer message and a deferred declaration, reasoning effort is changed by an in-history configuration item, and background review forks reuse the exact parent prefix.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-037",
+    "deepseek-harness-architecture-038",
+    "codexagent-agent-runtime-and-models-033",
+    "hermes-learning-and-memory-058"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-037",
+     "deepseek-harness-architecture-038"
+    ],
+    "why": "q5 SRC: per-model systemPromptUpdate=in-history appends changed prompts after cached history, and a request-header tool diff emits one developer message with tool-addition and removal blocks instead of rewriting the tool list. Hermes (058) cites about 26 percent end-to-end cost reduction from cache-parity review forks."
+   },
+   "mechanism": "Keep a request header {system_hash, tools_hash, effort} per series. On change, if the model declares in-history support, append a system or developer message with the delta (new tools, new instructions, effort) instead of mutating the prefix; otherwise rebuild and accept the miss. Background forks (review, memory extraction) copy the parent system prompt, tools and reasoning config byte for byte.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check model-gateway prompt assembly for what happens when a connector or skill is added mid-thread (tool list rewrite or append) and whether background calls (titles, follow-ups, verification) reuse the parent prefix.",
+    "strengths": ""
+   },
+   "benefit": "Connectors and skills added mid-chat would no longer invalidate the whole prefix; cheaper background inference.",
+   "approach": "model-gateway: header diffing and append-only deltas for providers that support them; cache-parity forks for background roles that run on the same model.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-09-023"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Provider-specific semantics; only enable per model where tested.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Second-order cache gain after the basics in C-t3-09-023 are measured.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-025",
+   "name": "Latency: prewarm and progressive context hydration",
+   "description": "The backend warms the provider connection and cache while the user is still typing, and a run starts streaming before slow context sources (rules, MCP, repository info) finish, with per-source completeness flags so the model knows what may be missing.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-harness-architecture-110",
+    "cursor-ai-features-134"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-134",
+     "cursor-harness-architecture-110"
+    ],
+    "why": "q4 SRC: RequestContext carries completion flags per source (rules, env, repository, subagents, skills, MCP) and the prompt states what may be incomplete; prewarm_request mirrors a run request without an action to warm the stream."
+   },
+   "mechanism": "Composer focus sends a prewarm call (auth, routing decision, provider connection, optionally a cache-priming request on the stable prefix). Context assembly runs sources concurrently with deadlines; the run starts when required sources are ready and marks optional ones as pending in a context-status block.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; a grep for prewarm/warm_cache in Model Plane Rust found nothing. Check gateway time-to-first-token phases in turn_timing to see whether context assembly blocks streaming.",
+    "strengths": "turn_timing already measures admission, context and provider intervals, which gives the baseline to prove a gain."
+   },
+   "benefit": "Faster first token on every chat turn; Verevon mints several audience tokens and assembles rich context before streaming.",
+   "approach": "Gateway prewarm endpoint in model-gateway plus deadline-based optional context sources.",
+   "effort": "M",
+   "dependencies": [
+    "turn_timing telemetry"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Prewarm cache-priming costs tokens; restrict to cheap connection warm-up unless measured.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Worth doing after measuring time to first token by phase.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-026",
+   "name": "Responses-API-native transport features (WebSocket incremental continuation, async tools, mid-turn steering)",
+   "description": "Turns stream over a persistent WebSocket that reuses the previous response id so each request sends only new items, and newer provider APIs allow tools that return later while the model keeps reasoning, user steering mid-turn and reasoning changes in-conversation.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-038",
+    "codexagent-agent-runtime-and-models-092"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-038"
+    ],
+    "why": "q5 SRC: responses_websocket with incremental requests based on previous_response_id, a warmup request, sticky turn state and automatic HTTPS fallback; the embedded guide (092, DOC) documents async tool calling and mid-turn steering."
+   },
+   "mechanism": "OpenAI adapter keeps a per-thread WebSocket session; each turn sends only new input items plus previous_response_id; on failure fall back to HTTPS full context. Async tools: return a pending result and later post the real output with the original call_id.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; a grep for previous_response_id in Model Plane Rust found nothing. Check whether the OpenAI adapter uses Chat Completions or Responses and whether any continuation by response id exists.",
+    "strengths": ""
+   },
+   "benefit": "Lower latency and bytes per turn on OpenAI routes; async tools map onto the missing post-approval continuation.",
+   "approach": "Optional OpenAI Responses adapter mode in inference-core behind a flag.",
+   "effort": "L",
+   "dependencies": [
+    "OpenAI Responses adapter"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Provider-held state (previous_response_id) conflicts with ZDR and with the durable Session Core history; only for non-ZDR turns and always rebuildable from Verevon history.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "OpenAI-specific and in tension with ZDR; useful later.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-027",
+   "name": "Per-turn and per-run cost accounting by token category (cache, reasoning, tools, subagents)",
+   "description": "Every call reports disjoint uncached input, output, cache-read, cache-write and reasoning tokens; the UI shows estimated cost for the last turn, subagents and the whole conversation, with a per-tool breakdown and a published rate card.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "deepseek",
+     "web-chatgpt",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-088",
+    "antigravity-architecture-087",
+    "deepseek-harness-architecture-043",
+    "web-perplexity-web-product-088",
+    "web-chatgpt-web-product-103"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-088"
+    ],
+    "why": "q5 SRC: CostDisplaySection {input, cache_read, output, thinking, response, tools, tool_breakdown, generation_count, estimated_cost_usd} with TurnCostSummary {turn, subagent, cumulative_total}. DeepSeek (043) defines the disjoint-count convention (subtract provider-folded cache hits) that makes it reconcilable."
+   },
+   "mechanism": "Usage record per call {uncached_in, cache_read, cache_write, out, reasoning, tool_name?, role, subagent_id?}; cost-core prices each category; model-gateway aggregates per turn, per subagent and per thread and emits it in the usage event; the per-answer details popover shows the breakdown.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-119"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/pricing.rs:206-257",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:926-940"
+    ],
+    "gap": "The usage event carries tokens and cost from the cost-core catalogue (null when unknown) and cache creation/read tokens are priced, but there is no reasoning-token category, per-tool or per-subagent breakdown or cumulative thread total in the UI.",
+    "strengths": "Cost is never fabricated (null when unknown) and the subscription route says included in the subscription; that honesty is ahead of several references."
+   },
+   "benefit": "Transparency goal (DeepSeek-style) and cost governance for agents where tools and subagents dominate spend.",
+   "approach": "Extend the usage record in inference-core and cost-core with reasoning and role or tool attribution; render in the existing answer details popover and Work panel.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-039 purpose tags"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Estimates may differ from invoices; label them as estimates and reconcile with Azure actual cost.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Mostly plumbing on top of shipped cost data.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-028",
+   "name": "Quotas, credits and usage windows with reset display, overage and spend alerts",
+   "description": "Usage is limited per model family by windows (five-hour, weekly) or credits; settings show remaining quota and reset times, paid tiers can enable overage, admins set spend alerts, and expensive models or modes ask for confirmation before running.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "web-chatgpt"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-087",
+    "cursor-ai-features-079",
+    "web-chatgpt-web-product-150"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-087"
+    ],
+    "why": "q4 SRC: QuotaInfo {remaining_fraction, reset_time} per model, plan credits, overage that bills after the baseline, and a quota summary RPC feeding settings. Cursor (079) adds pre-run price checks and spend-alert thresholds."
+   },
+   "mechanism": "cost-core exposes remaining budget per org and member and per model family; model-gateway includes remaining fraction and reset time in ListModels and in a live meter event during runs; admission checks the pre-run estimate against budget and asks for confirmation above a threshold.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-126",
+     "v-chat-agents-ui-114"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs:127-222"
+    ],
+    "gap": "cost-core has a price catalogue, budget check and billing outbox, and Control owns org quotas, but there is no live per-run credit meter (DOC: not built), no per-model remaining-quota display and no pre-run price confirmation.",
+    "strengths": "Budget posture already feeds routing (Budget/Balance/Genius), which most references do not do."
+   },
+   "benefit": "Users and admins see spend before and during long agent runs, which is the main fear with autonomous agents.",
+   "approach": "Live meter event from model-gateway fed by cost-core; Control-owned quotas shown in the picker; confirmation for high-cost runs.",
+   "effort": "M",
+   "dependencies": [
+    "cost-core live aggregation",
+    "Control Plane quotas API"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Live estimates during streaming are approximate.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "The live meter is a known planned gap (I16) and matters for agents.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-029",
+   "name": "Privacy, residency and cost preferences and guards at model selection",
+   "description": "Choosing a model can trigger guards: confirmation above a price threshold or for tiers that train on prompts, provider-routing preferences (sort by price or latency, data-collection deny) for aggregators, and region-hosted open-weight models so data stays in-region.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes",
+     "web-perplexity"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-102",
+    "web-perplexity-web-product-086",
+    "hermes-architecture-and-surfaces-109"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-102"
+    ],
+    "why": "q3 SRC: model_cost_guard (20 USD per M input or 100 USD per M output thresholds) and model_data_policy_guard (vendor-documented training tiers) ask for confirmation with did-you-mean suggestions; Hermes (109) forwards OpenRouter data_collection deny and sort preferences."
+   },
+   "mechanism": "At selection and at admission, evaluate the chosen model against price thresholds and data-policy tiers; warn or require confirmation; enforce hard floors (privacy tier, residency) before network.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-115",
+     "v-modelplane-135",
+     "v-chat-agents-ui-110"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/config.rs:259-283",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:153-162",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-60"
+    ],
+    "gap": "No explicit cost-threshold confirmation (only an expensive badge).",
+    "strengths": "A per-turn minimum privacy tier (global, eu_resident, zdr_contractual, sovereign) is enforced before the network and fails closed, with residency per provider and privacy badges in the picker; this is stronger than any reference, which only warn."
+   },
+   "benefit": "Keep and extend: the privacy floor is a differentiator for EU customers.",
+   "approach": "Keep; add an optional cost confirmation using the expensive flag and cost-core prices.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "None significant.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is ahead on hard privacy and residency enforcement.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-030",
+   "name": "Service and speed tiers (Standard, Fast or priority, Ultrafast) with bounded windows",
+   "description": "Users trade usage for latency per model: a Fast or priority tier costs more, Ultrafast is fastest, tiers can be toggled by shortcut and are shown in credit history; bounded windows apply the tier only per turn or first turn so request bodies stay cache-stable.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "hermes",
+     "web-chatgpt"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-034",
+    "web-chatgpt-web-product-101",
+    "hermes-architecture-and-surfaces-103"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-034"
+    ],
+    "why": "q4 SRC: per-model service_tiers with descriptions and multipliers in the catalogue, a default tier per model, shortcut cycling and credit-history breakdown. Hermes (103) adds time-bounded fast windows to keep cache stability."
+   },
+   "mechanism": "Model record declares service_tiers [{id, wire value, cost multiplier, latency note}]; request carries a tier; inference-core maps it (OpenAI service_tier=priority) and cost-core applies the multiplier; UI shows a speed toggle where supported.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:155",
+     "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:143",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:6760",
+     "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:2281"
+    ],
+    "gap": "No baseline record. SRC check: inference-core has a prefer_priority_service_tier flag used on the Codex subscription route and set internally by some gateway paths (source validation, tool loop), but no user-facing speed control, no tier on platform OpenAI routes and no cost multiplier.",
+    "strengths": ""
+   },
+   "benefit": "A simple latency lever for interactive chat versus background agents; monetisable.",
+   "approach": "Expose a speed tier in the model record and composer; map to provider priority processing in inference-core; price in cost-core.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cost surprises; show the multiplier.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Plumbing exists; demand is moderate.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-031",
+   "name": "Best-of-N model comparison with recorded preference",
+   "description": "The same prompt runs on several selected models in parallel; the user picks the better answer and gives reasons, producing paired preference data tied to models and experiment ids.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-091"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-091"
+    ],
+    "why": "q5 SRC: StartBattleModeRequest.models and num_forks, BattleModeInfo with eliminated and end_type, a Best of N Models settings list and preference telemetry with up to two reasons."
+   },
+   "mechanism": "Fork a turn into N runs on different models (same context snapshot), stream side by side, record the chosen answer and reasons with the routing decision and experiment id, and continue the thread from the winner.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-117",
+     "v-modelplane-137",
+     "v-planned-decisions-127"
+    ],
+    "evidence": [],
+    "gap": "Searched side-by-side, compareModels and arena in SPA and model-gateway: none; no plan found.",
+    "strengths": ""
+   },
+   "benefit": "Gives router-policy empirical data to tune Budget/Balance/Genius and helps users trust model choices.",
+   "approach": "model-gateway fan-out of one turn to N routes with a cost cap; preference records in Session Core; Solid split view.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-09-007",
+    "cost confirmation"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "N-times cost; restrict to opt-in and show the cost.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Only one source has it; useful for tuning but not core.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-032",
+   "name": "Routing evaluation and model-migration discipline (cost-per-task benchmarks, validation matrix, reproducible profiles)",
+   "description": "Routing defaults and model upgrades are justified by evals: published cost-per-task comparisons, a playbook that classifies every model usage site and validates role mappings against a matrix before changing them, and a minimal telemetry-free agent profile for reproducible benchmarks.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-091",
+    "web-perplexity-web-product-085",
+    "deepseek-transparency-and-customization-101"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-091"
+    ],
+    "why": "q5 SRC: an embedded skill that inventories model sites (strings, aliases, routers, pickers, caches, parsers, tests), classifies them, maps flagship, balanced and fast roles and validates against a matrix rather than blind string replacement. Perplexity (085) publishes score versus cost per task."
+   },
+   "mechanism": "An eval harness runs a fixed task suite per (role, candidate model, effort) and records quality, cost and latency; a RoutingPolicy change requires a passing comparison against the current table; results are published in the router-policy page.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-modelplane-126"
+    ],
+    "evidence": [],
+    "gap": "No baseline record for router evals. Check whether the Model Plane eval-lab (mentioned in reference rel notes) covers routing-table changes and whether RoutingPolicy edits are gated on any evaluation.",
+    "strengths": ""
+   },
+   "benefit": "Makes the runtime-editable routing table safe to change and lets Verevon justify defaults to customers.",
+   "approach": "Model Plane eval job (Go durable tier) over a task suite; gate RoutingPolicy PUT on a stored eval id for production orgs.",
+   "effort": "M",
+   "dependencies": [
+    "task suite",
+    "C-t3-09-008 role table"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Eval suites drift from real usage; refresh from anonymised, consented traces only (never ZDR).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "The router is a core Verevon idea; it needs evidence to tune.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-033",
+   "name": "Model picker UX: search, favourites, recents, legacy fold and locked models",
+   "description": "A popover with a provider rail and a virtualised, fuzzy-searchable model list; favourites float up, deprecated models sit in a Legacy group, recent model+effort+speed combinations are one click, locked models explain how to get access, and a Default option hides model names.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "t3code-ui-and-multimodel-004",
+    "codexagent-agent-runtime-and-models-044"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-004"
+    ],
+    "why": "q5 SRC: ProviderModelPicker with a Favourites plus per-instance rail, tokenised fuzzy search across providers, favourites first, a collapsible Legacy section and number-key jumps. Codex (044, q5) adds recent configurations, locked models and a Default that hides model names."
+   },
+   "mechanism": "Solid popover: left rail (Favourites, Verevon modes, each provider group), list virtualised with fuzzy tokenised ranking over display name and aliases; per-user favourites and recents stored server-side; locked entries rendered from entitlement reasons.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-110"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1008-1095",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2665-2705"
+    ],
+    "gap": "The picker groups the catalogue (Subscription, Claude, OpenAI GPT, DeepSeek, Other) with cost and privacy badges and pins the Verevon modes, but has no search, favourites, recents, legacy fold or locked-model explanations.",
+    "strengths": "Pinned intent modes on top and privacy badges are already good defaults."
+   },
+   "benefit": "As the catalogue grows (Gemini, BYO endpoints) a grouped list stops scaling; small UX cost.",
+   "approach": "Frontend Plane Solid component; favourites and recents persisted per user through the gateway.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-001",
+    "C-t3-09-004 for locked reasons"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "None significant.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "User-visible daily surface, cheap.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-034",
+   "name": "Live provider health and availability snapshot with in-place unavailability explanations",
+   "description": "The UI receives one live snapshot per provider (enabled, auth identity, probe status, version, models with capabilities, advisories) rendered instantly from cache and refined by background probes; unavailable providers are greyed with the reason and their models withheld, and send is blocked until a ready route exists.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "t3code-architecture-050",
+    "t3code-ui-and-multimodel-002",
+    "antigravity-architecture-085",
+    "t3code-ui-and-multimodel-087"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-002",
+     "t3code-architecture-050",
+     "t3code-ui-and-multimodel-087"
+    ],
+    "why": "q4 SRC: a typed ServerProvider snapshot streamed to the UI, initial snapshot from disk cache then probe and enrichment with a generation counter, and readiness gating that explains why an instance is unavailable in a tooltip."
+   },
+   "mechanism": "inference-core keeps a health map per provider deployment (last probe, error class, quota state); ListModels includes availability and reason; the picker greys unavailable entries with the reason and the composer refuses to send to them.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/http_health.rs:1-6"
+    ],
+    "gap": "No baseline record. inference-core has an HTTP health module (http_health.rs); check whether provider health or quota state is reflected in /v1/models and whether the picker greys unavailable routes.",
+    "strengths": ""
+   },
+   "benefit": "Explains failures before they happen (expired subscription, exhausted quota, provider outage) instead of after a failed turn.",
+   "approach": "Add availability to the model record from the fallback layer health map; render in the picker.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-001",
+    "C-t3-09-017"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Stale health can hide a working route; keep probes cheap and short-lived.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Helpful but secondary to failover itself.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-035",
+   "name": "Catalogue curation by admins and users (custom model ids, hide, reorder, favourite, capability overrides)",
+   "description": "Per provider instance a user or admin can add custom model ids, hide unused models, reorder and star them, and override catalogue facts such as context window, max output and input types, with Restore defaults.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "t3code-ui-and-multimodel-086",
+    "deepseek-transparency-and-customization-100"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-100"
+    ],
+    "why": "q4 DOC: an editable model catalogue per provider (id, name, context window, max output, input types) that shows inherited values without saving overrides and has a Restore defaults; T3 Code (086) adds hide, reorder, favourite and custom slugs per instance."
+   },
+   "mechanism": "Overlay table {scope: org|user, model_id, hidden, order, favourite, overrides{context_window, max_output, modalities}} merged over the catalogue at ListModels time; overrides are claims, flagged unverified.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check whether the settings pages offer any per-org model visibility or ordering beyond the router-policy table.",
+    "strengths": ""
+   },
+   "benefit": "Lets admins correct gaps and tidy the picker without code changes.",
+   "approach": "Overlay in inference-core plus a settings page; restrict capability overrides to admins.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-001",
+    "C-t3-09-004"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Wrong overrides (for example a larger context window) cause failures; mark them unverified and log them.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful once BYO endpoints exist.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-036",
+   "name": "Per-model context-window management (truncation policy, compaction formula, context meter)",
+   "description": "Each model declares its usable window, truncation policy for tool output and compaction trigger; compaction can use a cheaper summarisation model; native and local compaction are coordinated; the composer shows a context ring with used and max tokens and a manual Compact action.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "hermes",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-047",
+    "deepseek-transparency-and-customization-096",
+    "hermes-learning-and-memory-073",
+    "t3code-ui-and-multimodel-032"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-096"
+    ],
+    "why": "q4 DOC: a published trigger formula floor(min(W x 0.8, W - O - 65,536)), newest 16 percent kept verbatim, per-model overrides with a separate summarisation route and output cap. Hermes (073) coordinates proactive prune, micro-compaction and provider-native compaction; T3 Code (032) has the context ring with manual compaction."
+   },
+   "mechanism": "Model record carries context_window, effective_percent, truncation {mode, limit}; compaction policy per model {threshold_ratio, headroom, retain, summariser role}; gateway emits a context snapshot event {used, max, auto_compact_at} rendered as a ring with a Compact button.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-134",
+     "v-modelplane-136",
+     "v-planned-decisions-124"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/crates/mp-tokens/src/lib.rs:1-5",
+     "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:473-613",
+     "apps/Model Plane/rust/services/inference-core/src/provider/overflow.rs:100",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:571-720"
+    ],
+    "gap": "Real BPE counting, typed overflow with fallback to a larger-window provider, optional Anthropic clear_tool_uses and a context inspector exist; there is no per-model declared truncation or compaction policy, no published trigger formula and no composer context ring or manual compact action.",
+    "strengths": "The assembled-context inspector (tokens per segment versus budget) is more detailed than any reference."
+   },
+   "benefit": "Predictable long sessions and visible context pressure for agent pages.",
+   "approach": "Move compaction thresholds into the model record; add a context snapshot event and a ring in the composer.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "None significant.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Most of the hard parts are shipped; the remainder is presentation and per-model tuning.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-037",
+   "name": "Structured outputs per turn and strict-JSON utility calls",
+   "description": "A turn or internal utility call can require output matching a JSON schema; unsupported response formats are dropped up front per provider using a capability memo.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "hermes",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-042",
+    "web-perplexity-web-product-089",
+    "hermes-architecture-and-surfaces-100"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-042"
+    ],
+    "why": "q4 SRC: TurnStartParams.outputSchema plus strict-JSON contracts for internal reviewers. Hermes (100) adds a memo of (endpoint, model, format) triples that already rejected json_schema so the call is not retried in vain."
+   },
+   "mechanism": "structured_output_schema in the neutral request; adapters map to response_format json_schema, a forced tool or an instruction; a per-route memo records rejections and downgrades to json_object plus validation.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-132",
+     "v-planned-decisions-123"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs:459-486",
+     "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:726-731",
+     "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription_tools.rs:15-33"
+    ],
+    "gap": "No rejection memo for MaaS endpoints that only accept json_object.",
+    "strengths": "Schema outputs work on OpenAI, Anthropic (tool or instruction) and the subscription route, and the Terra planner relies on it."
+   },
+   "benefit": "Keep; add the memo when more MaaS endpoints are routed.",
+   "approach": "Keep.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is equal here.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-038",
+   "name": "Remote harness configuration, experiments and policy-resolved feature flags",
+   "description": "Agent configuration (tool limits, prompts, default model, memory and checkpoint settings) can be overridden remotely per experiment, plan or org, each run records the experiment ids, and self-hosted deployments resolve the same flags from a local policy table.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-090",
+    "claude-extensibility-and-safety-071"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-090"
+    ],
+    "why": "q4 SRC: ExperimentKey overrides for global, plan-based, default-model, memory and tool configs with experiment ids stamped on every execution. Claude desktop (071) resolves flags from a rule table when the hosted flag service is absent."
+   },
+   "mechanism": "A config overlay service keyed by {org, plan, experiment} returns typed overrides; the run record stores the overlay version and experiment ids; air-gapped deployments load the same keys from a signed local file.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-126",
+     "v-chat-agents-ui-114"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs:127-222",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/router_policy.rs:30-66"
+    ],
+    "gap": "Only the routing table is runtime-editable; prompts, loop budgets and defaults need a deploy, and no experiment ids are stamped on runs.",
+    "strengths": "RoutingPolicy is already runtime-editable through Session Core with an admin page."
+   },
+   "benefit": "Tune per org without redeploys and attribute metric changes to experiments.",
+   "approach": "Generalise RoutingPolicy storage in Session Core into a typed config overlay with versions.",
+   "effort": "M",
+   "dependencies": [
+    "Session Core config store"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Config sprawl; keep a closed list of overridable keys.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Operational, not user-facing.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-039",
+   "name": "Request attribution, purpose tags and governed request extensions on every inference call",
+   "description": "Every outbound provider call carries a stable non-secret client identity and a purpose tag (chat, compaction, title, subagent) for billing, policy and abuse handling, and features can add top-level request fields only through a registry with prepare and accept semantics.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "deepseek-harness-architecture-136",
+    "deepseek-harness-architecture-157",
+    "deepseek-harness-architecture-044"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-044",
+     "deepseek-harness-architecture-157"
+    ],
+    "why": "q4 SRC: GenerateOptions.purpose (compaction, session-title) lets adapters attach transport metadata without changing model input; a request-extension registry reserves one owner per top-level field and commits delivery only after a 2xx."
+   },
+   "mechanism": "Neutral request carries purpose, org, run and step ids; adapters map them to provider metadata or headers where supported (never into the prompt); the metered decorator records purpose for cost and ZDR audit; extensions register owned fields and collisions fail before dispatch.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/metered.rs:1-8"
+    ],
+    "gap": "No baseline record. inference-core has a metered decorator; check whether calls carry a purpose or role tag that cost-core and audit can attribute (titles, follow-ups, verification judge, planner).",
+    "strengths": ""
+   },
+   "benefit": "Billing per purpose, ZDR enforcement checks on auxiliary calls, and provider-side abuse attribution.",
+   "approach": "Add purpose and role fields to the inference proto and record them in metrics and cost entries.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-09-008"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Do not send org identifiers to providers unless contracts allow it.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap and supports ZDR, cost and role routing at once.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-040",
+   "name": "Per-model-family prompt, tool and argument-order variants",
+   "description": "System prompt sections, tool descriptions and edit toolsets differ per model family (GPT generations, Claude generations, Gemini, own models), stored per model with a hash; tool schemas are sanitised for strict providers; argument order is engineered so intent fields stream first.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "cursor-ai-features-075",
+    "cursor-harness-architecture-104",
+    "codexagent-agent-runtime-and-models-039",
+    "hermes-architecture-and-surfaces-098",
+    "deepseek-harness-architecture-050"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-039"
+    ],
+    "why": "q5 SRC: per-model instruction templates, approval and permission wording, collaboration modes and token-budget text stored in the catalogue and conditionally included by capability flags, with a prompt hash. Cursor (075, 104) shows family detection and prompt variants per generation; Hermes (098) sanitises tool schemas for Gemini and Kimi; DeepSeek (050) measured description-first argument order."
+   },
+   "mechanism": "Model record references prompt_profile_id; prompt builder selects section variants by profile; tool schemas pass a per-provider sanitiser (Gemini OpenAPI subset, strict-type providers); tool schemas put description fields first plus one prompt sentence; every variant is covered by an eval.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check model-gateway prompt assembly for any branching by provider or model family and whether tool JSON Schemas are sanitised per provider (needed before Gemini).",
+    "strengths": ""
+   },
+   "benefit": "Quality parity across vendors in a multi-provider router; required for Gemini tool calling.",
+   "approach": "Prompt profiles in model-gateway keyed from the model record; schema sanitiser in inference-core adapters.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-09-001",
+    "C-t3-09-032 evals"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Variant explosion; limit to families with measured differences.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Needed to make the multi-vendor router perform well, especially with Gemini.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-041",
+   "name": "Frontier vendor breadth: Gemini, native DeepSeek, open-weight and specialist models",
+   "description": "The lineup spans OpenAI GPT generations, Claude, Gemini Flash and Pro with thinking levels, open-weight models hosted in-region (Kimi, DeepSeek, GLM, Nemotron), grounded search models and specialty models, with per-model thinking affordances.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "deepseek",
+     "web-chatgpt",
+     "web-perplexity"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-082",
+    "codexagent-agent-runtime-and-models-030",
+    "web-chatgpt-web-product-099",
+    "web-perplexity-web-product-082",
+    "deepseek-harness-architecture-049",
+    "web-perplexity-web-product-090"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-082"
+    ],
+    "why": "q4 DOC: one picker across Sonar, GPT, Gemini, Claude, Kimi, GLM, Grok and Nemotron with a Best auto-router, per-model Thinking toggle and admin or regional gating. Antigravity (082) shows the Gemini lineup with Fast to High thinking levels."
+   },
+   "mechanism": "Native adapters per vendor (Gemini generateContent with thinking_level and thought signatures; DeepSeek native for cache and Files API) registered as provider families, each model with a full capability record and residency.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-117",
+     "v-modelplane-123",
+     "v-modelplane-124",
+     "v-planned-decisions-118"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:471",
+     "apps/Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql:23"
+    ],
+    "gap": "Providers are Azure OpenAI, OpenAI-compatible (including DeepSeek and Cohere as Azure MaaS ids), Anthropic direct and Foundry, Cohere and the ChatGPT subscription. Gemini is absent (the seed row was soft-deleted because no adapter can serve it) and there is no native DeepSeek adapter; the picker has no Gemini group.",
+    "strengths": "EU-resident Azure deployments of OpenAI, Claude and MaaS models give residency coverage most references lack."
+   },
+   "benefit": "Gemini is named in the product goal (Antigravity capabilities: long context, video and multimodal); without it Verevon cannot route the perception and long-context roles to the best model.",
+   "approach": "Add a Gemini family in inference-core (Vertex AI in an EU region for residency, with thought-signature replay and schema sanitising), then expose it in the catalogue and router table.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-09-021 reasoning replay",
+    "C-t3-09-040 schema sanitiser",
+    "C-t3-09-001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Residency and ZDR terms for Vertex must be attested before routing privacy-floored turns there.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Explicit product-vision dependency and a code-verified absence.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 5,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-042",
+   "name": "Verbosity and reasoning-summary controls",
+   "description": "Users pick output detail (low, medium, high) and reasoning summary mode (auto, concise, detailed, none); the runtime warns when a setting is ignored by a model.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-041"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-041"
+    ],
+    "why": "q3 SRC: model_verbosity and model_reasoning_summary with catalogue support flags and an ignored-setting warning."
+   },
+   "mechanism": "Verbosity and summary mode in the request; adapters map them where supported and report when ignored.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-113",
+     "v-planned-decisions-121"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:169-173",
+     "apps/Model Plane/rust/services/model-gateway/src/verbosity.rs:1"
+    ],
+    "gap": "No reasoning-summary mode and no ignored-setting notice.",
+    "strengths": "A verbosity dial (concise, balanced, detailed) with terse profiles is shipped on every route."
+   },
+   "benefit": "Keep.",
+   "approach": "Keep; add a summary mode when OpenAI reasoning is wired (C-t3-09-005).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is equal here.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-09-043",
+   "name": "Provider-native server tools (web search inside the model call)",
+   "description": "web_search runs as a provider-native server tool inside an auxiliary model request and returns structured results with cited snippets.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "deepseek-harness-architecture-045"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-045"
+    ],
+    "why": "q3 SRC: web-search-deepseek posts to the Anthropic-compatible endpoint with web_search_20250305 and parses result blocks and citations."
+   },
+   "mechanism": "Provider server tool enabled per request; results parsed into citations.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Research and web is covered in category 3; Verevon routes web work through Quarry (Ingestion Plane).",
+    "strengths": ""
+   },
+   "benefit": "Low: provider-native search bypasses Quarry, which owns web execution and capture.",
+   "approach": "Do not adopt for agent browsing; at most allow it as a cited-search provider option when an org opts in.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Bypasses the Model proposes / Quarry executes rule and Quarry capture or audit.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Conflicts with Quarry ownership of web execution.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

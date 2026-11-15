@@ -1,0 +1,1162 @@
+[
+  {
+    "finalId": "F-t3-038",
+    "title": "Deck pipeline with brand templates: tool-owned slide manifest, per-slide validation, present mode, research-to-deck, and an org template library",
+    "searches": [
+      "Grep Model Plane: slides? (tool|manifest|deck|pptx|validat)|pptx|python-pptx|pptxgenjs|PresentationML",
+      "Grep repo-wide: present(ation)? mode|presenter|slide strip|slide viewer|deck viewer",
+      "Grep repo-wide: DeckTheme|deck theme|brand token|brand kit|template skill|template library|SkillKind|artifact template",
+      "Grep repo-wide: soffice|libreoffice|unoconv|pptx render|render slide|PowerPoint.Application (render or COM gate)",
+      "Grep Model Plane: validate|verify|check|lint office|ooxml|docx|pptx|xlsx",
+      "Grep Frontend src: slides?|deck|presentasjon|lysbilde (excluding styles and demo)",
+      "Grep deep_research.rs: deck|slide|presentation|pptx (no hits)",
+      "Grep Frontend agents lib and workflow builder: Google Slides and slides app kind"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4320,
+        "why": "code_interpreter tool description: build .pptx with python-pptx inside the sandbox.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/health_attest.rs",
+        "line": 181,
+        "why": "Health attestation lists pptx among required sandbox Office libraries.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+        "line": 283,
+        "why": "MIME mapping for pptx outputs returned from the sandbox.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/pptx.ts",
+        "line": 2,
+        "why": "Browser-side buildPptx turns one finished answer into a PresentationML deck.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/pptx.ts",
+        "line": 43,
+        "why": "Per-slide bullet and character budget before a continuation slide starts.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/pptx.ts",
+        "line": 56,
+        "why": "Slide planner: new slide per level-1 or level-2 heading; no manifest or validation.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/lib/agent-roles.ts",
+        "line": 175,
+        "why": "Google Slides listed as an agent app role; UI label, no provider found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/lib/verevon-workflow-builder-data.ts",
+        "line": 199,
+        "why": "Google Slides mapped to a slides workflow app kind in UI data.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 10905,
+        "why": "Test comment: python-pptx shipped but unadvertised, so deck requests had no tool.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 10978,
+        "why": "Test library list includes python-pptx from the execution-core runtime image.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 11000,
+        "why": "Test comment: slide charts must be pictures; deck requests must be built, not described.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+        "line": 904,
+        "why": "Test asserts deck.pptx carries the PresentationML content type.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/tests/fixtures/real/make-real-fixtures.ps1",
+        "line": 240,
+        "why": "Fixture script drives PowerPoint via COM to build real test files.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/Dockerfile",
+        "line": 82,
+        "why": "Runtime image pip-installs python-pptx 1.0.2 for sandbox deck generation.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 249,
+        "why": "Plan H8: deck path v1, research report to designed PPTX, Wave 5.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 230,
+        "why": "Owner question OD18 lists deck theme as open; template library not in plan.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/outputs/verevon-homepage-market-audit.pptx.inspect.ndjson",
+        "line": 2,
+        "why": "Sample deck inspect output; no generator or validator found in repo.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-046",
+    "title": "Sharing, replay, export and import: governed snapshot links, org-only default, and conversation export and import",
+    "searches": [
+      "Grep apps: share[ _-]?(link|url|token|snapshot|thread|chat|conversation)|public[ _-]?link|ShareDialog|shareThread|chatShare",
+      "Grep apps: ReplayThread|replay_thread|events/replay|replayRun|listRunEventReplay",
+      "Grep apps: (fork|branch)[ _-]?(thread|conversation|chat)s?|forkThread|fork_thread",
+      "Grep apps: conversations.json|chatgpt export|claude export|import conversation|export conversation|export transcript (no importer found)",
+      "Grep apps: exportMyData|privacy/export|CONTROL_PLANE_DSAR_DISCLOSURE|gdpr/export",
+      "Grep apps: chat.save_thread_snapshot|saveChatThreadSnapshot (name collision check)",
+      "Grep Frontend chat features: copy link|thread_id deep link"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+        "line": 64,
+        "why": "ReplayThread RPC: replays the thread event log as an ordered stream.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 4008,
+        "why": "replay_thread_task reads durable events ordered by timestamp and event id.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 4952,
+        "why": "SessionCore replay_thread gRPC endpoint streams events to callers.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 181,
+        "why": "HTTP GET /v1/threads/:thread_id/events replays thread events.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 218,
+        "why": "HTTP GET /v1/runs/:run_id/events/replay serves run replay pages.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+        "line": 307,
+        "why": "replayRun: history replay of a past agent run from durable events.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+        "line": 297,
+        "why": "Chat run panel pages durable run-event replay when reattaching.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/run-console-client.ts",
+        "line": 460,
+        "why": "Client call to the run event replay endpoint.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs",
+        "line": 1,
+        "why": "Share backend covers documents only: user-core resource grants, view-only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/knowledge/components/ShareDialog.tsx",
+        "line": 22,
+        "why": "ShareDialog component is used only in knowledge; no chat share dialog.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/authz_facade.go",
+        "line": 140,
+        "why": "Grant facade: user-core resource grants backing the ShareDialog listing.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/privacy-client.ts",
+        "line": 30,
+        "why": "DSAR export disclosure: model conversations, memory and documents not included.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/privacy.rs",
+        "line": 39,
+        "why": "Gateway route /api/v1/privacy/export proxies the Control Plane DSAR export only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-deep-link.ts",
+        "line": 19,
+        "why": "Thread deep links name owner-bound threads and grant no access.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts",
+        "line": 130,
+        "why": "Model-executable chat.save_thread_snapshot saves title, pin and preview only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "line": 2882,
+        "why": "chat.save_thread_snapshot action: thread metadata, not a shared snapshot.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 789,
+        "why": "SaveChatThreadSnapshotRequest: title, preview, turns and pin; saved per thread, not shared.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+        "line": 184,
+        "why": "fork_thread forks artifact versions only; no conversation branch or fork found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+        "line": 888,
+        "why": "Agent skill scope org or user with shared_with; not applied to threads.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json",
+        "line": 1008,
+        "why": "Audit: no chat share route; gateway shares.rs covers document grants only.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 271,
+        "why": "Plan I19: read-only chat share link; owner-gated decision still open.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+        "line": 176,
+        "why": "Backlog item 22: governed share and replay entry.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+        "line": 181,
+        "why": "Backlog #22 first step: read-only, default-off, revocable share link refusing ZDR.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-031",
+    "title": "Artifact canvas: server-side versions with restore, user editing, selection comments and selection-scoped AI edits, annotation, then collaborative documents",
+    "searches": [
+      "Grep repo-wide: artifact[a-z_ ]{0,24}(revision|version)|revision_id|expected_revision|artifact_version|ArtifactVersion",
+      "Grep repo-wide: restore[ _-]?(this[ _-]?)?version|restoreVersion|restore_version|restoreRevision",
+      "Grep repo-wide: getSelection|selectionchange|highlight-to-edit|rewrite this selection|select-and-rewrite|selection_comment|review_comment",
+      "Grep Frontend src: contentEditable|CodeMirror|monaco|ProseMirror|tiptap|Lexical|milkdown|BlockNote|Yjs|yrs|Automerge|CRDT",
+      "Grep Application Plane: yrs|yjs|CRDT|automerge|co-edit|live cursor|presence",
+      "Grep repo-wide: save to knowledge|saveArtifact|save_artifact|promote_artifact|translate artifact",
+      "Grep apps: edit_artifact|patch_artifact|artifact edit|update_artifact|read_artifact",
+      "Grep Frontend src: annotation overlay|AnnotationOverlay|annotate near preview|marker|canvas",
+      "Grep apps: /v1/artifacts and /api/v1 artifacts routes",
+      "Manual read: ChatArtifactPanel.tsx, chat-types.ts, chat-artifacts.ts, chat-versions.ts, chat-export/index.ts"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+        "line": 1,
+        "why": "Gateway owns artifact versions; process-local projection rehydrated from durable thread metadata.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+        "line": 137,
+        "why": "ArtifactVersionStore: per-(thread, artifact) version counter and title index.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+        "line": 184,
+        "why": "fork_thread: private provisional workspace so failed runs cannot advance counters.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+        "line": 206,
+        "why": "lock_commit: per-thread commit lock serializing durable append and projection update.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+        "line": 219,
+        "why": "next_version: previous+1 assigned server-side; the model does not supply the counter.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 2679,
+        "why": "update_artifact arm: requires an id; resolves near-miss ids against existing artifacts.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 2795,
+        "why": "read_artifact handler returns stored artifact text for the thread.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4324,
+        "why": "create_artifact tool definition advertised to the model.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4339,
+        "why": "read_artifact tool definition: model reads back stored text on demand.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4344,
+        "why": "update_artifact tool definition: model emits a new version of an existing artifact.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+        "line": 310,
+        "why": "Read-only version stepper over artifact history; no edit or restore control.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+        "line": 256,
+        "why": "Export entries (Word, Excel, PowerPoint, PDF) for document artifacts, built in browser.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+        "line": 262,
+        "why": "copyContent: navigator.clipboard copy action on artifact content.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "line": 55,
+        "why": "ChatArtifactVersion: content, title and version of one emitted revision.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "line": 78,
+        "why": "ChatArtifact.history: revisions oldest to newest; absent on pre-versioning snapshots.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts",
+        "line": 443,
+        "why": "artifactVersions: orders revision history; one revision when no history exists.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions.ts",
+        "line": 2,
+        "why": "Edit and regenerate version navigation for the final exchange; client-only, session-lifetime.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/index.ts",
+        "line": 2,
+        "why": "Browser-only export of one answer to Word, Excel, PowerPoint or PDF; no network.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+        "line": 714,
+        "why": "contenteditable appears only in a keyboard-shortcut guard; no rich editor.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/studio/lib/studio-canvas-model.ts",
+        "line": 136,
+        "why": "contenteditable check only; studio canvas model has no artifact editor.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs",
+        "line": 4,
+        "why": "Studio canvas project store is gateway-local, ephemeral and lost on restart.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spacePresence.ts",
+        "line": 1,
+        "why": "Realtime Space presence module; no document collaboration or CRDT sync found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/tests/e2e/product-readiness.spec.ts",
+        "line": 85,
+        "why": "E2E expects artifact_revision_binding receipt carrying previous and latest versions.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+        "line": 6595,
+        "why": "Invoke-chain test asserts artifact_revision_binding receipt scope.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/scripts/seed_tool_knowledge.sql",
+        "line": 181,
+        "why": "Seeded tool guidance: revise by reusing the same artifact id as a new version.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/studio-core/studio.md",
+        "line": 199,
+        "why": "Studio spec lists a project artifacts route; spec only, no studio-core code.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 253,
+        "why": "Plan item I17: highlight-to-edit, shortcut presets and restore this version.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+        "line": 114,
+        "why": "Audit marks selection-scoped edits and version restore as partial gap.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-057",
+    "title": "Custom connectors: probe-and-test add flow, a REST/API-key connector kind and a vault-brokered egress proxy",
+    "searches": [
+      "Grep MCP code: probe|list_tools|tools/list|discover_protected_resource|discover_authorization_server|needs_oauth",
+      "Grep repo-wide: custom connector|egendefinert|REST connector|connector kind|api_key connector; integration-corev2 AuthType",
+      "Grep Model Plane: vault|secret_ref|secret://|managed secret|token endpoint",
+      "Grep Model Plane: AllowDomains|MpNetworkPolicy|egress proxy|HTTPS_PROXY|network proxy|G1",
+      "Grep integration-corev2: SafeClient|WithAllowlist|ResolveAndVet|egress",
+      "Grep sandbox code: network Disabled|unshare net|NetworkMode",
+      "Manual read: McpServersSection.tsx connect flow and tool allowlist"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs",
+        "line": 46,
+        "why": "MCP routes: register, delete, share, OAuth start and callback, connect.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs",
+        "line": 186,
+        "why": "list_tools fetches tool definitions from an MCP server; no pre-save probe route.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs",
+        "line": 105,
+        "why": "discover_protected_resource: OAuth protected-resource discovery during connect.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs",
+        "line": 158,
+        "why": "discover_authorization_server: resolves authorization-server metadata for OAuth connect.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs",
+        "line": 482,
+        "why": "MCP OAuth tokens kept as AAD-bound ciphertext in capability-core vault.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx",
+        "line": 162,
+        "why": "Connect flow detects OAuth need; no discovered-tool list shown before saving.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx",
+        "line": 187,
+        "why": "Tool allowlist typed as text and parsed client-side, not chosen from discovery.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx",
+        "line": 429,
+        "why": "Saved tool allowlist shown as chips on each server row.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 942,
+        "why": "Raw MCP credentials rejected; a managed secret reference is required.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 1080,
+        "why": "Secure-MVP note: legacy bearer token never serialized into the catalog payload.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 1111,
+        "why": "OAuth-connected MCP servers reference secret://capability-core/mcp-oauth-tokens.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/policy.rs",
+        "line": 23,
+        "why": "MpNetworkPolicy enum: Disabled, AllowAll, AllowDomains egress allowlist.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox.rs",
+        "line": 210,
+        "why": "AllowDomains keeps netns for proxy; allowlist not self-enforcing.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs",
+        "line": 116,
+        "why": "egress_proxy_configured checks HTTPS_PROXY or ALL_PROXY environment variables.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs",
+        "line": 290,
+        "why": "AllowDomains egress refused unless an egress proxy variable is set.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+        "line": 581,
+        "why": "Code interpreter forces MpNetworkPolicy::Disabled; sandbox has no egress.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/egress/guard.go",
+        "line": 1,
+        "why": "SSRF and DNS-rebinding guard for provider outbound HTTP, single resolution.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/egress/guard.go",
+        "line": 137,
+        "why": "WithAllowlist: host and CIDR allowlist applied to vetted outbound dials.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/egress/client.go",
+        "line": 60,
+        "why": "SafeClient: HTTP client whose dials use only vetted addresses.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go",
+        "line": 73,
+        "why": "Provider AuthType is OAuth-dominant; no generic REST or API-key connector kind.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/external-ideas-harvest.md",
+        "line": 125,
+        "why": "External ideas harvest proposes AllowDomains as the network-proxy extension.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/gap-model.md",
+        "line": 414,
+        "why": "Gap model checklist item to adopt AllowDomains egress allowlist; unchecked.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-083",
+    "title": "Run admission controls: credit-aware pause and resume, an org-level agent pause switch and clamped per-turn overrides",
+    "searches": [
+      "Grep apps: paused[ _-]?for[ _-]?credit|credit[ _-]?pause|insufficient[ _-]?credit|credit[ _-]?exhaust|agents?[ _-]?paused|kill[ _-]?agents",
+      "Grep apps: turn[ _-]?override|TurnOverride|effort[ _-]?override|model[ _-]?override|modelOverride|approval[ _-]?posture|per[ _-]?turn",
+      "Grep apps: PauseRun|ResumeRun|pause_run|resume_run",
+      "Grep Model Plane and cost-core: budget/check|budget_exceeded|reserve|reservation",
+      "Grep model-gateway: drain and readyz; agents_enabled|pause_runs in apps"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/drain.rs",
+        "line": 1,
+        "why": "Graceful drain on shutdown for redeploys; not an agent or org pause.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/budget.rs",
+        "line": 101,
+        "why": "Pre-flight cost-core budget check runs before forwarding to inference.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/budget.rs",
+        "line": 135,
+        "why": "Budget refusal is a hard 402 budget_exceeded error; no paused state.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/org_quota.rs",
+        "line": 1,
+        "why": "Per-org spend ceiling read from Control Plane and handed to cost-core.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "line": 18,
+        "why": "ResumeRun RPC resumes a paused or checkpointed run.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "line": 27,
+        "why": "PauseRun RPC: user-initiated pause; blocks between steps until resumed or cancelled.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "line": 338,
+        "why": "ResumeRunRequest: approval_id gates AwaitingApproval resume; empty only for user pause.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "line": 1090,
+        "why": "resume_run handler moves a run to Running via durable approval or user pause.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "line": 1196,
+        "why": "pause_run handler sets the run to Paused; in-flight step is not aborted.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+        "line": 650,
+        "why": "Browser-run control wiring for PauseRun, ResumeRun and CancelRun RPCs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 317,
+        "why": "POST /v1/orchestration/runs/:run_id/resume exposes run resume to clients.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+        "line": 105,
+        "why": "Frontend resumeRun client call to the orchestration resume endpoint.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "line": 2959,
+        "why": "orchestration.resume_run registered in the AI-first action registry.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/runs.proto",
+        "line": 282,
+        "why": "Run status values: queued, running, completed, failed, cancelled, awaiting_approval.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 72,
+        "why": "ChatInvokeRequest carries an optional per-turn model string.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 116,
+        "why": "Per-turn effort quick, standard or deep; no raw token budget from client.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/thinking.rs",
+        "line": 36,
+        "why": "budget_tokens maps the effort profile to a server-side thinking budget.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/profile.rs",
+        "line": 119,
+        "why": "resolve_posture: requested posture can only tighten the server floor.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 8631,
+        "why": "posture_floor derives the approval floor from authenticated claims.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 928,
+        "why": "Per-turn retrieval-source filter applied per request; not thread-locked.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 2557,
+        "why": "Session-core treats the per-turn retrieval filter as a non-thread-locked axis.",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-079",
+    "title": "Typed feature-flag and settings registry served by Control Plane, with kill switches and an agent-access class",
+    "searches": [
+      "Grep apps: feature_flags?|featureFlags?|kill[ _-]?switch|agent_access|agentAccess|settings_registry|setting_schema|rollout_stage|feature_gate",
+      "Grep apps: AGENTIC_SUBSCRIPTION_ENABLED|FINETUNE_ENABLED|MEMORY_GROUNDING_ENABLED|PROMOTE_ON_USE_(ENABLED|EXECUTE)|LEARNING_(RUN_EVENTS|REVIEW)_ENABLED|CONTEXTUAL_RETRIEVAL_ENABLED|ZDR_WAIVER_ENABLED",
+      "Grep Data Plane: Switch::Inherit|org_processing_policy|graph_extraction",
+      "Grep Frontend actions: settings.update_setting|MODEL_EXECUTABLE_ACTION_IDS",
+      "Grep gateway orgs/settings.rs: ZDR_FEATURE and org features list",
+      "Grep Control Plane billing-core: feature_flags JSONB and FeatureFlags",
+      "Grep feature_flags() name collision: inference-core provider and chat-client comment"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/billing-core/migrations/0001_init_billing_core.up.sql",
+        "line": 7,
+        "why": "billing_accounts.feature_flags JSONB keyed by org_id; billing-owned, no evaluation service.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/billing-core/internal/billing/types.go",
+        "line": 35,
+        "why": "Account model FeatureFlags map[string]bool; per-org billing record, not a registry.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/agentic_subscription.rs",
+        "line": 41,
+        "why": "AGENTIC_SUBSCRIPTION_ENABLED kill switch constant, read by three services.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/finetune_routes.rs",
+        "line": 314,
+        "why": "FINETUNE_ENABLED master kill switch; route returns 503 when unset.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/learning_events.rs",
+        "line": 52,
+        "why": "LEARNING_RUN_EVENTS_ENABLED kill switch; default on when unset.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_grounding.rs",
+        "line": 84,
+        "why": "MEMORY_GROUNDING_ENABLED kill switch for grounding pipeline, default off.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/cmd/main.go",
+        "line": 747,
+        "why": "LEARNING_REVIEW_ENABLED constant parsed by a hand-written switch function.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs",
+        "line": 39,
+        "why": "PROMOTE_ON_USE_ENABLED and _EXECUTE env flags read into a OnceLock config.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/embedding-engine-rs/src/provider/contextualize.rs",
+        "line": 71,
+        "why": "CONTEXTUAL_RETRIEVAL_ENABLED incident kill switch; requires a reason string.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/graph-index-rs/src/budget.rs",
+        "line": 35,
+        "why": "Per-org Switch enum (inherit, on, off) for graph extraction policy.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/graph-index-rs/src/budget.rs",
+        "line": 86,
+        "why": "OrgPolicy row: graph extraction switch, budget mode and monthly budget.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs",
+        "line": 41,
+        "why": "ZDR org feature read from an org features list; no typed registry.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "line": 2398,
+        "why": "settings.update_setting action: low risk, no approval, reversible.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts",
+        "line": 126,
+        "why": "Model-executable allowlist omits settings actions, so the agent cannot write settings.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/settings.rs",
+        "line": 27,
+        "why": "Preferences and API-key routes; no feature-flag or kill-switch registry.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 2556,
+        "why": "Name collision: feature_flags() here concerns provider capability bits.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+        "line": 669,
+        "why": "ProviderCapabilities.feature_flags() returns capability names, not runtime flags.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json",
+        "line": 68,
+        "why": "Fixture names an Auth Core kill switch ZDR_WAIVER_ENABLED, off by default.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/deploy/docker-compose.yml",
+        "line": 378,
+        "why": "AGENTIC_SUBSCRIPTION_ENABLED defaults to false via compose interpolation.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/deploy/docker-compose.yml",
+        "line": 448,
+        "why": "FINETUNE_ENABLED defaults to 0 in compose; dev override flips it.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/docker-compose.yml",
+        "line": 845,
+        "why": "CONTEXTUAL_RETRIEVAL_ENABLED defaults true; kill-switch reason passed through.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv",
+        "line": 2,
+        "why": "Capability promotion ledger rows with states such as source_only; doc-like record.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-093",
+    "title": "Grow the corpus from research: arm promote-on-use safely and add a data-source catalogue with use_when and cost hints",
+    "searches": [
+      "Grep apps: promote_on_use|PROMOTE_ON_USE",
+      "Grep apps: use_when|useWhen|when_to_use|cost_hint|costHint|data source catalog|source catalogue",
+      "Grep Model Plane: brreg|yr_weather|traffic|news|get_weather|get_statistics|shipping_get_quotes",
+      "Grep Frontend knowledge and gateway knowledge: promoted from web|promoted_from|promote",
+      "Manual read: promote_on_use.rs module doc and config, runtime_loop/mod.rs call site, tool_loop.rs tool definitions"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs",
+        "line": 1,
+        "why": "Promote-on-use counts grounded web_fetch uses and ingests past a threshold.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs",
+        "line": 17,
+        "why": "Refinement 1: promoted document would be owned by the service principal, not the user.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs",
+        "line": 36,
+        "why": "config(): PROMOTE_ON_USE_THRESHOLD default 3; enabled and execute default off.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs",
+        "line": 53,
+        "why": "Grounded-use counter is a process-local in-memory map.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs",
+        "line": 62,
+        "why": "maybe_promote: fire-and-forget entry point called per grounded fetch.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "line": 768,
+        "why": "Phase 8 promote-on-use comment: default off, guarded by PROMOTE_ON_USE_ENABLED.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "line": 786,
+        "why": "Call site: maybe_promote invoked from the agent runtime loop.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/info_tools.rs",
+        "line": 6,
+        "why": "Public-data tools: Yr weather, traffic, news via information-core; Brreg direct.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/info_tools.rs",
+        "line": 39,
+        "why": "Default Brreg company-registry base URL constant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4309,
+        "why": "get_weather description: prefer over web_search; ten fixed Norwegian cities.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4314,
+        "why": "get_statistics description: SSB, population only; other values rejected.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4391,
+        "why": "shipping_get_quotes description: cheapest-first carrier quotes with transit days.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/shipping_tools.rs",
+        "line": 1,
+        "why": "Shipping quote tool for the agentic loop, backed by shipping-core carrier adapters.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 1955,
+        "why": "brreg_base_url reads BRREG_API_BASE_URL with a public default.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 876,
+        "why": "costTier low, medium or high hint exists for LLM models, not data tools.",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-094",
+    "title": "Self-maintained team knowledge wiki generated from activity",
+    "searches": [
+      "Grep apps: SubmitProposal|ReviewProposal|wiki_proposals|wiki/proposals|WikiService",
+      "Grep Data Plane: JobWikiRefresh|refreshWiki|maintenance/sweep|stale_wiki",
+      "Grep Model Plane: wiki_propose_edit|wiki_lint|wiki_agent|knowledge_wiki_search",
+      "Grep session-core: dreaming|dream_extractor|agent_memory",
+      "Grep apps: retrieval.low_confidence|retrieval_low_confidence_subject",
+      "Grep wiki-store-go: source_hash|source_changed|stale_since|mark_stale|space_id",
+      "Grep learning-plane: wiki|decision|entit (no hits)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go",
+        "line": 403,
+        "why": "SubmitProposal stores an agent wiki proposal with source refs and status.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go",
+        "line": 458,
+        "why": "ReviewProposal approves or rejects; approval publishes a new page version.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go",
+        "line": 1363,
+        "why": "publishOperatingMapWikiPage writes an approved operating-map proposal into its page.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go",
+        "line": 113,
+        "why": "Wiki pages listed by org and workspace_id; workspace scoping in store queries.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/handler/wiki.go",
+        "line": 548,
+        "why": "Maintenance sweep accepts stale_wiki, orphan_wiki, contradiction and related items.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/data-orchestrator-go/internal/jobs/executor.go",
+        "line": 155,
+        "why": "JobWikiRefresh case in the scheduled job executor.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/data-orchestrator-go/internal/jobs/executor.go",
+        "line": 196,
+        "why": "refreshWiki: data-quality lint issues posted to the wiki maintenance sweep.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/data-orchestrator-go/internal/jobs/executor.go",
+        "line": 243,
+        "why": "fetchLintItems reads data-quality lint output, not user activity.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/wiki_agent.rs",
+        "line": 1,
+        "why": "Wiki maintenance tool surfaces: propose_edit envelope and lint heuristics.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/wiki_agent.rs",
+        "line": 91,
+        "why": "propose_edit builds a pending envelope; the durable write happens elsewhere.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/wiki_agent.rs",
+        "line": 110,
+        "why": "lint flags contradiction, stale and orphan signals on candidate pages.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs",
+        "line": 101,
+        "why": "Tool bridge dispatches wiki_propose_edit and wiki_lint tool names.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 542,
+        "why": "Routes to submit and review wiki proposals (POST /v1/wiki/proposals).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4381,
+        "why": "knowledge_wiki_search tool definition: model searches wiki pages.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs",
+        "line": 108,
+        "why": "Operating-map proposal review route for human approve or reject.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs",
+        "line": 117,
+        "why": "Gateway wiki page routes: list, by-path, versions, diff, backlinks.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/operating_map.rs",
+        "line": 146,
+        "why": "review_operating_map_proposal handler for human approval of proposals.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/knowledge/components/KnowledgePage.tsx",
+        "line": 840,
+        "why": "UI status: accepted operating map is published into the Knowledge wiki.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/knowledge-client.ts",
+        "line": 287,
+        "why": "Wiki client lists and fetches pages; no proposal review UI found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+        "line": 1,
+        "why": "Memory consolidation writes candidates to personal agent_memory rows.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 6499,
+        "why": "Retrieval low_confidence comment: corpus gap may warrant a wiki proposal.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-events/src/subjects.rs",
+        "line": 155,
+        "why": "retrieval.low_confidence subject defined for wiki-proposal triggers; no call site found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/graph-index-rs/src/extractor.rs",
+        "line": 99,
+        "why": "Extracted struct: model-driven graph extraction result per document chunk.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/graph-index-rs/src/contradiction.rs",
+        "line": 1,
+        "why": "Claim contradiction detection module (plan P1-4).",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  }
+]

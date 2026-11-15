@@ -1,0 +1,841 @@
+[
+  {
+    "finalId": "F-t1-049",
+    "title": "Searchable people-and-agent directory with an agent-readable resolver",
+    "searches": [
+      "git grep -i: directory/search|searchMembers|member-search|people search|directory across Control, gateway orgs and Space feature",
+      "git grep -i: resolve_(person|subject|member|agent)|resolveSubject|ok|ambiguous|not_in_channel|unlinked (resolver vocabulary)",
+      "git grep -i: lookup_(user|member|person)|find_(member|person|user)|people_lookup|directory_lookup|who_is in gateway, Model, convex",
+      "git grep -i: MemberPicker|AddMember|member picker|mention menu, picker sources in Space feature",
+      "git grep -i: MentionCandidate|mentionQuery sources in SpaceRoomComposer",
+      "git grep -i: SpaceBindAgentDialog and agent browse-to-bind in convex spaceAgents",
+      "git grep -i: members/search and org member routes in org-core server.go and gateway orgs.rs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/handlers.go",
+        "line": 956,
+        "why": "searchMembers: people search by name or email, active and invited members",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/server.go",
+        "line": 120,
+        "why": "GET /orgs/:id/members/search registered on org-core, not exposed by gateway",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/org/types.go",
+        "line": 176,
+        "why": "MemberSuggestion autocomplete type returned by member search",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs.rs",
+        "line": 54,
+        "why": "Gateway exposes members list, invite, role routes; no members/search route",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs",
+        "line": 173,
+        "why": "list_members org roster route; no org-wide directory search",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx",
+        "line": 20,
+        "why": "Add-member picker offers only people already in the org",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 184,
+        "why": "@ mention candidates built from Space roster and Space agents only",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceBindAgentDialog.tsx",
+        "line": 26,
+        "why": "Bind-existing-agent dialog; Space-scoped agent picker, not a resolver",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts",
+        "line": 479,
+        "why": "Owners and managers browse agent definitions to bind one to this room",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts",
+        "line": 43,
+        "why": "Space reference is ambiguous error; false positive, not an agent resolver",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+        "line": 52,
+        "why": "Doc: UI research lists search rooms and chats as a surface",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-053",
+    "title": "Guests and link invitations with mandatory expiry",
+    "searches": [
+      "git grep -i: \\bguest\\b|principal_type|PrincipalType|principal.type in Control, Application, gateway spaces and Space feature",
+      "git grep -i: invite_code|inviteCode|invitation link|max_uses|terms_accepted|acceptTerms across Control, Application, frontend",
+      "git grep -i: inviteMember and /invite routes in org-core, auth-core and gateway orgs",
+      "git grep -i: InviteDialog|invite room or Space UI in Space feature and settings",
+      "git grep -i: room grant requires org membership in convex spaceMembers",
+      "git grep -i: guests|external guests in *.md docs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts",
+        "line": 446,
+        "why": "Org invitation acceptance route with rate limiting; org-level only",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts",
+        "line": 996,
+        "why": "Org invitation email states a 48-hour expiry; org membership, not room",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/handlers.go",
+        "line": 464,
+        "why": "inviteMember adds or records an org invitation; no room target",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/auth/components/AcceptInvitationPage.tsx",
+        "line": 32,
+        "why": "Accept-invitation page for org invites; no guest or room path",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembers.ts",
+        "line": 61,
+        "why": "Room grant requires existing org membership; no guest principal",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx",
+        "line": 20,
+        "why": "Picker lists org members only; server refuses others",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/internal/auth-event.publisher.ts",
+        "line": 722,
+        "why": "Auth event sets inviteCode to empty string; no link or code invite exists",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/CONTROL_PLANE_ROADMAP.md",
+        "line": 56,
+        "why": "Doc: canonical org invitation acceptance with same-origin links",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 2587,
+        "why": "Doc: product policy for external guests still open",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-054",
+    "title": "Teams and sub-groups with source-tracked membership; mentionable groups",
+    "searches": [
+      "git grep -i: \\bteams?\\b|team_members|team_rooms|TeamMember|user.?group across Control, Application, gateway spaces and Space feature",
+      "git grep -i: @here|@channel|@team|@everyone|mention group in Application and Space code",
+      "git grep -i: ticket-teams and team routes in conversation-core",
+      "git grep -i: team-room comments in convex schema and spaces",
+      "git grep -i: triggerModes group in agents (adjacent mention semantics)",
+      "git grep -i: team rooms in *.md research and plan docs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 560,
+        "why": "Comment: team Spaces are room kinds; no team table exists",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts",
+        "line": 273,
+        "why": "Comment: team Space rooms are a product rule, not implemented",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 628,
+        "why": "Agent triggerModes include group; agent trigger, not user-group mention",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts",
+        "line": 335,
+        "why": "Agent triggerModes group option; no user-group expansion",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go",
+        "line": 92,
+        "why": "ticket-teams routes: support routing teams only, not Space teams",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts",
+        "line": 36,
+        "why": "Channel literal teams means Microsoft Teams integration; false positive",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+        "line": 54,
+        "why": "Doc: team rooms appear as a planned UI section",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+        "line": 61,
+        "why": "Doc: client must not invent an organization or team room from an org id",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-031",
+    "title": "Org audit trail for admins: role-gated view, Space decisions and agent invocations, SIEM export, usage ledger export",
+    "searches": [
+      "git grep -i: admin/audit|/v1/audit|audit/export|audit_export|auditExport|exportToken|export_token (code and docs)",
+      "git grep -i: audit:read|audit:export|auditor|X-User-Role|require_admin|isOrgAdmin (role gating)",
+      "git grep -i: recordOnce|record_once|audit_publisher|AuditPublisher (idempotent audit writes)",
+      "git grep -i: siem|splunk|datadog|export.*(audit|usage) (SIEM and export, all file types)",
+      "git grep -i: decision.issued|decision.denied|decision_issued|space.decision (Space decision audit events)",
+      "git grep -i: agent_invocation|invocation_recorded|approval.*audit|verevon.audit.v2 approv (agent and approval audit)",
+      "git grep -i: space_ref|agentPrincipal|agent_principal in cost-core and usage code (attribution)",
+      "git grep -i: tool_action (session-core audit subject and gateway consumer)",
+      "git grep -i: trust center|audit log|audit trail|audit view|Open audit log (UI strings, tsx)",
+      "git grep -i: text/csv|.csv|export_csv in cost-core, gateway cost and settings (usage export)",
+      "git grep -i: moderat in Space code (moderation audit)",
+      "git grep -i: ListSpaceAuthorityEvents|authority-events|SpaceAuthorityEvent (authority event exposure)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/api.go",
+        "line": 111,
+        "why": "GET /v1/audit route behind internalAuth middleware; org_id query filter",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/api.go",
+        "line": 115,
+        "why": "GET /v1/usage/summary route in the same internal /v1 group",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/api.go",
+        "line": 197,
+        "why": "listAudit: org/since/until/event/user_id filters, limit default 100, no cursor",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/service_auth.go",
+        "line": 207,
+        "why": "/v1/audit reads map to audit:read:self scope",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/service_auth.go",
+        "line": 273,
+        "why": "Signed delegation carries UserRole, but listAudit never checks it",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs",
+        "line": 30,
+        "why": "Gateway GET /api/v1/audit route, gated only by require_session",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs",
+        "line": 50,
+        "why": "list_audit scopes to authorized org; no admin or auditor role check",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs",
+        "line": 4,
+        "why": "Trust Center aggregates tool_action events via audit proxy (header comment)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/audit-client.ts",
+        "line": 95,
+        "why": "listAuditEvents calls /api/v1/audit; tool-action and activity aggregators",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+        "line": 1267,
+        "why": "Settings Recent security events panel loads 25 audit events",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+        "line": 1554,
+        "why": "Open audit log action label; no dedicated admin audit route or export found",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/SettingsPages.test.tsx",
+        "line": 450,
+        "why": "Test mocks /api/v1/audit for settings pages",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/cmd/server/main.go",
+        "line": 93,
+        "why": "Global audit-core retention purge (AUDIT_RETENTION_DAYS, default 365)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/audit_publisher.rs",
+        "line": 182,
+        "why": "Tool-action audit record carries data_category and zdr flags",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/nats-provisioner/publishers_registry_test.go",
+        "line": 83,
+        "why": "Registers subject verevon.audit.v2.model.session-core.tool_action",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 274,
+        "why": "Space deletion-policy audit rows persisted in user-core store, not audit-core",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 320,
+        "why": "Space legal-hold audit rows persisted in user-core store",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/authority.go",
+        "line": 137,
+        "why": "Signed Space decision evidence carries privacy_revision; no audit emission",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/decision.go",
+        "line": 222,
+        "why": "Decision issuance and validation; no audit-core emission found in file",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/conversation/types.go",
+        "line": 252,
+        "why": "ListSpaceAuthorityEvents repository method, Space authority event source",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx",
+        "line": 145,
+        "why": "Per-Space activity panel with authority, approvals and effects lenses",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts",
+        "line": 461,
+        "why": "Client calls per-Space activity route only, not an org-wide view",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 713,
+        "why": "Gateway per-Space activity route; no org-wide audit or export route",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 4528,
+        "why": "agent_invocation_blocked error path; no audit call seen beside it",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/server/server.go",
+        "line": 173,
+        "why": "Usage reads pinned to principal org; no Space or agent dimension",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/leads-core/internal/audit/publisher.go",
+        "line": 26,
+        "why": "Precedent: per-export audit subject lead_export published to audit",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/users/gdpr.go",
+        "line": 29,
+        "why": "Precedent: DSAR export audit subject for export auditing",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/gdpr_handlers.go",
+        "line": 83,
+        "why": "Existing admin-role check via X-User-Role header on GDPR endpoints",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/VEREVON.md",
+        "line": 324,
+        "why": "Doc: audit log with tool_action listed as built, delivery unverified",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/docs/core-research/audit-core.md",
+        "line": 102,
+        "why": "Doc: GET /v1/audit org-scoped and internal-key gated",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/endpoint-map.md",
+        "line": 192,
+        "why": "Doc: GET /v1/audit listed as later (dashboard)",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md",
+        "line": 417,
+        "why": "Doc roadmap: export/SIEM and legal hold listed as enterprise audit items",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Infra Plane/docs/SECURITY.md",
+        "line": 387,
+        "why": "Doc: security events retained externally in a SIEM (no code export)",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-051",
+    "title": "Retention policies for rooms, files and agent sessions, plus shared-Space deletion on the existing saga",
+    "searches": [
+      "git grep -i: retention_(class|policy|policies)|data_retention_days|audit_log_retention_days|retention_days across Control, Application, session-core, gateway",
+      "git grep -i: sweeper|purge|expire|runRetention across Control, Application, Model, Data Plane and gateway",
+      "git grep -i: legal.?hold in user-core spaces and Application convex",
+      "git grep -i: spaceDeletionOwnerReceipts|DeletionReceipt|deletion_receipt|write fence in convex and user-core",
+      "git grep -i: retention in settings and Space frontend features",
+      "git grep -i: S6.1|retention proof|retention schedule in *.md docs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/cmd/server/main.go",
+        "line": 96,
+        "why": "Global audit retention goroutine purges audit and usage rows (env-set days)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/cmd/server/main.go",
+        "line": 157,
+        "why": "runRetention purge loop; no per-org or per-Space policy",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/migrations/002_add_enterprise_fields.up.sql",
+        "line": 31,
+        "why": "Dormant org_compliance table with data_retention_days and audit retention columns",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/org/types.go",
+        "line": 66,
+        "why": "DataRetentionDays field on org compliance struct; no sweeper reads it",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/authority.go",
+        "line": 152,
+        "why": "Effect policy retention_class, residency, deletion_scope as opaque strings",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/018_space_effect_policies.up.sql",
+        "line": 13,
+        "why": "retention_class NOT NULL text column; no sweeper consumes it",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql",
+        "line": 228,
+        "why": "agent_memory expires_at column; no sweeper found",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_dedup.rs",
+        "line": 1347,
+        "why": "Read-time filter drops expired agent memories; no deletion sweeper",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 762,
+        "why": "spaceDeletionOwnerReceipts table: per-plane deletion receipts",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts",
+        "line": 17,
+        "why": "Owner receipt states pending, blocked_legal_hold, succeeded, partial, failed, unknown",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 727,
+        "why": "blocked_legal_hold authorization status exists for deletion",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts",
+        "line": 484,
+        "why": "requestPersonalSpaceDeletion: saga is personal-Space only",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 320,
+        "why": "Legal-hold audit rows recorded in user-core store",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx",
+        "line": 121,
+        "why": "Per-connection retention label only; no retention settings UI",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 2274,
+        "why": "Doc: S6.1 Space deletion, export and retention proof (planned, partly built)",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/docs/compliance/README.md",
+        "line": 85,
+        "why": "Doc compliance checklist: Retention Schedule row pending",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/docs/core-research/audit-core.md",
+        "line": 80,
+        "why": "Doc: audit retention goroutine purges at boot then every 24h",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-057",
+    "title": "Artifact sharing: edit role, Space-as-subject grants, general access and access requests",
+    "searches": [
+      "git grep -i: resource_grants|subject_type|general_access|access_request|request_access in user-core, gateway shares.rs and frontend",
+      "git grep -i: 'edit'|'view' role values in user-core ACL and gateway shares route",
+      "git grep -i: ShareDialog and share UI in knowledge, Space and settings features",
+      "git grep -i: canvas and file artifact share types in Frontend features",
+      "git grep -i: SPACE_AUTHORITY_ADR intersection rule in apps/*.md",
+      "git grep -i: general access or access request flows in Control and Frontend"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/authz_facade.go",
+        "line": 14,
+        "why": "resource_grants is the single grant authority for explicit grants",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/users/acl_repository.go",
+        "line": 25,
+        "why": "ACL repository already has roleEdit constant; edit role exists for grants",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/authz_facade.go",
+        "line": 123,
+        "why": "Authz check returns role view or edit for grants",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs",
+        "line": 111,
+        "why": "create_share hard-codes resource_type document",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs",
+        "line": 114,
+        "why": "create_share hard-codes subject_type user; no Space subject",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs",
+        "line": 115,
+        "why": "create_share hard-codes role view; no edit grant from UI",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/knowledge/components/ShareDialog.tsx",
+        "line": 16,
+        "why": "Share dialog is view-only MVP for documents",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/knowledge/components/ShareDialog.tsx",
+        "line": 135,
+        "why": "Role field disabled and fixed to Can view",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/ownership-client.ts",
+        "line": 23,
+        "why": "Grant row type for ShareDialog shared-with list",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/WorkflowBuilder.tsx",
+        "line": 44,
+        "why": "Canvas term means workflow builder, not a shareable canvas artifact",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+        "line": 64,
+        "why": "Doc: Space membership never widens resource ACL; intersection rule",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-048",
+    "title": "Room visibility, directory and self-join (org-public or private), with a late-joiner history rule",
+    "searches": [
+      "git grep -i: visibility in user-core spaces, gateway spaces, convex spaces and schema, Space frontend",
+      "git grep -i: self-join|selfJoin|join_space|/join|spaces/directory|rooms/directory|browse (Control, gateway, convex, frontend)",
+      "git grep -i: valid_from|validFrom|ParticipantWindow|tenure|joined_at|late.joiner|history window",
+      "git grep -i: membership_changed|membership-changed|revocation (durability of membership events)",
+      "git grep -i: Browse|Join space|Join room|Discover|Public space in Space frontend and sidebar",
+      "git grep -i: is_public|isPublic|public_space|open_room in Space code (public concept)",
+      "git grep -i: self-join|tenure|directory|browse rooms|public room in *.md docs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql",
+        "line": 38,
+        "why": "registered_spaces has privacy_revision but no visibility column",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql",
+        "line": 51,
+        "why": "space_memberships has no valid_from, valid_to or join sequence",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/authority.go",
+        "line": 167,
+        "why": "ThreadReadEntitled admits current members only; no tenure window",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/shared_thread_read_decision.go",
+        "line": 64,
+        "why": "Shared thread-read decision; no membership window fields",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/nats/shared_publisher.go",
+        "line": 195,
+        "why": "membership_changed published on plain NATS, loss tolerated (not durable)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/spaces.go",
+        "line": 339,
+        "why": "Membership-change events published on roster sync",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembers.ts",
+        "line": 198,
+        "why": "Membership sync called after each grant or revocation (idempotent)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 546,
+        "why": "spaces table: name, isOrganizationRoom flag, no visibility or topic field",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 625,
+        "why": "audit_visibility field only; false positive for room visibility",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 651,
+        "why": "Space route table: no directory, browse, join or visibility route",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx",
+        "line": 35,
+        "why": "Sidebar lists caller's Spaces only via listSpaces; no browse dialog",
+        "kind": "code"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-033",
+    "title": "SPA realtime client layer: client-supplied idempotency key, send states with in-place optimistic row, normalized store with version guards, offline vs service-down banner",
+    "searches": [
+      "git grep -i: idempotency_key|idempotencyKey|idempotency-key|sendId|send_id|clientMessageId in spaces feature, shared api, gateway spaces",
+      "git grep -i: required_or_generated and generated idempotency keys in gateway spaces.rs",
+      "session-core migrations and grpc: idempotency unique index, derive_idempotency_hash, new_ulid msg ids",
+      "git grep -i: queued|sending|accepted|failed and optimistic|pending in spaces components and lib",
+      "git grep -i: createStore|Resource<|stale-while|version guard|resource state in frontend src",
+      "git grep -i: navigator.onLine|offline|online|visibilitychange|freeze|resume|slackDown|last-fresh|connectivity",
+      "git grep -i: /health probe usage in frontend src; gateway main.rs health route",
+      "git grep -i: EventSource|WebSocket|stream|connected frame in spaces feature and clients",
+      "git grep -i: echo|canonical id|reconcile in spaces feature"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 136,
+        "why": "Gateway invents idempotency_key when the composer omits one",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 151,
+        "why": "Generated or client key forwarded into the thread append decision",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 605,
+        "why": "required_or_generated: uses client key when present, else generates one",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 956,
+        "why": "DeleteSpaceRequest takes a client idempotency_key (deletion path only)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0002_events_and_ordinals.sql",
+        "line": 35,
+        "why": "Unique (org_id, idempotency_key) index on events when key is set",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0003_orchestration_tables.sql",
+        "line": 129,
+        "why": "Decisions mirror the idempotency pattern with partial unique index",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 2442,
+        "why": "Message id is a fresh ULID per append, not derived from client key",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 2598,
+        "why": "Message idempotency hash derived server-side from msg id and sequence",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 720,
+        "why": "Space deletion requests idempotent on spaceRef plus idempotencyKey index",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 51,
+        "why": "Composer waits on a streamed connected frame; no client send key",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-approvals.ts",
+        "line": 22,
+        "why": "Approvals deliberately non-optimistic by design",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-thread-presentation.ts",
+        "line": 14,
+        "why": "Only run statuses (queued, running, failed); no send-level states",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+        "line": 300,
+        "why": "Space page re-polls on visibilitychange; no offline or service-down state",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+        "line": 206,
+        "why": "Presence heartbeat with online, typing, offline values (presence, not connectivity)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/insights/lib/insights-auto-refresh.ts",
+        "line": 16,
+        "why": "Only window online listener in frontend; insights refresh, not Space banner",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+        "line": 91,
+        "why": "Unauthenticated /health route exists as a probe target",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "line": 236,
+        "why": "Chat controller uses createStore; reusable pattern, not versioned or entity keyed",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/session/session-store.ts",
+        "line": 24,
+        "why": "Session createStore; no entity-keyed store with version guards",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  }
+]

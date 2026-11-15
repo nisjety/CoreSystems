@@ -66,6 +66,9 @@ paths = [
   '''Frontend Plane/Ingestion Plane/''',
   # Compiled audit helper binary committed in the same sweep.
   '''audit-verify\.exe$''',
+  # Audit working set (2026-11-16): extracted feature/verdict JSON and notes behind the
+  # 01-03 audit reports. Prose like "firecrawl-api-surface-105" and "SFTP/disk" trips generic-api-key.
+  '''(^|/)audit-evidence/''',
 ]
 
 # Matched against the detected secret string (gitleaks 8.24.3's default

@@ -1,0 +1,2248 @@
+{
+ "category": "UI/UX & product design",
+ "excluded": [
+  {
+   "id": "hermes-architecture-and-surfaces-166",
+   "reason": "Terminal (Ink) renderer over a Python JSON-RPC backend: a TUI transport architecture, not a user-facing UI/UX capability; Verevon is web-only and already a thin SPA over a Rust BFF (platform-architecture territory)."
+  },
+  {
+   "id": "web-manus-web-product-096",
+   "reason": "Extended reasoning time for complex tasks is a model/compute capability (category 09), not UI/UX; DOC-only and unspecified."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t3-12-001",
+   "name": "Agent-first app shell and information architecture",
+   "description": "One shell that hosts chat, long-running agent tasks and other surfaces behind a stable left navigation (Recents/Projects/Agents/Automations/Library/Settings), with deep-linkable routes for every object.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-142",
+    "antigravity-architecture-089",
+    "claude-product-ux-045",
+    "claude-product-ux-046",
+    "cursor-ai-features-116",
+    "cursor-harness-architecture-120",
+    "manus-product-ux-102",
+    "web-chatgpt-web-product-133",
+    "web-claudeai-web-product-110"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-045",
+     "claude-product-ux-046"
+    ],
+    "why": "Claude (q5, SRC) unifies Chat, Cowork tasks and Code in one shell with a sidebar mode switch, and every object (conversation, project, task, space, settings, plugin install) has a claude:// deep link mapped to an SPA route; ChatGPT (DOC) converged on the same Chat|Work toggle with mixed Recents."
+   },
+   "mechanism": "A single SPA router owns a closed route enum (chat, project, task, space, settings, customize, admin) and a sidebarMode preference (chat|task|code). Recents is one list mixing chats and tasks with filter/sort/pin; projects group both. Every route is addressable by URL (and a custom scheme on desktop) so notifications, emails and other surfaces can deep-link to the exact object. Antigravity adds standalone quick conversations that run in a scratch folder beside project conversations.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-149",
+     "v-planned-decisions-150",
+     "v-modelplane-172"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/app/App.tsx:8-10",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:644,874",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md:193"
+    ],
+    "gap": "Chat, the Agent Run Console (/agents/runs), Spaces and the dashboard are separate destinations; Recents shows chats only (capped at 80) and agent runs live in their own history, so there is no single list of \"my work\". Space cockpit Work/Knowledge/Activity tabs are placeholders waiting on owner-plane projections.",
+    "strengths": "Decided principle \"IDE-like capability, not IDE-like cold-start UI\" with a conversation-first command centre; routes are URL-addressable (SolidJS router with 31 lazy routes)."
+   },
+   "benefit": "Users of an agent product think in tasks, not pages; one Recents that mixes Ask chats and Do runs (with state) makes long-running agent work findable and is the precondition for the inbox and notification clusters.",
+   "approach": "Frontend Plane: merge chat threads and agent runs into one Recents projection (session-core already owns both; expose origin and run state on /v1/threads) with a Chat|Work filter; keep Spaces as the collaborative container. Add stable deep-link routes for run, approval and finding so Application Plane notifications can link to them.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-12-007 run-state vocabulary",
+    "session-core thread listing with paging (BFF cap 80)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Merging lists must not widen ACLs: Space runs must stay filtered by Control-signed Space membership.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Table-stakes shape; Verevon has the pieces but not the unified work list. Not priority because the chat page itself is solid.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-002",
+   "name": "Contextual tabbed workspace pane beside the conversation",
+   "description": "A right-hand auxiliary pane that hosts the work products of the session (artifacts, files, diff, browser view, terminal, sources, plan), opened by the work or by the user, with tabs and split support.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "t3code",
+     "manus",
+     "deepseek"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-111",
+    "claude-product-ux-050",
+    "t3code-ui-and-multimodel-036",
+    "t3code-ui-and-multimodel-037",
+    "manus-product-ux-108",
+    "deepseek-transparency-and-customization-087"
+   ],
+   "bestInClass": {
+    "source": "claude + t3code",
+    "recordIds": [
+     "claude-product-ux-050",
+     "t3code-ui-and-multimodel-036",
+     "t3code-ui-and-multimodel-037"
+    ],
+    "why": "Claude (q5, SRC) gives each session panes for diff, file at line, terminal tabs, preview/browser, PR, tasks, plan and artifacts, with agent-callable show_pane/close_pane tools; T3 Code (q4, SRC) persists a thread-scoped tab set with a versioned store and an empty-state launcher with single-letter shortcuts (B,T,F,D,P,A)."
+   },
+   "mechanism": "A per-thread pane store (persisted, schema-versioned with migrations) holds an ordered list of typed tabs {kind: artifact|file|diff|browser|terminal|sources|plan, params}; singleton rules per kind (Manus) prevent duplicates; the agent can request a pane through a tool or event (Claude ccd_view show_pane), the user can open one from an empty-state launcher. Heavy pane bodies are lazy chunks.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-141"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:410-447",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:635-672",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-surfaces.ts:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWorkspaceCanvas.tsx:1-60"
+    ],
+    "gap": "Four fixed surfaces (Work/Output/Sources/Trace), one focused at a time; no user-launchable browser/file/terminal tabs, no multiple artifacts side by side, no agent-requested pane event.",
+    "strengths": "Opened by the work in a fixed priority (Work > Output > Sources, once per thread), Trace never steals focus, resizable rail 340-880 px that keeps 480 px for the conversation, width persisted. This calm-by-default discipline is better suited to a non-IDE product than Claude/T3 tab sprawl. Keep it; only add a \"pin a second artifact\" affordance later."
+   },
+   "benefit": "Already delivers the core value.",
+   "approach": "Keep. When computer use lands, add a Browser surface fed by Quarry live view (see C-t3-12-031).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Adding IDE-style tabs would contradict the calm-UI decision.",
+   "tier": "n/a",
+   "significance": 4,
+   "rationale": "Verevon is at parity for a chat/agent product and ahead on focus discipline.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-003",
+   "name": "Split view, pop-out windows and layout restore",
+   "description": "Open several sessions side by side, pop a session or pane into its own window, tear off and re-dock, and restore the window layout after restart.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-product-ux-049",
+    "claude-runtime-architecture-093"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-049",
+     "claude-runtime-architecture-093"
+    ],
+    "why": "Only Claude (q5, SRC) ships split panes, pop-outs, tear-off and layout restore via IPC (reportOpenLayout/takeRestorableLayout)."
+   },
+   "mechanism": "Main process tracks child windows (opener validated as the main frame), reports open popouts and layout to a store, and on restart replays the layout. In a browser the equivalent is window.open on a deep-link route plus a BroadcastChannel to keep state in sync.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Web-only product: no split view of two threads; browser tabs on deep links are the only multi-view.",
+    "strengths": ""
+   },
+   "benefit": "Low for a web chat product; browser tabs cover most of it.",
+   "approach": "Skip; ensure every thread/run route is deep-linkable so users can open two browser tabs, and that the SSE stream tolerates two tabs on one thread.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-12-001 deep links"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Two tabs on one thread can double-submit; idempotency key per send is planned (I2).",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Desktop-window feature; Verevon is a web app and has no desktop shell.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-004",
+   "name": "Command palette with typed pickers and content search",
+   "description": "One keyboard entry (Ctrl/Cmd+K) to search actions, threads (including message content), projects and files, with typed sub-pickers and recent-item switching.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-112",
+    "claude-product-ux-047",
+    "codexagent-plugins-and-extensibility-041",
+    "t3code-ui-and-multimodel-023"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-023"
+    ],
+    "why": "T3 Code (q4, SRC) runs commands, projects, threads with message-content snippets, files and project content through one reducer with mutually exclusive overlay modes; Claude adds a recent-item switcher and per-item usage ranking."
+   },
+   "mechanism": "A palette state machine reduceCommandPaletteUiState(mode: command|files|content) where re-pressing the shortcut toggles closed and modes never stack. Items are {kind: action|submenu, searchTerms, threadContentMatch{source, snippet}}; actions come from the same registry as the UI (Verevon already has a 168-action registry), ranking blends fuzzy score with recency/usage counts.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-143",
+     "v-chat-agents-ui-142"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:1-110",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2266"
+    ],
+    "gap": "Ctrl/Cmd+K and \"/\" open global search, but there is no command palette that executes actions (grep CommandPalette|cmdk: none); no server-side conversation content search (chat-01 C-028).",
+    "strengths": "A typed action registry (zod I/O, owner plane, risk, reversibility) already exists and is the ideal palette source."
+   },
+   "benefit": "Power users and Norwegian enterprise admins move faster; the action registry makes palette actions automatically authority-checked.",
+   "approach": "Frontend Plane: build a Solid palette over the existing action registry (filter by risk: palette may only run low-risk, reversible actions directly; others open their confirm dialog). Add a thread-content mode once Data/session-core expose search.",
+   "effort": "M",
+   "dependencies": [
+    "action registry",
+    "server-side conversation search (chat-01 C-028)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Palette must not become a back door around approval gates; reuse registry risk metadata.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common across desktop references and already planned (I1); cheap on top of the registry.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-005",
+   "name": "Keyboard-first interaction, shortcut sheet and rebinding",
+   "description": "Every action has a shortcut, a searchable shortcut overlay (Ctrl+/ or Ctrl+?), user rebinding with context conditions and conflict detection, plus input niceties (type-anywhere-to-focus, double-Escape stop).",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "deepseek",
+     "t3code",
+     "codexagent",
+     "web-chatgpt"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-113",
+    "claude-product-ux-048",
+    "deepseek-transparency-and-customization-075",
+    "deepseek-transparency-and-customization-076",
+    "t3code-ui-and-multimodel-045",
+    "t3code-ui-and-multimodel-103",
+    "codexagent-plugins-and-extensibility-126",
+    "web-chatgpt-web-product-135"
+   ],
+   "bestInClass": {
+    "source": "t3code + deepseek",
+    "recordIds": [
+     "t3code-ui-and-multimodel-045",
+     "deepseek-transparency-and-customization-075",
+     "deepseek-transparency-and-customization-076"
+    ],
+    "why": "T3 Code (q5, SRC) has VS Code-style when-clauses, last-rule-wins, a recorder and conflict flags; DeepSeek (SRC/DOC) adds a searchable Mod+/ reference and a double-Escape stop bound to the live turn so a stale keypress never cancels the wrong run."
+   },
+   "mechanism": "A declarative keybinding table {command, key, when} with per-OS overrides (ctrl->mod on macOS); a context-key evaluator decides which bindings are live; user overrides stored per user and merged last-wins; conflicts computed on edit. Stop requires two Escapes within a short window, each validated against {sessionId, turn, generation, focused region}. Type-anywhere-to-focus routes printable keys to the composer unless something else owns focus or IME is composing.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-142",
+     "v-chat-agents-ui-143",
+     "v-planned-decisions-152",
+     "v-modelplane-173"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:1-110",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:556-617"
+    ],
+    "gap": "A handful of fixed shortcuts (new chat, focus composer, switch thread, Esc closes panel); no shortcut sheet (planned I1), no rebinding, no double-Escape run stop.",
+    "strengths": "Focus management is good: Esc returns focus, focus returns to the composer after an answer."
+   },
+   "benefit": "Discoverability of existing shortcuts and a safe keyboard stop for agent runs.",
+   "approach": "Frontend Plane: move use-chat-shortcuts into a declarative table, render a shortcut sheet from it (Ctrl+/), add double-Escape stop validated against the run id and stream generation. Defer user rebinding.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Shortcuts colliding with Norwegian keyboard layouts (AltGr combos); test nb-NO layout.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Sheet and safe stop are cheap and visible; full rebinding is nice-to-have.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-006",
+   "name": "Attention model: typed notifications, sounds and badges",
+   "description": "The product tells the user when an agent needs approval, needs an answer, or finished, through event-typed channels (in-app, OS/browser push, email, mobile), per-type levels, distinct sounds, badges and unread counts, and stays quiet when nothing changed.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "manus",
+     "web-perplexity"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-114",
+    "claude-product-ux-054",
+    "claude-runtime-architecture-094",
+    "cursor-ai-features-132",
+    "manus-product-ux-111",
+    "web-perplexity-web-product-106"
+   ],
+   "bestInClass": {
+    "source": "claude + antigravity",
+    "recordIds": [
+     "claude-product-ux-054",
+     "antigravity-agent-ux-and-gemini-114"
+    ],
+    "why": "Claude (q5, SRC) splits notifications by event type (permission, idle/done, question) with off|badge|banner per type, sound and attention cues, actionable notifications and a \"sessions waiting for you\" list; Antigravity (q5, SRC) uses two distinct sounds (action required vs done), web push for remote sessions and a sidebar attention state."
+   },
+   "mechanism": "Run events map to a closed set of attention kinds {needs_approval, needs_input, finished, failed}. A per-user preference matrix kind x channel {off, badge, banner/push, email}. Delivery: in-app badge and unread count first, then Web Push (service worker + VAPID) for an open/closed tab, then email/mobile for long absences; notifications deep-link to the run. Perplexity rule: automations notify only when something noteworthy changed.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/RunNotifyButton.tsx:1-20",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3685",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:535",
+     "apps/Frontend Plane/verevonv3/src/app/App.tsx:178-180"
+    ],
+    "gap": "A per-run \"Notify me when done\" watcher (capability-core -> notification-core) and a /chat/findings page exist, but there is no event-typed preference matrix, no browser/Web Push (grep Notification API: none), no tab-title or badge unread count, no distinct \"needs approval\" alert; approvals waiting while the user is away are silent unless opted in per run.",
+    "strengths": "Durable per-user watcher through notification-core (not a client timer) is the right backbone."
+   },
+   "benefit": "Verevon Do runs pause for durable approvals; without an approval-needed alert runs stall silently, which wastes the durable-approval design and the user's time.",
+   "approach": "Application Plane (notification-core) owns delivery and preferences; Model Plane emits attention kinds on run_paused_for_approval/ask/finished via the NATS outbox; Frontend Plane adds a tab badge, a \"Waiting for you\" section and Web Push registration. Default: needs_approval and needs_input always notify; finished only when opted in.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-12-007 run-state vocabulary",
+    "notification-core push channel",
+    "deep-link routes"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Notification content must respect ZDR (no prompt text in push payloads for ZDR orgs); Space-run notifications must go only to principals the owner plane authorises.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Present in 6 of 12 sources and essential for long-running agents with approval gates.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-007",
+   "name": "Run-state vocabulary and inbox-style work lifecycle",
+   "description": "A small closed vocabulary of session states (working, needs input, plan ready, ready for review, completed, archived) used in lists and notifications, with an attention-ordered inbox (pinned, active, snoozed, settled).",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-129",
+    "t3code-ui-and-multimodel-020"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-020"
+    ],
+    "why": "T3 Code (q5, SRC) turns the sidebar into a working inbox: pinned (drag to reorder), active with status pills and elapsed time, snoozed threads that wake with a notice, and a collapsed Settled (N) tail; Claude (q4, SRC) supplies the closed state vocabulary and mark-completed."
+   },
+   "mechanism": "Server-derived run state enum on every thread/run row {working, needs_approval, needs_input, plan_ready, completed, failed, archived}; client groups by attention order (needs_approval > needs_input > working > plan_ready > unseen completion > settled). Snooze stores wake_at; a timer moves the row back with a \"woke\" notice. Elapsed time is rendered from started_at without per-second re-render of the whole list.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:869-896",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:21"
+    ],
+    "gap": "Rail shows run-status chips and an \"attention\" filter, but there is no closed vocabulary shared with notifications, no attention-ordered grouping, no snooze or settled tail, and no mark-completed.",
+    "strengths": "Status chips already come from server truth (session-core), not client guesses."
+   },
+   "benefit": "Makes parallel Do runs manageable and gives notifications and the inbox the same words.",
+   "approach": "Model Plane: publish the run-state enum in mp-contracts and on /v1/threads rows; Frontend Plane: attention-ordered sidebar section and Settled tail; snooze as a presentation field next to pinned (PUT /v1/threads/{id}/presentation already exists).",
+   "effort": "S",
+   "dependencies": [
+    "session-core presentation fields"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "States must be derived from durable run status, never from client stream state, or they lie after reload.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Cheap, foundational for C-t3-12-001 and C-t3-12-006; unique-to-differentiator in references but it is the core UX of agent products.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-008",
+   "name": "Sidebar organisation: sections, grouping, drag order and bulk actions",
+   "description": "User sections and groups, grouping by date/project/state, drag-and-drop ordering, bulk select, auto-archive, hover quick reply, pinned projects.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-perplexity"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-051",
+    "claude-product-ux-140",
+    "web-perplexity-web-product-108"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-051",
+     "claude-product-ux-140"
+    ],
+    "why": "Claude (q5, SRC) has built-in and custom sections, group-by (date, project, state, custom, none), drag ordering, bulk select and auto-archive, all exposed as agent-callable sidebar tools."
+   },
+   "mechanism": "Sidebar model {sections[], groups[], groupBy, sort} stored server-side per user; rows carry pinned/unread/completed/archived; drag-and-drop writes an order key; bulk menu operates on a selection set; auto-archive after N days of completed state.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/chat-organization.ts:3-27",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:5-69",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:226-320"
+    ],
+    "gap": "Group/sort/filter and up to 100 projects exist but are browser-only (never sent to a server, not cross-device); no bulk actions, no drag order, no auto-archive; archive routes exist in MG but are not exposed.",
+    "strengths": "Rename/pin/delete are server-backed presentation fields."
+   },
+   "benefit": "Cross-device organisation; enterprise users switch between laptop and phone.",
+   "approach": "Move organiser state to session-core presentation fields (Model Plane) behind the existing BFF route; expose archive; add bulk menu in the SPA.",
+   "effort": "M",
+   "dependencies": [
+    "chat-01 C-027 / C-029 server-side projects"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Do not let a Space-scoped thread be moved into a personal project without Control authority.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Browser-only organisation is a visible weakness, but chat-01 already tracks it; keep as recommended.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-009",
+   "name": "Home overview of work and typed starting points",
+   "description": "A home with a calm hero composer, typed creation entry points (slides, website, research...), example prompts and an overview of recent work and outputs.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "manus",
+     "t3code",
+     "web-manus"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-118",
+    "claude-product-ux-130",
+    "manus-product-ux-107",
+    "t3code-ui-and-multimodel-019",
+    "web-manus-web-product-083"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-107",
+     "web-manus-web-product-083"
+    ],
+    "why": "Manus (q4, SRC) offers typed creation entry points with matching placeholders and playbooks; Claude (SRC) adds a home overview of outputs, PRs and progress with section reordering; T3 Code a centred draft hero composer with an inline project switcher."
+   },
+   "mechanism": "Home composer = the same composer component as chat with a mode chip set that pre-selects tool/output type and placeholder; below it, an overview projection of recent runs and outputs; submitting hands the draft (and attachments) to a new thread.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-146",
+     "v-chat-agents-ui-147"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:441-447",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3874-3944",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/pending-chat-launch.ts:1"
+    ],
+    "gap": "Typed output chips (slides/site/research) are limited by which creation backends exist (see category 02).",
+    "strengths": "Dashboard composer with date autocomplete, work-period picker, entity overlay, drag/paste and lossless handoff of draft and attachments into chat; one composer node moved between empty state and dock. Keep."
+   },
+   "benefit": "Already delivered.",
+   "approach": "Keep; add typed chips only for creation backends that really exist (no fake entry points, consistent with the honesty-badge decision).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Chips for unbacked capabilities would break the honesty principle.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Parity or better (work-period picker is unusual).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-010",
+   "name": "First-run onboarding that personalises the agent",
+   "description": "A short first-run flow (role, use, team or personal, imports) that writes answers into the agent's instructions, offers role-aware first tasks and records completion per step.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "manus",
+     "t3code",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-manus"
+    ],
+    "n": 10,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-115",
+    "antigravity-architecture-090",
+    "claude-product-ux-058",
+    "codexagent-plugins-and-extensibility-100",
+    "cursor-ai-features-119",
+    "deepseek-transparency-and-customization-080",
+    "manus-product-ux-106",
+    "t3code-architecture-089",
+    "t3code-ui-and-multimodel-072",
+    "web-chatgpt-web-product-140",
+    "web-claudeai-web-product-116",
+    "web-manus-web-product-087"
+   ],
+   "bestInClass": {
+    "source": "claude + deepseek",
+    "recordIds": [
+     "claude-product-ux-058",
+     "deepseek-transparency-and-customization-080",
+     "cursor-ai-features-119"
+    ],
+    "why": "Claude (q4, SRC) asks name, role and topics and writes them into \"Instructions for Claude\", then offers starter tasks; DeepSeek (DOC) mounts exactly one onboarding step at a time from an ordered ledger with per-owner durable completion; Cursor (SRC) maps job role to first actions via validated remote config."
+   },
+   "mechanism": "An ordered onboarding ledger: each step {id, order, owner, version} registers itself; the shell mounts one step with complete()/skip(); completion is stored per user and versioned so new steps appear once. Answers (name, role, language, topics) are written to the persona/custom-instructions store, and a role -> starter-task map (server config) seeds the home chips.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/onboarding/components/steps/IntroStep.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/onboarding/components/steps/OrganizationStep.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/onboarding/components/steps/ConnectStep.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/onboarding/lib/onboarding-state.ts"
+    ],
+    "gap": "Not in the baseline; light grep shows an organisation onboarding wizard (intro, organisation, website crawl, connect accounts, assembly, paywall). Not verified: whether it writes the persona (Settings Persona, 1,500 chars) or seeds role-aware chat starters; no versioned one-step ledger seen. Check OnboardingPage.tsx and onboarding-state.ts for persona writes.",
+    "strengths": "Website crawl and account connection during onboarding (Quarry + integration-corev2) give the agent real org context from day one, which none of the references do."
+   },
+   "benefit": "Hermes-style tailoring starts at first run: a persona seeded from role and language makes the first answer feel personal.",
+   "approach": "Frontend Plane: add a personal step (name, role, preferred language) that writes the persona via persona-client and seeds role-based starter chips; keep org steps. Make completion versioned per step.",
+   "effort": "S",
+   "dependencies": [
+    "persona store (Convex)",
+    "memory consent"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Do not write inferred facts to memory without consent; ZDR orgs must not persist onboarding free text outside allowed stores.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Table-stakes in 10 of 12 sources; Verevon has the org half, missing the personal half.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 5,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-011",
+   "name": "Contextual feature education and cross-surface discovery",
+   "description": "Capability tips under the composer, coach marks, What's New, server-driven NUX tips, an install hub and recommendations of the better-suited surface for a task.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-product-ux-059",
+    "claude-product-ux-060",
+    "claude-product-ux-146"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-060",
+     "claude-product-ux-146"
+    ],
+    "why": "Claude (SRC) tracks tips shown/clicked/dismissed, has a What's New modal and nudges, and recommends a better-suited product inline; Antigravity's server-driven NUX config (in its onboarding record) is the same pattern."
+   },
+   "mechanism": "A tip registry {uid, location, trigger, maxShows} delivered from server config; the client shows at most one tip per surface, records dismissals per user, and a What's New feed versioned by release.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; check src/features for \"whats-new\", \"tip\", \"nudge\" components and any release-notes surface.",
+    "strengths": ""
+   },
+   "benefit": "Verevon has many hidden capabilities (work-period picker, context inspector, schedule this); tips raise adoption without clutter.",
+   "approach": "Frontend Plane: small tip registry with per-user dismissal stored in Control/user prefs; What's New fed from release notes.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Nudge fatigue; respect the calm-UI principle (max one tip visible).",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful, low urgency.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-012",
+   "name": "Settings information architecture, search and safe edits",
+   "description": "Settings grouped by area with scopes (user/workspace/org) and admin locks, a global settings search that scrolls to and highlights the row, staged edits with per-setting reset to default and stale-write refusal, and progressive disclosure of advanced features.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "manus",
+     "t3code",
+     "deepseek"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-117",
+    "cursor-ai-features-141",
+    "manus-product-ux-103",
+    "t3code-ui-and-multimodel-046",
+    "t3code-ui-and-multimodel-098",
+    "deepseek-transparency-and-customization-071",
+    "deepseek-transparency-and-customization-072",
+    "deepseek-transparency-and-customization-073"
+   ],
+   "bestInClass": {
+    "source": "t3code + deepseek",
+    "recordIds": [
+     "t3code-ui-and-multimodel-046",
+     "deepseek-transparency-and-customization-071"
+    ],
+    "why": "T3 Code (q4, SRC) indexes about 40 settings for a global search with anchored scroll, pulse highlight and per-setting reset; DeepSeek (q4, SRC) stages typed values, marks user overrides, offers reset to the deployment default and refuses edits based on a stale revision."
+   },
+   "mechanism": "Settings registry entries {id, section, label, keywords, scope, lockedBy}; search filters the registry and navigates to section#id, then pulses the row. Each form snapshot carries resolved value, inherited base, raw user value and revision; save sends the revision and the server rejects stale writes; \"reset\" deletes the override.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/SettingsPage.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:448-497",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PersonaSection.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PrivacyDataSection.tsx"
+    ],
+    "gap": "Settings exist with many sections (persona, memory, skills, MCP, plugins, privacy, quotas, schedules, security), but there is no settings search, no override/inherited markers, no reset-to-default and no stale-write protection (not seen in grep; FE roadmap still lists \"de-fake residual settings rows\").",
+    "strengths": "Org/user scope is real and Control-backed for admin sections."
+   },
+   "benefit": "Admins in multi-org tenants need to see what is inherited vs overridden; stale-write refusal prevents two admins clobbering policy.",
+   "approach": "Frontend Plane registry + search; owner planes (Control for org policy) return revision with each setting and reject stale writes.",
+   "effort": "M",
+   "dependencies": [
+    "Control Plane setting revisions"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Search must hide admin-only settings from non-admins.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Common; moderate user impact.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-013",
+   "name": "Theming and appearance customisation",
+   "description": "Light/dark/system, accent colours, custom themes from seed colours, density, UI and code font families and sizes, contrast and translucency, dyslexia-friendly font.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "t3code",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-116",
+    "t3code-ui-and-multimodel-024",
+    "t3code-ui-and-multimodel-025",
+    "t3code-ui-and-multimodel-095",
+    "manus-product-ux-104",
+    "web-chatgpt-web-product-136",
+    "web-claudeai-web-product-111",
+    "deepseek-transparency-and-customization-074",
+    "hermes-architecture-and-surfaces-170"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-024",
+     "t3code-ui-and-multimodel-025"
+    ],
+    "why": "T3 Code (q5, SRC) defines about 56 colour roles, separate light and dark theme choices, an OKLCH palette engine that generates a contrast-solved theme from canvas + accent, live editor and VS Code theme import, plus independent font families/sizes, contrast and glass sliders."
+   },
+   "mechanism": "Semantic colour roles as CSS custom properties; a theme = {light: roles, dark: roles}; a generator takes seed colours, works in OKLCH and solves text/surface contrast to WCAG targets; appearance sync components write document-level variables; a synchronous first-paint bootstrap reads the stored preference to avoid flash (DeepSeek).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-148"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2266",
+     "apps/Frontend Plane/verevonv3/src/styles/global.css:55,332-335,368,409",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAppearancePreview.tsx:15-16"
+    ],
+    "gap": "Theme toggle only; no accent, density, font-size or dyslexia font preference. ChatAppearancePreview is a development-only comparison tool, not a user setting.",
+    "strengths": "Large verevon-* token set in global.css with a dark variant and an accessible focus ring."
+   },
+   "benefit": "Font size and dyslexia font matter for accessibility; tenant accent colours help enterprise branding.",
+   "approach": "Frontend Plane: expose font size and a dyslexia-friendly font first (a11y), then org accent from Control branding; reuse existing tokens.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Custom themes can break contrast; generate rather than free-pick.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Table-stakes in a basic form (Verevon has it); the rest is polish.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-014",
+   "name": "Design-system discipline and purposeful motion",
+   "description": "A written design contract (flat surfaces, one primitive per concern, explicit empty/loading/degraded states), semantic token enforcement, one in-repo component kit, and small meaningful motion with reduced-motion fallbacks.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes",
+     "deepseek",
+     "t3code",
+     "claude"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-167",
+    "deepseek-transparency-and-customization-167",
+    "t3code-ui-and-multimodel-063",
+    "t3code-ui-and-multimodel-105",
+    "claude-product-ux-131"
+   ],
+   "bestInClass": {
+    "source": "hermes + deepseek",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-167",
+     "deepseek-transparency-and-customization-167"
+    ],
+    "why": "Hermes (q5, SRC) ships a 34 KB DESIGN.md with principles, distinct empty/loading/reconnecting/degraded/exhausted states and cancellation rules; DeepSeek (q5, DOC) enforces that features use only semantic alias tokens and shared primitives via specs."
+   },
+   "mechanism": "Tokens in three layers (scale -> semantic alias -> component); a lint/spec gate rejects raw colours and literal spacing in feature code; one primitives catalog (Button, Badge, SearchField, Loader, ErrorState, Toast); state checklist per surface (empty, loading, reconnecting, degraded, exhausted, error); motion tokens with prefers-reduced-motion fallbacks (T3 status-pulse, live-activity sweep).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/styles/global.css:4630",
+     "apps/Frontend Plane/verevonv3/src/styles/global.css:12297",
+     "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:341"
+    ],
+    "gap": "Not in the baseline. A large token set and reduced-motion media queries exist (10 files), but no token-enforcement gate or single primitives catalog was found; the design spec (VEREVON_CHAT_UX_DESIGN_SPEC.md) is marked stale versus code. Check eslint config for a raw-colour rule and src/shared/ui for a primitives kit.",
+    "strengths": "Honest-state principle (design-preview badges, honest empty states) already matches Hermes' state checklist."
+   },
+   "benefit": "Keeps a fast-growing SolidJS UI consistent across chat, agents and Spaces.",
+   "approach": "Frontend Plane: add a stylelint/eslint rule banning raw colours outside tokens, a state checklist per surface in the design doc, and motion tokens.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Gate noise on legacy CSS (global.css is ~16k lines); start with new files only.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Low effort, protects quality; not user-visible directly.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-015",
+   "name": "Feedback surfaces: toasts, composer banners, connection status, offline and boot states",
+   "description": "Rules and components for transient outcomes (toasts that survive closing panels), persistent notices docked above the composer, a connection pill with hold times, an offline page with retry, and an instant connecting splash.",
+   "prevalence": {
+    "sourcesWith": [
+     "t3code",
+     "deepseek",
+     "claude",
+     "web-chatgpt"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "t3code-ui-and-multimodel-064",
+    "t3code-ui-and-multimodel-065",
+    "deepseek-transparency-and-customization-084",
+    "deepseek-transparency-and-customization-085",
+    "claude-product-ux-057",
+    "t3code-architecture-030",
+    "web-chatgpt-web-product-141"
+   ],
+   "bestInClass": {
+    "source": "t3code + deepseek",
+    "recordIds": [
+     "t3code-ui-and-multimodel-064",
+     "t3code-ui-and-multimodel-065",
+     "deepseek-transparency-and-customization-084",
+     "deepseek-transparency-and-customization-085"
+    ],
+    "why": "T3 Code (q4, SRC) has thread-scoped stacked toasts with expandable detail and copy-for-errors plus a composer banner stack; DeepSeek (DOC) codifies toast vs in-place notice and a connection pill with minimum-visible (800 ms) and recovered (2 s) hold times so healthy operation stays silent."
+   },
+   "mechanism": "One shell-level toast manager (outlives the panel that triggered it) with {threadRef, severity, detail, actions, copyable}; a composer banner stack with priority ordering; a connection indicator fed by the SSE/fetch layer with hysteresis (show Reconnecting only after a short delay, hold Connected 2 s then hide); failed operations keep user data in place.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx"
+    ],
+    "gap": "Not in the baseline. Grep found no app-wide toast system (only ticket bulk actions) and no connection-status pill; chat has reconnect handling in the live run panel and honest error events (chat-01 C-002). Check src/shared/ui for a toast/notice primitive and how gateway 503/429 errors surface outside chat.",
+    "strengths": "Honest errors instead of fake \"done\" on stream failure (chat-01)."
+   },
+   "benefit": "Clear, calm failure feedback is a trust signal for an enterprise product with many planes that can fail independently.",
+   "approach": "Frontend Plane: shell toast manager + composer banner stack; connection pill driven by the chat-client stream state with hysteresis; map typed refusal codes (v-modelplane-171) to banner copy.",
+   "effort": "S",
+   "dependencies": [
+    "typed refusal codes"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Over-notifying; follow the \"healthy stays silent\" rule.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Users notice failure handling immediately; cheap.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-016",
+   "name": "Accessibility: screen readers, reduced motion, keyboard reachability",
+   "description": "ARIA labelling, live-region narration of agent progress, reduced-motion handling, forced-colours and coarse-pointer support, keyboard models for artifacts and editors, and accessibility regression tests.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek",
+     "t3code",
+     "web-claudeai"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-132",
+    "deepseek-transparency-and-customization-088",
+    "t3code-ui-and-multimodel-052",
+    "web-claudeai-web-product-113"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-088"
+    ],
+    "why": "DeepSeek (q4, SRC) pins behaviour with ARIA-tree snapshots in Chromium and WebKit, focus-ring e2e tests, 962 aria-* uses and 61 reduced-motion checks; Claude.ai (DOC) documents keyboard models (F6 regions) and known gaps honestly."
+   },
+   "mechanism": "ARIA snapshot tests (Playwright accessibility tree) per key surface; live region announces lifecycle, not tokens; focus-ring tests; prefers-reduced-motion and forced-colors media queries; 16 px minimum input font on coarse pointers.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:449-540",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:765",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx:1-15",
+     "apps/Frontend Plane/verevonv3/src/styles/global.css:368"
+    ],
+    "gap": "No ARIA-snapshot regression suite seen (check tests/ for toMatchAriaSnapshot); several Norwegian-only strings reduce screen-reader quality in English.",
+    "strengths": "Live region announces lifecycle, heartbeat and source tally rather than tokens; charts are accessible SVG with a data table, keyboard navigation and never colour alone; visible 4.5:1 focus ring; aria-* in about 245 files. Keep and add snapshot tests."
+   },
+   "benefit": "Public-sector and Norwegian enterprise buyers require WCAG (universell utforming).",
+   "approach": "Keep; add Playwright ARIA snapshots for chat, approvals and the run console.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None significant.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is at or above most references on narration and charts.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-017",
+   "name": "Rendering performance at scale and startup budget",
+   "description": "Virtualised transcripts and lists, block-level streaming re-render, tiered lazy loading of feature chunks with self-healing chunk errors, workers for heavy computation, and a tested cold-start request budget.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "t3code",
+     "claude",
+     "deepseek"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-121",
+    "antigravity-architecture-091",
+    "t3code-ui-and-multimodel-051",
+    "claude-product-ux-061",
+    "deepseek-transparency-and-customization-086"
+   ],
+   "bestInClass": {
+    "source": "claude + t3code",
+    "recordIds": [
+     "claude-product-ux-061",
+     "t3code-ui-and-multimodel-051"
+    ],
+    "why": "Claude (q5, REA) registers 257 lazy modules in tiers T1/T2/T3 with largeClosure markers and a reload-on-unrecoverable policy; T3 Code (q4, SRC) virtualises the timeline, lazy-loads heavy panels, caps hidden mounts and uses workers; DeepSeek tests a startup RPC budget in e2e."
+   },
+   "mechanism": "Message list virtualisation with measured row heights; markdown parsed incrementally per completed block so only the last block re-renders while streaming; lazy registry {id, tier, onUnrecoverable: reload} with fixed-height skeletons; diff/stat work in Web Workers; an e2e test counts /api calls at cold boot and fails above budget.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-145",
+     "v-planned-decisions-153",
+     "v-modelplane-173"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx:15-20",
+     "apps/Frontend Plane/verevonv3/src/app/App.tsx:8-10"
+    ],
+    "gap": "No virtualisation; the whole message is reparsed on every streamed token (blocks remount); no render benchmark; no startup request budget. Route-level lazy loading exists (31 lazy routes).",
+    "strengths": "SolidJS fine-grained reactivity makes block-level re-render cheap once parsing is incremental."
+   },
+   "benefit": "Long Do runs and research reports are Verevon's showcase; jank on long transcripts is noticed immediately.",
+   "approach": "Frontend Plane: incremental block parser (planned I5), virtualised transcript (e.g. a Solid virtual list), worker for heavy markdown/highlighting, Playwright startup budget test.",
+   "effort": "M",
+   "dependencies": [
+    "chat-01 C-005"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Virtualisation conflicts with in-page find and screen readers; pair with C-t3-12-038 and the live region.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Same priority as chat-01 C-005; directly user-visible.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-018",
+   "name": "Responsive web, mobile apps and multi-platform reach",
+   "description": "The same account across web, desktop and mobile with a responsive layout (sheets, off-canvas sidebar, mobile composer rules), native mobile apps with widgets and push, and task monitoring from the phone.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "t3code",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "manus-product-ux-113",
+    "t3code-ui-and-multimodel-069",
+    "web-chatgpt-web-product-137",
+    "web-claudeai-web-product-115",
+    "web-manus-web-product-084",
+    "web-perplexity-web-product-104"
+   ],
+   "bestInClass": {
+    "source": "claude.ai + chatgpt",
+    "recordIds": [
+     "web-claudeai-web-product-115",
+     "web-chatgpt-web-product-137"
+    ],
+    "why": "Claude.ai (DOC) keeps mobile parity for artifacts, interactive charts, task monitoring and push; ChatGPT (DOC) adds widgets, iPad split view and a simplified mobile sidebar; T3 Code (SRC) shows concrete responsive rules (sheet below 980 px, Enter inserts newline on phones)."
+   },
+   "mechanism": "Breakpoint-driven layout: right panel becomes a sheet, sidebar off-canvas; coarse-pointer composer rules; PWA manifest + Web Push give phone notifications without a native app; native apps reuse the same session APIs.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWorkspaceCanvas.tsx:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-appearance-refinements.css:79-85"
+    ],
+    "gap": "Responsive web with a full-screen sheet below 760 px; no mobile app, no PWA manifest (public/ has no manifest; grep), so no install-to-home-screen or Web Push on phones.",
+    "strengths": "Responsive canvas exists."
+   },
+   "benefit": "Approving a paused agent run from a phone is the main mobile use case.",
+   "approach": "Frontend Plane: PWA manifest + service worker for Web Push and an approval-friendly mobile layout; defer native apps.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-12-006 attention model"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Service worker caching must never cache authenticated API responses (ZDR).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Native apps are out of scope now; PWA closes most of the gap cheaply.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-019",
+   "name": "Internationalisation and localisation discipline",
+   "description": "All UI copy through typed locale catalogs with ICU plurals, many locales, a gate that rejects hardcoded strings, dictionary parity tests, layered overrides, and localised help and model output language.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek",
+     "hermes",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "claude-product-ux-062",
+    "deepseek-transparency-and-customization-083",
+    "deepseek-transparency-and-customization-127",
+    "hermes-architecture-and-surfaces-169",
+    "manus-product-ux-105",
+    "web-chatgpt-web-product-138",
+    "web-claudeai-web-product-112",
+    "web-perplexity-web-product-109"
+   ],
+   "bestInClass": {
+    "source": "deepseek + hermes",
+    "recordIds": [
+     "deepseek-transparency-and-customization-083",
+     "hermes-architecture-and-surfaces-169"
+    ],
+    "why": "DeepSeek (q4, SRC) routes all text through typed dictionaries with a gate against hardcoded copy and a parity test; Hermes (q4, SRC) layers plugin packs, per-profile overlays, bundled locales and English fallback; Claude ships 34k ICU strings in 11 locales."
+   },
+   "mechanism": "Message keys in typed catalogs (one per feature namespace) with ICU plural/select; a CI script fails on string literals in JSX outside the i18n call; a parity test asserts every key exists in every locale; typed failure causes select localised guidance.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-144",
+     "v-planned-decisions-155",
+     "v-modelplane-170",
+     "v-modelplane-171"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1917-1924",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2538-2542",
+     "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs:1-5"
+    ],
+    "gap": "Norwegian/English via inline i18n.tr(no, en) pairs; several Norwegian-only strings remain (approval buttons, plan rung labels, tool status, trace copy); no gate or parity test; only two locales.",
+    "strengths": "Norwegian-first product and Model Plane (Bokmal report sections, trivial-prompt words) and typed localisable refusal codes for ZDR/subscription/capability: a real differentiator for the Nordic market. Keep."
+   },
+   "benefit": "Removes visible language leaks in the most important controls (approvals).",
+   "approach": "Frontend Plane: lint rule forbidding bare string literals in JSX under features/chat and features/agents, fix the listed leaks; add Swedish/Danish later via catalogs instead of inline pairs.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Inline tr(no,en) pairs make adding a third locale costly; migrate gradually.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Leaks in approval buttons are visible to every English user.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-020",
+   "name": "Desktop OS integration: tray, background running, native chrome",
+   "description": "Close-to-tray with background agents, keep-awake, start at login, floating activity indicator and task windows, custom title bar, \"Open in\" local apps.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek",
+     "manus",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-055",
+    "claude-runtime-architecture-090",
+    "claude-runtime-architecture-091",
+    "deepseek-transparency-and-customization-138",
+    "manus-product-ux-110",
+    "t3code-ui-and-multimodel-068"
+   ],
+   "bestInClass": {
+    "source": "claude + manus",
+    "recordIds": [
+     "claude-product-ux-055",
+     "manus-product-ux-110"
+    ],
+    "why": "Claude (q4, SRC) keeps sessions running in the tray with keep-awake and wake scheduling; Manus (q4, SRC) has an always-on-top activity indicator with stop/mark-read per task."
+   },
+   "mechanism": "Electron main process: hide-on-close, tray menu with running count, powerSaveBlocker while sessions work, always-on-top mini window listing running tasks.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Verevon is web-only; runs are server-side so closing the tab does not stop them (durable runs), which removes most of the need.",
+    "strengths": "Server-side durable runs make tray persistence unnecessary."
+   },
+   "benefit": "Low: runs already continue server-side.",
+   "approach": "Skip; cover \"what is running\" with the sidebar attention section and a tab-title badge.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "A desktop shell adds a new attack surface and release pipeline.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Desktop-shell feature; web architecture already solves background execution.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-021",
+   "name": "Quick entry and system-wide summon",
+   "description": "A global hotkey that opens a small prompt window anywhere (with recent chats, images, dictation), hold-to-talk system-wide writing help, an always-on voice concierge.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "antigravity",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-052",
+    "claude-product-ux-053",
+    "claude-runtime-architecture-092",
+    "antigravity-agent-ux-and-gemini-119",
+    "web-claudeai-web-product-114",
+    "web-perplexity-web-product-107"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-052",
+     "claude-runtime-architecture-092"
+    ],
+    "why": "Claude (q4, SRC) ships a quick-entry overlay with a global shortcut, recent chats, attachments and dictation that hands off to the main app."
+   },
+   "mechanism": "OS-level global shortcut registers a frameless window; its payload {text, chatId, images} is passed to the main window by IPC.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not possible in a pure web app; the dashboard composer and Ctrl/Cmd+Shift+O new chat are the web equivalents.",
+    "strengths": ""
+   },
+   "benefit": "Low for web.",
+   "approach": "Skip; a browser extension could add it later if Verevon ever ships one.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "n/a",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Requires a desktop shell.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-022",
+   "name": "Hardware companions and novelty devices",
+   "description": "BLE maker devices that show approvals and status, physical macro keypads with agent keys, floating pets.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-063",
+    "claude-runtime-architecture-095",
+    "codexagent-plugins-and-extensibility-115"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-063"
+    ],
+    "why": "Claude (SRC) defines a BLE (Nordic UART) protocol for approval prompts and status on maker devices; Codex has a keypad and pet overlay."
+   },
+   "mechanism": "Web Bluetooth GATT transport with pairing code and newline-delimited JSON messages.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "None.",
+    "strengths": ""
+   },
+   "benefit": "None for Verevon users.",
+   "approach": "Skip.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "n/a",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Developer novelty, unrelated to enterprise chat/agents.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-023",
+   "name": "Process-visibility density controls and activity grammar",
+   "description": "User-selectable levels of how much tool and reasoning process is shown (compact to verbose), a detail level for usage stats, one-line activity titles from a fixed vocabulary, grouped task sections for long work, and reasoning previews.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "cursor",
+     "antigravity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-transparency-and-customization-067",
+    "deepseek-transparency-and-customization-068",
+    "deepseek-transparency-and-customization-069",
+    "deepseek-transparency-and-customization-070",
+    "cursor-ai-features-118",
+    "antigravity-agent-ux-and-gemini-120"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-067",
+     "deepseek-transparency-and-customization-069"
+    ],
+    "why": "DeepSeek (q5, SRC) offers Compact/Standard/Detailed/Verbose work details applied outside-in (turn, group, row) plus collapse timing, and builds running/closed group titles from a fixed category vocabulary; Antigravity (q5) groups long work into task sections with edited files and collapsible progress."
+   },
+   "mechanism": "Each tool maps to a category with preparing/running/closed labels (\"Reading files\", \"Searching the web\"); a visibility policy (compact|standard|detailed|verbose) decides which rows render, applied at turn, group and row level; collapse on completion or next message; legacy values read but never written back.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-154"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:722-1000",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:571-720",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1623-1835"
+    ],
+    "gap": "One fixed detail level in the transcript; verb/object/outcome activity grammar is planned (AIF phase 3) but not built; tool status words are Norwegian-only.",
+    "strengths": "Work panel (what is happening, what is left, does Verevon need you, telemetry), assembled-context inspector with per-segment token budgets and per-answer details popover (time, confidence, cost) already exceed most references in transparency."
+   },
+   "benefit": "Directly serves the DeepSeek-style transparency goal while keeping casual users calm.",
+   "approach": "Frontend Plane: a transcriptView preference (compact/standard/detailed) and a localised tool-category vocabulary; Model Plane can add the category on tool_call events.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-12-019 i18n"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Verbose mode must not reveal redacted provider reasoning or secrets.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap, aligns with product identity; Verevon already strong underneath.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-024",
+   "name": "Long-session navigation: turn rail, minimap and windowed history",
+   "description": "A rail with one mark per turn (including unloaded turns) with prompt/answer previews, jump anchors that page history around an event, load older/newer.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "t3code",
+     "manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-transparency-and-customization-081",
+    "t3code-ui-and-multimodel-015",
+    "manus-product-ux-109"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-081"
+    ],
+    "why": "DeepSeek (q4, SRC) serves a server-side turn-outline projection with bounded previews so the rail works before history loads, and pages from the exact event needed; T3 Code (q4) a hover-preview minimap; Manus (q4) windowed history with jump anchors kept in sync with replay."
+   },
+   "mechanism": "Server projection session-turn-outline {turnIndex, promptPreview, settledAnswerPreview, firstEventSeq}; client renders a fixed-pitch virtual rail; clicking requests a history window around firstEventSeq (older/newer boundaries) instead of loading the whole thread.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No turn rail or minimap; transcripts load whole; thread list capped at 80 without paging (chat-01 C-015).",
+    "strengths": ""
+   },
+   "benefit": "Long research and Do threads become navigable; pairs with virtualisation.",
+   "approach": "Model Plane (session-core) outline endpoint; Frontend Plane rail.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-12-017 performance"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Previews must honour ZDR (no stored text for ZDR threads).",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Valuable after virtualisation; consistent with chat-01 C-015.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-025",
+   "name": "Agent-asks-user cards and prompt-anchored trays",
+   "description": "Typed surfaces docked at the composer for the agent's current need: approve a plan, answer clarifying questions (with timeouts and late replies), sudo/secret prompts, queued messages and steering, goal tracking.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "hermes",
+     "deepseek"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-139",
+    "hermes-architecture-and-surfaces-171",
+    "deepseek-transparency-and-customization-089",
+    "deepseek-transparency-and-customization-077"
+   ],
+   "bestInClass": {
+    "source": "cursor + deepseek",
+    "recordIds": [
+     "cursor-ai-features-139",
+     "deepseek-transparency-and-customization-089",
+     "deepseek-transparency-and-customization-077"
+    ],
+    "why": "Cursor (q4, SRC) docks plan, questionnaire, queue, goal and subagent trays above the prompt so decisions stay visible while the run continues; DeepSeek (DOC/SRC) adds a timed question card with drafts and late replies and an editable queue that can be promoted to steering; Hermes types approval, clarify and masked secret prompts."
+   },
+   "mechanism": "Server->client request events {kind: approval|clarify|secret|plan, id, options, deadline}; the composer area renders one tray per pending request in priority order; answers post back by id; a timed card pauses on focus, expiry records a skip and a late reply is still delivered to the run if it is waiting; queue items {id, text, mode: queue|steer} editable until consumed.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1940",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:64-112"
+    ],
+    "gap": "Plan proposal card (edit, reorder, authority rung, justification) and tool approval cards are shipped but render inside the transcript, not docked; no structured clarify-question tool with options/timeouts (chat-01 C-013); approval button copy is Norwegian-only.",
+    "strengths": "Durable approvals through orchestration with an authority rung and justification is a stronger authority model than any reference; keep it as the backend."
+   },
+   "benefit": "A paused run is visible at the point of input; fewer stalled runs.",
+   "approach": "Frontend Plane: render pending approvals/plan/questions as a composer tray (same data); Model Plane: add an ask_user event kind with options and deadline in execution-core.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-12-006 attention model"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Secret prompts must never pass through the model or transcript; route secrets via Control/integration vaults.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Agents that ask are core to Do mode; consistent with chat-01 C-013 priority.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-026",
+   "name": "Slash commands with typed semantics",
+   "description": "Slash commands for modes and workflows that open a popup, run a client action or take input, never silently becoming a prompt; human commands kept out of model history; per-surface curation from one definition.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-architecture-102",
+    "deepseek-transparency-and-customization-079",
+    "hermes-architecture-and-surfaces-168"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-079"
+    ],
+    "why": "DeepSeek (q4, SRC) guarantees a typed slash line never downgrades to a plain prompt and keeps human commands out of model history; Hermes curates per-surface visibility on the command definition."
+   },
+   "mechanism": "Command registry {name, description, inputHint, surfaces, handler -> success|error}; parser resolves the line; unknown commands show an error instead of sending; command execution recorded as a UI event, not a model message.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:1-110"
+    ],
+    "gap": "\"/\" opens global search and /schedule exists; no general slash-command registry with typed handlers or user command templates (baseline known gap 16).",
+    "strengths": ""
+   },
+   "benefit": "Fast access to Do mode, research, schedule, browse.",
+   "approach": "Frontend Plane: slash registry backed by the action registry (same as palette).",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-12-004 palette"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Conflict with \"/\" opening search; pick one meaning.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Consistent with chat-01 C-022.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-027",
+   "name": "Composer as control hub: model/effort picker, output type, modes",
+   "description": "Model and reasoning effort, output type, attachments, connectors and permission mode all live in the message box so users choose before sending; rich model rows with provider labels, NEW chips and favourites.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt",
+     "web-claudeai",
+     "t3code"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "web-chatgpt-web-product-134",
+    "web-claudeai-web-product-109",
+    "t3code-ui-and-multimodel-088"
+   ],
+   "bestInClass": {
+    "source": "claude.ai",
+    "recordIds": [
+     "web-claudeai-web-product-109"
+    ],
+    "why": "Claude.ai (q5, DOC) puts \"+\", \"/\", output picker, model+effort and permission mode in one composer; T3 Code (q4, SRC) has the best model row (sub-provider label, NEW chip, shortcut hint, favourite star)."
+   },
+   "mechanism": "Composer toolbar components bound to per-thread draft state {model, effort, outputType, mode, attachments}; model list rows {providerIcon, accountBadge, name, subProvider, isNew, favorite, disabledReason}.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-146"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:154-168",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:384-405",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3037-3050"
+    ],
+    "gap": "No favourites or NEW chips in the model list; output-type picker limited to existing creation backends.",
+    "strengths": "Ask/Do (Spør/Utfør) mode switch, Auto/Quick/Deep effort, intent modes (Budget, Balance, Genius) resolved server-side, catalogue grouped by provider with expensive and privacy-tier badges and per-org remembered choice. Privacy-tier badges are a ZDR-aligned differentiator. Keep."
+   },
+   "benefit": "Already delivered.",
+   "approach": "Keep; optionally add favourites.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 4,
+   "rationale": "Parity, with privacy-tier badges ahead.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-028",
+   "name": "Usage, limits and plan presentation at the point of need",
+   "description": "Plan-gated limits explained exactly where they bite (concurrent tasks, research quota), with reset/wait/upgrade/credits options, and clear pricing ladders and credit mechanics.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "manus-product-ux-126",
+    "web-claudeai-web-product-117",
+    "web-manus-web-product-082",
+    "web-manus-web-product-104",
+    "web-perplexity-web-product-103"
+   ],
+   "bestInClass": {
+    "source": "manus + claude.ai",
+    "recordIds": [
+     "manus-product-ux-126",
+     "web-claudeai-web-product-117"
+    ],
+    "why": "Manus (SRC) shows specific upgrade or owner-contact messages at each limit with the current number; Claude.ai (DOC) offers reset, wait, upgrade or continue on credits inline."
+   },
+   "mechanism": "Typed limit errors {limitKind, current, max, resetAt, actions[]} from the owner plane; the client maps them to an inline notice with actions; member vs owner audiences get different calls to action.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-171"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/subscription_failure.rs:1-10",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/OrgQuotasSection.tsx",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:1-20"
+    ],
+    "gap": "Typed subscription/ZDR/capability refusal codes and org quotas exist; 429 has Retry-After; but no live spend meter (known gap 16) and no inline \"you hit X, reset at Y, ask your admin\" notice seen in chat.",
+    "strengths": "Typed, localisable refusal catalogue is the right contract."
+   },
+   "benefit": "Cost-core already knows spend; showing it calmly avoids surprise bills for org admins.",
+   "approach": "Frontend Plane: map refusal codes and 429s to inline notices with role-aware actions; Model Plane cost-core exposes a per-run/per-month spend projection.",
+   "effort": "S",
+   "dependencies": [
+    "cost-core spend projection"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Do not expose org spend to non-admin members.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common and cheap given the typed codes.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-029",
+   "name": "Privacy and trust center inside the product",
+   "description": "One in-product hub for chat privacy, memory, personalisation, data use, connected apps and security, with explanations next to approval cards.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "web-chatgpt-web-product-139"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-139"
+    ],
+    "why": "ChatGPT (DOC only) consolidated a Privacy Center with links to each setting (Sept 2026)."
+   },
+   "mechanism": "A read-mostly page assembling the user's effective privacy state from owner planes (memory on/off, retention, ZDR, connected apps) with deep links to the controlling setting.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-157"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/src/app/trust",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PrivacyDataSection.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx"
+    ],
+    "gap": "Public Trust Center page exists but about 30 sentences await re-verification and edits are not deployed; in-app Privacy/Trust sections exist; no single \"your effective privacy state\" view (ZDR status per thread/provider).",
+    "strengths": "ZDR, typed refusals and memory provenance give Verevon more real privacy substance than the reference."
+   },
+   "benefit": "Trust is a selling point for Nordic enterprise; showing effective ZDR state per conversation is unique.",
+   "approach": "Frontend Plane assembles from Control (org policy, ZDR) and Model Plane (memory) read APIs; no cross-plane DB reads.",
+   "effort": "S",
+   "dependencies": [
+    "ZDR attestation status API"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Claims must be code-verified (the Trust Center re-verification lesson).",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "DOC-only reference, but strong strategic fit.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-030",
+   "name": "Visual point-and-comment on live previews",
+   "description": "In a preview or browser view, select elements or draw regions and attach a comment that goes to the agent as structured UI context; in-place editing of slides and images.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "web-manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-140",
+    "web-manus-web-product-086"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-140"
+    ],
+    "why": "Cursor (q4, SRC) has a design mode in the in-app browser to click elements or draw a region and comment; Manus (DOC) applies the same \"select region + instruction\" across builder, slides and design."
+   },
+   "mechanism": "Overlay on the preview iframe captures element selector/bounding box or a drawn rectangle plus screenshot crop; posts {selector, rect, crop, comment} as an attachment to the next turn.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Artifacts are read-only to the user; no selection or region comment (baseline known gap 6; chat-01 C-018).",
+    "strengths": ""
+   },
+   "benefit": "Makes artifact iteration far faster.",
+   "approach": "Frontend Plane overlay on the sandboxed artifact iframe; message attachment of kind ui_region.",
+   "effort": "M",
+   "dependencies": [
+    "chat-01 C-017 artifact editing"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Sandboxed iframe must stay isolated (the artifact panel already blocks parent access).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Consistent with chat-01 C-018.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-031",
+   "name": "Computer and browser takeover UX",
+   "description": "Computers as first-class objects in the UI (choose, view desktop, take control, pause, return control), human takeover for logins and sensitive steps with optional carry-over, pausable remote view and steering from a phone.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "manus-computer-control-architecture-074",
+    "manus-computer-control-architecture-084",
+    "cursor-ai-features-142"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-074",
+     "manus-computer-control-architecture-084"
+    ],
+    "why": "Manus (DOC strings) exposes choose/view/take over/pause/exit takeover and lets the user finish a login and optionally allow similar tasks later; Cursor (SRC) adds a pausable VNC view and steer-from-phone."
+   },
+   "mechanism": "Live view stream (VNC/CDP screencast) in a pane; a takeover state machine {agent_driving, user_driving, paused} where the agent proposes and the user explicitly hands control back; sensitive-step detection triggers a takeover request; carry-over is a scoped, time-limited grant.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:722-1000"
+    ],
+    "gap": "Work panel shows a live agent screen, but chat turns cannot drive a browser, agent browser runs fail closed without a broker grant (DOC), and live view plus takeover is planned (wave 3 E10); no user-driving state.",
+    "strengths": "Risky browser actions already get durable approvals (login, checkout, form post, cross-domain)."
+   },
+   "benefit": "Manus-style computer use is part of the product vision; takeover is how a user safely completes logins without giving credentials to the model.",
+   "approach": "Ingestion Plane (Quarry) owns the browser session and live view and executes or rejects; Model Plane proposes actions and emits takeover_requested; Frontend Plane renders the view and a \"Take over / Hand back\" control; carry-over = a scoped browser grant from Control.",
+   "effort": "L",
+   "dependencies": [
+    "browser-broker grants",
+    "Quarry live view stream"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Credentials typed during takeover must never reach the model or transcript; grants must not widen across Spaces.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "High vision value but blocked on browser grants; DOC-supported only.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-032",
+   "name": "Plugin-extensible UI slots",
+   "description": "Typed UI slots that let plugins add or replace UI elements by id, draw a band above the composer, or claim notices.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "deepseek-transparency-and-customization-078",
+    "deepseek-transparency-and-customization-141",
+    "deepseek-transparency-and-customization-170"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-078"
+    ],
+    "why": "Only DeepSeek (q4, SRC) composes its web client from typed slots that plugins can register into with declared cardinality and scope."
+   },
+   "mechanism": "Slot registry with declaration-merged SlotMap {key, cardinality, scope, ownerProps}; plugins register by id; renderer resolves overrides by priority.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No UI plugin surface; plugins have no install or runtime surface (known gap 12).",
+    "strengths": ""
+   },
+   "benefit": "Low; Verevon plugins should act through the action registry and capability-core, not inject UI.",
+   "approach": "Skip for now; if needed, allow declarative cards (JSON UI) rendered by Verevon, not arbitrary code.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Third-party UI code is an XSS and phishing risk in an enterprise app.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Unique to one source and conflicts with the authority model.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-033",
+   "name": "Agent and automation management hubs",
+   "description": "Dedicated pages for agents, automations/schedules (active, paused, completed with run now/pause/edit), skills and connectors, plus team-published named agents pinned to the sidebar.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-143",
+    "web-manus-web-product-085",
+    "web-perplexity-web-product-105"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity + manus",
+    "recordIds": [
+     "web-perplexity-web-product-105",
+     "web-manus-web-product-085"
+    ],
+    "why": "Perplexity (DOC) has hubs for tasks, connectors, automations (Active/Paused/Completed with Run now/Pause/Edit/Pin/Delete), skills and memory; Manus (DOC) an Agents tab and Automations panel; Cursor (SRC) lets teams publish named agents members pin to their sidebar."
+   },
+   "mechanism": "Each hub is a list over an owner-plane resource with a state filter and row actions bound to typed APIs; named agents = a shared agent definition (instructions, tools, knowledge) with org visibility, pinned per user.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-172",
+     "v-planned-decisions-151"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:229-275",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/WorkflowBuilder.tsx:13-16",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotStudio.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx"
+    ],
+    "gap": "The Agent Run Console uses real run, plan and proof APIs, but role workspaces, Workflow builder and Chatbot studio are design previews with honesty badges, the Fleet console calls /v1/fleets with no route (stub), and preset agents have empty action sets; schedules are a settings section plus /chat/routines, not an automation hub with run now/pause.",
+    "strengths": "Honest design-preview badges rather than fake functionality; real proof bundles in the Run Console."
+   },
+   "benefit": "The \"agent pages\" are half of the product promise; today they are mostly blueprints.",
+   "approach": "Model Plane: agent definition resource (instructions, skills, allowed actions, knowledge scope) in session/capability-core with org visibility; Frontend Plane: Agents hub listing definitions and runs, Automations hub over /api/v1/cron with run now/pause. Keep the decision that the Model Plane is not a DAG runner.",
+   "effort": "L",
+   "dependencies": [
+    "capability-core action bindings",
+    "scheduled runs with tools (known gap 10)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Shared agents must carry their own authority scope and never widen a member's ACL.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Blocks the agent-page vision; references treat agents and automations as first-class.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-034",
+   "name": "Channel-resident agents (Slack and similar)",
+   "description": "The assistant living inside Slack/Teams channels with per-channel instructions, memory silos, spend limits and access layers.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-product-ux-064"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-064"
+    ],
+    "why": "Claude (SRC strings) layers workspace defaults with channel extensions, memory silos and spend limits."
+   },
+   "mechanism": "Channel binding {workspace, channel, instructions, memorySilo, spendLimit, accessLayer} resolved per message.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Channel Plane is docs-only/future.",
+    "strengths": ""
+   },
+   "benefit": "Later reach.",
+   "approach": "Skip until Channel Plane exists; then reuse Space-scoped authority.",
+   "effort": "XL",
+   "dependencies": [
+    "Channel Plane"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Memory silos must follow ZDR and Space ACLs.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Architecture rule: Channel Plane is future.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-035",
+   "name": "Coding-specific workspace surfaces",
+   "description": "In-app pull request workspace, repository grouping across environments, config files rendered as forms, \"Open in\" local editor.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "t3code",
+     "deepseek"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-144",
+    "cursor-ai-features-117",
+    "t3code-ui-and-multimodel-082",
+    "deepseek-transparency-and-customization-158"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-144",
+     "cursor-ai-features-117"
+    ],
+    "why": "Cursor (q4, SRC) has a PR tab with threads, checks and stacks and renders special config files as forms."
+   },
+   "mechanism": "Provider-backed PR model rendered as tabs; view-zone registry maps config paths to form editors.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable: Verevon is not an IDE.",
+    "strengths": ""
+   },
+   "benefit": "None for Verevon's audience.",
+   "approach": "Skip. If config-as-forms is wanted, apply it to skills/agent definitions instead.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "n/a",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "IDE features are explicitly out of scope.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-036",
+   "name": "Environment and deployment identity in the shell",
+   "description": "Org banner with custom text/colour, deployment display name, and build-stage artwork or pill so users never confuse environments.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-065",
+    "t3code-ui-and-multimodel-026"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-065"
+    ],
+    "why": "Claude (SRC) supports admin-configured org banners and deployment identity; T3 Code shows build-stage artwork."
+   },
+   "mechanism": "Control-managed branding config rendered in the shell header; build stage injected at build time.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; check CoreNavbar for an environment badge and Control branding settings.",
+    "strengths": ""
+   },
+   "benefit": "Small: helps admins and testers on staging vs production.",
+   "approach": "Frontend Plane: env pill from build config; org banner from Control settings.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "nice-to-have",
+   "significance": 1,
+   "rationale": "Minor.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-037",
+   "name": "Community showcase, sharing and gamification",
+   "description": "Share tasks/sites to a community showcase, playbooks, events, trophies; shareable memory-loadout codes.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "manus-product-ux-112",
+    "hermes-learning-and-memory-068"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-112"
+    ],
+    "why": "Manus (SRC) runs a community showcase, playbooks, events and trophies; Hermes encodes a privacy-preserving shape of learned memory as a share code."
+   },
+   "mechanism": "Public share endpoints and a moderated gallery; achievements ledger.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Decision: gamification limited to a per-org adoption map, no per-user leaderboards (Norwegian works-council context).",
+    "strengths": "Deliberate decision fits the market."
+   },
+   "benefit": "Low and partly contrary to the decision.",
+   "approach": "Skip; keep the per-org adoption map.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "Public sharing conflicts with ZDR and enterprise data rules.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Consumer growth loop; conflicts with a recorded product decision.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-12-038",
+   "name": "Find-in-page that reaches collapsed and embedded content",
+   "description": "Ctrl/Cmd+F that searches collapsed process rows and embedded views, expanding a row on match.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-056",
+    "deepseek-transparency-and-customization-082"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-082"
+    ],
+    "why": "DeepSeek (q4, SRC) keeps collapsed rows in the DOM with hidden=\"until-found\" and reveals on beforematch, so native find works without custom UI; Claude builds a custom find overlay across popouts."
+   },
+   "mechanism": "Render collapsed content with the hidden=\"until-found\" attribute and listen for beforematch to set the expanded state; avoid unmounting collapsed content.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "grep for until-found in src: none; collapsed traces likely unmount (verify in ChatMessages reasoning/trace disclosure).",
+    "strengths": ""
+   },
+   "benefit": "Users can find a tool result or source inside collapsed work.",
+   "approach": "Frontend Plane: use hidden=until-found in the disclosure primitive; when virtualising (C-t3-12-017) add an in-app search that pages to the match.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Virtualisation removes off-screen DOM, so native find stops working; plan both together.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Cheap polish.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

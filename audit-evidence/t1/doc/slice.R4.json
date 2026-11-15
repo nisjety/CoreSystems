@@ -1,0 +1,914 @@
+[
+ {
+  "finalId": "F-t1-059",
+  "title": "Do not disturb, quiet-hours schedules and urgent break-through, visible to agents",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 35,
+  "wave": "W3",
+  "quickWin": true,
+  "summary": "Add a per-user attention state {dnd_until, schedules [{days, start, end, tz}], vip subjects} to notification-core and gate the router on it: while in DND, non-critical signals from non-VIP actors are stored for the inbox only and do not go to push or the OS, then flush when DND ends. Agents classify approval requests by urgency in capability-core, with a per-agent daily cap and an owner-configurable limit on critical break-through. Expose a coarse 'can I interrupt now' answer to agents, not the schedule itself.",
+  "whyItMatters": "Agents work around the clock. Without DND they will page humans at night, and push (F-t1-035 (R-t1-05-05)) should not ship before this gate. It also helps the agents: one that can check whether a human is interruptible can defer a non-urgent ask instead of blocking a run.",
+  "referenceBestPractice": {
+   "bestSource": "Slack (manual pause, schedule, admin default hours, VIP and urgent break-through); Teams for urgent messages and meeting auto-DND",
+   "others": [
+    "Teams (priority contacts, urgent messages, auto-DND in meetings)",
+    "Buzz (explicitly has none; spec defers DND)",
+    "QM (has no DND at all)"
+   ],
+   "prevalence": "2 of 5 sources; common",
+   "mechanism": "Slack combines a manual pause, a recurring schedule, admin default hours, a VIP override and a once-a-day 'notify anyway' urgent break-through (DOC). Teams adds urgent messages and priority contacts that pass DND and automatic DND in meetings (REA). Router rule: if the user is in DND, the signal is not critical and the actor is not VIP, store it in the inbox only and do not deliver to OS or push; queued items flush when DND ends; urgent break-through is rate-limited per sender."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Application Plane/notification-core/internal/channels/channels.go:1-40",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:226"
+   ],
+   "gap": "No DND, quiet hours or schedule exists in Spaces or notification-core (channels.go holds only org-level event-by-channel configuration). Quiet hours are named as part of S4.4, whose current source state is the delivery attempt state machine and a disabled-by-default worker."
+  },
+  "approachOriginal": "Application Plane (notification-core): attention-state table and a router gate placed after the F-t1-008 (R-t1-05-04) preference checks. Model Plane (capability-core): add an urgency class to approval and agent-awaiting signals, plus a per-agent daily critical cap. Frontend Plane: DND toggle, schedule editor and VIP list in Settings. Expose DND to agents only through a narrow 'interruptible now' read so the schedule itself is not disclosed to every room member's agents.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "F-t1-008 (R-t1-05-01) router and urgency field",
+   "F-t1-008 (R-t1-05-04) preferences",
+   "F-t1-060 (R-t1-05-10) ledger for queued flush"
+  ],
+  "planeOwner": "Application Plane",
+  "risks": "Urgent-flag abuse by agents (cap per agent per day, owner-configurable); disclosing a user's schedule to agents or room members; queued items must flush once and in order.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 1,
+   "DOC": 2,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "S4.4 quiet hours: apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (execution tracker, line 226) and the baseline note 'Quiet hours are planned in S4.4'"
+  },
+  "sourceClusters": [
+   "C-t1-05-007"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-059",
+    "status": "stub",
+    "exactGap": "Control user-core already stores a per-user NotificationSettings.QuietHours {enabled, start, end} (default off, 22:00-08:00) and a manual profile availability status (online/busy/away/offline, labelled as helpdesk behaviour), but nothing enforces or exposes them: the frontend has no quiet-hours UI and notification-core's only gate is a per-event opt-out (WithPreferenceGate, IsNotificationEnabled) with no time window, DND, VIP or urgency class. No Space event producers reach notification-core either (the sender allow-list is gateway 'notification.created' for the delegated user and capability-core run_completed/run_failed), and a gate-suppressed request is stored as suppressed and returns before dispatch, so it neither reaches push nor creates an inbox row.",
+    "evidence": [
+     "apps/Control Plane/user-core/internal/http/handlers.go:999-1014",
+     "apps/Control Plane/user-core/internal/http/handlers.go:1255-1270",
+     "apps/Control Plane/user-core/internal/http/handlers.go:225-262",
+     "apps/Control Plane/user-core/internal/http/handlers.go:523-532",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/AccountSettingsPage.tsx:470-486",
+     "apps/Application Plane/notification-core/cmd/server/main.go:151",
+     "apps/Application Plane/notification-core/cmd/server/main.go:177",
+     "apps/Application Plane/notification-core/internal/notification/service.go:284-302",
+     "apps/Application Plane/notification-core/internal/notification/service.go:326-360",
+     "apps/Application Plane/notification-core/internal/notification/service.go:446-458",
+     "apps/Application Plane/notification-core/internal/preferences/preferences.go:127-160",
+     "apps/Application Plane/notification-core/internal/http/handlers.go:199-217",
+     "apps/Application Plane/notification-core/internal/channels/channels.go:1-40",
+     "apps/Application Plane/notification-core/internal/consumers/identity_sync.go:12-30",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2211-2217",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:226",
+     "apps/Frontend Plane/verevonv3/docs/space-defenition.md:352"
+    ],
+    "reuse": [
+     "user-core NotificationSettings and QuietHours (GET/PUT /api/v1/settings/notifications) as the source of truth to extend with timezone, days, dnd_until and VIP",
+     "notification-core WithPreferenceGate seam in Accept (service.go isNotificationEnabled) as the enforcement point, and the existing suppressed status",
+     "notification-core identity_sync NATS consumer as the pattern for projecting a user attention setting from Control into notification-core",
+     "AccountSettingsPage Availability section as the UI host and the existing profile status field",
+     "activity-grammar.ts salience classes (critical, attention, normal, muted) as the urgency vocabulary for approval and awaiting signals"
+    ],
+    "constraints": "DND is a person-level attribute that spans organisations, while notification-core rows and every Space or Model event are org-scoped, so keep the source of truth in Control user-core and project it into notification-core by event or API, never by cross-plane DB read. The existing gate is binary (suppressed or sent) and drops the inbox row too, so DND needs a tri-state (deliver, inbox-only, deferred) and a flush path; the delivery queue is off by default and rejects ZDR requests, so flush depends on finishing the S4.4 ledger (F-t1-060). Urgency must be set by the trusted producer (gateway or capability-core), not by the agent, with a per-agent cap; the 'interruptible now' answer to agents must be a narrow server-side read bound to the run's delegated subject that does not disclose the schedule or cross orgs. Quiet hours are already named in S4.4, and space-defenition.md lists 'notification polish' in its non-goals, so this is planned but only partly aligned with the stated non-goal.",
+    "approachAdjustment": "Start from the existing user-core quiet-hours setting instead of a new attention-state table: add timezone (the profile already has one), days, dnd_until and VIP, project it into notification-core, and add the gate after the preference check with a deliver/inbox-only/defer decision. Sequence it after the Space notification producers (F-t1-008) exist, because there is nothing Space-specific to gate today, and fold the deferred flush into the single S4.4 ledger rather than a second queue.",
+    "effortRevised": "M",
+    "effortNote": "M holds for settings, gate and UI; the flush rides on the S4.4 ledger (F-t1-060) and the producers are separate items.",
+    "verdict": "reword",
+    "verdictReason": "The item says no quiet hours exist, but a stored-and-unenforced per-user quiet-hours setting and a profile availability status already exist in Control; the build should extend them and respect the person-level versus org-scoped split.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-060",
+  "title": "Finish the S4.4 delivery ledger and add a content-free missed-activity digest",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 36,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Generalise notification-core's lease-based delivery-attempt ledger into the S4.4 Space delivery ledger: idempotency keys, max-age expiry, bounded retries, and delivery errors reported back to the agent run that produced the message. Then add an email channel and a per-user digest (hourly or daily) that auto-pauses after inactivity and, for ZDR orgs, carries counts and links only.",
+  "whyItMatters": "The ledger is the foundation for push, email digests, scheduled agent output and the future Channel Plane without losing or duplicating messages. The digest pulls absent humans back when agents are blocked on them, cutting approval latency.",
+  "referenceBestPractice": {
+   "bestSource": "QM (delivery outbox and morning digest)",
+   "others": [
+    "Buzz (content-free mention outbox bridged by an operator)",
+    "Teams (configurable missed-activity email)"
+   ],
+   "prevalence": "Outbox: 2 of 5 sources, differentiator; digest: 2 of 5, common",
+   "mechanism": "QM's DeliveryStore does enqueue, claimPending and ack with idempotency keys, max-age expiry and 5 retries, and reports undeliverable errors back to the source session; its personal morning digest runs on a managed schedule that auto-pauses when the person is inactive. Teams-style missed-activity email summarises unread mentions and activity. Outbox row: id, idempotency_key, destination, source_ref, status, attempts, lease_until, with a reaper for stale leases."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Application Plane/notification-core/internal/notification/delivery_state.go:13-22",
+    "apps/Application Plane/notification-core/internal/notification/delivery_worker.go:91-94",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1618-1622",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:226"
+   ],
+   "gap": "notification-core already has a leased delivery-attempt state machine (pending, claimed, sent_unconfirmed, acknowledged, failed, unknown) whose worker is disabled by default, but the Space delivery ledger is only a named gap (delivery_ledger_not_built) and the plan's tracker still lists durable feed reconciliation, provider and ZDR proof and HA as open. There is no email channel for Space events and no digest of any kind."
+  },
+  "approachOriginal": "Application Plane: extend notification-core's attempt ledger into the S4.4 Space ledger, keeping its semantics (provider acceptance is not confirmation; ambiguous outcomes stay 'unknown'; ZDR attempts content-free). Add idempotency keys and a reply-to-source error path for agent runs. Model Plane (capability-core schedule) composes the digest and notification-core delivers it, with counts and links only for ZDR orgs. Avoid a second parallel ledger for notifications versus Space delivery.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t1-008 (R-t1-05-01) signals",
+   "F-t1-009 (R-t1-05-03) inbox as digest source",
+   "Email channel in notification-core",
+   "Provider and ZDR proof for any third-party sender"
+  ],
+  "planeOwner": "Application Plane",
+  "risks": "Two ledgers diverging if not unified; email is a content-persisting boundary outside Verevon, so a ZDR org's digest must carry no bodies; digest fatigue without inactivity auto-pause.",
+  "significance": 3,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 7,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "S4.4 durable Space completion delivery: apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (execution tracker, line 226); named gap delivery_ledger_not_built in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1618-1622"
+  },
+  "sourceClusters": [
+   "C-t1-05-022",
+   "C-t1-05-020"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-060",
+    "status": "partial",
+    "exactGap": "notification-core has a leased delivery-attempt state machine (pending, claimed, sent_unconfirmed, acknowledged, failed, unknown), a lease-fenced worker and request-level idempotency keys, but the worker is off by default, needs NOTIFICATION_DELIVERY_MODE=novu plus a callback secret, has no bounded-retry or max-age policy, and rejects ZDR requests outright (service.go:296-301, delivery_worker.go:91-94). The Space delivery ledger is a named gap (delivery_ledger_not_built, spaces.rs:1618-1623) with no Space-event producers, and no per-user digest exists: insight-core's daily-brief scheduler (per-org/day idempotency key, email channel registered in migration 006) is deliberately disabled because an organisation is not a notification recipient.",
+    "evidence": [
+     "apps/Application Plane/notification-core/internal/notification/delivery_state.go:13-70",
+     "apps/Application Plane/notification-core/internal/notification/delivery_worker.go:55-140",
+     "apps/Application Plane/notification-core/internal/notification/service.go:296-302",
+     "apps/Application Plane/notification-core/internal/notification/service.go:305-325",
+     "apps/Application Plane/notification-core/internal/config/config.go:62-66",
+     "apps/Application Plane/notification-core/internal/config/config.go:96-110",
+     "apps/Application Plane/notification-core/cmd/server/main.go:151",
+     "apps/Application Plane/notification-core/cmd/server/main.go:177-180",
+     "apps/Application Plane/notification-core/internal/feed/types.go:14-19",
+     "apps/Application Plane/notification-core/internal/http/handlers.go:199-217",
+     "apps/Application Plane/notification-core/migrations/006_register_daily_brief.up.sql:1-17",
+     "apps/Application Plane/notification-core/migrations/013_register_run_watch_notifications.up.sql:1-17",
+     "apps/Application Plane/insight-core/cmd/server/main.go:110-113",
+     "apps/Application Plane/insight-core/internal/briefs/brief.go:30-35",
+     "apps/Application Plane/insight-core/internal/briefs/scheduler.go:60-136",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1616-1627",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:226",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2211-2218",
+     "apps/Application Plane/convex-core/convex/schema.ts:680-712"
+    ],
+    "reuse": [
+     "notification-core delivery_attempts state machine, lease-fenced worker and callback verifier as the single ledger (do not build a parallel Space ledger)",
+     "notification-core request idempotency keys (FindByIdempotencyKey and resumeExisting) and insight-core BriefIdempotencyKey (daily_brief_<org>_<day>) as the digest dedupe pattern",
+     "insight-core briefs scheduler shape (round per tick, per-recipient key) and the channel-config registry rows for email (migrations 006 and 013)",
+     "Convex outbox lease pattern (spaceLifecycleEvents deliveryState, lease, nextAttemptAt) and ctx.scheduler.runAfter workers for a Space-side outbox or digest tick",
+     "notification-core identity_sync consumer pattern for event-fed user state"
+    ],
+    "constraints": "ZDR: notification-core refuses to enqueue ZDR requests today because the queue stores no payload and no transient-descriptor provider contract exists, so a ZDR org's counts-and-links digest cannot ride the existing queue; it needs an explicit content-free request class or retention mode ruled on by Control/ZDR policy, or the encrypted expiry-bound descriptor contract the code comment names. Email goes through Novu to an external provider, a content-persisting boundary whose provider and ZDR proof the S4.4 tracker still lists as open. Recipients must be real user subjects (the gateway may notify only the delegated user; an org id is not a recipient), and digest counts must come from Application-owned state (read markers, inbox feed) or owner-plane APIs and events, never DB reads, since pending approvals live in Model Plane. Digest links must resolve through normal Space membership checks (membership_changed revocations apply), so Space access never widens.",
+    "approachAdjustment": "Treat finishing the S4.4 ledger (bounded retries, max-age, ZDR proof, durable feed reconciliation, HA) as the already-planned dependency rather than new work, and make the digest a separate Application Plane item: a per-user scheduler modelled on insight-core's briefs scheduler (using Convex scheduler or an outbox) that composes counts and links, instead of a capability-core Space schedule, because a digest is a projection and capability-core schedules fire Model runs needing Control fire decisions. Add the reply-to-source error path for agent runs as a Model-side change tracked separately. Gate any ZDR-org digest on the content-free request class decision.",
+    "effortRevised": "L",
+    "effortNote": "Kept at L, but note the split: the digest alone is M once the ledger and a content-free class exist; finishing the ledger is roadmapped S4.4 work and larger than the digest.",
+    "verdict": "reword",
+    "verdictReason": "Status is partial and already planned (S4.4); the item understates what exists (idempotency keys, lease worker, email channel config, a disabled brief scheduler), overstates what ZDR allows (the queue rejects ZDR), and places digest composition in the wrong plane.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-061",
+  "title": "'Catch me up' recap of what I missed, scoped to my own read access",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 37,
+  "wave": "W3",
+  "quickWin": true,
+  "summary": "Add a 'Catch me up' entry point on the room header and the inbox. It runs a Model Plane recap turn over the unread messages and runs since the user's last read marker, prioritising items that mention the user or need action, with scopes unread, last 7 days or a custom range, and offers mark-as-read on completion. The scope is computed from the viewer's own access, ZDR is propagated, and the result is ephemeral for ZDR orgs.",
+  "whyItMatters": "The highest-value AI feature for a returning user in an agent-heavy room: what did the agents do while I was away, and what needs me. Verevon owns its Model Plane and already puts agents in rooms, so this is an agent turn rather than a new subsystem, and it is the sort of attention feature Slack and Teams only bolt on.",
+  "referenceBestPractice": {
+   "bestSource": "Teams (cross-thread prioritised recap)",
+   "others": [
+    "Slack (unread-only, last 7 days or custom range, plus a recurring-summary workflow step)"
+   ],
+   "prevalence": "2 of 5 sources; common",
+   "mechanism": "Teams does a holistic, cross-thread recap prioritised by relevance, with read-aloud, and marks chats read when the recap is dismissed (REA). Slack offers unread-only, last-7-days and custom-range scopes and a workflow step for recurring summaries (DOC). Collect unread content since last_read for the requested scope (only content the viewer can access), summarise with a model, prioritise mentions and action items, offer mark-as-read."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43-54"
+   ],
+   "gap": "Only a 'Meeting Scribe' agent template that summarises the text conversation when it is mentioned. There is no 'catch me up' entry point, no unread-scoped or cross-room recap and no link to read markers."
+  },
+  "approachOriginal": "Frontend Plane: 'Catch me up' action in the room header and the inbox, registered in the action registry. Model Plane: a recap run invoked with the viewer's own read scope (never a wider room scope), zdr=true propagated, token and cost limits through the existing cost plane. Use the unread map and read markers from F-t1-009 (R-t1-05-02) to pick the window; optionally mark-as-read on completion. Output is not persisted for ZDR orgs.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "F-t1-009 (R-t1-05-02) read markers and unread map",
+   "Model Plane run with viewer-scoped access"
+  ],
+  "planeOwner": "Model Plane (recap run); Frontend Plane (entry point)",
+  "risks": "Summaries quoting content the viewer cannot see if the scope is computed from the room rather than the viewer; cost on large rooms; stale recap if new messages arrive mid-run.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 1,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-05-021"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-061",
+    "status": "partial",
+    "exactGap": "The 'Catch me up' feature itself is absent: no catch-up action, recap run or unread-scoped summary exists in features/spaces or the gateway, and the only related thing is the Meeting Scribe agent template, which summarises the thread when mentioned and posts into the room for everyone. The substrate the item lists as a dependency is already shipped: an Application read marker per member per room (spaceReadMarkers.ts, spaces.mark_read action), an arrival-time snapshot and unread set (space-unread.ts, SpacePage.tsx), unread dots in the sidebar, and viewer-scoped transcript and work reads under Control read decisions (space_thread_transcript, space_work). The marker is a room-level timestamp over threads, not per message.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:1-60 (one marker per member per room; timestamp only; unreadThreadIds)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts:1-45 (client unread set from the arrival marker)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:120-150 (arrival snapshot held while the durable marker advances)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:295-317 (unread dot on thread rows in the sidebar)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:35-60 (Meeting Scribe template: summarises when mentioned)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2322-2345 (space_work: runs and schedules under the viewer read decision)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2607-2640,2690-2733 (viewer-scoped Space thread transcript via Control decision and Model Gateway)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2068-2076 (spaces.mark_read is an Application action)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/InboxPage.tsx:1-30 (Inbox is the Zammad-backed support ticket inbox, not a Space unread feed)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-30 (ZDR turn: no thread, run or tool loop; one model call)"
+    ],
+    "reuse": [
+     "Application read marker and the arrival-marker snapshot as the window start",
+     "space_thread_transcript and space_work reads (per-viewer Control decisions) as the content source",
+     "sidebar and room-header unread signals as entry points",
+     "spaces.mark_read action for the mark-as-read on completion step",
+     "an existing stateless gateway summarize route as the pattern (for example knowledge scrape/products/summary)",
+     "model-gateway budget guard for cost limits"
+    ],
+    "constraints": "The recap must read only what the viewer may read: gather transcripts through the existing per-thread Control read decisions and the work projection, never a room-wide Model Plane scope, and bound the number of unread threads because decisions are per thread. The output is viewer-private, so it must not be posted into the room (a mention-driven Scribe reply is visible to every member); keep it ephemeral or store it in the viewer's personal Space. ZDR: a ZDR turn is a single stateless call, which fits an ephemeral recap; non-ZDR orgs need an explicit persistence choice. Application owns the read marker (timestamp only), Model Plane owns the recap call, Control owns the read decisions.",
+    "approachAdjustment": "Put the entry points where the unread signal lives: the room header and the sidebar or Spaces list for cross-room recap, not the Inbox, which is the support ticket inbox with no Space unread state. Build it as a gateway-composed stateless summarize call (threads read under the viewer's Control decisions plus the run list since the arrival marker) instead of a new Model Plane run primitive with viewer-scoped multi-thread access, which does not exist, and avoid the room-agent persona path because it would post the answer to the room. Use the arrival snapshot, not the advancing durable marker, as the window start. The item's dependency on F-t1-009 read markers is already met at room level.",
+    "effortRevised": "M",
+    "effortNote": "M holds if the recap is stateless and gateway-composed; it becomes L if a persisted private result surface is added.",
+    "verdict": "reword",
+    "verdictReason": "The feature is genuinely missing and cheap relative to its value, but the item misses that its read-marker dependency is shipped, points at the wrong inbox, and assumes a viewer-scoped Model Plane run primitive that does not exist; the stateless gateway-composed route is the buildable path.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-062",
+  "title": "Space UI quality baseline: locale-correct activity grammar and dates, server-held preferences, shared announcer, reduced motion, density and high contrast, failure screens",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 38,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Move the hard-coded Norwegian activity labels and forced nb-NO dates onto the i18n catalogue and the viewer locale (and pass the locale to the Model Plane); move locale and time zone into a layered, versioned user/org preference document next to the already server-side theme; promote the page-local live region into a shared, tick-keyed announcer with row narration and focus hand-off rules; audit Space animation for prefers-reduced-motion and add a density setting; add forced-colors/prefers-contrast rules for status marks and focus rings; and add a cannot-reach-Verevon page with start-up milestones.",
+  "whyItMatters": "Verevon's Space accessibility and bilingual UI are already at or above buzz and QM; these small gaps (Norwegian-only activity grammar, no high-contrast rules, split preference storage) are where it would regress as the room grows.",
+  "referenceBestPractice": {
+   "bestSource": "Grok Bot (friendly activity vocabulary, announcer and pane focus rules); Teams (row narration, start-up milestones); Slack (cannot-connect page with log download); Buzz (reduced-motion gate, 3-level density); teams (63 locales with regional fallback map, app locale independent of the OS locale) for localization; slack (validated layered settings object with effective-value view) for preferences",
+   "others": [
+    "QM (agent-facing copy reviewed like UI)",
+    "Teams (device-memory efficiency mode)",
+    "grokbot (RTL, endonyms, zod-versioned settings that refuse bad files)",
+    "qm (palette import with contrast checks, density tiers)",
+    "buzz (theme-derived UI)"
+   ],
+   "prevalence": "[R-t1-12-11] friendly copy 2 of 5 (Grok Bot, QM); accessibility 2 of 5 (Grok Bot, Teams); motion/density 2 of 5 (Buzz, Teams); shell failure UX 2 of 5 (Slack, Teams); differentiators [R-t1-11-06] Localization 3 of 5 (common); theming and high contrast 4 of 5 (table-stakes); preference store 3 of 5 (common).",
+   "mechanism": "[R-t1-12-11] Catalog map from activity kind to localised friendly label. Announcer: two hidden regions (role=status, role=alert) each wrapping a span keyed by a counter so identical messages repeat, with announce(text, politeness). Pane navigation: outgoing pane inert and aria-hidden until animationend, then focus to the landing target once headings exist, skipped if focus is already elsewhere. Density: a data attribute scaling spacing variables; motion components check prefers-reduced-motion. Failure UX: milestone events (loaderStarted, firstPaint) to telemetry, critical load failure routes to an error page listing network checks and a \"download logs\" bundle. [R-t1-11-06] Message catalogs keyed by id with ICU plurals and a fallback chain; dir=rtl; Intl dates in the user locale. Preference schema with version and migrations; layers default < org policy < user < device; read API returns value plus source. Theme tokens as CSS variables with system, light, dark and contrast modes; org branding from config."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:122-137 (status labels hard-coded Norwegian) and lib/space-thread-presentation.ts:73,90 (dates forced to nb-NO)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:765 (page-local sr-only role=status region, not a shared module)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1387-1397 and components/SpaceActivityFeed.tsx:79-112 (aria-live on live rows, colour-independent status shapes)",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css:4630 (reduced-motion rules exist elsewhere; none under features/spaces; no density setting)",
+    "apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts:5 (states the app has no Suspense or ErrorBoundary usage)",
+    "apps/Frontend Plane/verevonv3/docs/onboarding-audit.md:297 (no aria-live in onboarding either)",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1-20",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/index.tsx:48",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/index.tsx:82",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:122-137",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-thread-presentation.ts:71-93",
+    "apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts:114",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx:51-55",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css:44084-44110"
+   ],
+   "gap": "[R-t1-12-11] Activity labels and dates are Norwegian-only; no shared announcer or row narration for agent states and no focus hand-off rules; no reduced-motion handling or density setting in Space; no root error boundary, no cannot-reach-Verevon page, no diagnostic export and no start-up milestones. [R-t1-11-06] Two locales via inline tr(no, en) pairs. RUN_STATUS labels in activity-grammar.ts are hard-coded Norwegian and formatWhen/formatWhenWithTime force nb-NO. Locale is stored in localStorage (verevon.locale) while theme is saved server-side through /api/v1/navbar/theme, so preferences are split. global.css has 14 prefers-reduced-motion rules but no forced-colors or prefers-contrast handling (SRC grep). No org branding or density setting. The unified settings store was not examined (confidence low on that part)."
+  },
+  "approachOriginal": "[R-t1-12-11] Frontend Plane. Use the existing i18n.tr(nb, en) pattern (as in SpacePage) for the grammar labels and the viewer locale for dates. Create shared/lib/announcer and route Space completions and approvals through it, polite by default and assertive only for approvals addressed to the viewer. Add the density attribute and spacing tokens and gate Space motion on reduced motion. Add a root boundary and a static gateway-served fallback page; the diagnostic bundle must redact tokens and exclude ZDR content. [R-t1-11-06] Frontend Plane: route RUN_STATUS and date formatters through i18n.tr and localeIntl(); add forced-colors and prefers-contrast blocks for status marks and focus rings; include the viewer locale in Model Plane run requests so activity lines match. Control Plane (user-core / org-core): a versioned preference document with layered resolution exposed through the navbar/bootstrap payload (migrating the localStorage locale on first load); org branding fields (accent, mark) with contrast enforced at save time. Model Plane reads time zone and language for scheduled agent work.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Control Plane user profile and org settings",
+   "F-t1-008 (R-t1-05-04) (notification preferences can join the same document)"
+  ],
+  "planeOwner": "Frontend Plane (with Control Plane for the preference document)",
+  "risks": "[R-t1-12-11] Over-announcing; diagnostic bundles must never include secrets or ZDR content; Solid 2 boundary semantics differ from Solid 1 (the compat shim exists because of this). [R-t1-11-06] Agent-generated text stays in the model language unless the viewer locale is passed; brand colours with poor contrast; migration of existing localStorage values; a third locale needs catalog extraction first.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 28,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-12-11] apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md section 4 item 5 (hygiene pass, partly done for the index page); the activity-grammar labels were not covered."
+  },
+  "sourceClusters": [
+   "C-t1-12-011",
+   "C-t1-12-023",
+   "C-t1-12-024",
+   "C-t1-12-018",
+   "C-t1-11-021",
+   "C-t1-11-020",
+   "C-t1-11-019"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-062",
+    "status": "partial",
+    "exactGap": "Activity status labels and verbs are hard-coded Norwegian (activity-grammar.ts RUN_STATUS and verb literals) and both date formatters force nb-NO instead of using localeIntl(locale); there is no shared announcer module (only page-local live regions in ChatPage and SpaceActivityFeed), no forced-colors or prefers-contrast rule anywhere in global.css, no root error boundary or cannot-reach page, and the viewer locale is not sent to the Model Plane. Two sub-items already exist and should be dropped or reduced: every Space animation is already gated by prefers-reduced-motion in global.css, and a server-held user preference store (language, timezone, date/time format, compactMode) already exists in Control user-core and is edited in AccountSettingsPage, so only the frontend reading of it is missing.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:118-137 (RUN_STATUS Norwegian labels; verb literals at 206,222,376,457)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-thread-presentation.ts:73,90 (toLocaleDateString/toLocaleString forced to nb-NO)",
+     "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1-20 (only no|en, localeIntl maps to nb-NO/en-US)",
+     "apps/Frontend Plane/verevonv3/src/shared/i18n/index.tsx:48,82 (locale persisted only in localStorage verevon.locale)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:765 (page-local sr-only role=status announcer)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityFeed.tsx:93 (per-row aria-live on live rows)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1380-1400 (colour-independent status marks)",
+     "apps/Frontend Plane/verevonv3/src/styles/global.css:43955-43962,44978-44982,48829-48833,49182-49210 (activity pulse, space pulse signal, working dots and typing dots all gated by prefers-reduced-motion)",
+     "apps/Frontend Plane/verevonv3/src/styles/global.css (grep: no forced-colors or prefers-contrast rule)",
+     "apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts:5 (app has zero Suspense/ErrorBoundary)",
+     "apps/Frontend Plane/verevonv3/src/demo/fixtures/fjordform-home.ts:8 (no root ErrorBoundary)",
+     "apps/Control Plane/user-core/internal/http/server.go:228 (GET/PATCH /api/v1/preferences)",
+     "apps/Control Plane/user-core/internal/http/handlers.go:829,931,978 (language/region/dateFormat/timeFormat, compactMode; timezone is written into the region key)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/settings-client.ts:218-226 (getPreferences/updatePreferences used by AccountSettingsPage)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs:415 (gateway round-trips compactMode; no frontend reader found by grep)",
+     "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:180 (hygiene pass item 5)"
+    ],
+    "reuse": [
+     "shared/i18n useI18n().tr and localeIntl() for the grammar labels and date formatters",
+     "Control user-core /api/v1/preferences plus settings/appearance and settings/language, already exposed through gateway settings/preferences.rs and settings-client.ts (no new preference document)",
+     "existing reduced-motion pattern in global.css (no-preference wrapper) for any new Space motion",
+     "ChatPage streamAnnouncement and the SpaceActivityFeed aria-live rows as the seed for a shared announcer",
+     "AGENT_STATUS_MARKS colour-independent shapes in SpacePage.tsx"
+    ],
+    "constraints": "Preferences are Control-owned (user-core settings), so do not add a second store in the frontend or Application Plane; org-level layered defaults and org branding need user-core/org-core. Diagnostic export and the cannot-reach page must exclude secrets and ZDR content. Passing the viewer locale to the Model Plane is a plain request field built by the gateway and grants no authority. Solid 2 has no ErrorBoundary usage today (compat shim), so boundary semantics need a spike.",
+    "approachAdjustment": "Drop the reduced-motion audit (done) and the 'new layered preference document' as a prerequisite: make the frontend bootstrap read language, timezone, dateFormat, timeFormat and compactMode from the existing /api/v1/preferences and keep localStorage only as a cache. Keep the i18n of activity-grammar and the date formatters, the shared announcer with row narration, forced-colors/prefers-contrast rules, compactMode wired as the density attribute, a root error boundary plus static fallback page, and locale on Space turns. Fix the timezone-to-region mapping in handlers.go before Space code starts depending on timezone (INF, low confidence that it is a bug).",
+    "effortRevised": "M",
+    "effortNote": "Unchanged: two sub-items drop out (reduced motion, new preference store) but the root error boundary and fallback page are new work and are the riskiest part.",
+    "verdict": "reword",
+    "verdictReason": "Roughly a third of the item already exists (reduced motion in Space, a server-held preference store, colour-independent status shapes), so the text would recommend building what ships. The remaining gaps are real and small.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-063",
+  "title": "Agent identity in the room: surface the persisted avatar colour (then shape) and add a hover card that leads with blocking state",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 39,
+  "wave": "W1",
+  "quickWin": false,
+  "summary": "Pass the avatarColor that the Application Plane already stores and projects through the gateway agent composition and the SpaceAgent type, then render a deterministic non-human shape-by-colour avatar on posts, agent cards, the roster and the sidebar. Add a hover/focus card for agents and members whose preview leads with what blocks a human (awaiting approval), then a draft, then the last entry.",
+  "whyItMatters": "Agents must be instantly distinguishable from people in a mixed room and must never look like a human colleague. The colour is already collected and stored, so this is a bug-level fix with immediate visible effect; the hover card surfaces \"waiting for your approval\" wherever an agent name appears.",
+  "referenceBestPractice": {
+   "bestSource": "Grok Bot (14+ shapes by 11 colours, crop upload, describe-to-generate; hover card ordered by blocking state)",
+   "others": [
+    "Buzz (BotIdenticon, agent badge with managed-by owner)"
+   ],
+   "prevalence": "avatars 1 of 5 (Grok Bot; Buzz has a similar idea); hover card 1 of 5 (Grok Bot); unique",
+   "mechanism": "Agent identity fields {avatar_shape, avatar_color, avatar_version, image_ref}; a deterministic SVG character from shape by colour, with the colour token reused as an accent in agent rows. Hover card preview = awaitingReason ? localized(awaitingReason) : draft ? draftLabel + first line : lastEntry ? preview(lastEntry) : emptyText, opened with a delay and on keyboard focus."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:91,106-132 (collects a colour and sends avatarColor)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3324-3354 (create path forwards avatar_color) versus lines 4114-4135 (agent composition whitelist omits avatarColor)",
+    "apps/Application Plane/convex-core/convex/spaceAgents.ts:89,194 and convex/schema.ts:328-330 (colour stored and projected)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:704 (SpaceAgent type has no avatar field)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:911-915 (cards show an initial only)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:245-321 (no hover card; no HoverCard component in src per a 2026-10-13 grep)"
+   ],
+   "gap": "The colour is persisted in the Application Plane but the gateway agent listing drops it, the client type has no field for it and cards render an initial only, so the collected colour is never shown. No shapes, uploads or generated avatars and no hover card."
+  },
+  "approachOriginal": "Slice 1 (S, no new plane work): add avatar_color to the gateway composition whitelist (spaces.rs around 4114-4135), to SpaceAgent in spaces-client.ts, and render a shared <AgentAvatar> on posts, cards, roster and sidebar. Slice 2: avatar shape persisted on the Application Plane agent definition. Slice 3: a hover card built on @kobalte/core (check HoverCard availability in the pinned alpha) reading status and pending approvals from existing projections.",
+  "effortOriginal": "S",
+  "dependencies": [
+   "Agent status projection (exists)"
+  ],
+  "planeOwner": "Frontend Plane (gateway passthrough); Application Plane for shape later",
+  "risks": "Generated avatars that resemble real people (keep non-human characters); the hover card must not reveal approval details to anyone but the run owner, who is the only person who can decide today.",
+  "significance": 3,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md section 6.1 row on agent identity lists avatar as an initial only (about line 236); baseline known gap 16."
+  },
+  "sourceClusters": [
+   "C-t1-12-020",
+   "C-t1-12-022"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-063",
+    "status": "partial",
+    "exactGap": "The create-agent dialog collects one of ten colours and sends it (SpaceCreateAgentDialog.tsx:20-31, 115), the gateway forwards it (spaces.rs:3324-3354), and Convex stores and projects it (spaceAgents.ts:89, 194, 441; schema.ts:328-330), but the gateway agent composition field map omits avatarColor (spaces.rs:4120-4134), the SpaceAgent client type has no field for it (spaces-client.ts:704), and agent cards render only the first letter (SpacePage.tsx:915). The timeline already separates agents from people with a Sparkles glyph versus member initials (SpaceRoomTimeline.tsx:316, 357), but there are no shapes, uploads or generated avatars, and no hover card exists even though @kobalte/core 2.0.0-alpha.0 ships a hover-card module.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:20-31",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:91",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:106-132",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3324-3354",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4096-4160",
+     "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:704-733",
+     "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:772",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:911-915",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:316",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:357",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:276-285",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:1-40",
+     "apps/Frontend Plane/verevonv3/package.json:24",
+     "apps/Frontend Plane/verevonv3/node_modules/@kobalte/core/dist/hover-card (directory listing)",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:52-110",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:194",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:441",
+     "apps/Application Plane/convex-core/convex/schema.ts:324-330",
+     "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:236"
+    ],
+    "reuse": [
+     "AGENT_AVATAR_COLORS palette exported from SpaceCreateAgentDialog as the allowed-colour set",
+     "spaceAgents:spaceAgentBindingsForGateway, which already returns avatarColor (only the gateway field map drops it)",
+     "space-live-work.ts live-run projection plus thread latest_run_status/AWAITING_APPROVAL for the hover-card lead line",
+     "@kobalte/core hover-card (present in the pinned alpha, already used elsewhere only for Switch)",
+     "The Sparkles/initials avatar split in SpaceRoomTimeline as the human-versus-agent baseline to extend"
+    ],
+    "constraints": "Avatar colour is presentation only and must never enter an authority decision (schema.ts:328-329 says so); the BFF already validates it as a six-digit hex, so the same validator should guard the new read path. The hover card may show an approval state, but a run belongs to the member who started it and only that member can decide (SpaceApprovalPanel.tsx header), so the card must not expose approval details or controls to other members beyond 'waiting on <owner>'. Agent identity comes from an Application binding joined to a Control roster entry; an agent Control authorizes but Application has not described must keep rendering as 'identity not published' with a neutral avatar, never an invented colour. Generated non-human shapes belong in Application Plane agent definitions, not in Control.",
+    "approachAdjustment": "Slice 1 is correct and tiny: add avatarColor to the composition field map (spaces.rs around 4120-4134), add avatar_color to SpaceAgent, and render one shared AgentAvatar on cards, roster, sidebar, mention picker and post headers; fall back to the current initial or Sparkles when absent. Verified: HoverCard exists in the pinned Kobalte alpha, so the item's 'check availability' caveat can be dropped. Treat shapes and uploads as a separate, lower-value follow-up.",
+    "effortRevised": "S",
+    "effortNote": "Slice 1 (field map, type, shared avatar component) is S and has no plane work; the hover card is S to M; shapes are a separate Application Plane change.",
+    "verdict": "keep",
+    "verdictReason": "The stored colour is never shown because of a one-line gateway omission, so this is a genuine, cheap fix; the item correctly describes what exists and what is missing.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-064",
+  "title": "Room creation flows: templates with an agent roster and seed artifacts, clone, project and case Spaces bound to work objects, invite-on-mention",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 40,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Let a room be created from a declarative template (description, instructions, agent roster bound through the normal bind decision, seed canvas and list) or cloned from an existing room, in one transaction; enable project and case kinds with owner and roster, and have the Application Plane create a bound case or project Space when a ticket, customer case or project is created (membership from assignees, owner-plane ACLs stay authoritative, agent bindings still need human approval). When someone mentions a non-member or unbound agent, offer to add or bind them through the normal decisions.",
+  "whyItMatters": "Buzz's templates with an agent roster are something neither Slack nor Teams has, and case Spaces are already planned in the Space authority ADR; together they turn recurring work into ready-made human-plus-agent rooms.",
+  "referenceBestPractice": {
+   "bestSource": "buzz (templates, non-member mention dialog); Buzz (SRC): a resource event lists coordinates and binds a channel, and the project signer gets no authority over member resources",
+   "others": [
+    "teams (create from group, clone)",
+    "qm (project rooms with source-tracked channel members)",
+    "Slack channel templates that pre-seed lists (DOC)"
+   ],
+   "prevalence": "[R-t1-02-11] templates 2 of 5 (buzz, teams; differentiator); project rooms 1 of 5 (qm); mention-to-invite 1 of 5 (buzz); unique to differentiator [R-t1-08-09] resource-bound rooms: 1 of 5, unique; templates: 1 of 5, unique",
+   "mechanism": "[R-t1-02-11] room_template(id, name, visibility, description, canvas_ref, agents[{definition_id, role, policy}]); instantiate creates the room then binds each agent through the normal decision. On send the server returns non_member_mentions[]; the client shows a dialog (safe action focused, invite withheld and explained when the actor cannot administer the room, draft restored on cancel); invite goes through the normal add-member decision. QM project store keeps channel-derived members separate so unlinking removes only them. [R-t1-08-09] Binding record {resource_ref, space_ref} created with the resource; a project is a list of resource refs plus a home space and only aggregates, since each resource's authorization still comes from its owner. A template is a declarative bundle {room settings, artifacts[], agents[]} instantiated in one transaction."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2860-2900 (room create takes a name only; kinds other than personal and room return unsupported_space_kind)",
+    "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27 (project and case kinds accepted)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:20-77 (agent templates only)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:188-199 (unbound or paused agents are not mention candidates; nothing offered for people)",
+    "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:82",
+    "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:84",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:1-40",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43"
+   ],
+   "gap": "[R-t1-02-11] No room templates or clone, project and case creation refused by the gateway, and no invite-on-mention for people or unbound agents. [R-t1-08-09] Case and project Spaces are planned in the Space authority ADR (the support chat maps to a future case Space), but support tickets live in conversation-core and do not spawn Spaces. The only templates are three agent templates (Meeting Scribe, Status Agent, Knowledge Helper) in the create-agent dialog; no room template seeds artifacts."
+  },
+  "approachOriginal": "[R-t1-02-11] Application Plane: room templates (instructions plus agent roster); the gateway create route accepts a template id and, once policies exist, project and case kinds; agent bindings still go through Control decisions one by one and templates never pre-grant tools (agents stay mention-only until confirmed). Gateway returns non_member_mentions and Frontend adds the dialog, reusing add-member and bind-agent decisions and respecting the agent add policy. External channel linking for projects stays with the future Channel Plane. [R-t1-08-09] Application Plane: Space kinds case and project with resource bindings; conversation-core publishes a ticket-created event that the Application Plane consumes to create the bound Space; a template registry instantiates Space, bindings and seed artifacts, so templates land after the canvas and lists exist. Auto-archive the Space with the resource.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Agent access list (F-t1-011 (R-t1-02-03))",
+   "Room lifecycle (F-t1-022 (R-t1-02-04))",
+   "Role management (F-t1-022 (R-t1-02-01))",
+   "Channel Plane for the project channel link",
+   "Case Space kind (ADR-0001)",
+   "Membership from ticket assignees",
+   "F-t1-015 (R-t1-08-01) and F-t1-058 (R-t1-08-06) for seed artifacts"
+  ],
+  "planeOwner": "Application Plane (templates, bound Spaces) with Control Plane (kinds, decisions)",
+  "risks": "[R-t1-02-11] Templates must not pre-grant tools. The mention dialog must not reveal whether a private-room candidate exists. Source-tracked membership is needed for project rooms so unlinking does not remove manual members. [R-t1-08-09] Room sprawl, so auto-archive with the resource. The template phase has DOC-only support and is only valuable once artifact types exist.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 9,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-02-11] Space definition doc says mentioning an unbound agent offers to add it (per the comparator's UI baseline narrative; document path not re-verified) [R-t1-08-09] apps/SPACE_AUTHORITY_ADR_2026-08-13.md:82 (case Space) and :84 (Convex projects as a migration candidate). Seed templates are not planned."
+  },
+  "sourceClusters": [
+   "C-t1-02-027",
+   "C-t1-02-024",
+   "C-t1-02-032",
+   "C-t1-08-020",
+   "C-t1-08-018"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-064",
+    "status": "partial",
+    "exactGap": "Named room creation takes a name only (create_personal_space routes kind=room to spaces:createRoomForGateway and refuses project and case with unsupported_space_kind at spaces.rs:2873), although the Convex schema and Control's registered_spaces already allow project and case kinds (no Convex mutation creates them). The only templates are three client-side agent prompt presets in SpaceCreateAgentDialog.tsx that prefill a name and instructions, with no agent roster, no seed artifacts and no clone, and the composer offers only actively bound agents and roster people as mention candidates (SpaceRoomComposer.tsx:184-203) with no offer to bind or invite. Nothing creates a case or project Space from a ticket: ticket.created appears only as an automation-rule event name in dispatchers.rs, and the ADR marks the support chat as a future case Space.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2820-2920",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2873",
+     "apps/Application Plane/convex-core/convex/spaces.ts:340-417",
+     "apps/Application Plane/convex-core/convex/spaces.ts:1503-1555",
+     "apps/Application Plane/convex-core/convex/schema.ts:546-604",
+     "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:15-110",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:28-40",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:184-203",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:45-75",
+     "apps/Frontend Plane/verevonv3/docs/space-defenition.md:163-170",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3433-3546",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-731",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs:1985-2023",
+     "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:82-84",
+     "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:594"
+    ],
+    "reuse": [
+     "spaces:createRoomForGateway plus the Control registration saga (a created room registers within seconds per the page audit)",
+     "setInstructionsForGateway and GET/PATCH /instructions (4000-character Space instructions) as the template's instructions slot",
+     "Existing agent create and bind routes (POST /api/v1/spaces/{ref}/agents and /agents/bind) with binding policy fields (triggerModes, allowedTools, approvalMode) for the roster",
+     "add_space_member and sync_room_members for roster people, and require_space_agent_grant_role for the owner/manager gate",
+     "AGENT_TEMPLATES constants as the seed of a server-side template registry"
+    ],
+    "constraints": "A room is born pending_registration and nothing that depends on Control (membership convergence, agent binding decisions) can happen until Control registers it, so 'one transaction' is really an idempotent, resumable saga: create, await registration, set instructions, bind each agent through its own Control confirmation, then seed artifacts, reporting partial state honestly (the room doc says never say 'created' until both steps are confirmed). Templates must never pre-grant tools or approval modes beyond the binding defaults, and a mention never grants, so an invite or bind offer must go through add-member or bind decisions with the owner/manager role and must not reveal whether a private candidate exists. Project and case kinds are accepted by Control but their owner, lifecycle and membership semantics are not defined (ADR rows 82 and 84); a ticket-bound case Space needs a conversation-core event consumed by the Application Plane, with membership derived from assignees staying subordinate to the ticket ACL. Seed artifacts depend on the records item (F-t1-058). The Space doc non-goals do not exclude templates.",
+    "approachAdjustment": "Reword 'one transaction' as a resumable saga and split the item: (1) templates as an org-level server-side registry of {instructions, agent roster with binding policy} executed over the existing create, instructions and bind routes, no seed artifacts; (2) offer to add a non-member person or bind an unbound agent from a mention, reusing add-member and bind decisions; (3) project and case kinds and ticket-bound case Spaces only after an ADR defines their owner and lifecycle; (4) seed canvas and list only after F-t1-058. Note the composer comment still points to a 'Phase UI-3b' bind offer that is not built, while the create-agent-from-room half of UI-3b shipped.",
+    "effortRevised": "L",
+    "effortNote": "Kept at L; slices (1) and (2) are about M, while case and project Spaces and seed artifacts are the L part.",
+    "verdict": "reword",
+    "verdictReason": "Status is partial (name-only rooms, three client-side agent presets, project and case kinds accepted by Control but refused by the gateway); the approach needs a saga framing, a registry placement and a split, and the case-Space half depends on undefined ADR semantics.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-065",
+  "title": "Governed Space skills and plugin bundles (ecosystem-compatible manifests)",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 41,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Give skills a Space scope and a review lifecycle (draft, reviewed, published, archived, with review invalidated by any edit and signed manifests), and let the org plugin registry accept Claude-style and Cursor-style marketplace manifests with git-sha pinning and a variables schema, fanning components out to the skill store, MCP registry and hook runner. A Space manager can then enable an org-activated plugin or publish a room skill, never beyond what the org allows.",
+  "whyItMatters": "A team can curate room-specific know-how ('how we run incident review') safely, which is how agents get better in a shared room, and reading existing plugin ecosystems gives Verevon agents many capabilities for little effort. It extends two existing assets (the / skill picker and the admin-activated plugin packs).",
+  "referenceBestPractice": {
+   "bestSource": "qm",
+   "others": [
+    "grokbot",
+    "buzz"
+   ],
+   "prevalence": "Governed skills: 2 of 5 (differentiator); plugin bundles: 2 of 5 (differentiator)",
+   "mechanism": "qm's SkillStore runs draft->reviewed->published->archived with HMAC-signed manifests verified on resolve, visibleFor(principal, scope) filtering, supporting files materialised only for speakers who can see the skill, and git skill packs pinned to a ref with visible ineligibility reasons. Grok Bot reads both .cursor-plugin and .claude-plugin marketplace.json, pins git sources to a 40-hex sha, declares a variables JSON-schema (writeOnly marks secrets) and registers each component (commands, agents, skills, rules, hooks, mcpServers) with its subsystem; buzz persona packs are a simpler variant."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:314-331",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1988-2006"
+   ],
+   "gap": "Skills exist with org and personal scope (badges) and are resolved server-side in Model Gateway from structured skill_ids; Settings has an org plugin-pack section where an admin registers a JSON manifest (tools, skills, hooks) that stays inactive until activated (spot-check). Missing: Space-scoped skills, a review/publish lifecycle, signed manifests, git pack import, Space-level plugin enablement, ecosystem manifest compatibility, sha pinning and a variables schema. Governed Space skills are plan item S3.5."
+  },
+  "approachOriginal": "Model Plane skill store: add scope=space and the review state machine (promotion persists immutable reviewed versions and scoped activation in the database, per S3.5), signed manifests and progressive disclosure; Control Plane decides who may publish to a scope (editor and above for a Space). Plugin registry: accept .claude-plugin and .cursor-plugin manifests with sha pinning and a variables schema, keeping admin activation inactive by default; components fan out to the skill store, the MCP registry (F-t1-037 (R-t1-06-02)) and the hook runner. Optional git pack importer in Ingestion Plane: HTTPS only, DNS pinning and private-address denial, bounded files, symlink and binary rejection (S3.5 slice 4). Space cockpit enables an org-activated plugin per room.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "S3.5 consolidate governed Space skills",
+   "F-t1-037 (R-t1-06-02) Space tool cockpit",
+   "Space role model",
+   "Admin activation of plugin packs (existing)"
+  ],
+  "planeOwner": "Model Plane (skill store, plugin registry); Control Plane (publish decisions); Ingestion Plane (git pack import)",
+  "risks": "Skill-borne prompt injection (the review gate must cover the exact body); plugin hooks run code, so require sha pins and admin activation; supply-chain risk of third-party manifests.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (S3.5 governed Space skills; S3.6 plugin cockpit). Ecosystem manifest compatibility is not in the plan."
+  },
+  "sourceClusters": [
+   "C-t1-06-015",
+   "C-t1-06-016"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-065",
+    "status": "partial",
+    "exactGap": "Skills exist with org and user scope (explicit shared_with list), are resolved server-side in model-gateway from structured ids, and are picked per turn with the composer's / picker; the registry CHECK allows only org|user, so there is no Space scope, no draft/review/publish lifecycle and no signing, and capability-core's versioned skill_packages table is referenced only by migrations and docs (no Go or Rust consumer). The plugin side is a record store only: plugin_packages rows default disabled and unpinned, the gateway wire type carries just a manifest URL, nothing in Model Plane loads a manifest, and Settings takes a pasted JSON blob. No .claude-plugin/.cursor-plugin parsing, git pack import, sha pinning or variables schema exists.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:5,216,318-335 (/ skill picker, picked skills as chips, id sent to server)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts:19-28 (scope 'org' | 'user' only, shared_with)",
+     "apps/Model Plane/rust/services/session-core/migrations/0031_agent_skills_ownership.sql:1-25 (scope CHECK IN ('org','user'), owner_user_id, shared_with)",
+     "apps/Model Plane/rust/services/model-gateway/src/skills.rs:225-250 and src/ownership.rs:31-36 (ownership Scope is Org or User)",
+     "apps/Model Plane/go/services/capability-core/migrations/0003_capabilities_registry.up.sql:137-160,240-256 (skill_packages with pinned_version/eval_score; plugin_packages enabled default FALSE, pinned, rollout_state)",
+     "apps/Model Plane/go/services/capability-core/internal/api/plugins.go:1-70 (plugin registry inert until a host loads it; org-scoped CRUD)",
+     "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:229-253 (plugin row mapped to a wire Plugin carrying a manifest URL)",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx:55-90 (admin pastes JSON manifest, parsed client-side)",
+     "apps/Model Plane/go/services/capability-core/migrations/0007_tenant_scopes_and_risk_constraints.up.sql:70-71 (no 'space' scope_kind)",
+     "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:162 (hook_configs: tool-call interceptors, not a plugin hook runner)",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1988-2006 (S3.5 and S3.6 planned; canonical skill record undecided)",
+     "Grep of apps/Model Plane for skill_packages: only migrations and docs (negative for code consumers)"
+    ],
+    "reuse": [
+     "session-core agent_skills table, model-gateway skill resolver and the composer / picker (extend with Space scope)",
+     "SKILL-1 ownership shape (scope, owner_user_id, shared_with) already shared with MCP servers",
+     "capability-core plugin_packages registry (disabled/pinned/rollout_state defaults) as the activation record",
+     "Control Space roles (viewer, editor, manager, owner) and signed decisions for who may publish to a Space",
+     "capability-core audit action vocabulary (pinned, quarantined, promoted) for review events"
+    ],
+    "constraints": "Control decides authority: publishing to a Space needs a new Control decision type (none exists for skills), and the browser never supplies scope or authority. A skill body is prompt text injected into Space turns, so the review gate must cover the exact stored body and any edit must invalidate review. Plugin hooks and MCP components execute code or reach networks, so the Model-proposes/Quarry-executes and egress rules apply and plugins stay admin-activated, inert by default. Capability scope_kind has no 'space', so Space scope in capability-core needs a migration. Two skill stores exist and the plan requires choosing one canonical record first (S3.5 slice 1).",
+    "approachAdjustment": "Split. Governed Space skills (L): extend session-core agent_skills, the live store the resolver reads, with scope 'space' plus space_ref, review-state columns and immutable reviewed versions, with a Control publish decision; do not build on capability-core skill_packages unless S3.5 slice 1 picks it. Ecosystem plugins (defer): there is no plugin host, so fan-out to skills, MCP and hooks has nothing to land on; start only with importing static skill markdown from .claude-plugin/.cursor-plugin bundles as draft Space skills that require review, pin to a 40-hex sha and refuse hooks and MCP components until a host and governance exist. Drop 'a Space manager enables an org-activated plugin' until Space-scoped plugin activation has a record to write to.",
+    "effortRevised": "XL",
+    "effortNote": "Raised from L: the plugin half needs a plugin host that does not exist. Governed Space skills alone are L; static-skill bundle import adds M.",
+    "verdict": "reword",
+    "verdictReason": "Skills with org/user scope and the picker already exist and the plugin registry is only a stub, so the real gap is Space scope plus review lifecycle (L) and a plugin host that is missing; the item should be narrowed to governed Space skills with a skills-only bundle import and the plugin fan-out deferred.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-067",
+  "title": "Duplex voice for agents: a voice front that delegates to the Space agent, then agents as attributed participants in room calls",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 43,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Phase A (M, no SFU needed): inside a Space, a user holds a realtime voice conversation with an agent. A fast voice persona talks and its only tools delegate: send_task hands real work to the existing agent run in the Space (still behind approval gates) and a history search covers Space threads and past voice sessions; each agent gets voice, speed and language settings. Phase B (L, after F-t1-029 (R-t1-03-01)): a server-side participant per invited agent hears the call through STT, answers with an attributed audio track, and stops when a human starts talking.",
+  "whyItMatters": "This is the defining hybrid moment of the Space vision: humans and agents in the same voice room, and a personal agent that can be tasked hands-free. The front and worker split avoids a second agent brain, and doing it server-side is better than Buzz, whose agent voice runs on the owner desktop.",
+  "referenceBestPractice": {
+   "bestSource": "Grok Bot (SRC) for the voice-front and worker split; Buzz (SRC) for agents as audio participants with floor control",
+   "others": [],
+   "prevalence": "1 of 5 each (Grok Bot, Buzz); unique.",
+   "mechanism": "Grok Bot: realtime session (session.update, input_audio_buffer.append, response.create/cancel) with voice tools send_task(constraints), recall_text_messages and search_conversations{query, scope this-chat|earlier|everything, from, to, if_missing}; worker results come back as async updates the persona announces; one active voice chat per user and ending needs confirmation; the refusal text for send_task tells the model not to drop prohibitions or approval requirements; per-agent voice_id, voice_speed, voice_language. Buzz: agent audio publisher authenticates as the agent and shows in the roster; VAD with about 300 ms silence flush; any human speech cancels agent TTS (barge-in); agent speaks only when addressed."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:448-450 and :4900-4945 (SRC: /v1/ai/realtime/session creates a realtime session returning client secret and websocket URL, default server_vad turn detection, ZDR-gated through decide_content_route)",
+    "apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx and voice-mode-state.ts:1-35 (SRC: tap-to-talk dictation, review, send, optional read-aloud)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3683 (SRC: VoiceModeDialog mounted only in the dashboard composer, not in Spaces)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts:6,91 (SRC: governed TTS pinned to azure-speech, fails closed on a different provider)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-420 (SRC: room posts go through streamChat with spaceRef and mentionedAgentRef)"
+   ],
+   "gap": "A realtime session route and a tested half-duplex voice mode exist, but nothing is full-duplex, Space-scoped or delegating to a Space agent, there is no per-agent voice profile and no agent audio identity in a room. The baseline also records that personal agents are not possible today (a personal Space cannot hold an agent), which limits a personal-agent voice phase until that is changed."
+  },
+  "approachOriginal": "Model Plane: a realtime voice session type whose only tools are send_task (calls the existing agent run API in the Space so approval gates and Control decisions still apply) and search_conversations (Space threads read under the read decision); add voice_id, voice_speed and voice_language to the agent profile in the registry behind SpaceCreateAgentDialog. Frontend: upgrade VoiceModeDialog into a duplex call island that can mount in SpaceRoomComposer and reuse the call store from F-t1-029 (R-t1-03-01). Phase B: a Model Plane SFU participant per invited agent subscribing to room audio, streaming to /v1/ai/realtime, publishing an agent track under the agent identity, label shown in the roster; floor policy cancels agent playback on any human speech (response.cancel) and the agent speaks only when explicitly invited to the call or addressed, consistent with the explicit-invocation rule. Enforce F-t1-050 (R-t1-03-03) before the agent hears the room.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Model Gateway realtime route",
+   "Agent run API and approval gates",
+   "F-t1-029 (R-t1-03-01) call substrate (phase B only)",
+   "F-t1-050 (R-t1-03-03) consent policy",
+   "Agents in personal Spaces (agents-in-the-room category) for personal-agent voice"
+  ],
+  "planeOwner": "Model Plane",
+  "risks": "ZDR attestation for realtime providers (the route already fails closed). Cost per minute. Agents talking over humans; always label agent voices. Delegated actions must still hit in-room approval gates and must carry the constraints of the spoken request.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 11,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-03-010",
+   "C-t1-03-011"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-067",
+    "status": "partial",
+    "exactGap": "Model Plane already exposes POST /v1/ai/realtime/session (inference-core create_realtime_session returns a provider client secret and websocket URL, server_vad by default, ZDR fail-closed through decide_content_route and reject_unattested_zdr_modality), but the BFF has no route for it, no frontend caller exists, and the session request has no tools field, so nothing is duplex or can delegate to a Space agent. The shipped voice mode is half-duplex (VoiceModeDialog: tap, record up to 60 s, governed dictate route, review, send, optional Azure TTS read-aloud) and is mounted only in DashboardComposer, not in Spaces; there is no per-agent voice profile, a personal Space cannot hold an agent (docs, 2026-09-07), and no call substrate (SFU, WebRTC) exists in the frontend, gateway, Model Plane, Application Plane or Ingestion Plane.",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:448-450,1960-1968,4900-4945 (realtime routes, request shape without tools, ZDR route decision)",
+     "apps/Model Plane/rust/services/inference-core/src/grpc.rs:872-900 (create_realtime_session, ZDR rejected unless attested)",
+     "apps/Model Plane/proto/model_plane/v1/inference.proto:1156-1175 (CreateRealtimeSessionRequest fields: model, provider_hint, voice, instructions, formats, turn detection)",
+     "apps/Frontend Plane/verevonv3/src/features/voice/voice-mode-state.ts:9-31 (half-duplex phases, zdr-unavailable)",
+     "apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx:421 (realtime naming is CSS classes only)",
+     "apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts:17-18 (60 s and 1.4 MB per take)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3683 (only mount point)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts:16-23 and apps/gateway/src/domains/ai.rs:22,47 (governed TTS pinned to azure-speech)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402 (room posts go through streamChat with spaceRef)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:47 (duplex voice a gap; ZDR voice refused today)",
+     "apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md:31 (realtime partial; browser/WebRTC client integration missing)",
+     "apps/Frontend Plane/verevonv3/docs/space-defenition.md:150-160,386 (invocation rule; personal Space cannot hold an agent as of 2026-09-07)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains (grep: no realtime route); src, gateway, Model Plane, Application Plane, Quarry crates, integration-corev2 (grep: no livekit, mediasoup or RTCPeerConnection)"
+    ],
+    "reuse": [
+     "model-gateway /v1/ai/realtime and the inference-core RealtimeProvider (client-secret broker, ZDR gate)",
+     "VoiceModeDialog, voice-mode-state machine and voice-recorder mic handling",
+     "governed TTS chain (speech-client.ts, gateway ai.rs, inference-core) for read-aloud and agent voice names",
+     "SpaceRoomComposer streamChat path so delegated work keeps the Control append decision, approvals and attribution",
+     "Space agent bindings and registry profile for per-agent voice fields"
+    ],
+    "constraints": "A realtime session hands the browser a client secret and a direct provider socket, so the Model Plane cannot meter cost, enforce tools server-side or see the audio; tool calls must be executed by the browser through the normal BFF Space send and approval path, and the Space context has to be pinned in the session instructions at mint time. ZDR voice is refused today, so ZDR Spaces get no duplex voice. History search needs a Space read decision. Agents speak only when invited (invocation rule), which matches the item. Phase B needs a server-side call participant and a call substrate that does not exist (F-t1-029).",
+    "approachAdjustment": "Add a BFF route that mints a realtime session with Space-scoped instructions and a tool schema (requires a tools field on CreateRealtimeSessionRequest), keep send_task and search execution in the browser via the existing composer and read routes, and treat per-minute cost as unmetered until a Model-side relay exists. Do not describe the Model Plane as running the voice tools. Keep Phase B as a separate, later item behind the call substrate.",
+    "effortRevised": "L",
+    "effortNote": "Phase A is L, not M: BFF route, proto change, a duplex WebRTC or WebSocket client with echo control and barge-in, send_task bridge and per-agent voice fields. Phase B is XL and blocked on a call substrate.",
+    "verdict": "reword",
+    "verdictReason": "The Model Plane half exists and the half-duplex mode is shipped, so the item is right that duplex is missing, but Phase A understates the work and mislocates tool execution. Phase B should be demoted until a call layer is decided.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-005",
+  "title": "Make zero-data-retention binding in every plane, with typed refusals and content-free telemetry",
+  "originalTier": "priority",
+  "finalTier": "recommended",
+  "rank": 5,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Session Core must act on the zero_data_retention flag in the signed Control decision (today it decodes the flag and discards it): refuse durable thread, message and memory writes under ZDR with a typed code. Prove the same for the other durable stores a Space touches (sandbox-manager process output and snapshots, notification and feed projections, agent_memory and Letta), commit the typed ZDR refusal UI, and add a cross-plane ZDR test matrix. Keep telemetry content-free; add a consent gate only if analytics are ever added.",
+  "whyItMatters": "ZDR is a stated Verevon promise and an architecture rule (it must propagate). Any plane that ignores it is a compliance defect that a regulated buyer will find. GrokBot shows the pattern users expect: a persistent feature is blocked with a visible reason instead of silently storing.",
+  "referenceBestPractice": {
+   "bestSource": "grokbot",
+   "others": [
+    "teams (AI-interaction retention controls, DOC)",
+    "qm, teams, buzz (consent-gated or scrubbed telemetry)"
+   ],
+   "prevalence": "ZDR-blocks-persistence: 1 of 5 (grokbot), unique. Consent-gated, scrubbed telemetry: 4 of 5 (grokbot, qm, teams, buzz), table-stakes.",
+   "mechanism": "The backend reports privacy mode; every persistent feature checks it at connect or write time and returns a typed no-storage error that the UI maps to a visible block state with a reason. For telemetry, analytics start disabled or deferred with a capped buffer until consent resolves, are dropped on opt-out, use closed label sets and scrub errors before send."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs:1752-1755 (zero_data_retention and third_party_processing_allowed are read from the claims and held in _privacy_processing_flags 'for the later provider/retention propagation slices'; not acted on)",
+    "apps/Application Plane/notification-core/internal/notification/delivery_worker.go:91-95 and feed_projection.go:133-137 (ZDR requests are refused for async delivery and feed projection, so the Novu-content concern raised in the baseline is at least partly handled in this service)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:80-116 and apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:292-294 (gateway raises ZDR fail-closed; Control forbids durable owner actions)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts:1-30 (typed refusal text; reported uncommitted by the UI baseline)",
+    "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go:262-290 (process output is retained durably in sandbox_process_output; no ZDR check seen)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/observability.rs:1-25 (Prometheus metrics only; grep for sentry/posthog/analytics in verevonv3/src and package.json found no third-party telemetry SDK)"
+   ],
+   "gap": "Session Core ignores the claim, so ZDR is enforced at the edge (gateway, Control, notification-core) but not at the store that persists threads and memory. No cross-plane test proves every durable write path refuses under ZDR; the sandbox-manager and agent_memory paths are unchecked; the typed refusal UI is uncommitted. Telemetry hygiene is currently fine because no third-party SDK was found, but nothing guards it."
+  },
+  "approachOriginal": "Model Plane: in session-core CreateThread, message append and agent_memory writes, branch on claims.zero_data_retention and either persist nothing or return a typed zdr_persistence_unavailable status; model-gateway maps it to the existing typed refusal codes; letta-bridge and sandbox-manager (workspace, snapshot, process output) take the same flag from the decision. Application Plane: Space-originated notifications under ZDR carry reference-only payloads (coordinate with category 05 notification work). Frontend Plane: commit zdr-refusals.ts and render one block state per refusal code. Add a ZDR conformance test (one case per durable write path, per plane) and a CI label allowlist so Prometheus labels and error reports stay content-free. Only if analytics are added: consent state machine with a capped deferred buffer.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "ZDR claim carried in every plane contract",
+   "F-t1-008 (R-t1-05-01) (content-free Space notifications)",
+   "typed refusal UX"
+  ],
+  "planeOwner": "Model Plane (session-core, model-gateway, sandbox-manager) with Application Plane and Frontend Plane",
+  "risks": "Feature regressions for ZDR orgs (persistent computers, memory, schedules) must be explicit rather than silent. A missing claim must fail closed. Pre-existing rows written before a posture change are a retention question, handled by the retention item.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 11,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Planned but not finished: the session-core code comment marks provider/retention propagation as a later slice; apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md S6.1 and S6.2 list ZDR verification cases."
+  },
+  "sourceClusters": [
+   "C-t1-10-027",
+   "C-t1-10-037"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-005",
+    "status": "partial",
+    "exactGap": "Session Core already enforces ZDR on the caller's verified token claim (authorize_operation refuses every non-read scope on CreateThread, AppendMessage and StartRun, MemoryRetention plus authorize_memory_preflight gate durable and Letta memory, run output is refused and a ZDR managed start is metadata-only); only the Space decision's own zero_data_retention flag is still decoded and discarded (grpc.rs:1749-1755), which Control and the gateway make unreachable today. Execution-core, letta-bridge, notification-core, Quarry and Control also refuse, and a typed refusal catalogue (mp-contracts zdr_refusal.rs, api/contracts/zdr-refusals.json), a posture-matrix golden and the SPA presentation module zdr-refusals.ts (wired into the Space composer through translateApiError) exist, but the catalogue, retention receipts, matrix test and SPA module are still untracked in git. Real remaining gaps: Session Core's own refusals are plain strings rather than typed codes, per-Space ZDR is explicitly 'not applied in v1' (matrix policy.space_zdr, honest-limits L14), sandbox-manager has no ZDR flag (covered only by execution-core's upstream refusal), the README-referenced scripts/tests/zdr-contract-sync.test.sh is missing, and no content-free telemetry label guard was found.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/auth.rs:262-285",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:1735-1775",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:4468-4516",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:4090-4160",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:5645-5670",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:6295-6315",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:6378-6395",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:105-122",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs:1-140",
+     "C:/dev/CoresSystem/apps/Model Plane/api/contracts/zdr-posture-matrix.json:1-12",
+     "C:/dev/CoresSystem/apps/Model Plane/api/contracts/zdr-posture-matrix.json:60-70",
+     "C:/dev/CoresSystem/apps/Model Plane/api/contracts/zdr-posture-matrix.json:196-206",
+     "C:/dev/CoresSystem/apps/Model Plane/api/contracts/README.md:1-40",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/tests/zdr_retention_matrix.rs:1-40",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs:655-675",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs:893-902",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs:1254-1262",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4558-4575",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc_auth.rs:320-345",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs:2025-2075",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/letta-bridge/internal/server/auth.go:20-60",
+     "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/delivery_worker.go:80-105",
+     "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/feed_projection.go:125-145",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:280-300",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:60-130",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts:1-60",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts:185-198",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:455-470",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.test.tsx:761-775",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/process_host.rs:417-431",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/process/store.go:255-290"
+    ],
+    "reuse": [
+     "mp-contracts zdr_refusal catalogue (codes, actions, feature vocabulary) and its golden zdr-refusals.json.",
+     "zdr-posture-matrix.json with the strict loader test zdr_retention_matrix.rs as the cross-plane conformance spine.",
+     "Session Core MemoryRetention (Durable, ZeroDataRetention, WaivedRun) and retention_receipt.rs as the single posture derivation.",
+     "model-gateway grpc_auth.rs, which already maps a ZDR identity to the typed durable-mutation refusal for gateway-side checks.",
+     "SPA zdr-refusals.ts plus translateApiError, which the Space composer already uses."
+    ],
+    "constraints": "ZDR must propagate and a missing claim must fail closed (already the case). Space-level ZDR needs a Control decision, not a UI flag: the posture matrix pins space_zdr as 'changes nothing' until a deliberate change. A Space is a durable shared transcript by design, so Session Core already refuses Space thread creation and appends for ZDR callers; the product decision is how that is worded, not whether to enforce it. Under ZDR, continuation descriptors for approvals are refused (agent.rs:4558-4575), so approvals cannot resume by design. Keep telemetry content-free (gateway metrics are Prometheus-only).",
+    "approachAdjustment": "Replace 'Session Core must act on the decision flag' with a small hardening list: (1) commit the untracked catalogue, retention receipt, matrix test and SPA module; (2) return the typed durable-mutation refusal from authorize_operation and memory_grpc preflight instead of plain strings; (3) cross-check the decision's zero_data_retention against caller.zdr() in the Space decision verifiers so a ZDR-flagged decision can never persist; (4) record the Space-ZDR product decision (L14) and add a sandbox-manager flag only if leases ever become reachable by ZDR callers; (5) restore or drop the README's zdr-contract-sync script and add a label allowlist check for Prometheus and error reports.",
+    "effortRevised": "S",
+    "effortNote": "M to S: the enforcement matrix, typed catalogue and cross-plane refusals are built; what is left is committing work in progress, typing two refusal sites, one cross-check and a product note. Applying per-Space ZDR would be a separate M or L item.",
+    "verdict": "demote",
+    "verdictReason": "Largely exists in the code, and the item's central premise (Session Core ignores ZDR and must be made to refuse durable thread, message and memory writes) misdescribes the state. Keep only the residual hardening above and move it out of the W1 priority slot.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-005",
+    "verdict": "partial",
+    "checked": [
+     "extract/grokbot/dist/electron-main/main-app.cjs at about offset 1868995 (class h7 extends ConnectError: 'sand box access is blocked by privacy mode', failureMetadata {kind:'no-storage'})",
+     "extract/grokbot/dist/node-agent-coordinator/main.cjs (outcome set includes no_storage, box_blocked, access_denied; maps no-storage failure to display info)",
+     "extract/grokbot/dist/electron-main/main-app.cjs at about offsets 1644167 and 1645291 (analytics: EMt=256 deferred buffer cap; analyticsOptedOut gives a disabled state; flush only with an access token)",
+     "extract/grokbot/dist/electron-main/main-app.cjs (team.privacy_mode.read permission, GetUserPrivacyModeRequest, getSandGhostModeHeaderFromPrivacyMode)",
+     "C:/dev/qm/docs/error-reporting.md:1-25 (opt-in by SENTRY_DSN; 'Events are sent unredacted'; traces 'sent without scrubbing')",
+     "C:/dev/qm/plugins/chassis/src/error-reporting.ts:11-55 (sdk.init with extraErrorDataIntegration depth 8, no beforeSend scrubber)",
+     "cluster C-t1-10-037 member records teams-product-surface-139 (REA locale: privacy_diagnostic_data_viewer) and buzz-architecture-077 (closed label sets), not re-opened in depth",
+     "REA analyze_javascript_application on extract/grokbot/dist/node-agent-coordinator (summary, partial)"
+    ],
+    "corrections": "GrokBot's ZDR block is confirmed for one feature: connecting to the persistent sandbox box ('sand box') under privacy mode raises a typed no-storage ConnectError that the UI maps to a block state. The mechanism's 'every persistent feature checks it at connect or write time' generalises from that single case. Say 'GrokBot blocks its persistent computer (sandbox) under privacy mode with a typed no-storage error'. Telemetry 'consent-gated or scrubbed: 4 of 5 (grokbot, qm, teams, buzz)' is wrong for qm. qm backend error reporting is operator opt-in (on only when a DSN is set), and its docs state events and traces are sent unredacted and unscrubbed. qm is a counter-example (record qm-architecture-139 says the same), not a reference. buzz's evidence is server-side operational metrics with closed label sets, not user consent. Correct to: consent-deferred client analytics 1 of 5 (grokbot, 256-event cap, disabled on opt-out); diagnostic data viewer 1 of 5 (teams, REA strings); closed-label operational metrics (buzz); qm opt-in but unredacted. Teams AI-interaction retention is DOC only.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "GrokBot privacy-mode block is observed for the sandbox/box connect path only (SRC from bundle)",
+     "GrokBot analytics 'consent' is opt-out/activation state plus token gating, not an explicit consent dialog that we saw",
+     "qm sends unredacted error context to Sentry when enabled; cite it as an anti-pattern",
+     "Teams retention controls for AI interactions are DOC (Purview), likely license/enterprise-gated",
+     "buzz telemetry evidence is operational/server metrics, not user-consent gating"
+    ],
+    "confidence": "high"
+   }
+  }
+ }
+]

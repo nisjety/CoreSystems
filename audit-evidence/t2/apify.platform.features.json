@@ -1,0 +1,1891 @@
+[
+ {
+  "id": "apify-platform-001",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Actor as unit of deployment",
+  "what": "An Actor is a serverless cloud program that takes structured JSON input, does a job (scrape/automate/process) and produces structured output; it can be run from Console, API, CLI, schedule, or by other Actors.",
+  "how": "Actor = Dockerfile + README.md + input/output schemas + default storages + metadata (name, description, author, version). Visibility private or public (Store). Runs manually, via REST, CLI, scheduler, or Actor-to-Actor calls.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry's 'platform half' needs an equivalent packaged-unit abstraction (code + schema + storages) if Verevon wants a catalogue of crawlers/agents.",
+  "notes": "Apify's core abstraction since ~2017; the most mature 'serverless scraper' packaging model among peers."
+ },
+ {
+  "id": "apify-platform-002",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "actor.json definition file",
+  "what": "A single .actor/actor.json links a local project to a platform Actor and declares all metadata and schemas.",
+  "how": "Fields: actorSpecification(=1), name, version (MAJOR.MINOR), buildTag (default latest), environmentVariables, dockerfile, readme, input (or inputSchema), storages {dataset,keyValueStore,datasets}, webServerSchema (OpenAPI 3), webServerMcpPath, usesStandbyMode, minMemoryMbytes, maxMemoryMbytes, changelog. name/version/buildTag/env only applied via CLI deploy.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/actor-definition/actor-json"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A declarative manifest (schemas + runtime hints + MCP path) is a good pattern for Quarry 'crawler packs' or integration-corev2 provider actions.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-003",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Input schema -> auto-generated UI + validation",
+  "what": "Declaring a JSON input schema makes Console render a form automatically and validates API/UI input; required to publish to Store.",
+  "how": "schemaVersion 1; types string/integer/number/boolean/array/object/resource; editors e.g. textfield, textarea, javascript, python, select, datepicker, fileupload, hidden, number, checkbox, json, requestListSources, pseudoUrls, globs, keyValue, stringList, schemaBased, proxy, resourcePicker. Keywords: default, prefill, example, pattern/min/max/minItems/uniqueItems/nullable, enum/enumTitles/enumSuggestedValues, dateType, isSecret, sectionCaption/groupCaption, unit, errorMessage, resourceType/resourcePermissions/mcpServers. Max 500 kB.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/actor-definition/input-schema",
+   "https://docs.apify.com/platform/actors/development/actor-definition/input-schema/specification/v1",
+   "https://docs.apify.com/platform/limits"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon could render Quarry job and integration-action parameter forms from the same schema the Model Plane uses for tool-calling; domain-specific editors (proxy, globs, requestListSources) are directly reusable ideas.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-004",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Secret input fields (isSecret)",
+  "what": "Input fields marked isSecret are encrypted end-to-end so only the running Actor can read them.",
+  "how": "Hybrid encryption: AES-256-GCM random key wrapped with a 2048-bit RSA key unique per (user, Actor) pair; stored in run KV store as ENCRYPTED_VALUE:...; decrypted by Actor.getInput() using APIFY_INPUT_SECRETS_PRIVATE_KEY_FILE/PASSPHRASE env vars inside the run. Supported for string/object/array (SDK JS 3.1+/3.4.2+, Python 2.7+).",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/actor-definition/input-schema/secret-input",
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Relevant for Verevon's credential vault / browser-login secrets: per-(user,tool) key pairs and in-container-only decryption is a sound pattern.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-005",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Output schema (where results live)",
+  "what": "An output schema declares named outputs as URL templates so Console (Output tab) and agents know where results are.",
+  "how": ".actor/output_schema.json: actorOutputSchemaVersion 1, title, properties{id:{title,description,template}}; template vars links.apiDefaultDatasetUrl, links.apiDefaultKeyValueStoreUrl, run.containerUrl, storages.datasets.<name>.apiUrl; GET Run returns 'output' with resolved URLs; empty properties shows Log tab instead.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/actor-definition/output-schema"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Quarry runs could publish a typed 'output map' that the Data Plane and Model Plane consume uniformly.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-006",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Dataset schema: fields + views",
+  "what": "Dataset schema both validates items (JSON Schema) and configures how Console displays them (views), and gives agents field metadata.",
+  "how": "storages.dataset: fields (JSON Schema w/ title/description/example/enum), views[] with transformation {fields, unwind, flatten, omit, limit, desc} and display {component: table, properties{label, format: text|number|date|link|boolean|image|array|object}}; first view default; multiple named datasets supported; views don't change exports.",
+  "evidence": [
+   "https://docs.apify.com/platform/storage/dataset-schema"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Field metadata for AI agents + view config is a good pattern for Quarry result sets surfaced in Verevon workspace tables.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-007",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Versions, builds and build numbers",
+  "what": "Each Actor can have multiple MAJOR.MINOR versions; each is built into a Docker image with an auto-incremented build number.",
+  "how": "Build number MAJOR.MINOR.BUILD (e.g. 1.2.345); build default 1800 s timeout / 4096 MB; build statuses READY->RUNNING->SUCCEEDED/FAILED/TIMED-OUT/ABORTED; untagged unused builds deleted after 90 days.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/builds-and-runs/builds",
+   "https://docs.apify.com/platform/actors/running/runs-and-builds",
+   "https://docs.apify.com/platform/limits"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Versioned immutable builds with tags are the right model for Quarry extractors and integration-corev2 provider actions.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-008",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Build tags (latest/beta) and pinning",
+  "what": "Users select builds by tag or exact number; tags move between builds via the Actor update API.",
+  "how": "Each tag maps to exactly one build; version's buildTag property auto-tags successful builds; pin exact numbers to avoid breaking changes.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/builds-and-runs/builds",
+   "https://docs.apify.com/platform/actors/running/runs-and-builds"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-009",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Build cache",
+  "what": "Builds reuse cached Docker layers by default; a clean build can be forced.",
+  "how": "API: useCache=0 forces clean build; Console: Source > Code > Build options > Clean build; cache is best-effort.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/builds-and-runs/builds"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-010",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Source types: Web IDE, Git, Zip, Gist",
+  "what": "Actor source can be edited in a browser IDE or pulled from Git (branch/subdir), a Zip URL or a GitHub Gist.",
+  "how": "Git URL with #branch or #branch:directory; private repos need deployment key (SSH URL); Zip auto-used by CLI when source > 3 MB; monorepo support via dockerContextDir + ACTOR_PATH_IN_DOCKER_CONTEXT build arg.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/deployment/source-types"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-011",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "GitHub integration / auto-build on push",
+  "what": "Linking a repo registers a push webhook so every push rebuilds the Actor; fallback build-webhook for GHE.",
+  "how": "Apify GitHub App or manual webhook to Build Actor API endpoint (/v2/actors/{id}/builds?version&tag); run-failed webhook can open GitHub issues via fine-grained PAT; Sep 3 2026 changelog: create GitHub/GitLab/Bitbucket repo from Console/CLI with pipeline preconfigured.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/github",
+   "https://docs.apify.com/platform/actors/development/deployment/continuous-integration",
+   "https://apify.com/change-log"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-012",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "CI with GitHub Actions (latest/beta branches)",
+  "what": "Official push-actor GitHub Action deploys on push; separate workflows tag beta builds from develop.",
+  "how": "apify/push-actor-action@v1 with APIFY_TOKEN; build-tag: beta; each Actor version bound to a branch; tests run before push gate deployment.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/deployment/continuous-integration"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-013",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Actor templates catalogue",
+  "what": "Dozens of starter templates per language (Python/JS/TS) covering crawlers, browsers, stealth, agents, MCP servers, standby APIs, test runners and CLI wrappers.",
+  "how": "manifest.json lists e.g. python-crawlee-beautifulsoup/parsel/playwright/playwright-camoufox, python-scrapy, python-selenium, python-standby, python-langgraph, python-crewai, python-llamaindex-agent, python-pydanticai, python-smolagents, python-browseruse, python-mcp-proxy, python-mcp-empty; js/ts-crawlee-cheerio/puppeteer/playwright/camoufox, js-cypress, ts-playwright-test-runner, js/ts-standby, js-langchain, js-langgraph-agent, ts-beeai-agent, ts-mastraai, ts-mcp-proxy/empty, cli-start, ts-start-bun. Jun 25 2026 changelog: guided creation flow recommends a template.",
+  "evidence": [
+   "https://raw.githubusercontent.com/apify/actor-templates/master/templates/manifest.json",
+   "https://apify.com/change-log"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Shows the breadth of 'things that can be an actor' (incl. browser-use agents and MCP proxies); Verevon's sandbox/agent plane could offer a similar preset library.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-014",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Actor tasks (saved configurations)",
+  "what": "A task is a saved, named input + run-options preset for one Actor, runnable from Console/API/schedule and shareable.",
+  "how": "Name 3-63 chars, title, description; input as JSON or form; Run options tab (timeout, memory); up to 5,000 tasks/user; tasks can be published to a public page (CLI task publish).",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/tasks",
+   "https://docs.apify.com/platform/limits",
+   "https://docs.apify.com/cli/docs/reference"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Equivalent to saved Quarry crawl presets per Space.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-015",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Apify Store marketplace (86,000+ Actors)",
+  "what": "A public marketplace where any user can publish Actors, free or paid; Store pages host README, input form, pricing, ratings, run stats.",
+  "how": "GET /v2/store public search API (keyword, category, limit, sortBy=popularity); 17 categories incl. AI, AGENTS, MCP_SERVERS, INTEGRATIONS; listing signals: users, star ratings, 30-day run stats, currentPricingInfo tiers, isWhiteListedForAgenticPayments; Top-100 by recency-weighted popularity; Oct 6 2026 changelog: use-case categories + filters (industry, output type, target site, actor type).",
+  "evidence": [
+   "https://apify.com/store",
+   "https://apify.com/change-log"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "The marketplace is Apify's moat; Verevon likely should not build one, but could consume it (via API/MCP) as a source of ready-made scrapers.",
+  "notes": "Actor count (86,000+) is a marketing figure from the Store page."
+ },
+ {
+  "id": "apify-platform-016",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Store pricing models: PPE, PPE+usage, pay-per-usage, (rental sunset)",
+  "what": "Paid Actors are billed per developer-defined events, optionally plus platform usage; rental (monthly fee) Actors are being retired.",
+  "how": "Pay-per-event: fixed price per event (result, start, upload...); 'pay per event + usage' adds compute; pay-per-usage: only platform CU/storage/proxy. Rental: no new rentals after 2026-04-01, remaining converted to pay-per-usage on 2026-10-01. Users set max charge per run and are never charged above it.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/actors-in-store",
+   "https://apify.com/pricing"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Per-event metering with user-set caps maps to Verevon's Model Plane cost tracking for browser/crawl jobs.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-017",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Pay-per-event charging SDK",
+  "what": "Actor code programmatically charges events; platform enforces the user's max-total-charge budget and aborts when reached.",
+  "how": "Actor.charge({eventName,count}) / Actor.pushData(data,eventName) return ChargeResult {eventChargeLimitReached, chargeableWithinLimit, chargedCount}; ChargingManager.getMaxTotalChargeUsd(), calculateMaxEventChargeCountWithinLimit(), getPricingInfo(); env ACTOR_MAX_TOTAL_CHARGE_USD; local test via ACTOR_TEST_PAY_PER_EVENT=true writing to charging-log dataset ($1 default per event).",
+  "evidence": [
+   "https://docs.apify.com/sdk/js/docs/guides/pay-per-event",
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Pattern for budget-aware browsing: the executor (Quarry) checks remaining budget before each billable step and shuts down gracefully.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-018",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Developer monetization analytics and payouts",
+  "what": "Developers see revenue/cost/profit, user growth, success rates and funnels; monthly payouts with KYC, thresholds and invoice approval.",
+  "how": "Insights > Analytics (export JSON). Payout cycle: invoices prepared days 1-10, issued day 11, approve/revise 11-14, paid 21-25; min $20 (PayPal/Wise) / $100 others; negative per-Actor profit floored at $0; user credit compensations may be deducted.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/publishing/monetize",
+   "https://docs.apify.com/platform/actors/publishing/monetize/monthly-payouts"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "none (unless Verevon runs a third-party marketplace)",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-019",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Store tier discounts (Bronze/Silver/Gold)",
+  "what": "Subscription tier unlocks lower prices on participating paid Actors.",
+  "how": "Tiers Bronze=Starter, Silver=Scale, Gold=Business; Actor owners opt in; Enterprise gets extra discounts.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/actors-in-store",
+   "https://apify.com/pricing"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-020",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Actor quality score (0-100)",
+  "what": "Every Store Actor gets a relative 0-100 score that drives Store and MCP search ranking.",
+  "how": "Eight factors: reliability (success rate, automated tests), popularity, feedback, ease of use, pricing transparency, trustworthiness (limited permissions), developer history, congruency of title/description/schemas/README; recalculated several times daily; visible in Console > Insights > Actor quality.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/publishing/quality-score",
+   "https://docs.apify.com/platform/actors/development/permissions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A quality/trust score for tools could feed the Model Plane's tool-selection ranking.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-021",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Publishing requirements & maintenance norms",
+  "what": "Publishing needs an input schema and README; docs set expectations for maintenance and breaking-change notice.",
+  "how": "Dedicated landing page per Actor; ~2 h/week maintenance guidance; contact community@apify.com before breaking changes; automated tests/monitoring recommended.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/publishing"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-022",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Pricing plans and compute units",
+  "what": "Four plans with prepaid monthly usage; compute billed per CU (1 GB-RAM-hour) at tiered rates.",
+  "how": "Free $0 ($5 usage), Starter $19, Scale $199, Business $999 (annual -10%); CU price $0.20/$0.20/$0.16/$0.13; max RAM 16/64/256/512 GB; concurrent runs 5 (pricing page) or 25 (limits page) / 32 / 128 / 256; overage billed up to user-set limit; unused credit expires; add-ons: concurrent run $5, RAM $1/GB.",
+  "evidence": [
+   "https://apify.com/pricing",
+   "https://docs.apify.com/platform/limits",
+   "https://docs.apify.com/platform/actors/running/usage-and-resources"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "Free-plan concurrent-run figure differs between pricing page (5) and limits page (25): DOC inconsistency."
+ },
+ {
+  "id": "apify-platform-023",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Memory->CPU->disk resource model",
+  "what": "Run memory selects CPU share and disk: 4096 MB = 1 core, disk = 2x memory; powers of two 128 MB-32 GB.",
+  "how": "CU = memory(MB) x hours with 1-second granularity; free CPU boost at startup; APIFY_DEDICATED_CPUS env var; per-user combined memory cap (16/64/256/512 GB).",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/usage-and-resources",
+   "https://docs.apify.com/platform/limits",
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Simple, explainable sizing knob worth copying for Verevon sandboxes/browser sessions.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-024",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Agentic payments (x402 / MPP / Skyfire)",
+  "what": "AI agents can pay for Actor runs without an Apify account using crypto or agent-payment protocols and a temporary spend-capped token.",
+  "how": "agi.apify.com issues temporary API token with fixed cap (x402, MPP); per-request pay via x402 PAYMENT-SIGNATURE or Skyfire skyfire-pay-id headers; eligible only PPE Actors without usage charges, limited permissions, no Standby; developer KYC required; Jun 26 2026 changelog: USDC on Base.",
+  "evidence": [
+   "https://apify.com/pricing",
+   "https://docs.apify.com/api/v2",
+   "https://docs.apify.com/platform/actors/publishing/monetize",
+   "https://apify.com/change-log"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Signal of where agent-to-tool commerce is heading; Verevon's Control Plane billing could expose metered agent access similarly.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-025",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Organization accounts and member permissions",
+  "what": "Teams get a shared org account with per-member permissions and centralized billing; up to 10 orgs per account.",
+  "how": "Settings > Organizations; one-way conversion of personal account (creates -owner login); org-level permissions: manage organization, manage access tokens, update email/profile, manage billing, view invoices/payouts/monetization; runs billed to the account they start from.",
+  "evidence": [
+   "https://docs.apify.com/platform/collaboration/organization-account",
+   "https://docs.apify.com/platform/collaboration/list-of-permissions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Control Plane already has orgs; Apify shows the minimum viable permission set for a scraping platform.",
+  "notes": "Role model is relatively thin (no named roles, no SSO documented on these pages)."
+ },
+ {
+  "id": "apify-platform-026",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Resource sharing: access rights, link sharing, pre-signed URLs",
+  "what": "Runs, builds and storages can be shared by access rights or link; storages also via time-limited pre-signed URLs; Actors/tasks only by explicit access.",
+  "how": "General resource access settings; pre-signed URLs for dataset items / KV records; Console 'share' actions.",
+  "evidence": [
+   "https://docs.apify.com/platform/collaboration",
+   "https://docs.apify.com/platform/storage/dataset",
+   "https://docs.apify.com/platform/storage/key-value-store"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Caution: Verevon rule says Space access never widens owner-plane ACL; Apify's link-sharing is the opposite default for storages.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-027",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Apify AI (beta) natural-language actor runner",
+  "what": "In Console, users describe a goal; Apify AI finds an Actor, fills inputs, asks confirmation, runs it and returns/summarizes the dataset.",
+  "how": "Entry points: Store search bar (long intent queries auto-routed) and dashboard chat widget; excludes full-permission and rental Actors; no memory/chat history; daily token allowance by plan; tasks/schedules/integrations out of scope (Jul 21 2026 changelog).",
+  "evidence": [
+   "https://docs.apify.com/platform/account/apify-ai",
+   "https://blog.apify.com/introducing-apify-ai/",
+   "https://apify.com/change-log"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Directly analogous to Verevon's 'AI proposes, Quarry executes' flow, including explicit confirmation before paid runs.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-028",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Three storage primitives per run",
+  "what": "Every run automatically gets a default key-value store (input), dataset (results) and request queue (URLs).",
+  "how": "IDs exposed via ACTOR_DEFAULT_DATASET_ID / _KEY_VALUE_STORE_ID / _REQUEST_QUEUE_ID and ACTOR_STORAGES_JSON; addressable by id, ~name or username~name; named storages kept indefinitely, unnamed expire (7 days default; free plan: last 10 runs 4 months).",
+  "evidence": [
+   "https://docs.apify.com/platform/storage",
+   "https://docs.apify.com/platform/actors/running/runs-and-builds",
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A clean trio (results / blobs+state / frontier) is a good data model for Quarry jobs; retention-by-name is a neat retention lever.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-029",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Dataset (append-only result table)",
+  "what": "Datasets store result items append-only and export to many formats with field selection.",
+  "how": "Formats JSON (default), JSONL, CSV, HTML table, XLSX, XML, RSS; params format, fields, omit (nested paths), clean/skipHidden (fields starting with #), xmlRoot/xmlRow; item <= 9 MB; tabular exports <= 2,000 columns; push 400 rps, other 60 rps; concurrent reads/writes; strong consistency (S3).",
+  "evidence": [
+   "https://docs.apify.com/platform/storage/dataset",
+   "https://docs.apify.com/platform/storage",
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Hidden '#'-prefixed debug fields and server-side export projections are practical ideas for Quarry result sets.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-030",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Key-value store (blob/state store)",
+  "what": "Mutable record store for any MIME type (JSON, HTML, images, zips) used for input, output, screenshots and state.",
+  "how": "Keys <= 256 chars [a-zA-Z0-9!-_.'()]; records stored with content type; optional Content-Encoding compression; list keys with exclusiveStartKey pagination; 200 rps CRUD, 100 rps zip download; INPUT and INPUT-METAMORPH-N conventions; Actor.useState() persists state here.",
+  "evidence": [
+   "https://docs.apify.com/platform/storage/key-value-store",
+   "https://docs.apify.com/platform/actors/development/builds-and-runs/state-persistence",
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-031",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Key-value store collections schema",
+  "what": "KV store schema defines named collections so the Output tab can link to e.g. all screenshots or render an HTML report in an iframe.",
+  "how": "key_value_store.json collections; output templates like {{links.apiDefaultKeyValueStoreUrl}}/keys?collection=screenshots; single record (e.g. /records/report.html) can render inline in Output tab.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/actor-definition/output-schema"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-032",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Request queue (persistent URL frontier)",
+  "what": "A persistent, deduplicated queue of requests supporting BFS/DFS order, forefront insertion, batch ops and reuse across runs for incremental crawling.",
+  "how": "Request {id, uniqueKey, url, method, payload, headers, userData, retryCount}; uniqueKey dedup; forefront:true; batchAddRequests/batchDeleteRequests; reclaimRequest; named queues persist indefinitely, unnamed 7 days; rate limits 350 rps CRUD/lock, 35 rps batch+listAndLockHead.",
+  "evidence": [
+   "https://docs.apify.com/platform/storage/request-queue",
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry's URL frontier should expose the same primitives (uniqueKey, forefront, batch add, reclaim) as an Ingestion-plane service.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-033",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Request locking for multiple consumers",
+  "what": "Several runs/clients can consume one queue safely via leases on head requests.",
+  "how": "listAndLockHead(lockSecs) returns requests with lockExpiresAt/lockByClient; prolongRequestLock / deleteRequestLock; locks scoped to clientKey (1-32 chars) or run; hadMultipleClients flag; expired locks make requests available again.",
+  "evidence": [
+   "https://docs.apify.com/platform/storage/request-queue"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Enables distributed Quarry workers sharing one frontier.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-034",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Storage sharing across runs and users",
+  "what": "Any run can read/write storages from previous runs or passed in by input; storages shareable by access rights, link or pre-signed URL.",
+  "how": "resourcePicker input + resourcePermissions grants a limited-permission Actor scoped READ/WRITE on chosen storages; 'use storage from another run' guide.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/permissions",
+   "https://docs.apify.com/platform/storage"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-035",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Storage REST addressing & rate limits",
+  "what": "Storages addressed by id, ~name or username~name; per-object rate limits with 429 rate-limit-exceeded.",
+  "how": "Default 60 rps per storage object; GET on unnamed storages needs only the id (accessible by id unless restricted).",
+  "evidence": [
+   "https://docs.apify.com/platform/storage",
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "Link-by-id access is convenient but security-wise permissive."
+ },
+ {
+  "id": "apify-platform-036",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "REST API v2 with OpenAPI spec",
+  "what": "Full REST API covering Actors, builds, runs, storages, webhooks, schedules, Store, users, logs; OpenAPI YAML/JSON published under Apache 2.0.",
+  "how": "Bearer token (or ?token=); data-wrapped responses; errors {error:{type,message}}; pagination limit/offset/desc (+exclusiveStartKey for KV keys); global 250,000 req/min, per-resource 60 rps (400 rps for run start/pushItems); /v2/actors (legacy /v2/acts).",
+  "evidence": [
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Quarry's external API should publish an OpenAPI spec and consistent envelope/pagination like this.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-037",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Run start, poll, and run-sync endpoints",
+  "what": "Start a run asynchronously and poll, or use run-sync endpoints that wait up to 300 s and return dataset items directly.",
+  "how": "POST /v2/actors/{id}/runs; GET run; run-sync and run-sync-get-dataset-items variants; 'last run' and 'default storage' shortcut endpoints.",
+  "evidence": [
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Sync-with-timeout plus async fallback is the ergonomic default Quarry should expose to the Model Plane.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-038",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Run options: build, timeout, memory, max charge, restart-on-error",
+  "what": "Callers override build tag/number, timeout, memory, max total charge, and whether to auto-restart on error per run.",
+  "how": "Env: ACTOR_BUILD_TAGS, ACTOR_TIMEOUT_AT, ACTOR_MEMORY_MBYTES, ACTOR_MAX_TOTAL_CHARGE_USD, ACTOR_RESTART_ON_ERROR; schedules/tasks store same options.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables",
+   "https://docs.apify.com/platform/schedules",
+   "https://docs.apify.com/platform/actors/running/tasks"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-039",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Official API clients (Node, Python) + experimental others",
+  "what": "Typed clients mirror endpoints and handle retries/backoff automatically.",
+  "how": "apify-client on npm/PyPI (stable); Java, Rust, .NET, PHP, Go experimental; exponential backoff on 429.",
+  "evidence": [
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-040",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Apify CLI",
+  "what": "Full-featured CLI for local dev, deploy, and platform ops, including in-Actor runtime commands and MCP client install.",
+  "how": "apify create/init/run/push/pull/call/validate-schema; actors ls|search|info|start|build; builds/runs ls|info|log|wait|abort|resurrect; datasets/kvs CRUD; task run|publish; secrets; apify api (raw authenticated call); apify mcp install <client>; apify actor get-input|push-data|set-value|charge|get-public-url (runtime); help --skill prints agent guidance.",
+  "evidence": [
+   "https://docs.apify.com/cli/docs/reference"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "CLI 'help --skill' that emits agent-readable guidance is a small but clever idea for Verevon tooling.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-041",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Apify SDK (JS/Python) runtime interface",
+  "what": "Actor runtime SDK provides input, storage, proxy, events, state, charging, metamorph and call helpers.",
+  "how": "Actor.getInput(), pushData(), setValue/getValue, useState(), createProxyConfiguration(), charge(), metamorph(), reboot(), on('migrating'|'aborting'|'cpuInfo'|'persistState'); events over ACTOR_EVENTS_WEBSOCKET_URL.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/programming-interface/system-events",
+   "https://docs.apify.com/platform/actors/development/builds-and-runs/state-persistence",
+   "https://docs.apify.com/platform/actors/development/programming-interface/metamorph",
+   "https://docs.apify.com/sdk/js/docs/guides/pay-per-event"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-042",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Actor Standby (always-on HTTP API mode)",
+  "what": "An Actor can run as a persistent HTTP service with a stable URL; the platform autoscales runs by request load and bills them like runs.",
+  "how": "usesStandbyMode; platform proxies any HTTP method to ACTOR_WEB_SERVER_PORT; readiness probe header x-apify-container-server-readiness-probe; ACTOR_STANDBY_URL stable; idle timeout stops runs, 'desired/max requests per run' trigger new runs; first response <= 5 min; run selection <= 2 min else 429; per-user rate limit in X-RateLimit-Limit; settings lockable by developer; scoped-token restriction not supported.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/programming-interface/standby",
+   "https://docs.apify.com/platform/actors/running/standby"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Model for turning Quarry extractors into low-latency synchronous tools (e.g. 'fetch page as markdown') without cold starts.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-043",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Web server schema (OpenAPI) -> Endpoints tab",
+  "what": "Standby Actors publish an OpenAPI 3 spec rendered as a Swagger UI 'Endpoints' tab with auth handled automatically.",
+  "how": "webServerSchema in actor.json (inline or file); validated at build; not enforced at runtime; servers[] replaced with standby URL.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/actor-definition/web-server-schema"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-044",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Actors as MCP servers",
+  "what": "Any Actor can expose an MCP endpoint reachable at its Standby URL + path.",
+  "how": "webServerMcpPath (e.g. /mcp) marks Actor as MCP server; templates ts/python-mcp-empty and mcp-proxy (wrap stdio/HTTP/SSE servers as monetized Actors); example web-fetch exposes /mcp 'fetch' tool.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/actor-definition/actor-json",
+   "https://raw.githubusercontent.com/apify/actor-templates/master/templates/manifest.json",
+   "https://apify.com/apify/web-fetch"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry and integration-corev2 could expose per-capability MCP endpoints the same way for external agents.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-045",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Hosted Apify MCP server (mcp.apify.com)",
+  "what": "A hosted Streamable-HTTP MCP server exposes Store search, Actor execution, storage, runs, tasks, schedules and docs as tools with dynamic tool discovery.",
+  "how": "Tools: search-actors, fetch-actor-details, call-actor (returns run+storage ids; use get-dataset-items), get run/list/log/abort, dataset/KV tools incl. schema generation, tasks & schedules CRUD, search/fetch-apify-docs, report-problem; default tools incl. apify/rag-web-browser and apify/web-fetch; ?tools= selector by category or actor name; OAuth or Bearer; 30 rps; hosted server infers output schema; excludes full-permission and rental Actors; local npx @apify/actors-mcp-server (stdio); telemetry on by default.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/mcp"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Reference design for Verevon's own MCP exposure of Quarry + integrations: category-based tool loading, dynamic discovery, schema inference before call.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-046",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Agent Skills + coding-agent plugin",
+  "what": "Installable skill packs teach coding agents validated Apify workflows; a plugin bundles skills + MCP server + routing agent.",
+  "how": "Skills: apify-ultimate-scraper, apify-actor-development, apify-actorization, apify-generate-output-schema, apify-sdk-integration, apify-integration-development; install via plugin or npx skills add apify/agent-skills; supported: Claude Code, Codex, Cursor, Copilot, VS Code, OpenCode, Windsurf, Gemini CLI, etc.",
+  "evidence": [
+   "https://docs.apify.com/platform/agents/skills",
+   "https://docs.apify.com/platform/integrations"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon could ship Quarry/agent skills so external coding agents drive it correctly.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-047",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "RAG Web Browser (search -> scrape to Markdown)",
+  "what": "An official Actor that Googles a query, scrapes top results and returns clean Markdown/text/HTML; also fetches a single URL; runs in Standby for low latency.",
+  "how": "Inputs query, maxResults, outputFormats, scrapingTool (browser-playwright | raw-http ~2x faster), requestTimeoutSecs budget, removeElementsCssSelector, htmlTransformer (readable text), proxyConfiguration, dynamicContentWaitSecs, removeCookieWarnings; output item {crawl, searchResult, metadata, markdown}; GET /search?query= in Standby; PPE from $1.33/1k pages; default tool in Apify MCP.",
+  "evidence": [
+   "https://apify.com/apify/rag-web-browser"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Closest Apify analogue to Firecrawl /search + /scrape; a reasonable baseline for Quarry's 'web search for RAG' endpoint.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-048",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Web Fetch Actor (single-URL to markdown/text/html/links/raw)",
+  "what": "A low-latency fetch endpoint with JS rendering on demand and bot-block handling; JSON or unwrapped raw body.",
+  "how": "Inputs url, formats[markdown,html,text,links,raw], headers, wait (1-60000 ms -> browser), unwrap; output {fetch{finalUrl,status,contentType,size}, metadata{title,description,language,OG,JSON-LD,headers}, <format>...}; 10 MB cap, 2 min timeout; errors UPSTREAM_FETCH_ERROR/FETCH_TIMEOUT/RESPONSE_TOO_LARGE/UNSUPPORTED_CONTENT_TYPE; PPE from $1.00/1k; Standby at web-fetch.apify.actor; MCP at /mcp.",
+  "evidence": [
+   "https://apify.com/apify/web-fetch"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Quarry's single-page fetch tool spec could mirror this format list and error taxonomy.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-049",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Website Content Crawler (site -> LLM-ready docs)",
+  "what": "Official crawler producing text/Markdown/HTML plus files for RAG, with adaptive rendering and multiple content extractors.",
+  "how": "Crawler types adaptive (default), Playwright Firefox, Cheerio; HTML transformers Readability (default), Readability+fallback, Extractus, Defuddle (keeps math/footnotes/code), none; remove/keep selectors, cookie-banner extension, wait/scroll/click-expanders; saves PDF/DOC/DOCX/XLS/XLSX/CSV; optional per-page AI summary (OpenRouter); LangChain/LlamaIndex loaders; Pinecone/Qdrant incremental update Actors; pay-per-usage ~$0.2-5 per 1k pages.",
+  "evidence": [
+   "https://apify.com/apify/website-content-crawler"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Benchmark for Quarry's crawl -> markdown pipeline and vector-store sync; Defuddle/Readability choice is directly reusable.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-050",
+  "category": "Output formats & content processing — markdown/html/json/screenshot/pdf/links/images, main-content extraction, PDF/doc/office parsing, structured LLM extraction (schema/prompt), change tracking/diffing, branding/metadata",
+  "name": "Multiple main-content extractors (Readability/Extractus/Defuddle)",
+  "what": "Users pick among extraction algorithms per crawl, with a 'fallback to original HTML' mode for non-article pages.",
+  "how": "htmlTransformer option in Website Content Crawler and RAG Web Browser; default remove-selector list strips nav/header/footer/modals/scripts.",
+  "evidence": [
+   "https://apify.com/apify/website-content-crawler",
+   "https://apify.com/apify/rag-web-browser"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Quarry should offer selectable extractors rather than one hard-coded readability pass.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-051",
+  "category": "Output formats & content processing — markdown/html/json/screenshot/pdf/links/images, main-content extraction, PDF/doc/office parsing, structured LLM extraction (schema/prompt), change tracking/diffing, branding/metadata",
+  "name": "Office/PDF file capture during crawl",
+  "what": "Crawler downloads linked PDF/DOC/DOCX/XLS/XLSX/CSV into storage and allows custom content types.",
+  "how": "saveFiles + saveContentTypes in Website Content Crawler; files land in KV store.",
+  "evidence": [
+   "https://apify.com/apify/website-content-crawler"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "Download/storage confirmed on the page read; text extraction of office files not confirmed."
+ },
+ {
+  "id": "apify-platform-052",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Web Scraper (user pageFunction in browser)",
+  "what": "Generic browser scraper where users write a JavaScript pageFunction executed in every page, with link following rules and hooks.",
+  "how": "context {enqueueRequest, getValue/setValue, log, request, waitFor, jQuery, customData, skipLinks}; linkSelector, globs, pseudoUrls, excludes; pre/postNavigationHooks; headless Chromium (useChrome option); maxPagesPerCrawl/maxResultsPerCrawl/maxCrawlingDepth/maxConcurrency; DEVELOPMENT run mode with DevTools Live View vs PRODUCTION.",
+  "evidence": [
+   "https://apify.com/apify/web-scraper"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "User-authored page functions are a power-user feature; for Verevon the AI could author them, but sandboxing (Model proposes / Quarry executes) must be preserved.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-053",
+  "category": "Acquisition API surface — scrape/crawl/map/search/extract/batch/interact/agent endpoints, async jobs, webhooks, streaming, pagination, SDKs/CLI/MCP/skills",
+  "name": "Store API (public actor search)",
+  "what": "Programmatic search of the marketplace without auth.",
+  "how": "GET https://api.apify.com/v2/store with search, category, limit, sortBy; returns pricing info and stats.",
+  "evidence": [
+   "https://apify.com/store",
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-054",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "Crawlee unified HTTP + browser crawlers",
+  "what": "One crawler interface spans HTTP (Cheerio/JSDOM/JSON APIs with HTTP/2, browser-like headers and TLS) and headless browsers (Playwright/Puppeteer; Chrome, Firefox, WebKit; headless/headful; screenshots).",
+  "how": "Classes BasicCrawler, HttpCrawler, CheerioCrawler, JSDOMCrawler, PlaywrightCrawler, PuppeteerCrawler, AdaptivePlaywrightCrawler; got-scraping default HTTP client; routing by label; lifecycle hooks; TypeScript generics; Dockerfiles; CLI.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/introduction"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Crawlee (Apache-2.0) is a credible foundation or reference for Quarry's crawler core.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-055",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "AdaptivePlaywrightCrawler (HTTP-first with learned browser fallback)",
+  "what": "Starts every request over plain HTTP and falls back to a browser on failure or on a sampled rendering-type detection, learning per-site which mode is needed.",
+  "how": "renderingTypeDetectionRatio (default 0.1) samples requests run in both modes; resultComparator returns equal/different/inconclusive; resultChecker rejects HTTP results -> browser retry; renderingTypePredictor {predict, storeResult}; handler errors fall back to browser unless shouldPropagateError; accessing page in HTTP mode throws -> browser retry.",
+  "evidence": [
+   "https://crawlee.dev/js/api/playwright-crawler/interface/AdaptivePlaywrightCrawlerOptions",
+   "https://apify.com/apify/website-content-crawler"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Best-in-class idea for Quarry cost control: HTTP-by-default with per-domain learned escalation instead of a fixed engine order.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-056",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "Browser fingerprint generation (fingerprint-suite)",
+  "what": "Browser crawlers inject realistic, consistent fingerprints by default, constrained by browser/OS/device/locale.",
+  "how": "browserPoolOptions.useFingerprints (default true), fingerprintOptions.fingerprintGeneratorOptions {browsers, minVersion, devices, operatingSystems, locales}; fingerprints tied to proxy URL by default.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/guides/avoid-blocking",
+   "https://crawlee.dev/js/api/browser-pool"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-057",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "Camoufox stealth Firefox + Cloudflare helper",
+  "what": "Templates and docs support Camoufox, a stealth Firefox build, with a handleCloudflareChallenge helper.",
+  "how": "python/js/ts-crawlee-playwright-camoufox templates; disable default fingerprinting when using Camoufox.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/guides/avoid-blocking",
+   "https://raw.githubusercontent.com/apify/actor-templates/master/templates/manifest.json"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry could offer a stealth-browser engine tier like this.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-058",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "BrowserPool lifecycle management",
+  "what": "Pool launches/retires/kills browsers, limits pages per browser, isolates contexts and offers ordered hooks.",
+  "how": "PlaywrightPlugin/PuppeteerPlugin; maxOpenPagesPerBrowser; retireBrowserAfterPageCount; useIncognitoPages (per-page context); hooks preLaunch/postLaunch/prePageCreate/postPageCreate/prePageClose/postPageClose; retired browsers drain then killed after timeout.",
+  "evidence": [
+   "https://crawlee.dev/js/api/browser-pool"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Hook ordering and graceful retirement are useful patterns for Verevon's browser-session manager.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-059",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "Session + cookie persistence per proxy IP",
+  "what": "Sessions bind cookies and custom state to a proxy IP so logins and anti-bot state persist across requests.",
+  "how": "persistCookiesPerSession (default true); session.getCookieString/setCookiesFromResponse; proxyConfiguration.newUrl(session.id) pins IP; Apify Proxy session- param: datacenter 26 h, residential ~30 min, SERP none.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/guides/session-management",
+   "https://docs.apify.com/platform/proxy/usage"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-060",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "Page actions in official Actors (wait/scroll/click/expand)",
+  "what": "Crawling Actors expose declarative dynamic-content handling: wait seconds/selector, scroll, click collapsed elements, remove cookie banners.",
+  "how": "Website Content Crawler: wait for selector, scroll, click [aria-expanded=false], cookie-warning browser extension; RAG Web Browser dynamicContentWaitSecs, removeCookieWarnings.",
+  "evidence": [
+   "https://apify.com/apify/website-content-crawler",
+   "https://apify.com/apify/rag-web-browser"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "Declarative, not a general action DSL like Firecrawl 'actions'."
+ },
+ {
+  "id": "apify-platform-061",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "Live view / container URL for debugging",
+  "what": "Each run gets a unique public URL to an optional in-container web server; Web Scraper's DEVELOPMENT mode exposes Chrome DevTools through it.",
+  "how": "ACTOR_WEB_SERVER_URL (e.g. xxx.runs.apify.net), ACTOR_WEB_SERVER_PORT (4321), containerUrl in Run object.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/programming-interface/container-web-server",
+   "https://apify.com/apify/web-scraper"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A per-session debug URL (DevTools/screencast) would fit Verevon's AI-browser transparency goals.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-062",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "got-scraping browser-mimicking HTTP client",
+  "what": "HTTP crawling uses generated browser-consistent headers and a sessionToken to keep fingerprints stable per session; proxyUrl support.",
+  "how": "useHeaderGenerator (default true), headerGeneratorOptions {devices, locales, operatingSystems, browsers}; sessionToken object key; BasicCrawler sendRequest(). Academy also lists curl-impersonate via node-libcurl and Playwright.request as alternatives.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/guides/got-scraping",
+   "https://docs.apify.com/academy/anti-scraping",
+   "https://crawlee.dev/js/docs/introduction"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "TLS/HTTP2 fingerprint claim comes from the Crawlee intro ('browser TLS fingerprints'), not the got-scraping page."
+ },
+ {
+  "id": "apify-platform-063",
+  "category": "Rendering & browser engines — HTTP vs headless fallback, Playwright/Chromium/CDP, stealth, fingerprinting, page actions (click/scroll/type/wait), sessions/profiles/cookies, auth/login handling, geolocation/locale",
+  "name": "Crawlee for Python",
+  "what": "Python port with asyncio, Playwright, BeautifulSoup/Parsel parsers, autoscaling, persistent queue, proxy/session rotation and retries.",
+  "how": "Type-hinted; compared against Scrapy; default 'human-like' config.",
+  "evidence": [
+   "https://crawlee.dev/python/docs/introduction"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "Feature parity vs JS not stated on page; adaptive crawler availability in Python unverified."
+ },
+ {
+  "id": "apify-platform-064",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "Apify Proxy: datacenter / residential / Google SERP / Unblocker groups",
+  "what": "A single proxy endpoint with username-encoded routing across IP pools, geo targeting and sticky sessions.",
+  "how": "http://<user>:<pwd>@proxy.apify.com:8000 (external, paid) or APIFY_PROXY_HOSTNAME/PORT/PASSWORD inside runs; username params groups-X,session-Y,country-XX (US states country-US_CA for residential); least-used IP selection; error codes 590-599; status page proxy.apify.com; built on proxy-chain.",
+  "evidence": [
+   "https://docs.apify.com/platform/proxy",
+   "https://docs.apify.com/platform/proxy/usage"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry needs a proxy abstraction with the same knobs (pool, geo, session) regardless of vendor.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-065",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "Unblocker proxy (smart anti-bot routing)",
+  "what": "A proxy group that routes through anti-bot/anti-captcha bypass automatically, billed per 1k requests.",
+  "how": "groups-UNBLOCKER; $1.50/1k (Free/Starter), $1.25 (Scale), $1.00 (Business).",
+  "evidence": [
+   "https://docs.apify.com/platform/proxy",
+   "https://apify.com/pricing"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "Little technical detail published; mechanism opaque."
+ },
+ {
+  "id": "apify-platform-066",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "Google SERP proxy",
+  "what": "Proxy group returning Google search results with country/language localization, priced per 1k.",
+  "how": "groups-GOOGLE_SERP; no sessions; $2.50 -> $1.70 per 1k by plan.",
+  "evidence": [
+   "https://docs.apify.com/platform/proxy",
+   "https://apify.com/pricing"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-067",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "Proxy pricing tiers",
+  "what": "Residential per GB, datacenter IPs included per plan then per IP, SERP/Unblocker per 1k.",
+  "how": "Residential $8/$8/$7.5/$7 per GB; datacenter 5/30/200/500 IPs included then $1/$0.8/$0.6 per IP; free-plan proxies platform-only.",
+  "evidence": [
+   "https://apify.com/pricing"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-068",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "SessionPool with error scoring and retirement",
+  "what": "Rotates sessions/IPs, scores failures, retires blocked sessions and spreads load randomly across good ones.",
+  "how": "sessionPoolOptions.maxPoolSize; markGood/markBad/retire; retireOnBlockedStatusCodes; session rotations excluded from maxRequestRetries; persisted across migrations (SDK).",
+  "evidence": [
+   "https://crawlee.dev/js/docs/guides/session-management",
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Copy: per-session health scores drive proxy/browser-profile rotation in Quarry.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-069",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "retryOnBlocked (Cloudflare / Google rate-limit detection)",
+  "what": "Crawler detects known bot-protection pages and retries with a fresh session automatically.",
+  "how": "BasicCrawlerOptions.retryOnBlocked supports Cloudflare Bot Management and Google Search rate limiting.",
+  "evidence": [
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-070",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "Retries, error handlers and request reclaim",
+  "what": "Per-request retry with hooks before each retry and after final failure; failed queue items reclaimed for later attempts.",
+  "how": "maxRequestRetries (default 3), errorHandler (pre-retry, may mutate request), failedRequestHandler, requestHandlerTimeoutSecs (60), reclaimRequest.",
+  "evidence": [
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions",
+   "https://docs.apify.com/platform/storage/request-queue"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-071",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "robots.txt compliance option",
+  "what": "Crawler can fetch each domain's robots.txt and skip disallowed URLs including those from enqueueLinks.",
+  "how": "respectRobotsTxtFile: true | {userAgent}; RobotsTxtFile helper also discovers sitemaps.",
+  "evidence": [
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions",
+   "https://crawlee.dev/js/api/utils/class/Sitemap"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Quarry's compliance policy should be an opt-in/opt-out flag at the same layer.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-072",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "Politeness: max requests per minute",
+  "what": "Throughput cap checked every second to avoid bursts.",
+  "how": "maxRequestsPerMinute (alias maxTasksPerMinute), default Infinity.",
+  "evidence": [
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions",
+   "https://crawlee.dev/js/docs/guides/scaling-crawlers"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-073",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "Anti-scraping academy (detection taxonomy)",
+  "what": "Public curriculum describing detection signals (IP, headers/TLS, fingerprints, URL patterns, intervals, honeypots, CAPTCHAs) and mitigations.",
+  "how": "Recommends Firefox under Playwright, residential proxies, puppeteer-extra stealth, curl-impersonate; frames workflow greylist -> challenge -> allow/deny.",
+  "evidence": [
+   "https://docs.apify.com/academy/anti-scraping"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Useful checklist for Quarry's stealth tiers and for explaining blocks to users.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-074",
+  "category": "Anti-bot, proxies & reliability — proxy pools/rotation/residential, CAPTCHA, rate limits/politeness, robots.txt/compliance, retries/backoff, blocklists, caching, freshness",
+  "name": "Proxy status/IP-rotation self-check endpoints",
+  "what": "Users verify proxy routing and rotation via dedicated endpoints and whitelist static egress IPs.",
+  "how": "proxy.apify.com status, api.apify.com/v2/browser-info/, APIFY_PROXY_STATUS_URL?format=json; webhook & proxy egress IPs 18.208.102.16, 35.171.134.41.",
+  "evidence": [
+   "https://docs.apify.com/platform/proxy/usage",
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables",
+   "https://docs.apify.com/platform/integrations/webhooks/actions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-075",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "AutoscaledPool (resource-aware concurrency)",
+  "what": "Concurrency scales automatically between min and max based on system load, with step ratios and intervals.",
+  "how": "minConcurrency/maxConcurrency (default 1 -> 200), desiredConcurrency, desiredConcurrencyRatio 0.95, scaleUp/DownStepRatio 0.05, autoscaleIntervalSecs 10, maybeRunIntervalSecs 0.5; cpuInfo isCpuOverloaded event ~1 s from platform.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/guides/scaling-crawlers",
+   "https://docs.apify.com/platform/actors/development/programming-interface/system-events"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry workers should autoscale per container on CPU/memory/event-loop signals rather than fixed concurrency.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-076",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "enqueueLinks with strategies and patterns",
+  "what": "Link discovery with same-hostname default, same-domain or all strategies, glob/regex/pseudoUrl filters, selector override and per-request transforms.",
+  "how": "strategy, globs/regexps/pseudoUrls, selector (default a[href]), transformRequestFunction (skip or mutate userData/uniqueKey), maxRequestsPerCrawl and maxCrawlDepth on crawler.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/introduction/adding-urls",
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-077",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Sitemap and robots.txt discovery",
+  "what": "Load sitemaps (incl. index files and gzip) and robots-listed sitemaps to seed crawls.",
+  "how": "Sitemap.load(urls, proxyUrl), fromXmlString, tryCommonNames (/sitemap.xml,/sitemap.txt); RobotsTxtFile for sitemap refs.",
+  "evidence": [
+   "https://crawlee.dev/js/api/utils/class/Sitemap"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-078",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Crawl budgets and depth limits",
+  "what": "Caps on pages, results, depth and per-minute rate; max-charge cap aborts billable runs.",
+  "how": "maxRequestsPerCrawl, maxCrawlDepth, maxRequestsPerMinute (Crawlee); maxPagesPerCrawl/maxResultsPerCrawl/maxCrawlingDepth (Web Scraper); ACTOR_MAX_TOTAL_CHARGE_USD.",
+  "evidence": [
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions",
+   "https://apify.com/apify/web-scraper",
+   "https://docs.apify.com/sdk/js/docs/guides/pay-per-event"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-079",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "RequestList for huge static URL sets",
+  "what": "Immutable in-memory list for millions of known URLs, persisted to KV; combinable with queue.",
+  "how": "RequestList sources + state saved under list name; addRequests() now preferred for most cases.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/guides/request-storage"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-080",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Schedules (cron with timezone/DST)",
+  "what": "Cron-driven scheduling of up to 10 Actors + 10 tasks per schedule with input overrides and failure emails.",
+  "how": "6-field cron (optional seconds), @hourly...@yearly, min 10 s gap, ~1 s accuracy, timezone-aware; per-schedule build/timeout/memory/input; 100 schedules/user; API POST with actions[]; schedules run with unscoped token.",
+  "evidence": [
+   "https://docs.apify.com/platform/schedules",
+   "https://docs.apify.com/platform/limits",
+   "https://docs.apify.com/platform/integrations/api"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's scheduled crawls/monitors need the same: timezone-aware cron, input override, failure notification.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-081",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Keep-alive crawler (long-running consumer)",
+  "what": "Crawler stays alive when the queue empties, waiting for new requests until stopped.",
+  "how": "keepAlive option; crawler.stop()/teardown().",
+  "evidence": [
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-082",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Run lifecycle, abort, graceful abort, resurrect",
+  "what": "Runs move READY -> RUNNING -> (TIMING-OUT|ABORTING) -> SUCCEEDED/FAILED/TIMED-OUT/ABORTED; graceful abort gives 30 s; finished runs can resume with same storages and changed memory/timeout/build.",
+  "how": "aborting event; resurrection restarts timeout; origin recorded in meta.origin (DEVELOPMENT, WEB, API, CLI, SCHEDULER, TEST, WEBHOOK, ACTOR, STANDBY, CI, MCP).",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/runs-and-builds",
+   "https://docs.apify.com/platform/actors/development/programming-interface/system-events"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Resurrect-with-same-storage and recorded run origin (incl. MCP) are worth copying for Quarry run records and audit.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-083",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Server migration + state persistence",
+  "what": "Platform may migrate a run to another worker at any time; SDK events let Actors persist and resume.",
+  "how": "migrating {timeRemainingSecs} event, persistState every 60 s (virtual), Actor.useState() to KV, Actor.reboot() to hasten restart; default storages preserved.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/builds-and-runs/state-persistence",
+   "https://docs.apify.com/platform/actors/development/programming-interface/system-events"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry long crawls should checkpoint on a persistState-like tick to survive worker churn.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-084",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Metamorph (run morphs into another Actor)",
+  "what": "A run can hand off to a different Actor image with new input while keeping its storages and run id.",
+  "how": "Actor.metamorph(); input under INPUT-METAMORPH-N; max 10 per run; limited -> limited only.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/programming-interface/metamorph",
+   "https://docs.apify.com/platform/limits"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "",
+  "notes": "Unusual primitive; niche use."
+ },
+ {
+  "id": "apify-platform-085",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Actor-to-Actor chaining via integrations",
+  "what": "Output of one run triggers another Actor/task with templated input, configured in the Integrations tab.",
+  "how": "Webhook to Apify API under the hood; variables {{resource.defaultDatasetId}} etc.; static+dynamic input; TEST event with sample payload; integration-ready Actors read 'payload'.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/actors"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Equivalent to Verevon Application Plane workflow triggers: crawl finished -> ingest -> notify.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-086",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Workflow key grouping",
+  "what": "Related runs and API calls can be grouped under a workflow key.",
+  "how": "APIFY_WORKFLOW_KEY env var.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "Thinly documented."
+ },
+ {
+  "id": "apify-platform-087",
+  "category": "Orchestration & scale — queues, concurrency, scheduling/cron, distributed workers, request queue/URL frontier, dedup, crawl scoping/filters/sitemaps, budgets/limits, priority",
+  "name": "Platform limits (quotas)",
+  "what": "Hard quotas per account on runs, memory, Actors, tasks, schedules, webhooks, logs and build time.",
+  "how": "Max log 10,485,760 chars; build 1800 s/4096 MB; 500 Actors, 5,000 tasks, 100 schedules, 100 webhooks per user; 10 metamorphs; concurrency 25/32/128/256; raise on request for paid plans.",
+  "evidence": [
+   "https://docs.apify.com/platform/limits"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-088",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Run logs (console tab, API, CLI)",
+  "what": "Every run/build streams logs viewable in Console, via API log endpoints and CLI 'runs log'.",
+  "how": "Log size cap 10,485,760 chars; env vars marked Secret are redacted from logs (env vars page).",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/runs-and-builds",
+   "https://docs.apify.com/platform/limits",
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables",
+   "https://docs.apify.com/cli/docs/reference"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-089",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Built-in monitoring and alerts",
+  "what": "Free alerting on any Actor/task with metric thresholds, run status and dataset field statistics, delivered by email, Slack or in-app.",
+  "how": "Conditions: metric lower (post-run), metric higher (every ~5 min + post-run), run status (aggregated every 20 min), dataset field stats (needs schema: missing fields, numeric/array size outliers); charts: 30-day status, last-200-run metrics, pinnable to home; 'monitoring suite' Actors add schema validation, duplicate checks, dashboards.",
+  "evidence": [
+   "https://docs.apify.com/platform/monitoring"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Data-quality alerts on crawl output (missing fields, outliers) are a differentiator Verevon could add to Quarry monitors.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-090",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Run origin + status messages",
+  "what": "Each run records how it started and exposes a human status message updated by the crawler.",
+  "how": "meta.origin values incl. MCP/CI/STANDBY/WEBHOOK; Crawlee statusMessageLoggingInterval (10 s).",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/runs-and-builds",
+   "https://crawlee.dev/js/api/basic-crawler/interface/BasicCrawlerOptions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-091",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Crawlee Statistics (persisted run metrics)",
+  "what": "Per-crawl counters, durations, retry histogram, status codes and error trackers persisted to KV and surviving migrations/resurrection.",
+  "how": "SDK_CRAWLER_STATISTICS_* keys; errorTracker vs errorTrackerRetry; persistState/resetStore/toJSON; statisticsOptions.",
+  "evidence": [
+   "https://crawlee.dev/js/api/core/class/Statistics"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-092",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Cost tracking per run and historical usage",
+  "what": "Each run detail shows cost; billing shows historical usage; PPE events itemized; Actor analytics for developers.",
+  "how": "Run detail page cost; Historical usage tab; CU and event accounting; dataset reads after run also metered.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/actors-in-store",
+   "https://docs.apify.com/platform/actors/publishing/monetize"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Model Plane cost ledger should attribute browser/crawl spend per run the same way.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-093",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Container/tenant isolation security architecture",
+  "what": "Each run executes in an isolated environment with own FS/CPU/memory, destroyed afterwards; platform services separated from customer workloads; SOC 2 Type II; Trust Center.",
+  "how": "No run state persists on worker; encrypted managed storage; least-privilege run tokens; vulnerability disclosure (security@apify.com); runtime technology not named.",
+  "evidence": [
+   "https://docs.apify.com/platform/security",
+   "https://docs.apify.com/platform/security/architecture"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon sandboxes/browser grants need a comparable isolation + least-privilege story; ZDR-like controls are not documented by Apify beyond retention settings.",
+  "notes": "Isolation technology (Docker/gVisor/Firecracker) undisclosed."
+ },
+ {
+  "id": "apify-platform-094",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Actor permission levels (limited vs full) with user approval",
+  "what": "Actors default to limited permissions (own storages, own run, proxy password, basic user info); full-permission Actors show a badge and require explicit one-time user approval even via MCP/CLI/API.",
+  "how": "ACTOR_PERMISSION_LEVEL; resourcePicker+resourcePermissions for scoped storage access; switching limited -> full is breaking (schedules/integrations stop until re-approved); full-permission lowers quality score and is excluded from MCP search and Apify AI.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/permissions",
+   "https://docs.apify.com/platform/integrations/mcp",
+   "https://docs.apify.com/platform/account/apify-ai"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Strong precedent for Verevon's browser grants / tool permissions: least privilege by default, explicit human approval for broad access, agents excluded from high-privilege tools.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-095",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Scoped API tokens with expiry and restricted-run propagation",
+  "what": "Tokens can be limited per resource/account-level permission, expire, and propagate their scope into Actor runs they start and into webhooks they create.",
+  "how": "'Limit token permissions' toggle; permission dependencies (Write includes Read; Run task needs Run actor + Read task); created resources auto-granted; Full vs Restricted access run modes; organization tokens vs personal tokens; restricted mode unsupported in Standby.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/api"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Scope propagation from caller token -> run token -> webhook is a good model for Verevon's delegated agent credentials.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-096",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Environment variables and custom secrets",
+  "what": "Rich runtime env (ids, limits, URLs, proxy, token, user flags) plus owner-defined variables with Secret flag (encrypted, redacted).",
+  "how": "ACTOR_* / APIFY_* list; build-time vars separate and unencrypted; APIFY_USER_IS_PAYING; APIFY_IS_AT_HOME.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-097",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Console UX: sections and keyboard shortcuts",
+  "what": "Console organizes Home, Store, Actors, Development (My Actors, Insights, Messaging), Tasks, Runs, Integrations, Schedules, Storage, Proxy, Settings, Billing with G+key shortcuts and Shift+? help.",
+  "how": "Developer 'Messaging' area for reported issues and emails to Actor users.",
+  "evidence": [
+   "https://docs.apify.com/platform/console"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-098",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Webhook delivery reliability",
+  "what": "Webhook POSTs retried with exponential backoff up to 11 times (~1 min -> ~32 h), 2-minute timeout, static source IPs, dispatch id header.",
+  "how": "Headers X-Apify-Webhook, X-Apify-Webhook-Dispatch-Id, X-Apify-Request-Origin; secret in URL recommended (no HMAC signing documented); Test button; idempotent handlers advised.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/webhooks/actions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon webhooks should add HMAC signatures on top of this retry model.",
+  "notes": "No request signing documented, weaker than HMAC-signed webhooks."
+ },
+ {
+  "id": "apify-platform-099",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Data retention controls",
+  "what": "Unnamed run storages auto-expire by plan retention; named storages never; builds untagged 90 days; free plan keeps last 10 runs 4 months.",
+  "how": "Retention set in billing settings on paid plans.",
+  "evidence": [
+   "https://docs.apify.com/platform/storage",
+   "https://docs.apify.com/platform/actors/running/runs-and-builds"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's ZDR requirement needs stronger guarantees than Apify's retention settings offer.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-100",
+  "category": "Observability & operations — logs, run history, metrics, alerts, replay/debug, cost tracking, self-hosting/deploy, multi-tenancy, security/sandboxing",
+  "name": "Self-hosting",
+  "what": "Not offered: Apify is SaaS-only; Crawlee (open source) can run anywhere, and CLI emulates platform storage locally.",
+  "how": "CRAWLEE_STORAGE_DIR local layout; apify run simulates env vars; no on-prem platform documented.",
+  "evidence": [
+   "https://crawlee.dev/js/docs/guides/request-storage",
+   "https://docs.apify.com/cli/docs/reference"
+  ],
+  "provenance": "INF",
+  "confidence": "medium",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon owns its runtime; Apify's platform layer is not reusable, only Crawlee is.",
+  "notes": "Inference from absence of any self-hosting docs plus SaaS-only pricing page."
+ },
+ {
+  "id": "apify-platform-101",
+  "category": "Integration-plane overlap — OAuth/connectors, provider actions, webhooks/triggers, MCP/tool exposure, data sync into knowledge",
+  "name": "Webhooks on run/build events",
+  "what": "System events (run created/succeeded/failed/aborted/timed-out/resurrected; build events) trigger HTTP POSTs with templated JSON payloads and headers.",
+  "how": "Events ACTOR.RUN.* / ACTOR.BUILD.*; payload template with {{userId, createdAt, eventType, eventData, resource, globals}} dot-notation; headers template; ad-hoc webhooks per run; 100 webhooks/user.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/webhooks/events",
+   "https://docs.apify.com/platform/integrations/webhooks/actions",
+   "https://docs.apify.com/platform/integrations/webhooks",
+   "https://docs.apify.com/platform/limits"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Same event vocabulary could drive Verevon Application Plane notifications and Data Plane ingestion triggers.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-102",
+  "category": "Integration-plane overlap — OAuth/connectors, provider actions, webhooks/triggers, MCP/tool exposure, data sync into knowledge",
+  "name": "MCP connectors (Actors calling third-party MCP servers with user credentials)",
+  "what": "Users authorize external services once; Actors call them via an Apify MCP proxy that injects credentials server-side, with tool allow-lists.",
+  "how": "Services incl. Notion, Slack, GitHub, Sentry, Supabase; auth: API key, OAuth with Dynamic Client Registration or managed client, or user's own OAuth app; ACTOR_MCP_CONNECTOR_BASE_URL; input schema resourceType mcpConnector + mcpServers; credentials never enter the Actor; access ends with run; per-connector tool restrictions apply to all Actors.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/mcp-connectors",
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables",
+   "https://docs.apify.com/platform/actors/development/actor-definition/input-schema/specification/v1"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Highly relevant to integration-corev2: a credential-injecting MCP proxy with per-run, per-tool scoping is exactly the 'provider actions' safety model Verevon wants.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-103",
+  "category": "Integration-plane overlap — OAuth/connectors, provider actions, webhooks/triggers, MCP/tool exposure, data sync into knowledge",
+  "name": "No-code workflow integrations (Make, Zapier, n8n, Gumloop)",
+  "what": "Official apps/nodes let workflows start Actors and consume datasets.",
+  "how": "Make scenarios (1,500+ apps), Zapier (6,000+ apps), n8n nodes, Gumloop agent builder; Telegram integration documented.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-104",
+  "category": "Integration-plane overlap — OAuth/connectors, provider actions, webhooks/triggers, MCP/tool exposure, data sync into knowledge",
+  "name": "Data destinations (Snowflake, Airtable, Google Drive, HubSpot, vector DBs)",
+  "what": "Integration Actors push datasets into warehouses, spreadsheets, drives, CRMs and vector stores (Pinecone, Qdrant, OpenAI Vector Store) with incremental updates.",
+  "how": "Integration-ready Actors in Store 'Integrations' category; community MongoDB/MySQL importers; LangChain/LlamaIndex loaders.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations",
+   "https://apify.com/apify/website-content-crawler"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Data Plane ingestion from Quarry maps to these 'sync into knowledge' connectors.",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-105",
+  "category": "Integration-plane overlap — OAuth/connectors, provider actions, webhooks/triggers, MCP/tool exposure, data sync into knowledge",
+  "name": "AI framework tool wrappers",
+  "what": "Actors usable as tools in LangChain, OpenAI Agents SDK, Vercel AI SDK, Google ADK, CrewAI, LlamaIndex.",
+  "how": "Documented integration pages; CrewAI ApifyActorsTool; templates for LangGraph/CrewAI/PydanticAI/smolagents/Mastra/BeeAI/browser-use.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations",
+   "https://raw.githubusercontent.com/apify/actor-templates/master/templates/manifest.json"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-106",
+  "category": "Integration-plane overlap — OAuth/connectors, provider actions, webhooks/triggers, MCP/tool exposure, data sync into knowledge",
+  "name": "Coding-agent plugins and MCP install",
+  "what": "One-command setup of Apify in coding agents via plugin or 'apify mcp install <client>'.",
+  "how": "Supported: Claude Code, Codex, Cursor, Copilot, VS Code, OpenCode, Kimi Code, Qoder, DeepSeek Harness, Grok, OpenClaw, Hermes.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations",
+   "https://docs.apify.com/platform/agents/skills",
+   "https://docs.apify.com/cli/docs/reference"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-107",
+  "category": "Integration-plane overlap — OAuth/connectors, provider actions, webhooks/triggers, MCP/tool exposure, data sync into knowledge",
+  "name": "Actor-to-Actor and task triggering via API",
+  "what": "Programmatic chaining using the API/SDK (call Actor, wait, read dataset) and integration webhooks aimed at Apify endpoints.",
+  "how": "client.actor().call() in API clients; integration UI builds webhook with payload field.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/actors",
+   "https://docs.apify.com/api/v2"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": "SDK call semantics inferred from client conventions; fetched page covers UI chaining."
+ },
+ {
+  "id": "apify-platform-108",
+  "category": "Integration-plane overlap — OAuth/connectors, provider actions, webhooks/triggers, MCP/tool exposure, data sync into knowledge",
+  "name": "GitHub issue creation on failed runs",
+  "what": "A webhook on ACTOR.RUN.FAILED can open GitHub issues via fine-grained PAT.",
+  "how": "Headers template carries Authorization; payload template builds issue body.",
+  "evidence": [
+   "https://docs.apify.com/platform/integrations/github"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-109",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Store listing badges: permissions, pricing, agentic-payment eligibility",
+  "what": "Store/Actor pages display permission level badge, pricing model, ratings/users/run stats and agentic-payment whitelist flag.",
+  "how": "isWhiteListedForAgenticPayments; limited/full badge; status badge page exists (content not fetched).",
+  "evidence": [
+   "https://apify.com/store",
+   "https://docs.apify.com/platform/actors/development/permissions"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-110",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Store search personalization",
+  "what": "Console search results are personalized per user while public Store ranking is shared; both weigh quality score.",
+  "how": "Quality score page.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/publishing/quality-score"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-111",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Dataset reads after run are metered",
+  "what": "Reading or writing a run's dataset after completion counts as storage operations usage.",
+  "how": "Pricing/Store pages.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/actors-in-store",
+   "https://apify.com/pricing"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "",
+  "notes": ""
+ },
+ {
+  "id": "apify-platform-112",
+  "category": "Platform & ecosystem — actors/marketplace/store, templates/presets, datasets/key-value/storage, integrations/connectors, versioning/builds, monetization/billing/credits, teams/orgs",
+  "name": "Standby monetization & isolation",
+  "what": "Standby Actors bill like runs plus PPE events; a user's background Standby runs are never shared with other users.",
+  "how": "Standby running page: idle runs cost until timeout; per-user runs.",
+  "evidence": [
+   "https://docs.apify.com/platform/actors/running/standby"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Tenant-isolated warm pools is the right default for Verevon browser sessions too.",
+  "notes": ""
+ }
+]

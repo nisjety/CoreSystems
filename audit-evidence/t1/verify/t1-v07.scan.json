@@ -1,0 +1,987 @@
+[
+  {
+    "finalId": "F-t1-062",
+    "title": "Space UI quality baseline: locale-correct activity grammar and dates, server-held preferences, shared announcer, reduced motion, density and high contrast, failure screens",
+    "searches": [
+      "nb-NO|toLocaleDateString|toLocaleString|RUN_STATUS labels in features/spaces/lib (hard-coded locale and labels)",
+      "verevon.locale|localStorage locale|navbar/theme|/api/v1/preferences|compactMode|timezone in FE src, gateway and user-core",
+      "announcer|aria-live|role=status|liveRegion|sr-only across FE src (looking for a shared announcer module)",
+      "find -iname '*announc*' under FE src/shared",
+      "prefers-reduced-motion|forced-colors|prefers-contrast|density in FE styles and features/spaces",
+      "ErrorBoundary|cannot reach|diagnostic|start-up milestone|fallback page in FE src and gateway",
+      "branding|accent|brand in Control org-core, user-core and gateway orgs domain",
+      "Doc: SPACE_PAGE_AUDIT_2026-09-06.md hygiene rows (4b)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-thread-presentation.ts",
+        "line": 73,
+        "why": "Dates forced to nb-NO via toLocaleDateString (also line 90).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts",
+        "line": 122,
+        "why": "RUN_STATUS labels hard-coded in Norwegian; no viewer-locale path (lines 122-137).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts",
+        "line": 15,
+        "why": "Only two locales (no, en), mapped to nb-NO and en-US.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/i18n/index.tsx",
+        "line": 48,
+        "why": "Viewer locale persisted in localStorage (setItem 48, getItem 82), not server-side.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/server.go",
+        "line": 228,
+        "why": "Server-held user preferences: GET and PATCH /api/v1/preferences exist.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/handlers.go",
+        "line": 836,
+        "why": "Appearance defaults include theme, fontSize and compactMode; language and timezone also stored (925-938).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/handlers.go",
+        "line": 985,
+        "why": "LanguageSettings stores dateFormat and timeFormat server-side; Space dates ignore them.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs",
+        "line": 408,
+        "why": "Gateway reads and writes fontSize and compactMode; FE never reads compactMode.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts",
+        "line": 115,
+        "why": "Theme saved server-side through /api/v1/navbar/theme, split from locale storage.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "line": 2389,
+        "why": "Action updates own preferences including timezone and language (user-level only).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+        "line": 765,
+        "why": "Page-local sr-only role=status region; not a shared announcer module.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityFeed.tsx",
+        "line": 93,
+        "why": "Live feed rows set aria-live by outcome; no shared announcer or row narration.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+        "line": 343,
+        "why": "Space page loading and inline status use role=status; no shared announcer.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/styles/global.css",
+        "line": 4630,
+        "why": "Reduced-motion rules are global (also 12297, 16691); none under features/spaces.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/demo/fixtures/fjordform-home.ts",
+        "line": 8,
+        "why": "Comment says the SPA has no root ErrorBoundary; no cannot-reach fallback found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+        "line": 285,
+        "why": "Doc: 4b room hygiene (unread per thread, pin, auto-title) marked done.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-066",
+    "title": "Agents attend Zoom, Meet and Teams meetings as visible guests through an Ingestion capture worker, with approval-gated chat drafts",
+    "searches": [
+      "zoom|google meet|teams meeting|meeting bot|guest join|join meeting|meeting link across all planes and FE src",
+      "onlineMeeting|hangoutLink|calendar.events|calendar_read in integration-corev2",
+      "capture worker|channel adapter across all planes",
+      "ListMeetings|ReadMeetingTranscript|DraftMeetingChat|internal meeting (no hits)",
+      "zoom|meet|teams|join call in Quarry-v2 crates (no hits)",
+      "Doc: meeting-intelligence.md phase 4 and capture rows"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/calendar_read.go",
+        "line": 94,
+        "why": "Graph calendar read selects onlineMeeting and webLink, so Teams links are discoverable.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/calendar_read.go",
+        "line": 95,
+        "why": "Google calendar read selects hangoutLink, so Meet links are discoverable.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentsWorkspacePrimitives.tsx",
+        "line": 55,
+        "why": "Meeting slots disabled: no backend executes them yet (booking, not attendance).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go",
+        "line": 1,
+        "why": "Generic channel adapter framing; no meeting join, capture or guest logic found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx",
+        "line": 1,
+        "why": "In-room approval card (reusable in principle); no meeting or draft approval object.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/meeting-intelligence.md",
+        "line": 45,
+        "why": "Doc: capture via Channel Plane adapter (future), then Quarry evidence submission.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/meeting-intelligence.md",
+        "line": 136,
+        "why": "Doc: phase 4 live meetings and Teams/Zoom/Meet connector bots; docs only.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-044",
+    "title": "Credential custody and outward actions: secrets broker, per-person connectors, draft-first sends, bounded cross-room reach",
+    "searches": [
+      "secret broker|credential broker|secret drop|one-time secret|credential grant|CredentialGrant|secret_ref across all planes and FE",
+      "redirect manual|redirect::Policy::none|host pin|allowed_hosts|https only in Ingestion Plane",
+      "standing|once|session grant scope in Control and Space FE (grant context)",
+      "draft|Draft|agent setting|needs approval in Application Plane, FE spaces and gateway spaces",
+      "connector account|personal connection|delegated|connection_id in execution-core and integration-corev2",
+      "human-only|agent-callable|allowedActorTypes|human owner in gateway actions and FE shared/actions",
+      "cross-space|cross-room|another Space|target space in gateway spaces and session-core",
+      "human_approved_ai_action|single-use|send authorization in conversation-core and integration-corev2",
+      "Doc: credential grant|secret broker|secret drop across *.md"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/egress/client.go",
+        "line": 60,
+        "why": "SafeClient: pinned-dial, SSRF-guarded HTTP client for outbound provider calls.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/egress/client.go",
+        "line": 90,
+        "why": "Redirects disabled unless opted in; each hop re-vetted by the guard.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/egress/guard.go",
+        "line": 54,
+        "why": "Guard vets the host unconditionally before any allowlist exception applies.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/service.go",
+        "line": 56,
+        "why": "Content-read redirects limited to an allowlist of host suffixes.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fetch.rs",
+        "line": 503,
+        "why": "Quarry fetch client built with redirect Policy::none (SSRF-safe fetch).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+        "line": 805,
+        "why": "validMCPSecretReference: MCP auth must reference a managed secret URI, not a raw secret.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0028_space_scoped_cron.sql",
+        "line": 10,
+        "why": "credential_grant_ref column added to Space cron; no consumer code found.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs",
+        "line": 426,
+        "why": "Only the read branch gets a delegated per-user credential; writes use org-scoped credential.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/connection_access.go",
+        "line": 23,
+        "why": "Personal connections gated to the connecting user; service calls without delegated user refused.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+        "line": 145,
+        "why": "Human owner catalog projection keeps only human-executable actions and strips other actors.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+        "line": 632,
+        "why": "knowledge.upload_files marked structurally human-only (needs file bytes).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.ts",
+        "line": 54,
+        "why": "allowedActorTypes: model-executable actions get human and model; others human only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.test.ts",
+        "line": 46,
+        "why": "Test: every action stays available to a human actor.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/attestation/signer.go",
+        "line": 27,
+        "why": "AuthorizationHumanApprovedAIAction: human-approved AI action attestation kind for outbound writes.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/consumers/ai_action_executor.go",
+        "line": 434,
+        "why": "Approved AI action runs with the human reviewer as ActorUserID.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/attestation/verifier.go",
+        "line": 277,
+        "why": "Verifies human-approved AI attestation before an integration write proceeds.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs",
+        "line": 46,
+        "why": "Inbox per-conversation human draft route (get, upsert, delete); Inbox only, not Spaces.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs",
+        "line": 52,
+        "why": "Draft lease route (get, claim, release) for an Inbox draft.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/AiActionReviewPanel.tsx",
+        "line": 1,
+        "why": "Human review panel for AI-proposed inbox actions with field edits before approval.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 4542,
+        "why": "Space agent bindings carry only an allowed_tools filter; no credential grants.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 3166,
+        "why": "Comment cites ADR-0002 (cross-Space agent registry, accepted for implementation).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 2495,
+        "why": "Space append refused when its Control decision targets another Space (no cross-room posts).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 1979,
+        "why": "Doc: S3.4 Space credential grants and broker, planned, not built.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 2000,
+        "why": "Doc: S3.6 Space MCP/plugin/connector cockpit, planned (human-only grant mutation).",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md",
+        "line": 1,
+        "why": "Doc: ADR-0002 cross-Space agent registry, status accepted for implementation.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md",
+        "line": 31,
+        "why": "Doc: realtime client-secret broker only; not a Space credential broker.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-047",
+    "title": "Webhooks that wake room agents (Space-bound inbound endpoints)",
+    "searches": [
+      "webhook routes and receivers in integration-corev2 (server.go, webhookorg, hotpath)",
+      "hmac|X-Hub-Signature|Stripe-Signature|verifyProviderWebhook|signature in integration-corev2",
+      "webhook file list across Application, Model, Control, FE spaces, gateway and shared",
+      "webhook_received|webhook-ingest|schedule.trigger|validateFireDecision|schedule-fire-decision in conversation-core, capability-core and user-core",
+      "webhooks table|webhook subscriptions in convex schema and bridge-core",
+      "mail-task alias|inbound alias|Postmark in Control user-core migrations",
+      "space_watch|SourceKind|watch decision across capability-core, session-core, user-core and gateway",
+      "Webhook strings in FE agents, inbox and settings"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 981,
+        "why": "POST /api/v1/webhooks/:provider: org-level inbound receiver, rate limited, not Space-bound.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 983,
+        "why": "Provider must exist in a fixed catalogue; unknown providers return provider_not_supported.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 2408,
+        "why": "verifyProviderWebhook covers github, shopify, slack, stripe and meta only; no generic HMAC.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 1080,
+        "why": "Publishes verevon.ingestion.integration.webhook_received with a stored-payload reference.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 1121,
+        "why": "Internal GET fetches the full stored payload of a webhook_received event by id.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/webhookorg/resolver.go",
+        "line": 1,
+        "why": "Resolves owning tenant for account-wide provider callbacks that carry no org id.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/hotpath/webhook.go",
+        "line": 74,
+        "why": "Normalises webhook events by calling an external normalise service.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/consumers/webhook_received_consumer.go",
+        "line": 51,
+        "why": "Consumes webhook_received, validates, dedups and stores into conversation-core, not Spaces.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/schedule/data.go",
+        "line": 31,
+        "why": "Seeded template schedule.trigger.webhook-ingest fires an ingestion run on webhook.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go",
+        "line": 330,
+        "why": "validateFireDecision checks a Control fire decision before each scheduled fire.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/spaces.go",
+        "line": 1025,
+        "why": "issueScheduleFireDecision is worker-only; re-checks authority per fire for Space schedules.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/server.go",
+        "line": 370,
+        "why": "Route POST schedule-fire-decision under the Space group.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/channel/webhook.go",
+        "line": 50,
+        "why": "Outbound WebhookAdapter with durable store, retry, dead-lettering; no Space binding found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/channel/webhook.go",
+        "line": 138,
+        "why": "HTTP sender POSTs payloads; non-2xx responses are retryable failures.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 257,
+        "why": "webhooks table: org-level outbound URL subscriptions with secret and stats; no functions found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/029_mail_task_addresses.up.sql",
+        "line": 1,
+        "why": "Per-user inbound-mail alias maps to a chat thread via Postmark; personal, not Space-bound.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/mail_task_thread_decision.go",
+        "line": 20,
+        "why": "States mail-task deliberately has no Space, membership or recipient audience.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/watch.go",
+        "line": 97,
+        "why": "Space watch primitive: first adapter kind is process_output; others planned per S4.3 design.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql",
+        "line": 38,
+        "why": "space_watches table: standing watch on one resource in one Space, under one member.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/store.go",
+        "line": 192,
+        "why": "Watch polls every two seconds with a cursor; delivery is a separate, unbuilt step.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/server.go",
+        "line": 367,
+        "why": "Control watch-create and watch-observe decision routes exist for Spaces.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 1627,
+        "why": "Gateway reports watches_not_built: watches are not published yet (S4.3).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx",
+        "line": 138,
+        "why": "UI copy: watches are not published yet.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotStudio.tsx",
+        "line": 622,
+        "why": "Webhook API card calls internal systems via signed endpoints (outbound); Configure status.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/lib/verevon-agent-blueprints.tsx",
+        "line": 307,
+        "why": "Static blueprint lists Webhook as a trigger option; template copy, not a runtime trigger.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/S4_3_WATCH_PRIMITIVE_DESIGN_2026-09-14.md",
+        "line": 1,
+        "why": "Doc: S4.3 Watch primitive design, status proposed; delivery owned by unbuilt S4.4.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-040",
+    "title": "Per-thread serialized, leased agent run queue and member-safe mid-run steering for multi-member rooms",
+    "searches": [
+      "SKIP LOCKED|advisory lock|lease|heartbeat|reaper|requeue|crash loop across Model Plane (code and docs)",
+      "heartbeat|lease|reaper|one running|already running|active run|ThreadBusy|in flight in session-core, execution-core and model-gateway",
+      "FOR UPDATE in session-core (thread and run row locks)",
+      "start_run_inner|ON CONFLICT (id) DO NOTHING|per-thread status checks (no per-thread run gate found)",
+      "queued_input|QueuedInput|steer|follow-up|invoke/:request_id/queue|chat/invocations across model-gateway, gateway chat, FE chat and FE spaces",
+      "submitting|blockedByApproval|ACTIVE_RUN_STATUSES|stopMessage in SpaceRoomComposer and SpacePage",
+      "idempot|call_index|tool ledger|ToolLedger|replay|dedup in execution-core and session-core",
+      "concurrent|two members|same thread in test names (Model Plane and gateway)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/queued_input.rs",
+        "line": 1,
+        "why": "Mid-run input registry: steer or follow-up classified at the tool-round boundary (module doc).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/queued_input.rs",
+        "line": 109,
+        "why": "QueuedInputRegistry struct: per-request_id queue, tenant and user bound, in-memory, single replica.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 142,
+        "why": "Route POST /v1/invoke/:request_id/queue accepts mid-run input (invoke_queue_input).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 7416,
+        "why": "invoke_queue_input handler: enqueues text for a live run, bounded by per-run caps.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs",
+        "line": 176,
+        "why": "Gateway queue_invocation_input proxies mid-run input to the model-gateway queue route.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+        "line": 42,
+        "why": "Gateway chat-domain route /api/v1/chat/invocations/{request_id}/queue; Space composer never calls it.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+        "line": 2105,
+        "why": "QueuedInputStrip shows mid-run messages in the Chat UI.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "line": 483,
+        "why": "QueuedInput type tracks mid-run messages per run, pending or delivered.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 378,
+        "why": "Space send blocked while submitting or awaiting approval; no queue or steer path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 372,
+        "why": "blockedByApproval: a thread paused on a human decision refuses new input.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 497,
+        "why": "stopMessage aborts the local read and cancels the run by requestId (Stop shipped).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+        "line": 1718,
+        "why": "FOR UPDATE SKIP LOCKED picks due or lease-expired managed-run terminalization rows.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+        "line": 1722,
+        "why": "Outbox claim sets processing with lease owner, expiry and attempt count (durable lease).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+        "line": 1333,
+        "why": "heartbeat_managed_run_inner renews a producer lease deadline; it never reopens a row.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+        "line": 1852,
+        "why": "run_recovery_worker: loop recovering due and lease-expired terminalizations (restart-safe).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 1157,
+        "why": "claim_scheduled_step locks run and thread rows FOR UPDATE OF r, t.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "line": 3122,
+        "why": "start_run insert dedupes by run id (ON CONFLICT DO NOTHING); no per-thread run gate.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "line": 246,
+        "why": "Session Core is the idempotency authority: step claimed before inference, receipt after.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "line": 993,
+        "why": "Stable per-(run, step) idempotency key on approval continuations collapses re-pauses.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
+        "line": 285,
+        "why": "Stable per-(run, action, category) idempotency key for browser event writes.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 1257,
+        "why": "Rejects a duplicate idempotency_key while already streaming (request-level only).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+        "line": 5556,
+        "why": "Test: concurrent plan proposals on one run leave one proposed plan (plan gate only).",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/demo/live/responder.ts",
+        "line": 349,
+        "why": "Demo responder simulates queued_input acknowledgements; not production behaviour.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/core-research/session-core.md",
+        "line": 24,
+        "why": "Doc: outbox claim/lease, bounded retry and poison states; managed-run heartbeat exists.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/core-research/grpc-safe-rebuild-decision-2026-07-16.md",
+        "line": 65,
+        "why": "Doc: no restartable continuation; claim/lease primitives exist; reconciler planned.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/core-research/agentic-engineering-audit-2026-07-17.md",
+        "line": 157,
+        "why": "Doc: worker crash retries restart from turn 0; no heartbeat in that path.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-056",
+    "title": "Agent task tracker: Needs-input state, per-task threads and unread in the Work tab",
+    "searches": [
+      "needs input|awaiting input|input required|needs_human across Model Plane, gateway, FE spaces and agents (no hits)",
+      "space_ref|thread_ref|task_thread in capability-core tasks and gateway (no thread or space field on tasks)",
+      "/v1/tasks proxy routes in model-gateway and list_tasks_proxy filters",
+      "awaiting_approval|Needs a human|RUN_STATUS in FE spaces",
+      "unread|unreadThreadIds|read_marker in FE spaces and Convex spaceReadMarkers",
+      "threads/{thread_id}/todos in gateway orchestration",
+      "watchers|notify me when this run finishes in gateway and capability-core runwatch",
+      "Doc: QM plan S4.5 unified Work cockpit and SPACE_PAGE_AUDIT hygiene row"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/tasks/types.go",
+        "line": 13,
+        "why": "Task states are created, assigned, blocked and completed; no needs-input state.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/tasks/types.go",
+        "line": 20,
+        "why": "Task struct carries parent run and assignee but no space or thread reference.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/tasks/types.go",
+        "line": 1,
+        "why": "Package doc: read-only catalog; mutation APIs live in downstream task-runner services.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 345,
+        "why": "Tasks proxy routes: list, create, get, patch and cancel forward to capability-core.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 5341,
+        "why": "list_tasks_proxy forwards org_id and status filter only; no space or thread filter.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+        "line": 906,
+        "why": "Space-scoped cron listing filters by space_ref; tasks have no equivalent.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+        "line": 66,
+        "why": "Per-thread todos route exists: /threads/{thread_id}/todos (orchestration).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts",
+        "line": 122,
+        "why": "awaiting_approval is the only needs-a-human run state, shown as critical.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx",
+        "line": 15,
+        "why": "Work panel lists what the room has running and scheduled; no per-task threads.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts",
+        "line": 51,
+        "why": "Space thread carries latest_run_id, linking a thread to its most recent run.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts",
+        "line": 4,
+        "why": "Per-thread unread for room posts; mirrors Convex unreadThreadIds.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceReadMarkers.ts",
+        "line": 50,
+        "why": "unreadThreadIds: server-side per-thread unread derivation from read markers.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs",
+        "line": 54,
+        "why": "Per-user 'notify me when this run finishes' watcher route for a single run.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go",
+        "line": 1,
+        "why": "Terminal run event triggers notification-core calls for each registered watcher.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts",
+        "line": 536,
+        "why": "Client handles AG-UI interrupt outcome as a resumable pause; no server emitter found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 2220,
+        "why": "Doc: S4.5 unified Work cockpit planned: runs, approvals, watches, schedules, delivery.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+        "line": 67,
+        "why": "Doc: per-thread unread and room hygiene marked Done (section 16) in the audit table.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-067",
+    "title": "Duplex voice for agents: a voice front that delegates to the Space agent, then agents as attributed participants in room calls",
+    "searches": [
+      "/v1/ai/realtime|client_secret|server_vad|response.cancel|turn_detection across Model Plane, gateway and FE src",
+      "VoiceModeDialog mount points in FE src",
+      "voice_id|voice_speed|voice_language|voice profile in FE, gateway and capability-core (no agent voice profile)",
+      "send_task|search_conversations across Model Plane and FE (no hits)",
+      "livekit|mediasoup|sfu|webrtc|RTCPeerConnection|call participant across all planes (no hits)",
+      "barge|interrupt|response.cancel in FE voice and spaces (no hits)",
+      "Doc: CHAT_PARITY_AUDIT_2026-10-01 and chat-parity-audit duplex and realtime rows"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 448,
+        "why": "Routes /v1/ai/realtime and /session registered; no gateway proxy or FE caller found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 4900,
+        "why": "ai_realtime routes through decide_content_route with realtime_voice (ZDR-aware).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+        "line": 872,
+        "why": "create_realtime_session: provider session with client_secret and turn_detection_type.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx",
+        "line": 69,
+        "why": "Voice dialog is tap-to-talk dictation with review; realtime naming is CSS only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-mode-state.ts",
+        "line": 14,
+        "why": "Voice state machine: recording, transcribing, review, send; no realtime session states.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+        "line": 3683,
+        "why": "VoiceModeDialog mounted only in the dashboard composer, not in Spaces.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts",
+        "line": 16,
+        "why": "Text-to-speech pinned to azure-speech for read-aloud; not duplex.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 386,
+        "why": "Space room sends are text turns streamed on submit; no voice input path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+        "line": 47,
+        "why": "Doc: full-duplex voice with barge-in listed as a gap in the chat parity audit.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/chat-parity-audit.md",
+        "line": 111,
+        "why": "Doc: realtime voice reported working live on 2026-06-05.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md",
+        "line": 31,
+        "why": "Doc: realtime sessions rated partial; lists OpenAI client-secret broker.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+        "line": 19,
+        "why": "Doc: agents answer only when invoked by mention or explicit action.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-050",
+    "title": "Meeting intelligence with consent: long-form transcription and an authority-scoped recap saved as a Space document, under a deny-by-default per-meeting AI policy",
+    "searches": [
+      "meetings?|meeting_id|meeting_record|meeting policy across all planes and FE (code)",
+      "diariz|diarisation|speaker_label|speaker in Model Plane and FE (no diarisation found)",
+      "TranscribeSpeech|transcribe|whisper|speech_to_text in Model Plane services and FE voice",
+      "ai_access|transcript_only|privacy_mode|meeting AI policy in Control and Application planes (no hits)",
+      "MediaSegmentCreated|start_ms|end_ms|transcript in Data Plane v2",
+      "Meeting Scribe|recap|minutes|decisions in FE spaces",
+      "Doc: meeting intelligence, transcript, Zoom or Google Meet terms in *.md"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+        "line": 2365,
+        "why": "dictation-path STT; ZDR contract required; no long-form or diarised output.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 3955,
+        "why": "Dictation route chains STT and a cleanup pass; returns raw text on cleanup failure.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+        "line": 21,
+        "why": "inference-core speech chain includes SpeechTranscriptionRequest.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts",
+        "line": 17,
+        "why": "Dictation capped at 60 seconds and 1.4 MB per take.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/embedding-engine-rs/src/media_consumer.rs",
+        "line": 155,
+        "why": "MediaSegmentCreatedEvent: start_ms, end_ms and optional transcript kept for citation only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/embedding-engine-rs/src/media_consumer.rs",
+        "line": 426,
+        "why": "Segment payload stores start and end offsets plus transcript for display and citation.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx",
+        "line": 47,
+        "why": "Meeting Scribe template summarises the text conversation only; no audio or transcript.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+        "line": 54,
+        "why": "Doc: Control decisions already bind purpose, privacy class, retention and ZDR.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+        "line": 19,
+        "why": "Doc: agents answer only when invoked by mention or explicit action.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/meeting-intelligence.md",
+        "line": 5,
+        "why": "Doc: meeting capture framed as a future external channel; capture belongs to Channel Plane.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/meeting-intelligence.md",
+        "line": 136,
+        "why": "Doc: phasing: upload to WhisperX ASR first; live Teams/Zoom/Meet bots last.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/meeting-intelligence.md",
+        "line": 45,
+        "why": "Doc: capture via Channel Plane adapter (future), then Quarry evidence submission.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  }
+]

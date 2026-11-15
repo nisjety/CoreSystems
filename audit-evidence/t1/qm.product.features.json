@@ -1,0 +1,2741 @@
+[
+  {
+    "id": "qm-product-001",
+    "category": "Messaging core",
+    "name": "Conversation kind decides which scope owns the thread",
+    "what": "Every conversation is a DM, a channel or a group DM; the kind picks the scope (personal:<user>, channel:<id>, group:<id>) that owns the thread's memory, files, sandbox, crons and apps. A 1:1 DM is therefore always the person's own agent, and a channel is always the room's agent.",
+    "how": "conversationScope() maps dm to personal(actor), group to group:<channelRef|threadRef>, anything else to channel:<ref>. ScopeId is a 'kind:ref' string over kinds personal|channel|team|org|group. Conversation carries kind, threadRef, audience[], isPrivate, isMpim and publishMembers.",
+    "evidence": [
+      "src/resolution/resolution-service.ts:15-23",
+      "src/types.ts:19-53",
+      "src/types.ts:55-67"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon Space kinds are personal/room/project/case and a personal Space cannot hold an agent; QM's rule that a DM is the actor's own personal scope is the missing 'personal agent works like a human colleague' primitive.",
+    "notes": "ScopeId is a bare 'kind:ref' string; Verevon's own adoption plan rejects string-encoded authority, so copy the semantics, not the encoding."
+  },
+  {
+    "id": "qm-product-002",
+    "category": "Messaging core",
+    "name": "Thread follow-up without re-mention (bot stake)",
+    "what": "Once the agent has spoken in a Slack thread (or was @mentioned in it), later human replies in that thread reach the agent without another @mention. Threads where the agent has no stake are ignored and rechecked after a 5 minute negative cache.",
+    "how": "app.message handler: for thread replies without a mention it calls botHasStakeInThread() (history read, LRU 10k entries, negative TTL 5 min) and dispatches with unprompted:true, which resolves to an 'ambient' turn origin. Top-level channel messages are only mirrored and later judged in batches.",
+    "evidence": [
+      "src/slack/events.ts:304-349",
+      "src/slack/message-gating.ts:29-46",
+      "src/slack/message-gating.ts:113-132",
+      "src/slack/turn-handler.ts:176-200"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon rooms invoke the model on every post; an explicit 'engaged thread' rule is a cheap, explainable default for when an agent listens in a human room.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-003",
+    "category": "Messaging core",
+    "name": "Bare 'stop' and Stop button abort the running turn",
+    "what": "Typing just 'stop' in a Slack thread aborts the in-flight run for that thread; the web composer shows a Stop button that sends an abort signal to the live run.",
+    "how": "isBareStop() matches /^stop[.!]?$/; maybeInterceptStop() looks up the in-flight run per threadRef (createInFlightThreadMap) and signals abort. Run signals are typed abort|steer|client_result and are durable so an abort survives a worker change.",
+    "evidence": [
+      "src/slack/message-gating.ts:202-234",
+      "src/runs/run-signal-store.ts:6-25",
+      "src/api/routes/turns.ts:158",
+      "plugins/web-ui/src/composer.ts:799"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already records stop/cancel; the natural-language 'stop' intercept before it becomes a new model turn is worth copying for chat surfaces.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-004",
+    "category": "Messaging core",
+    "name": "Queue-for-later and steer-now composer",
+    "what": "While a turn is running the composer offers 'Queue a message for after this turn'. Queued messages appear as editable chips (with attachments) and any of them can be promoted to steer the running task immediately when the harness supports steering.",
+    "how": "queuedRuns/steeringRuns maps keyed by threadRef; steerQueued() calls signalLiveRun('steer', text, runId) which POSTs a durable RunSignal of kind steer; harnessSupportsSteer() is true for pi, claude, codex and opencode. steerAuthors(runId) records who steered so a second person's interjection is attributable.",
+    "evidence": [
+      "plugins/web-ui/src/composer.ts:288-321",
+      "plugins/web-ui/src/composer.ts:544",
+      "plugins/web-ui/src/composer.ts:819-900",
+      "plugins/web-ui/src/composer.ts:1472-1507",
+      "plugins/web-ui/src/runtime-capabilities.ts:29",
+      "src/runs/run-signal-store.ts:6-25"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has a mid-stream queue endpoint; QM adds editable queue chips and multi-author steer attribution, which a shared Space composer needs.",
+    "notes": "Live Slack scenario 'dm-midturn-steer-single-reply' and 'concurrent-second-message' pin the behaviour (test/live-slack/scenarios.ts:349,466)."
+  },
+  {
+    "id": "qm-product-005",
+    "category": "Messaging core",
+    "name": "Human edits and deletes are replayed into the agent transcript",
+    "what": "When a person edits or deletes a message the agent already saw, the revision is appended to the session so the agent reasons over the corrected text, not stale text.",
+    "how": "Slack message_changed/message_deleted events are mirrored (edited_at/deleted_at columns) and turned into system entries of kind message_revision, rendered to the model as <message-edited>/<message-deleted> XML tags with author and sent-at. A revision is recorded only for a message already in the session, appended when the session lease is idle (4 attempts, 3 s apart), skipped for hidden or security-tainted originals, and reconciled again on the next turn.",
+    "evidence": [
+      "src/core/message-revisions.ts:9-60",
+      "src/slack/events.ts:209-263",
+      "src/surface-cache/surface-cache.ts:62-110"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has no per-message edit or delete today; if added, record revisions as explicit transcript entries so model context and audit never silently diverge.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-006",
+    "category": "Messaging core",
+    "name": "Reactions as both input and output",
+    "what": "Humans' reactions on the agent's messages (or on a followed thread root) reach the agent as events. The agent reacts through a [[react: name @ ~id]] directive or the surface tool (max 5 per turn), and an LLM picks an acknowledgment emoji from a curated set plus the workspace's custom emoji.",
+    "how": "reaction_added/removed handlers pass shouldSurfaceReaction gating into a turn; REACTION_INSTRUCTION teaches the directive; AckEmojiPicker.requestAckEmoji() asks core.pickAckEmoji with curated plus 40 sampled custom emoji (emoji.list cached 1h) and records each pick for an admin view.",
+    "evidence": [
+      "src/slack/events.ts:404-413",
+      "src/slack/turn-handler.ts:872-930",
+      "src/slack/reactions.ts:32-57",
+      "src/slack/ack-emoji.ts:33-95",
+      "src/api/routes/admin/slack-mirror.ts:139-148"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon rooms have no reactions; treating reactions as typed events the agent can receive and emit is a lightweight attention channel between humans and agents.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-007",
+    "category": "Messaging core",
+    "name": "Rich message rendering pipeline",
+    "what": "Messages render Markdown with tables, lazily loaded code highlighting and KaTeX math, Mermaid diagrams (also in shared conversations), safe HTML sanitisation and stable streaming markdown; Slack replies are converted to mrkdwn.",
+    "how": "marked + DOMPurify (markdown-sanitize.ts), lazy-hljs/lazy-katex loaders, mermaid-block.ts, stable-markdown.ts/streaming-markdown.ts for flicker-free streaming, src/slack/mrkdwn.ts for Slack output.",
+    "evidence": [
+      "plugins/web-ui/src/markdown-sanitize.ts",
+      "plugins/web-ui/src/mermaid-block.ts",
+      "plugins/web-ui/src/lazy-katex.ts",
+      "plugins/web-ui/src/stable-markdown.ts",
+      "src/slack/mrkdwn.ts:1-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon already reuses ChatMarkdown; the Mermaid-in-chat and streaming-stability details are the only deltas worth checking.",
+    "notes": "Dependency list taken from the scout inventory (package.json) and file names; renderer bodies not read line by line."
+  },
+  {
+    "id": "qm-product-008",
+    "category": "Messaging core",
+    "name": "Attachments are model inputs, not just files",
+    "what": "Uploaded and Slack-shared documents (PDF, Office, text/code) are passed to the model natively where the provider supports it, otherwise extracted to text with explicit truncation and unsupported-format notices; images take the image path. At most ten documents and 8 MB are included per turn, newest first.",
+    "how": "docs/document-inputs.md route table (OpenAI Responses, Anthropic, Chat Completions, OpenRouter, Gemini, OpenCode, gateways); extraction in cancellable workers with a 10 s deadline and size caps; artifacts rehydrated from artifact refs so the tape stores no duplicate bytes; web composer supports attach, drag, folder drop and paste.",
+    "evidence": [
+      "docs/document-inputs.md:1-30",
+      "src/core/document-inputs.ts",
+      "src/core/document-text-worker.ts",
+      "plugins/web-ui/src/composer.ts:325-343",
+      "plugins/web-ui/src/folder-drop.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon rooms have no attachment path; the per-turn authorization recheck and 'untrusted data' labelling of document content are the parts to adopt with Data Plane ownership.",
+    "notes": "Doc and file names verified; extractor internals not read."
+  },
+  {
+    "id": "qm-product-009",
+    "category": "Messaging core",
+    "name": "Shared web threads are continuable by any scope member, with speaker labels",
+    "what": "In a project, channel or group, a web thread is one shared conversation: any current member can post the next message and each user message carries a speaker label. Slack-origin sessions open in the web as read-only (lock icon).",
+    "how": "isContinuable() is true for web:<user>:* threads and for any thread whose scope is channel: or group:; sessions.addParticipant records members; user entries carry a speaker field rendered as a speaker-label; per-viewer transcripts filter entries by scopeLabel.",
+    "evidence": [
+      "plugins/web-ui/src/core-bridge.ts:604-609",
+      "plugins/web-ui/src/chat.ts:343-354",
+      "plugins/web-ui/src/chat.ts:1708-1809",
+      "plugins/web-ui/src/sessions.ts:1051",
+      "src/api/app-sessions.ts:930-960",
+      "docs/memory-records.md:92"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "This is the exact semantic Verevon lacks: Session Core append is owner-bound so non-owner replies are refused and a room is one thread per author.",
+    "notes": "QM has no human-only message in web: every post is a turn, so shared threads are agent chats with several authors, not human chat. Project conversations keep a member-inherits-history behaviour per docs/memory-records.md, so a newly added member can read earlier thread entries that pass the audience filter."
+  },
+  {
+    "id": "qm-product-010",
+    "category": "Messaging core",
+    "name": "Read-only conversation snapshot links",
+    "what": "The Share button creates a fresh read-only copy of a conversation's visible messages, replies and attachments. The audience is either 'Anyone in your organization' (signed-in internal) or 'Anyone with the link' (bearer). Links are immutable; there are no update or revoke controls.",
+    "how": "Server builds an allowlist projection (user messages, final assistant replies, successful published replies, attachments); attachments are copied into separate durable share storage with share-specific file ids; creator access to the original entries is re-verified on every read; isolated frontend entry (shared.html) with no-store, no-referrer, noindex and a restrictive CSP; routes /v1/share and /v1/shared-sessions/:token.",
+    "evidence": [
+      "docs/session-sharing.md:1-13",
+      "src/api/routes/session-sharing.ts:152",
+      "plugins/web-ui/server/shared-session.ts",
+      "plugins/web-ui/src/session-share.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon plan S1.7 defers sharing until resource intersection is enforced; QM's allowlist projection plus read-time creator recheck is a safe minimal design.",
+    "notes": "No revoke is a known gap (explicit in the doc)."
+  },
+  {
+    "id": "qm-product-011",
+    "category": "Messaging core",
+    "name": "Visibility-preserving fork",
+    "what": "Any viewer can fork a conversation (optionally up to a clicked message). The fork copies only entries the viewer can see; for a project it copies only entries visible to every current member, then makes all members participants of the new thread, with a 'forked from' badge and audit record.",
+    "how": "forkSession() reads transcripts.forViewer for the caller and, for projects, intersects the visible seq sets of all members under projects.withRosterLock(); appends copied entries under a fresh lease, records forkedFrom and forkBoundarySeq, titles the copy '(fork)'.",
+    "evidence": [
+      "src/api/app-sessions.ts:930-1010",
+      "plugins/web-ui/src/fork-origin.ts",
+      "plugins/web-ui/server/index.ts:1947",
+      "src/types.ts:111-112"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon plan S1.7 names visibility-preserving fork as future work; QM already ships the intersect-visibility algorithm and roster-lock pattern.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-012",
+    "category": "Messaging core",
+    "name": "Conversation-level pins as agent-managed bookmarks",
+    "what": "A conversation can carry a few pins (a transcript entry by seq or a short note) shown at the top of the web view; in a Slack DM pinning an entry also pins the Slack message natively. The agent manages them through a surface-neutral API with a hard cap.",
+    "how": "POST/GET/DELETE /v1/pins resolve the conversation from the capability token (subagent threads resolve to their tree root); app.pinConversationItem enforces a pin limit (409 pin_limit). Guidance text tells the agent to use pins sparingly and keep them current.",
+    "evidence": [
+      "src/api/routes/pins.ts:6-60",
+      "src/api/agent-api-catalog.ts:363-378",
+      "src/harness/agent-tools.ts:2902-2915"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Pins/bookmarks are absent from Verevon rooms; a capped, agent-editable pin set is a low-cost shared-context affordance.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-013",
+    "category": "Messaging core",
+    "name": "Forwarded Slack messages are unfolded into the turn",
+    "what": "When a user forwards a message to the agent, the forwarded content and its files are merged into the incoming message so the agent sees the original text.",
+    "how": "messageWithForwardedContent() reads attachments/files of the forwarded payload and returns {text, files}; used by app_mention, DM and mirror paths.",
+    "evidence": [
+      "src/slack/forwards.ts:40-80",
+      "src/slack/events.ts:150",
+      "src/slack/mirror.ts:26-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Forwarding/quoting a message into an agent is a Teams/Slack table-stakes interaction Verevon rooms lack.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-014",
+    "category": "Messaging core",
+    "name": "Drafts and prefilled new chats",
+    "what": "Unsent composer drafts persist per conversation in the browser; a ?q= link opens a new chat with the prompt prefilled but never auto-submits.",
+    "how": "drafts.ts stores drafts in localStorage under a single key with try/catch; deep-link.ts parses q and fills an editable draft.",
+    "evidence": [
+      "plugins/web-ui/src/drafts.ts:19-54",
+      "plugins/web-ui/src/deep-link.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Per-viewer drafts are browser-local; Verevon could do the same or sync them via the Application plane.",
+    "notes": "Drafts do not follow the user across devices."
+  },
+  {
+    "id": "qm-product-015",
+    "category": "Org & membership",
+    "name": "Five scope kinds and a resource layering model",
+    "what": "Everything the agent owns hangs off a scope: personal, channel, group (also used for web projects), team and org. A turn mounts the org scope read-only as 'global', each applicable team scope read-only as team-<id>, and the active scope read-write.",
+    "how": "createResolutionService().resolve() builds WorkspaceLayer[] {scopeId, mountPath, mode}, composes org plus scope instructions, command policy, security posture, sharing posture, approval grant modes, egress floors and granted file handles in one call.",
+    "evidence": [
+      "src/resolution/resolution-service.ts:45-112",
+      "src/types.ts:19-53",
+      "src/types.ts:143-163"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "This resolver is the coherent 'one active scope' spine that Verevon's adoption plan (R/S sequence) is building as ResolvedSpaceContext; QM shows it working end to end for memory, files, crons, apps and sandbox.",
+    "notes": "Already known to the baseline comparison; the layering order and what is composed per turn are verified here."
+  },
+  {
+    "id": "qm-product-016",
+    "category": "Org & membership",
+    "name": "Separate read, write and manage checks per scope kind",
+    "what": "Read, write and manage rights differ by kind: any internal person can read a public channel but only members can write; private channels, groups and personal scopes require membership; manage is limited to private channels, groups and the owner's personal scope.",
+    "how": "createCanReadScope/createCanWriteScope/createCanManageScope plus createMembershipControlsScope and createManagesArtifactHome consult the directory (channelMember, channelPrivacy, groupMember), managed groups (projects) and identity classification (guests are never active principals).",
+    "evidence": [
+      "src/resolution/scope-membership.ts:194-256",
+      "src/resolution/scope-membership.ts:258-278",
+      "src/resolution/scope-membership.ts:41-44"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's Space roles are viewer/editor/manager/owner; QM's rule that artifact creators keep manage rights in public channels while membership controls private ones is a concrete policy table to compare.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-017",
+    "category": "Org & membership",
+    "name": "Projects: web-native group rooms with an owner and roster",
+    "what": "A Project is a named room created in the web UI with an owner and members. It is the web counterpart of a Slack group DM and has its own conversations, files, crons, skills, apps and settings.",
+    "how": "Project store persists {id, ownerId, memberIds, channelMemberIds, slackChannel}; its scope is group:web-project-<id>; mutations take a keyed queue plus advisory lock and expose a version string used as a roster fence; routes /v1/projects and /members; the agent can use the same API as the asking person.",
+    "evidence": [
+      "src/projects/project-store.ts:9-120",
+      "src/api/agent-api-catalog.ts:177-221",
+      "plugins/web-ui/src/contexts.ts:1010-1180"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Maps to Verevon 'room'/'project' Spaces; the owner-only add/remove with roster-version fencing and the agent being able to manage membership as the asking person are directly comparable.",
+    "notes": "Project authority is encoded in the group ref prefix 'web-project-', which Verevon's plan rejects."
+  },
+  {
+    "id": "qm-product-018",
+    "category": "Org & membership",
+    "name": "Project linked to a Slack channel: roster follows the channel",
+    "what": "A project can be linked to a Slack home channel. Everyone in the channel joins the project and the roster then follows the channel; the channel becomes the project's default delivery audience for crons and report-outs. Unlinking removes members who joined through the channel.",
+    "how": "PUT/DELETE /v1/projects/:id/slack-channel; project-store setSlackChannel() and syncChannelMembers() keep channelMemberIds separate from explicit members; a channel that already has its own agent workspace is refused with 409; the Projects page shows link status and an editor.",
+    "evidence": [
+      "src/api/agent-api-catalog.ts:209-221",
+      "src/projects/project-store.ts:25-60",
+      "plugins/web-ui/src/contexts.ts:523-690"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A concrete bridge pattern for Verevon's planned Slack/Teams mirror (S5.x): one canonical room, one external channel binding, membership synced one way with provenance.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-019",
+    "category": "Org & membership",
+    "name": "Team scopes (flagged): shared resources for groups of people",
+    "what": "Admins can define teams with members/admins and attach them to rooms. A team provides read-only files, skills and credentials to a turn when the speaker belongs to it, and the 'isolatedInOpen' option keeps a team's material out of Open rooms.",
+    "how": "teams/team_members/team_rooms tables; teamsForTurn() includes a team when the actor is on it and (own personal scope, or the room is configured for it, or every audience member is on it, or posture is open and the team is not isolatedInOpen); scopeTeamsToTurn() stamps teamIds and adds a prompt note when several teams apply. Gated by feature flag team_scopes (added 2026-10-11).",
+    "evidence": [
+      "src/teams/teams.ts:44-67",
+      "src/teams/teams.ts:166-221",
+      "src/feature-flags.ts:5-14"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A QM 'team' is a resource-sharing group, not a Teams-style chat container; Verevon has no team concept in org-core, so this is a model for team-scoped skills/credentials without channels.",
+    "notes": "New since the Aug baseline comparison; verified in code, behind a flag."
+  },
+  {
+    "id": "qm-product-020",
+    "category": "Org & membership",
+    "name": "Directory and visibility rules for channels, groups and DMs",
+    "what": "A Slack-synced directory knows people, channels, group DMs and membership, and answers 'can this person see that room' for DMs, groups, public and private channels. It also resolves names for the agent's reach/DM actions and the people picker.",
+    "how": "isVisible() implements the table (dm: same person; group: groupMember; channel: private requires membership, public visible, unknown privacy consults listChannelsFor). Postgres directory store with member lists; /v1/directory, /resolve and channel-member routes; Slack directory sync on join/leave/rename/privacy-change events.",
+    "evidence": [
+      "src/directory/visibility.ts:1-27",
+      "src/directory/directory-store.ts",
+      "src/slack/directory.ts",
+      "src/slack/events.ts:356-399"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Room discovery/self-join is absent from Verevon; QM's directory is Slack-derived, so Verevon would need an owner-plane directory (Control) rather than copying the source.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-021",
+    "category": "Org & membership",
+    "name": "Principal links: one person, several sign-ins",
+    "what": "A person reachable as a Slack id, an email magic link and an OIDC subject can be linked so ownership of credentials, admin grants, sessions and approvals follows the person. Links are flat, need recorded evidence, never create an admin, and are reversible.",
+    "how": "personKey/samePerson/canonicalPerson fold ids through an installed PrincipalLinkResolver; admin API /v1/admin/principal-links; portal caches the canonical lookup for one minute and refuses to proxy (503) if core cannot answer; self-service Slack linking verifies a signed ticket and workspace membership instead of trusting email similarity.",
+    "evidence": [
+      "docs/principal-links.md:1-60",
+      "src/directory/person.ts:13-55",
+      "src/api/routes/admin/principal-links.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon plan S5.1 lists an external identity link graph with anti-takeover flows as future work; QM's rules (flat, evidence, never makes admin, reversible) are a ready checklist.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-022",
+    "category": "Org & membership",
+    "name": "External (partner) Slack workspaces with isolated audience and private continuation",
+    "what": "When an opted-in Slack account has a partner workspace, every non-DM conversation is treated as an external audience: only company-domain employees can start work, the channel agent runs on its own restricted computer with no personal or org memory/skills/keychain, and a request needing private context is continued in the employee's DM with the originating request.",
+    "how": "SLACK_ACCOUNTS externalAccess {companyDomains, companyTeamIds, serviceCredentials}; externalSlackNamespace() creates a workspace-and-policy namespace so enabling or changing the policy starts a fresh restricted computer; private-continuation re-verifies employee membership against the originating account and opens a DM (self-only continuation directive).",
+    "evidence": [
+      "docs/external-slack.md:1-53",
+      "src/slack/external-access.ts:1-77",
+      "src/slack/private-continuation.ts:11-119",
+      "src/resolution/external-slack.ts:8-68",
+      "src/slack/turn-handler.ts:219-345"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Direct answer to Verevon's guest/external/shared-channel gap: treat an external audience as a distinct restricted namespace and move private work to a DM instead of widening the room.",
+    "notes": "Deployment-level config only; docs state there is no admin UI for it."
+  },
+  {
+    "id": "qm-product-023",
+    "category": "Org & membership",
+    "name": "Actor allowlist (emails/domains) with deny responder",
+    "what": "Operators can restrict who may use the Slack agent to exact emails or whole domains; bots and external guests are always refused; a deny message is rate-limited per hour per user.",
+    "how": "createActorGate() parses entries (email vs domain) and returns a predicate; createDenyResponder() keeps a bounded lastSent map with 1h TTL; applied to mentions, DMs and reactions before dispatch.",
+    "evidence": [
+      "src/slack/allow-from.ts:1-65",
+      "src/slack/events.ts:134-143",
+      "src/slack/events.ts:215-233"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "A simple admission gate Verevon would need before exposing an agent to a mixed Slack/Teams audience.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-024",
+    "category": "Org & membership",
+    "name": "Internal vs guest principals and invited external users",
+    "what": "Principals are typed internal or guest; guests and bots cannot interact with the agent. Outside collaborators can be invited through an admin route that requires an expiry.",
+    "how": "PrincipalType internal|guest; identity service classifies and tracks external members; POST/DELETE /v1/admin/external-users(/:email); admin README notes the external-user API requires an expiry and rejects org members.",
+    "evidence": [
+      "src/types.ts:4-17",
+      "src/identity/identity-service.ts:24-37",
+      "src/api/routes/admin.ts:166-167",
+      "plugins/admin/README.md:17-24"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Guest model for Verevon rooms; note QM states external users are outside the interaction boundary except through explicit Slack exceptions.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-025",
+    "category": "Org & membership",
+    "name": "Admin console and org-admin-only role model",
+    "what": "A separate admin surface lists users with admin status, promotes or revokes org admins (last admin protected), invites teammates (single-use sign-in link valid 24h, revocable), shows spend, transcripts, history, files, live runs, errors, audit, skills, crons, deployments and keychain metadata, and edits governance per scope.",
+    "how": "Admin plugin is a separate Lit/Node service talking to core over signed HTTP; admin identity comes only from the core's durable admin_grants store (ADMIN_GRANTS env is a one-time seed); org_admin is the only role (team_admin was removed); every read of content is authorized and audited.",
+    "evidence": [
+      "plugins/admin/README.md:1-60",
+      "plugins/admin/ui/admin.ts:1-30",
+      "src/admin/admin-service.ts:29-110",
+      "plugins/admin/ui/users.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Compare with Verevon's org-core RBAC; QM's admin-reads-content-with-audit stance is a privacy tradeoff Verevon should decide deliberately (SECURITY.md calls it a limitation).",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-026",
+    "category": "Org & membership",
+    "name": "Per-scope feature flags for staged rollout",
+    "what": "Nine named feature flags (app_annotations, persistent_subagents, responsive_spine, inbox_loops, slack_loading_indicator, external_app_sharing, loop_triage, swarms, team_scopes) can be enabled per person scope or org-wide by an admin.",
+    "how": "FeatureFlagStore over a durable map; enabled(name, scope) is true when the org scope or the given scope is listed; admin settings-flags UI toggles them; routes and tool offers check the flag.",
+    "evidence": [
+      "src/feature-flags.ts:5-50",
+      "plugins/admin/ui/settings-flags.ts",
+      "docs/swarms.md:9-28"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon gates Space effects with deny-by-default org policies; QM's per-person flags show a lighter pilot mechanism for new agent surfaces.",
+    "notes": "Nine flags widen the config matrix; QM's own Wall of Shame warns about this."
+  },
+  {
+    "id": "qm-product-027",
+    "category": "Org & membership",
+    "name": "Agent-led onboarding",
+    "what": "A new user is onboarded by the agent itself: connect accounts, pick a voice, read a real work snapshot, then propose concrete help (crons, apps). State lives in the memory notebook as a marker line, and admins get a guided Slack-bot setup path.",
+    "how": "plugins/onboarding skill (SKILL.md) rewrites the notebook with '- Onboarding: pending v2 since <date>.' and flips it to completed; web onboarding-welcome/welcome-ideas empty states; admin onboarding tab walks model provider, Slack app and OAuth apps.",
+    "evidence": [
+      "plugins/onboarding/skills/onboarding/SKILL.md:1-45",
+      "plugins/web-ui/src/onboarding-welcome.ts",
+      "plugins/admin/ui/onboarding.ts",
+      "plugins/web-ui/src/onboarding-slack.ts",
+      "plugins/web-ui/src/slack-setup.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon onboarding is UI-led; making the agent run it and persist progress in memory is a cheap personal-agent activation pattern.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-028",
+    "category": "Calls & meetings",
+    "name": "Calendar tab is a placeholder",
+    "what": "The web UI has a Calendar nav row (for people with inbox access) that shows only 'Coming soon'. Calendar data is reachable only through the agent's Google Workspace skill.",
+    "how": "renderCalendar() renders a pane head and an empty state; no routes or storage behind it. Calendar reads/writes go through skills-seed/google-workspace using the user's OAuth.",
+    "evidence": [
+      "plugins/web-ui/src/calendar.ts:1-18",
+      "plugins/web-ui/src/shell.ts:635",
+      "skills-seed/google-workspace/SKILL.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 1,
+    "uniqueness": "common",
+    "verevonRelevance": "QM offers no calls, huddles, screen share, recording or meeting chat; there is nothing to copy here, and the scout's 'Calendar tab shipped' claim should be downgraded to stub.",
+    "notes": "Corrects qm.inventory.md section 3.3/7a which lists the Calendar tab as shipped."
+  },
+  {
+    "id": "qm-product-029",
+    "category": "Search & discovery",
+    "name": "Cmd+K overlay: conversation entries plus resources",
+    "what": "Cmd/Ctrl+K opens a search overlay that returns matching conversation entries (title, author, snippet, seq, archived flag) and, in parallel, skills, crons, apps, webhooks and projects, grouped by recency.",
+    "how": "registerChatSearchHotkey(); chat hits from /api/search (entry-search over the Postgres session store); resource hits from /api/resources/search (core resource-search over skills, crons, deployments, webhooks, contexts); debounce 150 ms; min query length 2; keyboard selection.",
+    "evidence": [
+      "plugins/web-ui/src/search.ts:19-56",
+      "plugins/web-ui/src/search-resources.ts:6-35",
+      "src/search/resource-search.ts",
+      "src/sessions/entry-search.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has no Space message/thread search; QM scopes search to conversations the viewer participates in and merges resource results in the same overlay.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-030",
+    "category": "Search & discovery",
+    "name": "Agent search across mirrored channel history and live Slack as the asker",
+    "what": "The agent can search the local mirror of channels it is in, or run Slack's own full-history search as the asking person through their connected Slack login, so it sees exactly what that person can see and never anyone else's DMs.",
+    "how": "Surface tool action 'search' has source=mirror|slack; the mirror is a Postgres table with a generated tsvector and GIN index; guidance forbids quoting a person's DM/private results into a room.",
+    "evidence": [
+      "src/harness/agent-tools.ts:3368-3445",
+      "src/surface-cache/surface-cache.ts:62-110",
+      "src/slack/surface-context.ts:53-75"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Search-as-the-asker is the right authority model for a shared room agent; Verevon's retrieval decisions already express this, but not for message history.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-031",
+    "category": "Search & discovery",
+    "name": "Conversation search for the agent: sessions search and history tool",
+    "what": "The agent can search across conversations visible to everyone in the room (sessions.search) and reopen exact entries by seq, or search only the current conversation's own durable transcript including parts compacted out of context.",
+    "how": "sessions tool action=search returns sessionId and entry seq references and does not widen read access; history tool does keyword search (all terms) or reopens one entry by seq; indexed conversation search added in git ada7af76.",
+    "evidence": [
+      "src/harness/agent-tools.ts:1460-1528",
+      "src/harness/agent-tools.ts:1741-1760",
+      "src/sessions/history-search.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Gives agents exact-recall of prior decisions without stuffing context; Verevon Session Core has transcripts but no agent-facing search tool.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-032",
+    "category": "Search & discovery",
+    "name": "Memory recall is notebook injection plus all-words search",
+    "what": "Built-in memory is a per-scope notebook whose tail (up to 6,000 characters) is injected each turn, with deltas after the first recall in a context; the memory tool searches facts that match every query word. The SPEC's 'vector search' claim is not what the built-in store does.",
+    "how": "recallBody() = capTail(body, RECALL_MAX_CHARS=6000); queryBullets() is a case-insensitive all-terms filter; recall-delta.ts folds repeat recalls; external providers (MCP memory provider, Memorable) can replace the strategy per scope.",
+    "evidence": [
+      "src/memory/notebook.ts:1",
+      "src/memory/memory-service.ts:85-88",
+      "src/memory/memory-service.ts:129",
+      "src/memory/recall-delta.ts:1-50",
+      "docs/SPEC.md:25"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's learned memory is richer (semantic/Dreaming); QM's lesson is the per-scope audience-labelled notebook and cheap deltas, not its retrieval quality.",
+    "notes": "Corrects the SPEC claim; vector recall may exist only in external providers."
+  },
+  {
+    "id": "qm-product-033",
+    "category": "Search & discovery",
+    "name": "People directory resolve used by pickers and agent reach",
+    "what": "People are searchable by name/email when adding project members or addressing a teammate; the agent resolves names to recipients with ambiguity and not-in-channel errors written for the model.",
+    "how": "/api/directory/resolve and people-results.ts feed the member picker; reach target resolution returns ok/ambiguous/none with explicit messages (private channel, unlinked login).",
+    "evidence": [
+      "plugins/web-ui/src/people-results.ts",
+      "src/resolution/scope-reach.ts:9-42",
+      "src/reach/reach.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has a per-Space Control roster and org members list but no cross-org directory search; the error vocabulary for failed lookups is reusable.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-034",
+    "category": "Notifications & attention",
+    "name": "Live per-conversation attention state in the sidebar",
+    "what": "Each conversation row shows whether the agent is working or waiting for the person's approval, updated live without a reload; the conversation header reads 'Needs your approval' while an approval is pending.",
+    "how": "SSE session_state events {threadRef, state working|awaiting_approval|idle|metadata, participants} come from an in-process (or Postgres NOTIFY backed) bus; the browser applies them with applySessionState() which ignores stale deltas by timestamp and re-fetches on resync frames.",
+    "evidence": [
+      "src/runs/session-state-bus.ts:5-14",
+      "src/api/routes/session-state.ts:1-45",
+      "plugins/web-ui/src/session-list.ts:168-185",
+      "plugins/web-ui/src/conversations.ts:82-115",
+      "plugins/web-ui/src/chat.ts:1457"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon polls room state every 6 s with no cross-room aggregate; QM's single multiplexed state stream with resync is the minimal push design for sidebar attention.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-035",
+    "category": "Notifications & attention",
+    "name": "Inbox 'waiting on you' badge",
+    "what": "The Inbox navigation row shows a capped count (99+) of open items waiting on the person.",
+    "how": "inboxOpenCount() counts ledger items in open statuses; inboxNavRow() renders a nav-badge with aria-label '<n> waiting on you'; realtime inbox_item SSE frames keep it fresh.",
+    "evidence": [
+      "plugins/web-ui/src/shell.ts:546-562",
+      "plugins/web-ui/src/inbox.ts:377",
+      "plugins/web-ui/src/core-bridge.ts:1546-1553"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Badge-on-nav for human review queues is the only unread-style counter QM has; Verevon's sidebar lacks any cross-room aggregate.",
+    "notes": "No per-conversation unread counts, mute, snooze or DND exist (verified by grep)."
+  },
+  {
+    "id": "qm-product-036",
+    "category": "Notifications & attention",
+    "name": "Durable delivery outbox for every agent message",
+    "what": "All agent output that leaves a turn (replies, cron results, approvals, DM relays, keychain cards) is enqueued with an idempotency key, claimed by a surface worker with a TTL, acknowledged, and expired when overaged; deliveries carry provenance (source thread, session, entry seq), an edit reference and a shadow mode for dry runs.",
+    "how": "DeliveryStore.enqueue/claimPending/ack/ackByKey/setEditRefByKey/listBySourceSession with maxAge expiry; the Slack worker retries up to 5 attempts and reports permanently undeliverable errors back to core; SPEC records that proposals for backoff and parked states were rejected in favour of simply expiring stale deliveries.",
+    "evidence": [
+      "src/delivery/delivery-store.ts:38-100",
+      "src/slack/delivery.ts:296-330",
+      "src/slack/deliveries.ts:150-200",
+      "docs/SPEC.md:46"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's planned S4.4 delivery ledger (pending/claimed/sent_unconfirmed/acknowledged/unknown) can be compared with this smaller shape; QM chose simpler semantics and explicitly rejected exponential backoff and parked states.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-037",
+    "category": "Notifications & attention",
+    "name": "Provenance footer on relayed and scheduled messages",
+    "what": "Messages the agent sends on someone's behalf say so ('Sent for @name'), and cron deliveries carry the cron title with a Settings link back to the web UI, so recipients can tell relays and automations from ordinary replies.",
+    "how": "Destination.relaySender is set when attributeAs differs from the sender; deliveryFooter() renders a context block with 'Sent for @x' and '<title> · Settings'; delivery provenance records trigger, fireKey and source thread.",
+    "evidence": [
+      "src/slack/deliveries.ts:159-176",
+      "src/reach/reach.ts:262-325",
+      "src/types.ts:208-240"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Any Verevon room that lets an agent message a person for someone else needs this attribution contract to avoid impersonation.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-038",
+    "category": "Notifications & attention",
+    "name": "Personalised suggested activities and morning digest",
+    "what": "A scheduled personal session writes three suggested starters for the person's new-chat screen (paused automatically when the person is inactive), and a seed skill delivers a single morning digest built from the person's connected sources.",
+    "how": "createSuggestedActivityService() keeps a profile {cronId, lastSeenAt, managedSchedule, autoPaused}; the generation task is a quiet research prompt returning exactly three {id,title,prompt,icon}; morning-digest skill keeps per-source checkpoint files and says so when nothing changed.",
+    "evidence": [
+      "src/suggestions/activities.ts:1-60",
+      "skills-seed/morning-digest/SKILL.md:1-30",
+      "plugins/web-ui/README.md:48-80"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Proactive digest plus activity suggestions are cheap, high-value attention features that Verevon's cron/watch stack could host once delivery targets exist.",
+    "notes": "There is no push gateway; digests arrive via Slack DM or the web conversation."
+  },
+  {
+    "id": "qm-product-039",
+    "category": "Apps & extensibility",
+    "name": "Skills as the main extension unit with a review lifecycle",
+    "what": "Skills are SKILL.md packages owned by a scope (personal, channel/group, team, org), moving through draft, reviewed, published and archived, HMAC-signed, promotable or movable between scopes, shortlisted and materialised lazily on explicit access. 25 seed skills ship (connectors, publish, hand-off, request-access, browse, define-loop and others).",
+    "how": "SkillStore.create/update/review/publish/archive/restore/resolve/visibleFor/promote/move; signatures verify manifests; the agent's skills tool lists, searches and reads without starting a sandbox; supporting files are written under .agent-skills/<conversation>/<name>/ on read and removed when the speaker cannot see them.",
+    "evidence": [
+      "src/skills/skill-store.ts:1-105",
+      "docs/skill-registry.md:74-88",
+      "skills-seed/",
+      "src/harness/agent-tools.ts:1069-1133"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's plan S3.5 consolidates governed skills; QM already shows per-scope ownership, review step, signature and grant-based sharing in one store.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-040",
+    "category": "Apps & extensibility",
+    "name": "Skill packs imported from git with eligibility and pinning",
+    "what": "An org admin registers a git repo of SKILL.md files at a pinned ref; one general normalizer maps any frontmatter dialect, ineligible skills (personal, private, colliding, binary, malformed) are excluded with a visible reason, and imported skills appear as governed published records with pack provenance. Update means bump the ref and re-import; removing the pack archives its skills.",
+    "how": "/v1/admin/skill-packs* (org_admin, audited) with register/catalog/import/patch/delete; authCredentialSlug references an org service credential for private repos; trustTier tag; pack-fetcher and normalize.ts.",
+    "evidence": [
+      "docs/skill-registry.md:1-72",
+      "src/skills/pack-fetcher.ts",
+      "src/skills/normalize.ts",
+      "src/api/routes/skill-packs.ts:185-190"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Supply-chain-safe skill import is a Verevon plan item (S3.5); the eligibility reasons and pinned-ref model are directly reusable.",
+    "notes": "Phase A is org-scope only; tracked sync is a later phase."
+  },
+  {
+    "id": "qm-product-041",
+    "category": "Apps & extensibility",
+    "name": "Skill edit review gate in the web UI",
+    "what": "Publishing or changing a skill in a shared scope requires the author to review the exact description and body first; any edit invalidates the review and double clicks are blocked.",
+    "how": "reviewMatches()/createReviewMatches() compare the reviewed text to the draft; the Publish button label switches from 'Review' to 'Publish change/skill' only when they match; scope title shown in the confirmation.",
+    "evidence": [
+      "plugins/web-ui/src/skill-edit-review.ts:1-33",
+      "plugins/web-ui/src/skills.ts:309-396",
+      "plugins/web-ui/src/skills.ts:405-521"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A small human-in-the-loop for shared-scope behaviour changes that Verevon's Space skills cockpit (S3.5) can copy.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-042",
+    "category": "Apps & extensibility",
+    "name": "Inbound webhooks with provider signature verification",
+    "what": "Agents register webhook endpoints that wake a turn when an external system POSTs; the creator receives the URL and secret once. Verification schemes are github, slack, stripe, linear and hmac-sha256; optional path filters skip uninteresting events; delivery destinations mirror crons; message history and session links are kept.",
+    "how": "webhook tool create/list/disable; webhook-receiver with constant-time compare per scheme (github sha256=, slack v0 with timestamp, stripe t.body, linear); filters like [{path:'action', in:['opened']}] gate the turn; the UI lists events per webhook.",
+    "evidence": [
+      "src/webhooks/verifiers.ts:22-140",
+      "src/harness/agent-tools.ts:2770-2800",
+      "plugins/web-ui/src/webhooks.ts",
+      "src/webhooks/webhook-receiver.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's Convex webhooks table is legacy and not Space-scoped; a Space-owned inbound webhook with signed verification is an obvious extension point.",
+    "notes": "Corrects the scout inventory, which listed only hmac-sha256."
+  },
+  {
+    "id": "qm-product-043",
+    "category": "Apps & extensibility",
+    "name": "Crons with shift-change notes, runAs modes and destinations",
+    "what": "Scheduled agent work supports calendar cron plus timezone, sub-day intervals, one-shot times, a human title, either a re-evaluated task or verbatim text, delivery to the current conversation, a teammate DM, a channel or a group DM, a fire log, a note that the next fire reads, per-cron runtime overrides, and run modes owner, scopeShared and scopeFloor.",
+    "how": "cron tool actions create/list/get/runs/patch/delete/run/disable/note/retarget/share; deterministic fire keys and slot claims via fire-store and pg-boss job queue; fires appear as 'running' the moment they start; a cron in a shared scope defaults to scopeShared where any member can edit and the owner is notified of edits.",
+    "evidence": [
+      "src/harness/agent-tools.ts:2280-2345",
+      "src/cron/fire-store.ts:37",
+      "src/cron/scheduler.ts:41-45",
+      "plugins/web-ui/src/crons.ts",
+      "src/triggers/edit-notice.ts:41"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon cron is at parity per the baseline; the 'shift-change note' and runAs modes are the usability and authority details worth adding to Space schedules.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-044",
+    "category": "Apps & extensibility",
+    "name": "Loops: durable work queues with playbooks, ship gates and a governor",
+    "what": "A Loop is 'a cron with a memory and a gate': a trigger (schedule, signed webhook, Slack events, Gmail Pub/Sub), a playbook, a ledger of work items that persist across fires, outputs held for human review, and a governor that quarantines or throttles unhealthy loops.",
+    "how": "Loop {playbook, successCondition, successChecks, shipActions[{action,gate}], caps, governor, runAs, health}; define-loop skill requires a shadow run on one real item before arming; decideShip() returns auto|hold|undeclared and standing ship grants require an org that allows 'always'; evaluateGovernor() degrades on consecutive failures or a high human return rate.",
+    "evidence": [
+      "src/types.ts:376-401",
+      "src/loops/ship-gate.ts:19-73",
+      "src/loops/governor.ts:1-60",
+      "skills-seed/define-loop/SKILL.md:1-60",
+      "docs/loop-ingestion.md:1-58"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Maps to Verevon's planned unified Work cockpit (S4.5) and watches; the shadow-run-before-arming rule and the return-rate governor are portable patterns.",
+    "notes": "SPEC's Wall of Shame names loops a past over-engineering (it should have reused cron machinery); flagged inbox_loops."
+  },
+  {
+    "id": "qm-product-045",
+    "category": "Apps & extensibility",
+    "name": "Durable watches and background processes that wake the conversation",
+    "what": "A long command launched with execute background:true returns a process id; the agent can poll with a cursor, stop it, or arm a watch so new output (optionally pattern-matched) and the exit wake the conversation as a new turn instead of polling.",
+    "how": "background tool actions poll/send_input/stop/list/watch/unwatch; watch is a durable monitor with cursor, heartbeat, expiry and instructions-to-self; each job has a hard TTL; background jobs retain their original sandbox target.",
+    "evidence": [
+      "src/harness/agent-tools.ts:1932-1975",
+      "src/monitors/monitor-broker.ts:73",
+      "docs/sandbox-resources.md:11-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon capability-core already has a watch primitive that is not exposed; QM shows the user-facing tool shape and the wake-with-instructions contract.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-046",
+    "category": "Apps & extensibility",
+    "name": "Connected apps through OAuth consent links and Composio",
+    "what": "People connect apps through OAuth with consent links that can be minted and redeemed (so a request in Slack opens a browser flow bound to the right person), and a Composio toolkit catalogue provides many more apps through the person's own account.",
+    "how": "/v1/connectors/oauth/* (start, consent mint/redeem, revoke, status, catalog), /v1/composio/* (toolkits, connections, authorize, execute, identity); providers in source: x, google, github, slack, notion, linear, dropbox; the Composio project key never reaches the sandbox.",
+    "evidence": [
+      "src/api/routes/connectors.ts:130-260",
+      "src/api/routes/composio.ts",
+      "docs/composio.md",
+      "src/connectors/consent-link.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has broader OAuth/connectors; the wrong-recipient check on consent redemption (audited event) is a useful abuse control for links posted in shared rooms.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-047",
+    "category": "Apps & extensibility",
+    "name": "MCP client with per-user credentials",
+    "what": "Admins register HTTP MCP servers; credentialScope shared uses one configured credential while per-user uses the initiating person's connector token, chosen by the runtime and never by tool arguments.",
+    "how": "PUT /v1/admin/mcp-servers/:id; mcp-client with SSE handling; per-user mode needs persistent keychain encryption (CONNECTOR_SECRET_KEY) and account-type slots default/personal/company.",
+    "evidence": [
+      "docs/mcp-connectors.md:1-57",
+      "src/mcp/mcp-client.ts",
+      "src/mcp/mcp-tool-service.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's MCP ownership is not Space-scoped; QM's 'actor chooses credential, arguments cannot' rule is the key invariant for shared rooms.",
+    "notes": "QM does not expose its own MCP server (verified: only a dev dependency)."
+  },
+  {
+    "id": "qm-product-048",
+    "category": "Apps & extensibility",
+    "name": "Client-executed tools",
+    "what": "A turn can call tools that the calling client executes and returns, using a client_result run signal, so a trusted client can offer capabilities the server cannot reach.",
+    "how": "ClientToolDeclaration passed per turn; RunSignal kind client_result carries callId and ClientToolResult; orchestrator external-tools bridges them. Used by the reverted ui-state skill to request a DOM snapshot from the person's open tab.",
+    "evidence": [
+      "src/runs/run-signal-store.ts:6-25",
+      "src/core/orchestrator/external-tools.ts",
+      "src/api/routes/turns.ts:158",
+      "src/harness/harness.ts:130"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "An approach for browser/desktop-local capabilities (clipboard, screenshots) that Verevon's Frontend Plane could expose without a server-side browser.",
+    "notes": "The consumer, ui-canvas/ui-state, was added on 2026-10-09 and reverted a day later."
+  },
+  {
+    "id": "qm-product-049",
+    "category": "Apps & extensibility",
+    "name": "Agent self-API catalogue with run-bound capability tokens",
+    "what": "The agent can do through HTTP what the web UI can do (projects, crons, webhooks, pins, conversations, deployments, files, loops, swarm, reach, keychain asks and more) via a discoverable /v1/apis catalogue. Tokens are bound to the session, run attempt and execution lease and always act as the asking person.",
+    "how": "agent-api-catalog.ts defines API families with guidance text and a 'when' predicate (admin only, swarms enabled); x-agent-capability tokens are signed, expire after 48h by default and may be deflate-compressed when rosters are large; swarm operations require a token minted for a real durable run.",
+    "evidence": [
+      "src/api/agent-api-catalog.ts:1-60",
+      "src/api/agent-api-catalog.ts:177-221",
+      "src/auth/capability-token.ts:11",
+      "docs/capability-tokens.md:1-50"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's V3 action registry plus drift guards covers the same 'agent UX = human UX' goal; QM's token-bound-to-run-lease and 'always the asking person' rules are a tighter authority contract to compare.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-050",
+    "category": "Apps & extensibility",
+    "name": "Admin operations exposed to the agent through existing handlers",
+    "what": "An admin can ask the agent to perform admin work (read users, spend, audit, settings) through an 'admin' tool that calls the same handlers and rechecks authority on every call; some actions stay portal-only.",
+    "how": "adminOperations table in src/tools/admin.ts is wrapped as a resource tool; only whoami is offered when operations are unavailable; description forbids secrets in arguments and requires confirmation of mutations.",
+    "evidence": [
+      "src/harness/agent-tools.ts:3319-3345",
+      "src/tools/admin.ts",
+      "docs/SPEC.md:48"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Agent-driven administration is attractive for Verevon admin ergonomics but must keep Verevon's rule that grant, role and approval decisions stay outside agents.",
+    "notes": "SPEC records the first design as over-engineered (a roughly 4,580-line patch replaced by a thin tool), but marks those size and rejection claims as unverified."
+  },
+  {
+    "id": "qm-product-051",
+    "category": "Apps & extensibility",
+    "name": "Slash-style skill picker in the web composer (no Slack slash commands)",
+    "what": "Typing '/' in the web composer opens a skill picker that inserts the skill; the Slack app defines no slash commands, relying on mentions, DMs and Block Kit buttons.",
+    "how": "SLASH_TOKEN regex over the draft; slashMenu() lists skills from the scope and the composer sends them as an invocation hint; Slack manifest has no slash command features.",
+    "evidence": [
+      "plugins/web-ui/src/composer.ts:171-176",
+      "src/slack/manifest.json:1-50"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon already has a '/' skill picker; QM confirms slash commands are not needed for a Slack-resident agent.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-052",
+    "category": "Apps & extensibility",
+    "name": "Slack app manifest with Agents and AI Apps pin",
+    "what": "A one-paste Slack manifest creates a bot with mention, DM, channel, group, file, reaction, pin and emoji scopes, interactivity for approval buttons, Socket Mode, and the Agents top-bar pin (agent_view) whose conversations are ordinary DM threads.",
+    "how": "manifest.json declares 25 bot scopes and 14 bot events including assistant_thread_started/context_changed (acknowledged as no-ops); optional provider-managed install; HTTP events mode as an alternative to Socket Mode.",
+    "evidence": [
+      "src/slack/manifest.json:1-60",
+      "src/slack/README.md:24-41",
+      "src/slack/events.ts:401-402"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Concrete scope list and event set for the Slack adapter Verevon plans in S5.3.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-053",
+    "category": "Apps & extensibility",
+    "name": "Secret drop forms keep secrets out of chat",
+    "what": "When the agent needs a secret it mints a one-time URL (7 day TTL) for a form with labelled fields; the person submits the secret there and it goes straight to their keychain, optionally with a grant to the conversation, so it never appears in a message.",
+    "how": "SecretDropStore.mint/peek/redeem with take-on-redeem semantics; records carry owner, service, fields, audienceScopeId, grantMode and destination; sibling drops for the same thread can be completed together; secret-drop pages styled like the web UI.",
+    "evidence": [
+      "src/credentials/secret-drop.ts:1-83",
+      "src/api/routes/secret-drop.ts",
+      "docs/demos/credential-approvals.html"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A forms primitive for shared rooms where people must hand an agent a credential without posting it; fits Verevon's Control-owned credentials.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-054",
+    "category": "Apps & extensibility",
+    "name": "Surface plugins that cannot import core",
+    "what": "Web UI, admin, portal and auth are separate services that talk to core only over signed HTTP; AGENTS.md forbids plugins importing core except through a shared chassis package; Slack is the one in-process plugin core supervises.",
+    "how": "plugins/chassis provides signed core client, source-auth signer, router, branding and claims; surface requests are HMAC-signed and replay-checked; routes carry auth modes (source, capability, either).",
+    "evidence": [
+      "AGENTS.md:33-38",
+      "plugins/chassis/src/core-client.ts:9",
+      "src/auth/source-auth.ts:8",
+      "src/auth/replay-dedupe.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Matches Verevon's no-cross-plane rule; the chassis is a model for a Frontend/Channel adapter contract (plan S5.1).",
+    "notes": "This is a repo-package boundary, not a runtime plugin loader."
+  },
+  {
+    "id": "qm-product-055",
+    "category": "Apps & extensibility",
+    "name": "Deployment directory and qm CLI",
+    "what": "Operators keep config, custom skills, sandbox images and infrastructure in a deployment directory that the qm CLI validates, plans and deploys (check, plan, up, doctor, rollback, proof and more), with typed secret routing and image digest evidence.",
+    "how": "qm init materialises a directory and a deploy skill for an agent; 22 CLI commands; layers under deploy/layers/<org>/ keep org-private material separate from core.",
+    "evidence": [
+      "README.md:1-60",
+      "cli/README.md",
+      "docs/getting-started.md:1-30",
+      "cli/src/cli.ts:244-590"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon plan S/R references a release contract; QM's check/plan/up/live-check verbs and digest evidence are a template.",
+    "notes": "Not a Space feature; relevant to operating many Verevon org deployments."
+  },
+  {
+    "id": "qm-product-056",
+    "category": "Agents in the room",
+    "name": "One agent per scope with its own durable computer",
+    "what": "The agent is not a user object; it is a resident of a scope. Every person and every room has its own sandbox (files, installed tools, caches) plus memory, crons, apps and keychain view, and parallel computers are encouraged because durable state belongs in Postgres or object storage.",
+    "how": "Sandbox interface with provision/exec/process sessions/teardown and an AgentComputerProfile {backend, writablePersistence, processSessions, parksOnTeardown, egressEnforcement, spec}; sandbox resources are independently recorded with owner scope, provider, lifecycle; agent can list/create/set_default/status/restart/retire.",
+    "evidence": [
+      "docs/SPEC.md:19-21",
+      "src/sandbox/sandbox.ts:57-70",
+      "docs/sandbox-resources.md:1-40",
+      "src/harness/agent-tools.ts:932-1068"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "This is the 'agent with its own PC' unit Verevon lacks for Spaces (only a credential-free code_interpreter lease exists); the per-scope computer plus agent-managed inventory is the pattern to port through sandbox-manager.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-057",
+    "category": "Agents in the room",
+    "name": "Ten interchangeable sandbox backends behind a capability profile",
+    "what": "The same agent runs on Sprites, smolmachines, E2B, Modal, Porter, Agent37, Superserve, DigitalOcean Managed Agents, AWS microVMs or local Docker. A profile states persistence, process sessions, egress enforcement and spec so the platform and the model do not assume what a backend lacks.",
+    "how": "SANDBOX_BACKEND enum validated in config; per-scope-kind overrides via SANDBOX_SCOPE_BACKENDS; sandbox-routing refuses to substitute another computer and throws CapabilityUnsupportedError when a backend lacks a capability; egress enforcement is conditional (config warns 'fail-open' when proxy URLs are missing).",
+    "evidence": [
+      "src/config.ts:1050-1067",
+      "src/config.ts:1262-1294",
+      "src/sandbox/sandbox.ts:57-95",
+      "src/sandbox/sandbox-routing.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Confirms the baseline's 'substrate capability profile' pattern; Verevon should publish a Model-owned profile and fail closed on downgrade; QM refuses substitute computers and unsupported capabilities but only warns when egress enforcement is missing.",
+    "notes": "Fly is a deploy provider, not a sandbox backend."
+  },
+  {
+    "id": "qm-product-058",
+    "category": "Agents in the room",
+    "name": "execute can target scoped, scratch, owner-auth or another room's computer",
+    "what": "The single command tool runs on the conversation's own computer by default, or on a blank per-turn scratch box, or on an invocation-only 'owner' box that carries the speaker's own credentials without putting them on the shared computer, or (read-only by etiquette) on another room's computer the speaker also belongs to, or on a named sandbox_id.",
+    "how": "execute accepts scope scoped|scratch|owner|<room> and durable/background/credentials/sandbox_id; owner is available to the live speaker in Open conversations and to owner-authorised shared automation and is destroyed at turn end; reached-room output is labelled provenance 'external, reached room'.",
+    "evidence": [
+      "src/harness/agent-tools.ts:769-800",
+      "src/harness/agent-tools.ts:876-920",
+      "src/harness/agent-tools.ts:734",
+      "SECURITY.md:84-100",
+      "docs/sandbox-resources.md:5-9"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Best-in-class answer to 'use my login without putting it in the room's computer'; maps onto Verevon's rule that Space access never widens an owner-plane ACL.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-059",
+    "category": "Agents in the room",
+    "name": "Org read-only, team read-only and scope read-write workspace layers",
+    "what": "The agent sees the org's shared material mounted read-only under global/, each applicable team under team-<id>/, and writes only to the active scope's workspace; grants to other scopes appear as shared/<name> handles.",
+    "how": "WorkspaceLayer {scopeId, mountPath, mode}; granted handles come from AclStore.handlesForAudience, which intersects what every audience member is entitled to; carried (Open posture) handles are read-only and capped at 200 files from up to 25 recent shared contexts.",
+    "evidence": [
+      "src/resolution/resolution-service.ts:69-77",
+      "src/acl/acl-store.ts:28-50",
+      "src/resolution/sharing-access.ts:12-126"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon plan S3.3 proposes the same org RO layer, Space RW volume and per-run overlay.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-060",
+    "category": "Agents in the room",
+    "name": "Per-scope memory notebook with sensitivity and provenance records",
+    "what": "Each scope has an append-mostly notebook of short facts. Records carry a stable id, sensitivity (ordinary, unknown, sensitive, restricted) and source scope/session; captures classify conservatively, consolidation never mixes sources, and a whole-notebook rewrite inherits the combined restrictions of the old content.",
+    "how": "Postgres memory_revisions.records is authoritative with Markdown as the rendering; classifiedMemory() asks a helper model for a label and takes the strictest of caller and model; strategies agent-only, consolidation, per-turn and scratch-promote; Memorable procedural memory and MCP memory providers plug in per scope.",
+    "evidence": [
+      "docs/memory-records.md:1-48",
+      "src/memory/classification.ts:1-48",
+      "src/memory/records.ts",
+      "src/memory/provider-router.ts:1-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Directly addresses the baseline's 'shared-room facts auto-copy into personal memory' reject item; Verevon has no Space memory scope and should start with sensitivity and provenance on every record.",
+    "notes": "Changed since the Aug 13 baseline (git 58a9dc63, 2026-09-29)."
+  },
+  {
+    "id": "qm-product-061",
+    "category": "Agents in the room",
+    "name": "Audience-checked memory disclosure and context cutoff on audience change",
+    "what": "Memory is checked at read time against the current audience: every source must still be readable by the actor, sensitive or restricted facts need every recipient entitled, unknown provenance stays narrow, and carrying personal facts into a shared room requires current Open policy at both ends. When the audience of a conversation changes, earlier model history, summaries and approvals cannot re-enter the next turn.",
+    "how": "memoryDisclosurePolicy() caches decisions per request only; buildMemoryContextSnapshot() fingerprints scope plus sorted audience ids; nextMemoryContext() sets throughSeq to the latest seq when the fingerprint changes and memoryBoundedEntries() drops anything older from replay.",
+    "evidence": [
+      "src/memory/disclosure.ts:1-207",
+      "src/memory/context-boundary.ts:35-58",
+      "docs/memory-records.md:49-92",
+      "docs/session-tape-spec.md:17-36"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "The strongest leak-prevention design seen in the QM audit (compare with the other reference audits): Verevon's audience snapshots and revisioned decisions could drive the same 'audience changed, cut the replay' rule.",
+    "notes": "Next-turn isolation only; not cancellation of an in-flight model request."
+  },
+  {
+    "id": "qm-product-062",
+    "category": "Agents in the room",
+    "name": "Memory notebook editor with revision history",
+    "what": "People can read, search, edit and delete facts in their scope's notebook, with compare-and-swap by revision, a revision history view and restore.",
+    "how": "/api/memory GET/PUT with revision token, /api/memory/history, /api/memory/restore; facts() parses bullets with optional (YYYY-MM-DD) dates; raw editing toggle; confirmation dialog for destructive actions.",
+    "evidence": [
+      "plugins/web-ui/src/memory.ts:10-60",
+      "plugins/web-ui/src/memory.ts:163-180",
+      "plugins/web-ui/server/index.ts:2094-2110"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's Memory page is blocked on a plane decision; QM's revisioned, human-editable notebook is the UX to target.",
+    "notes": "Restoration inherits the restrictions of intervening revisions and never declassifies."
+  },
+  {
+    "id": "qm-product-063",
+    "category": "Agents in the room",
+    "name": "Ambient judge: a cheap observer decides when to speak in a channel",
+    "what": "In channels and group DMs a small judge model reads batches of overheard messages and decides to engage only when the agent is addressed, clearly needed, or a standing order matches; silence is the default. Ambient behaviour defaults off until a channel has standing orders or action-bot triggers, and can be switched off per channel or org-wide.",
+    "how": "judgeAmbientBatch() with a system prompt returning {act, reason, asked_by}; judgeAmbientContainer() keeps a cursor per container, a backdrop of earlier messages, skips handled messages, records every judgment (decision, reason, prompt, model, latency) for an admin view and spawns a worker turn on 'act'.",
+    "evidence": [
+      "src/surface-cache/ambient-judge.ts:4-117",
+      "src/api/app-ambient.ts:45-181",
+      "src/api/routes/admin-resources.ts:281-316",
+      "src/api/routes/admin/slack-mirror.ts:91-137"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Resolves 'when does a room agent speak' with an auditable, per-room, default-off policy; Verevon currently has only @mention binding policy (trigger_modes).",
+    "notes": "SECURITY.md notes the judge's model call bypasses the ModelGateway and its internal-only check is weaker than addressed turns. Admin can list judgments filtered by act, ignore or fastlane with counts and pagination; reads are audited."
+  },
+  {
+    "id": "qm-product-064",
+    "category": "Agents in the room",
+    "name": "Standing orders and bot ledger per channel",
+    "what": "Each channel or group has editable standing orders ('whenever X, do Y' and tone) with full revision history and compare-and-swap edits, plus a ledger of other bots keyed by author name with modes ignore, rollup (hold for N hours), action (treat posts as triggers) or user (treat as a human).",
+    "how": "channel_policy and channel_policy_history tables; parseBotLedger() validates up to 200 entries, case-insensitive uniqueness and positive rollupHours; edits use expectedOrders; the agent's guidance tool and the admin governance page edit the same record.",
+    "evidence": [
+      "src/surface-cache/channel-policy-store.ts:4-110",
+      "plugins/web-ui/src/ambient-policy.ts:1-60",
+      "plugins/admin/ui/governance.ts:227-260",
+      "src/harness/agent-tools.ts:2902-2960"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A ready spec for Verevon's planned S5.2 standing orders with versioned policy; the bot ledger is relevant once third-party bots share rooms.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-065",
+    "category": "Agents in the room",
+    "name": "Solicited versus proactive wakes carry different authority",
+    "what": "When the judge engages because a person asked, the worker turn runs as that person with the room roster as audience; when it engages proactively it runs as a system ambient actor with no personal authority and can steer into an already live ambient run instead of starting another.",
+    "how": "spawnAmbientWorker() resolves solicitedAsker() (the asking message must be the newest from a non-bot internal member who is still in the group or channel); otherwise actor system:ambient:<org> with a wake envelope; steerIntoLiveAmbientRun() screens the steer text and sends a steer signal.",
+    "evidence": [
+      "src/api/app-ambient.ts:183-298",
+      "src/api/app-ambient.ts:300-328",
+      "src/core/wake-envelope.ts:1-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Shows how to keep an unprompted agent from borrowing a human's authority: authority is attached only when a verified person asked.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-066",
+    "category": "Agents in the room",
+    "name": "Turn origin taxonomy gates what authority a turn has",
+    "what": "Every turn is classified direct, human (live person), ambient or automation, and that origin decides whether the speaker's keychain, sharing posture, owner resources and approvals apply.",
+    "how": "resolveTurnOrigin() merges typed and legacy flags by rank; isPersonAuthored(); orchestrator computes liveTurn/liveAuthorTurn only for human or delegated-human origins with an all-internal audience; sharingSourcesForTurn requires a trusted live human or live ambient origin.",
+    "evidence": [
+      "src/core/turn-origin.ts:17-112",
+      "src/core/orchestrator.ts:558-575",
+      "src/resolution/sharing-access.ts:41-56"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already stamps authority on decisions; an explicit origin enum (who is actually behind this turn) is a simple input to those decisions and to scheduled-step authority.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-067",
+    "category": "Agents in the room",
+    "name": "Slack-resident agent speaks through an explicit surface tool",
+    "what": "In surface turns the only way the agent's words reach people is a 'slack' (or web) tool with actions post, reach, react, edit, delete, read_thread, whats_new, search, read_members and read_file; ending the turn without a post means silence, and post cannot address anyone outside the current conversation.",
+    "how": "surface tool description and schema; post replies in the current thread unless broadcast:true; reach needs exactly one of channel, recipient or participants and opens a group DM if missing; guidance on narrowest audience; finish_silently tool ends a turn quietly.",
+    "evidence": [
+      "src/harness/agent-tools.ts:3368-3560",
+      "src/harness/agent-tools.ts:3844",
+      "src/core/orchestrator/surface-tools.ts:70-260"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A clean contract for an agent that participates in a human room: explicit send, explicit silence, explicit cross-room reach with audience rules.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-068",
+    "category": "Agents in the room",
+    "name": "Agent can open DMs and group DMs and message teammates",
+    "what": "The agent can DM a teammate, post to another channel or open a group DM with exact participants, with a per-turn outbound cap (5 cross-conversation posts), visibility checks that the asker can see the destination, and attribution footers.",
+    "how": "reachEnqueue and resolveReachTarget check directory visibility (isVisible) for the actor; openGroupViaSurface creates the Slack mpim; /v1/reach exposes the same for API callers; spine.crossConversationPosts caps outbound posts.",
+    "evidence": [
+      "src/core/orchestrator/surface-tools.ts:96-260",
+      "src/reach/reach.ts:262-325",
+      "src/api/agent-api-catalog.ts:453-460"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "An agent that can start conversations (not just answer) is what makes 'work like a human colleague'; Verevon has no agent-initiated messaging path.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-069",
+    "category": "Agents in the room",
+    "name": "Human-to-agent and agent-to-human hand-off by DM",
+    "what": "When work needs another person's own login, files or memory, the agent decides whether to do it itself (Open posture) or DMs that person with the full request, a source-channel permalink and where to reply; it never posts the request in a channel and does not poll.",
+    "how": "hand-off seed skill using POST /v1/reach; request-access skill posts a keychain ask; private-continuation moves external-channel work to the employee's DM with the original request and attachments.",
+    "evidence": [
+      "skills-seed/hand-off/SKILL.md:1-33",
+      "skills-seed/request-access/SKILL.md:1-37",
+      "docs/external-slack.md:34-45"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Explicit human hand-off semantics for Space agents: ask the right person privately, with full context, and stop.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-070",
+    "category": "Agents in the room",
+    "name": "Approvals: only the requester decides, once, for the conversation or always",
+    "what": "A gated command pauses the turn and posts an approval card (Allow once, Allow session, Allow always, Deny) explaining the purpose, command and why it was flagged. Only the person who requested the command can decide; the turn resumes with the decision. Admins can disable the session and always options per scope.",
+    "how": "approvalMessage() builds Block Kit actions hilo_*; handleApprovalAction() recovers context from core if memory was lost, rejects non-requesters with an ephemeral notice, serialises clicks, re-runs the turn with approval {requestId, approved, scope}; core approval-store enqueues a DM delivery for pending approvals; ApprovalGrantModes {session, always} configurable.",
+    "evidence": [
+      "src/slack/approval-cards.ts:4-80",
+      "src/slack/approvals.ts:59-120",
+      "src/slack/approvals.ts:251-330",
+      "src/core/approval-store.ts:22-54",
+      "plugins/admin/ui/governance.ts:152-185"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon records only two verbs and does not resume the paused run on this path; QM shows three scopes, requester-only authority and recoverable resume.",
+    "notes": "Approval decisions are deliberately not callable by the agent (SECURITY.md)."
+  },
+  {
+    "id": "qm-product-071",
+    "category": "Agents in the room",
+    "name": "Approval cards go where the person is; web blocks the composer",
+    "what": "In a channel the approval card is sent to the requester's DM with a pointer in the thread; in a DM it stays in thread; in the web UI a pending approval panel blocks the composer and decisions appear as system notes in the transcript. Security-screen flags use the same card with kind 'input'.",
+    "how": "approvalCardDestination(threadOnly) returns {toDm, channelPointer}; recoveredApprovalContext() rebuilds from the stored request; web chat uses approvalBlocksComposer(), composerApprovalPanel and approval-decision rows.",
+    "evidence": [
+      "src/slack/approval-cards.ts:44-52",
+      "plugins/web-ui/src/chat.ts:764-838",
+      "plugins/web-ui/src/chat.ts:1136",
+      "plugins/web-ui/src/chat.ts:1837-1860"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Approval placement rules for shared rooms (do not decide in public, do not block others) apply directly to Verevon's in-room approvals.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-072",
+    "category": "Agents in the room",
+    "name": "Keychain asks: request access to someone else's credential",
+    "what": "If a command needs a credential the conversation has no grant for, the agent files an ask; the owner gets a card where the conversation is (Slack thread, web session or cron destination, else DM) and can approve once, approve standing or deny. On approval the blocked command re-runs. Asks expire after 24 hours and are pruned after 14 days.",
+    "how": "KeychainAsk {credentialId, ownerId, requesterId, requesterScopeId, requesterDestination, purpose, requestedMode, status}; KeychainGrant {audienceScopeId, mode once|standing, expiresAt, status}; approvalCardDestination() chooses the card location; only the owner can decide; grants are visible per audience scope.",
+    "evidence": [
+      "src/credentials/keychain.ts:122-166",
+      "src/credentials/keychain-approval.ts:33-60",
+      "skills-seed/request-access/SKILL.md:1-37",
+      "plugins/web-ui/src/keychain-state.ts:1-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A human-in-the-loop for shared-room credential use that keeps Verevon's 'grants come from outside the agent' rule; maps to plan S3.4 Space credential grants.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-073",
+    "category": "Agents in the room",
+    "name": "Credential delivery modes with host, method and path allowlists",
+    "what": "Service and personal credentials can be delivered as environment variables, files or through a broker that injects the secret into outbound requests to an allowed host, limited to listed HTTP methods and path prefixes; OAuth refresh tokens never leave the keychain record and the sandbox receives only derived access material.",
+    "how": "CredentialKind env|file|broker; BrokerDelivery {injection header/scheme/actor, allowedMethods, allowedPathPrefixes}; credentialInjectionError reserves x-qm-actor; connectorDerivedAuth refreshes single-flight; SECURITY.md concedes credentials are plaintext in the sandbox while in use.",
+    "evidence": [
+      "src/credentials/keychain.ts:37-75",
+      "src/credentials/keychain.ts:236-300",
+      "SECURITY.md:146-150"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The broker delivery mode is the way to get 'agent never sees the secret' for HTTP APIs; it fits Verevon's Quarry/integration-core boundary.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-074",
+    "category": "Agents in the room",
+    "name": "Scheduled and triggered work re-checks authority at fire time",
+    "what": "A cron or webhook-triggered turn re-verifies at every fire that the owner is still internal, still a member of the room (for shared scopes), that the destination is still visible, and that a recipient who was not the owner consented; otherwise the fire is skipped with a note.",
+    "how": "runTrigger() branches on runAs owner|scopeFloor|scopeShared, uses currentScopeMembers, actorMayReadScope, destinationVisible, consentRequiredRecipient/recipientConsentSatisfied; sendConsentNotice asks the recipient to accept or decline; composeCronEditNotice tells the owner when someone else edits their cron; assertNoEscalation blocks assigning an owner without consent.",
+    "evidence": [
+      "src/triggers/run-trigger.ts:164-330",
+      "src/triggers/trigger-store.ts:15-60",
+      "src/triggers/consent-notice.ts:4",
+      "src/triggers/edit-notice.ts:41"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Matches Verevon's fresh-authorization-at-fire requirement (S4.1) and adds recipient consent and owner edit notices that Verevon's plan does not mention.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-075",
+    "category": "Agents in the room",
+    "name": "Mid-conversation runtime switch and per-purpose runtimes",
+    "what": "An agent can inspect and change its own model, harness, reasoning effort and fast mode ('switch to Astra and do this'); the unfinished task resumes on the new runtime with saved tool results. Org admins approve the harness list, scopes can override the runtime, and crons and subagents have separate org defaults.",
+    "how": "runtime tool actions get/set/inherit with lifetime task|scope; resolveRuntimeChoice() cascades requested, purpose, scope, org, approved harness check and model-supported check; runtime handoff terminates the turn and the router resets the previous harness session; goals block runtime changes.",
+    "evidence": [
+      "src/harness/agent-tools.ts:4239-4300",
+      "src/harness/harness-router.ts:145-268",
+      "src/harness/harness-router.ts:270-324",
+      "plugins/web-ui/src/composer.ts:75-135",
+      "plugins/web-ui/src/context-model.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon plan S2.6 wants a typed runtime-adapter profile persisted per run; QM shows the cascade and the in-flight handoff.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-076",
+    "category": "Agents in the room",
+    "name": "Four coding-agent harnesses behind one tool catalogue",
+    "what": "Pi (vendored; the config warning says to set HARNESS=pi for real turns, and an unset HARNESS means mock), OpenCode, Codex and Claude Code all drive the same QM tool catalogue and session tape, chosen per scope; each adapter declares its control and tool transport and capabilities (abort, steer, images, thinking level, fast mode, provider sessions, native tape, goal enforcement).",
+    "how": "Harness {profile, turns, models, tools}; pi in-process, claude via @anthropic-ai/claude-agent-sdk with in-process MCP tools, codex via app-server JSON-RPC with dynamic tools, opencode via HTTP sidecar plugin; harnesses without goal-enforcement are wrapped by runTurnEnforcingGoal.",
+    "evidence": [
+      "src/harness/harness.ts:227-262",
+      "src/harness/pi-harness.ts:1832-1850",
+      "src/harness/claude-harness.ts:891-898",
+      "src/harness/codex-harness.ts:1414-1421",
+      "src/harness/opencode-harness.ts:1214-1221"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Reinforces the baseline 'typed harness adapter with native effects disabled' pattern; relevant if Verevon hosts a coding harness for Space computers.",
+    "notes": "OpenCode adapter supplies its provider key to the sidecar (SECURITY.md)."
+  },
+  {
+    "id": "qm-product-077",
+    "category": "Agents in the room",
+    "name": "Bring-your-own AI account per person",
+    "what": "In Settings a person can switch AI access from Company to their own Claude subscription, ChatGPT/Codex subscription or an API key; personal turns then run on that account (Claude via the Claude harness, ChatGPT via Codex or Pi).",
+    "how": "resolveIndividualAuthRouting() maps stored UserModelCredential kind apikey|oauth to harness/provider/model; subscription OAuth start/complete routes for Claude and ChatGPT device flows; org flag individualModelAuth and setPersonalModelAuth.",
+    "evidence": [
+      "src/core/individual-auth-routing.ts:24-90",
+      "plugins/web-ui/src/settings.ts:405-436",
+      "src/model/subscription-oauth.ts:36",
+      "plugins/web-ui/server/index.ts:1209-1271"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A cost and privacy lever for personal agents (each person pays or uses their own provider) that Verevon's cost-core and ZDR rules would need to model explicitly.",
+    "notes": "Conflicts with centrally enforced ZDR and spend control unless modelled."
+  },
+  {
+    "id": "qm-product-078",
+    "category": "Agents in the room",
+    "name": "Persistent subagents with a mailbox and inline chips",
+    "what": "A turn can spawn background subagents with their own durable transcript and run; they message the parent, siblings and each other through a durable mailbox, wake the parent on completion, show as draggable chips in the parent's tool rows, and can be detached into top-level sessions. A tree is capped at 50 pending or running runs.",
+    "how": "subagents tool open/followup_task/send_message(interrupt)/read/wait; createSessionMailbox on the durable artifact store; parent change and cycle checks; mailbox messages are screened as external data and never count as human authorisation; flag persistent_subagents.",
+    "evidence": [
+      "docs/persistent-subagent-sessions.md:1-35",
+      "src/harness/agent-tools.ts:1529-1740",
+      "src/sessions/session-mailbox.ts:16",
+      "plugins/web-ui/src/subagent-activity.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's agent-to-agent delegation (UI-2c) is unbuilt; QM's inherit-caller-scope, no-sidebar, mailbox-as-data design is a close fit.",
+    "notes": "Subagent cap was raised from 10 to 50 (git 93b2c434)."
+  },
+  {
+    "id": "qm-product-079",
+    "category": "Agents in the room",
+    "name": "Responsive coordinator ('spine') that delegates and stays free",
+    "what": "For people with the responsive_spine flag, Slack and spine turns run a coordinator that cannot run commands, background jobs or provider-native delegation; it posts an early acknowledgement, dispatches substantial work through subagents, ends promptly and is woken when children finish.",
+    "how": "delegationEnabled in orchestrator; shouldRouteToSpine() routes non-web, non-DM human/ambient turns; publishFirstAck() posts the first text block as an ack when no deliberate post happened; completion wake is deduplicated and carries the delegating run's authority.",
+    "evidence": [
+      "docs/persistent-subagent-sessions.md:19-37",
+      "src/core/orchestrator.ts:567-570",
+      "src/core/orchestrator.ts:2685-2715",
+      "src/api/app-ambient.ts:24-31"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A way to keep a shared room responsive: a thin front agent that never blocks the room while long work runs elsewhere.",
+    "notes": "Flagged and off by default."
+  },
+  {
+    "id": "qm-product-080",
+    "category": "Agents in the room",
+    "name": "Agent swarms: durable pools with a shared board computer",
+    "what": "An agent can spawn a pool of workers (up to 32 agents, depth 4, one hour lifetime by default), each with its own blank computer and durable transcript, a shared 'board' computer, character context, scoped messages with audience and reply-to, pause/resume/stop controls and a Swarm strip in the web UI.",
+    "how": "POST /v1/swarm spawn/send/read/context/control with requestId idempotency and monotonic seq; outbox provisions computers with three attempts; budgets reserved atomically; human API on /v1/sessions/:id/swarm; SWARMS_ENABLED kill switch plus swarms flag.",
+    "evidence": [
+      "docs/swarms.md:30-248",
+      "src/swarms/swarm-service.ts",
+      "plugins/web-ui/src/swarm-strip.ts",
+      "src/feature-flags.ts:5-14"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Multi-agent coordination beyond delegation; Verevon has none in rooms. Budget, depth and lifetime caps with human-visible controls are the parts to borrow.",
+    "notes": "UI for an agent board is explicitly deferred."
+  },
+  {
+    "id": "qm-product-081",
+    "category": "Agents in the room",
+    "name": "Goals with work floors and an independent verifier",
+    "what": "When a person explicitly asks for sustained work ('grind for 30 minutes', 'until tests are green') the agent registers a goal with a floor (min turns, ms, tokens, USD) and the harness refuses to let it stop early. Only an independent fresh-context governor can accept completion and only the person can pause or resume.",
+    "how": "goal tool create/get/update; runTurnEnforcingGoal re-prompts with continuation notes using a GrindMeter; governGoal reads objective, recent work and named evidence files; governor steps back then pauses a stuck goal; a goal strip shows status in the web UI.",
+    "evidence": [
+      "src/harness/agent-tools.ts:3909-4060",
+      "src/harness/harness-router.ts:43-120",
+      "src/harness/goal.ts:95",
+      "plugins/web-ui/src/goal-strip.ts:1-50"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A budgeted, verifier-gated autonomy mode for Space agents; new since the Aug baseline (git dc93931b, 9143874b).",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-082",
+    "category": "Agents in the room",
+    "name": "Background and activity visibility: reactions, early ack, task cards, follow link",
+    "what": "While the agent works in Slack the triggering message carries an LLM-chosen reaction that moves to the latest message and is removed at the end, the first text block is posted early as an acknowledgement, and (flagged) a single task card in the thread shows Working, Waiting to resume, Background work, Monitoring or No active work with a 'Follow via QM Web' link after five minutes.",
+    "how": "createTaskAcknowledgements() holds a leader lease per run, keeps state in a durable map and reconciles after restarts; createSlackSessionStatus() posts and updates task_card blocks with receipts and per-thread leases; commands and monitor instructions are never rendered.",
+    "evidence": [
+      "src/slack/task-ack.ts:25-150",
+      "src/slack/session-status.ts:1-80",
+      "src/slack/README.md:42-72",
+      "src/core/orchestrator.ts:2685-2715"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Status-in-the-room patterns for Verevon's Work tab and any future Slack/Teams mirror (what to show, what never to render).",
+    "notes": "Task cards are behind slack_loading_indicator and described as experimental."
+  },
+  {
+    "id": "qm-product-083",
+    "category": "Agents in the room",
+    "name": "Work visibility in the web transcript",
+    "what": "Tool calls are summarised by category (read, search, execute, other) with compact targets, completed work collapses into one timed disclosure while the answer stays visible, subagent activity cards and a working dot show live work, and a goal strip and queued-message strip sit above the composer.",
+    "how": "activityDescription() parses shell words to recognise cat, sed -n, rg and grep as read/search; tool purposes (<=4 words) displayed instead of raw commands; transcript paged by turns; scrolled-up readers stay in place when a turn ends.",
+    "evidence": [
+      "plugins/web-ui/src/activity-presentation.ts:1-70",
+      "plugins/web-ui/src/subagent-activity.ts",
+      "plugins/web-ui/src/working-dot.ts",
+      "docs/qa/chat-streaming/README.md:1-17"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon renders run events only from a 6 s poll; the collapsed 'completed work' pattern is the likely target for tool-call cards in a human room.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-084",
+    "category": "Agents in the room",
+    "name": "Agent-set shared session status",
+    "what": "The agent can set a one-emoji plus short text status on a session (for example a merged PR or a live release) that everyone in the session sees in the sidebar; it can clear or replace it as work progresses.",
+    "how": "POST /v1/conversations/:id with body {status:{emoji,text}} through the self-API (offered only on non-Slack surfaces); stored on Session.status; web sessionStatusMark renders an accessible emoji with tooltip.",
+    "evidence": [
+      "src/api/agent-api-catalog.ts:25-30",
+      "src/api/agent-api-catalog.ts:421-433",
+      "plugins/web-ui/src/session-status.ts:1-11",
+      "src/types.ts:93-96"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A one-glance 'where is this work' signal for Spaces that agents maintain themselves.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-085",
+    "category": "Agents in the room",
+    "name": "Agent-managed browser as a skill, with DM-only profiles",
+    "what": "Browsing is a skill: a remote stealth browser (Kernel, Anchor or Browserbase, chosen by which key exists) is driven over CDP from the agent's shell; persistent sign-in profiles and live-view links are used only in DMs, never in channels.",
+    "how": "browse skill with provider docs; managed model access supplied by core; interactive-login skill logs CLIs in under a temporary HOME and saves the directory to the keychain; browser actions do not re-enter command policy (SECURITY.md).",
+    "evidence": [
+      "skills-seed/browse/SKILL.md:1-60",
+      "skills-seed/interactive-login/SKILL.md:1-50",
+      "SECURITY.md:142-145"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Contrast with Verevon's Quarry boundary (Model proposes, Quarry executes): QM puts the browser in the sandbox and relies on skill rules for profile safety.",
+    "notes": "Browser actions sit outside some core gates; do not copy that."
+  },
+  {
+    "id": "qm-product-086",
+    "category": "Agents in the room",
+    "name": "Multiplayer behaviour eval suite on real Slack",
+    "what": "A live end-to-end catalogue posts as several synthetic humans and asserts agent behaviour in rooms: answer the asker not the chatter, attribute 'what she suggested', reply in thread, stay silent while two humans talk or when someone else is mentioned, handle a second asker interrupting, follow the latest contradicting instruction, refuse to act on another person's behalf, answer in channel, and three-way addressing.",
+    "how": "test/live-slack scenarios with actors alice/bob/carol, assertSilence windows, an LLM judge, markers, a Slack digital-twin backend and event redelivery/rate-limit twin scenarios.",
+    "evidence": [
+      "test/live-slack/scenarios-multiuser.ts:1-210",
+      "test/live-slack/scenarios.ts:349-496",
+      "test/live-slack/scenarios-twin.ts:24-67",
+      "test/live-slack/README.md:1-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Ready-made acceptance criteria for Verevon Space multi-human behaviour; port the scenarios as tests for the future room model.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-087",
+    "category": "Agents in the room",
+    "name": "Cost and limit controls",
+    "what": "Per-person and org rolling-window USD budgets, a spend dashboard with time-series breakdowns and custom date ranges, a token-authenticated spend export, goal floors and caps, turn wall clocks, swarm budgets and per-run tree caps.",
+    "how": "createBudgetTracker with limitUsd/orgLimitUsd/windowMs and an input-token cost estimate; admin spend views by person, channel and model; SPEND_EXPORT_TOKEN bearer export audited; turn wall clock per scope.",
+    "evidence": [
+      "src/ratelimit/budget.ts:15-50",
+      "plugins/admin/ui/spend.ts",
+      "SECURITY.md:184-190",
+      "src/resolution/config-store.ts:266-267"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon cost-core is stronger; the useful delta is cost shown per room/channel for admins and goal floors expressed in USD.",
+    "notes": "Estimate is input-token based; export token is a bearer secret. Dashboard breakdowns and custom windows are known from commit subjects (git 19bb8eb6, d7a46fc6), not read in spend.ts."
+  },
+  {
+    "id": "qm-product-088",
+    "category": "Collaborative artifacts",
+    "name": "Scope-owned files with grants to other scopes",
+    "what": "Files are SHA-addressed artifacts owned by a scope; the agent writes into its workspace, publishes durable files, and shares a file to org, personal, channel or team scopes with read or write permission; recipients see it under shared/.",
+    "how": "FileArtifactStore with owner and created-in scope; share tool and AclStore.grant/revoke/replaceGrantsIfCurrent; grants cover kinds file, skill, deploy, cron and service-cred; direct multipart uploads to S3 with checksum-bound resumable parts.",
+    "evidence": [
+      "src/acl/resource-ref.ts:1-35",
+      "src/acl/acl-store.ts:28-100",
+      "src/harness/agent-tools.ts:3091-3140",
+      "docs/files-publication.md:1-45",
+      "plugins/web-ui/src/files.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The baseline's 'provenance-bearing artifacts' and 'scope-centred resource UI' in practice; Verevon should keep Data Plane ownership but copy the owner-vs-created-in distinction.",
+    "notes": "SECURITY.md: no expiry or reclamation for artifacts and deduplicated bytes."
+  },
+  {
+    "id": "qm-product-089",
+    "category": "Collaborative artifacts",
+    "name": "Published web apps with versions, rollback and a friendly link",
+    "what": "From any conversation the agent can publish a workspace directory as a durable web app with immutable versions, rollback by pointer flip, a stable /d/<name>/ link, persistent $DATA_DIR (SQLite at app.db), optional always-on, and opt-in embedding by named origins. New apps are shared with their creation channel; DM apps stay private.",
+    "how": "publish tool and /v1/deployments routes (always-on, archive, display-name, embed-ancestors, fetch, git-url, logs, name, redeploy, restore, rollback, share); deploy providers docker, aws, fly, porter; per-app git remote; page views recorded.",
+    "evidence": [
+      "src/harness/agent-tools.ts:1200-1260",
+      "src/api/agent-api-catalog.ts:463-550",
+      "skills-seed/publish/SKILL.md:1-60",
+      "src/deploy/"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon plan S5.4 (governed internal app build/publish) is where this lands; QM proves the end-to-end loop and the default of scoped, private-until-shared apps.",
+    "notes": "Public bearer links are opt-in only since 2026-09 (git a153974f, 0edd2377)."
+  },
+  {
+    "id": "qm-product-090",
+    "category": "Collaborative artifacts",
+    "name": "Google-Docs-style app sharing and access requests",
+    "what": "An app's share dialog lets owners add people, see people with access, and set General access (Restricted, organisation, anyone with the link, with a public warning); people without access can request it and the owner approves or declines straight from a Slack button.",
+    "how": "deploy-permissions renders permission sections and a general access menu; /api/deployments/:id/share; decideDeploymentAccess() verifies the clicker owns or manages the app's home scope, grants read (keeping existing write), or DMs the requester a decline notice with a daily dedupe key.",
+    "evidence": [
+      "plugins/web-ui/src/deploy-permissions.ts:150-166",
+      "plugins/web-ui/src/deploy-permissions.ts:322-366",
+      "src/slack/deploy-access.ts:11-100",
+      "docs/qa/app-shell/README.md:1-17"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A familiar sharing UX with an approval path inside chat; Verevon's resource_grants (view-only) could grow the same access-request loop.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-091",
+    "category": "Collaborative artifacts",
+    "name": "App bar with in-app chat editing and visual annotations",
+    "what": "Signed-in people who can manage a published app see a slim bar; Chat opens an editing conversation beside the app, and annotation tools (select, marker, draw, capture) send annotated screenshots and element references to the agent as native chat attachments.",
+    "how": "devbar.sh embedded in app pages posts snapshots to the parent via postMessage; app-annotate and app-edit handle text selection and edits; feature flag app_annotations; app shell colours kept neutral.",
+    "evidence": [
+      "plugins/web-ui/src/app-devbar.ts:1-21",
+      "plugins/web-ui/src/app-annotations.ts",
+      "src/deploy/app-annotate.ts",
+      "docs/qa/app-shell/README.md:1-12"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Point-and-comment feedback on an artifact the agent built is a strong human-agent collaboration pattern for Verevon Studio.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-092",
+    "category": "Collaborative artifacts",
+    "name": "Inline playgrounds in chat",
+    "what": "In web conversations the agent can attach a self-contained interactive HTML playground (simulation, small game, explainer) to a message; it is validated and rendered as a typed tool result, not a published app.",
+    "how": "createPlaygroundArtifact and validatePlaygroundHtml; miniapp skill forbids network, external assets and servers; surfaces without a renderer do not receive the tool.",
+    "evidence": [
+      "src/playgrounds/playground.ts",
+      "skills-seed/miniapp/SKILL.md:1-15",
+      "plugins/web-ui/src/playground.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A lightweight rich-artifact type for rooms without standing up a document system.",
+    "notes": "The related ui_canvas (agent-written page code with full page privileges) was reverted after one day."
+  },
+  {
+    "id": "qm-product-093",
+    "category": "Collaborative artifacts",
+    "name": "Inbox: agent-drafted replies reviewed by a human",
+    "what": "A unified inbox shows Gmail and Slack conversations the person must act on, with the agent's proposed reply as an editable draft (conflict detection, persisted), actions to ask the agent, dismiss or send, saved filters, optional prioritisation and consolidation of duplicate items, and a shared AI sidebar.",
+    "how": "Loop items ledger with sourcePayload, proposal {data, by, at} and thread messages; Gmail and Slack source adapters, realtime updates matched to open items, FIRE_DEBOUNCE 30 s; triage ranks urgent/high/normal/low and groups duplicates; inbox_item SSE events; sent-mail view and email voice-profile skills.",
+    "evidence": [
+      "plugins/web-ui/src/inbox.ts:56-160",
+      "plugins/web-ui/src/inbox.ts:1034-1080",
+      "src/loops/inbox-realtime.ts:1-102",
+      "src/loops/triage.ts:1-60",
+      "src/types.ts:407-440"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A review-queue model for human approval of agent drafts, closest to Verevon's support-inbox AI proposals; not a Space feature by itself.",
+    "notes": "Flagged (inbox_loops); drafts only, never sends without a human decision."
+  },
+  {
+    "id": "qm-product-094",
+    "category": "Collaborative artifacts",
+    "name": "Code work with PR, CI and independent review gates",
+    "what": "A 'send' skill makes a PR, waits for CI in one bounded watcher process, runs an independent review and merges only when all gates pass; a git HTTP broker and credential broker keep git access scoped to published apps and users.",
+    "how": "send skill and github-gitlab scripts (watch-ci.mjs with 30 minute deadline); git-http-broker.ts and deploy-git-store; background lifetime longer than the watcher deadline; one watcher per PR with hand-off.",
+    "evidence": [
+      "skills-seed/send/SKILL.md:1-45",
+      "skills-seed/github-gitlab/SKILL.md",
+      "src/api/git-http-broker.ts",
+      "src/deploy/deploy-git-store.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A concrete review/approval flow for agent-authored code; relevant to coding agents in Verevon Spaces.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-095",
+    "category": "Agents in the room",
+    "name": "Overheard channel messages become labelled, untrusted context",
+    "what": "Messages the agent merely overheard in a channel or group are imported into the session as flagged 'overheard' entries (and mirrored to a searchable cache) so it can answer follow-ups with context, but they are treated as author-attributed data, never as instructions, and are skipped when finding the last real user turn.",
+    "how": "selectOverheardToImport() de-duplicates against recorded message timestamps; entries are appended with meta overheard:true under the managed roster version; the ambient judge prompt calls them 'untrusted data'; security screening labels overheard text by provenance.",
+    "evidence": [
+      "src/core/orchestrator.ts:2924-2960",
+      "src/sessions/session-store.ts:691",
+      "src/surface-cache/ambient-judge.ts:4-20",
+      "src/security/security-posture.ts:49"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Any Space agent that reads a human conversation needs a trust label for 'text I saw but was not told to act on'; this is a working implementation.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-096",
+    "category": "Agents in the room",
+    "name": "Keychain view: accounts, credentials, active grants and pending asks",
+    "what": "A Keychain page shows connected accounts (with needs-reconnect), saved credentials with expiry, which conversations hold active grants (once or standing, revocable) and asks waiting for the person's decision; the session top bar shows keychain as a tool of the current scope.",
+    "how": "/v1/keychain/overview returns providers, credentials, grants and asks; keychainSummary() derives connected, activeGrants and attention counts; isActiveGrant() requires an unexpired credential and an active, unexpired grant; admin keychain tab shows metadata only.",
+    "evidence": [
+      "src/api/routes/keychain.ts:163",
+      "plugins/web-ui/src/keychain-state.ts:20-60",
+      "plugins/web-ui/src/session-scope.ts:78-92",
+      "plugins/admin/ui/keychain.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's two flat credential vaults have no per-room grant view; a 'who can use what, here' page is the human-facing half of plan S3.4.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-097",
+    "category": "Agents in the room",
+    "name": "Context compaction and exact-recall tools instead of a summariser",
+    "what": "The agent can reduce its own context by keeping bounded recent entries, a saved summary if it fits and structured goal state, without calling a summariser; stored history is untouched and an exact-recall 'history' tool can reopen compacted entries by seq.",
+    "how": "context tool compact mode 'recent' sets a runtimeHandoff {context:'recent'} that stops the segment and resumes the unfinished request; history tool queries the durable transcript; stable prompt prefixes and grouped memory deltas keep caches warm.",
+    "evidence": [
+      "src/harness/agent-tools.ts:4218-4238",
+      "src/harness/agent-tools.ts:1460-1528",
+      "src/harness/context-compaction.ts",
+      "src/memory/recall-delta.ts:1-92"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Long-running room conversations need cheap compaction that preserves the audit trail; this keeps transcript and model context separate.",
+    "notes": "Prompt-cache claims (git a61db71b, 3b1e3cf4) are commit subjects only."
+  },
+  {
+    "id": "qm-product-098",
+    "category": "Realtime & sync architecture",
+    "name": "AG-UI-shaped SSE run stream with offset-resumable text deltas",
+    "what": "A live turn is streamed over Server-Sent Events as TOOL_CALL_START, TOOL_CALL_RESULT, RUN_FINISHED and custom delta frames keyed by text offset; the browser feeds them into @tanstack/ai's AG-UI stream processor, resumes from an offset after drops, and falls back to polling when SSE cannot open.",
+    "how": "run-events.ts replays tool entries from a cursor, sends {type:'CUSTOM',name:'delta',value:{offset,delta}} with id text:<offset>, heartbeats every 15 s and drops clients whose buffer exceeds 1 MiB; core-bridge feeds TEXT_MESSAGE_START/CONTENT into StreamProcessor and falls back after open/silence timeouts.",
+    "evidence": [
+      "src/api/routes/run-events.ts:1-110",
+      "src/runs/run-stream-events.ts:1-12",
+      "plugins/web-ui/src/core-bridge.ts:1565-1600",
+      "plugins/web-ui/src/core-bridge.ts:4-5"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already exposes an AG-UI stream; QM adds resumable offsets, tool-event replay and a documented poll fallback that fit a multi-viewer room.",
+    "notes": "Corrects the scout NEG: AG-UI event types are used (as strings in the server and via @tanstack/ai on the client), just not named 'AG-UI' in source."
+  },
+  {
+    "id": "qm-product-099",
+    "category": "Realtime & sync architecture",
+    "name": "Durable runs with leases, reaper and per-attempt tool ledger",
+    "what": "Every turn is a run claimed by a worker under a lease token with heartbeats; a leader-held reaper requeues or parks runs whose lease expired; a per-attempt tool ledger returns cached outputs for already executed calls so a retry does not repeat side effects; abort, steer and client_result signals are stored durably and replayed.",
+    "how": "RunStore {leaseToken, leaseExpiresAt, heartbeat, releaseLease, complete, setDeliveryState}; createReaper() sweeps under a Postgres leader lease; ToolLedger.begin/record(runId, attempt, callIndex); postgres-run-signal-store with dedupe keys; leaseLapsed() marks waiting work as 'waiting to resume'.",
+    "evidence": [
+      "src/runs/run-store.ts:34-86",
+      "src/runs/run-store.ts:128-141",
+      "src/runs/reaper.ts:1-54",
+      "src/runs/tool-ledger.ts:1-18",
+      "docs/SPEC.md:15"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has Temporal/NATS durability; QM's per-attempt tool ledger and signal replay are invariants to port as tests (baseline already lists them).",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-100",
+    "category": "Realtime & sync architecture",
+    "name": "The tape: context is a fold of an append-only log by audience",
+    "what": "One append-only log per conversation stream holds exactly what the model read, in order; model context is computed as fold(tape, audience) so the same tape and audience give the same bytes, and the audience filter keeps DM content out of channels. Phases 1 and 2 are implemented and tape serving is the default.",
+    "how": "session tape records of three kinds written synchronously in consumption order; rendering is a projection; native-tape harness capability for Pi; filterHistoryForAudience() drops entries whose scopeLabel not every audience member is entitled to.",
+    "evidence": [
+      "docs/session-tape-spec.md:1-36",
+      "docs/session-tape-spec.md:37-135",
+      "src/resolution/context-filter.ts:19-29",
+      "src/types.ts:141-148"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A principled storage model for 'what did the agent know when it answered' that also supports audience-scoped replay; compare with Session Core's thread/message model.",
+    "notes": "SPEC's Wall of Shame notes both session_entries and session_tape still exist (qm#1272)."
+  },
+  {
+    "id": "qm-product-101",
+    "category": "Realtime & sync architecture",
+    "name": "Postgres as the coordination substrate",
+    "what": "State, queue and coordination all live in Postgres: durable maps, LISTEN/NOTIFY wakeups for run workers and streams (payloads capped under 7,500 bytes), leader leases and advisory locks for singletons, an idempotency store, and pg-boss for cron jobs. In-memory stores are only a dev default.",
+    "how": "pg-pool with transaction pooling support, postgres-listener (one listener per process), postgres-notify-bus, leader-lease.ts hold(key, fn), advisory-lock.ts, idempotency-store.ts, cron/job-queue.ts on pg-boss; config warns when memory stores are used.",
+    "evidence": [
+      "src/persistence/postgres-notify-bus.ts:6-50",
+      "src/persistence/postgres-listener.ts:70-85",
+      "src/persistence/leader-lease.ts:4-30",
+      "src/cron/job-queue.ts",
+      "README.md:75-84"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's adoption plan explicitly rejects a second Postgres/pg-boss queue next to Temporal/NATS; the value here is the invariants (idempotency, leases), not the queue.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-102",
+    "category": "Realtime & sync architecture",
+    "name": "Slack events are persisted before they are acknowledged",
+    "what": "The Socket Mode receiver defers its envelope ack (cap 2.5 s) until the event is durably staged or handled; failed handlers withhold the ack so Slack redelivers, and a sweeper replays staged envelopes with bounded attempts, claim windows and a 24 hour abandon rule.",
+    "how": "createDeferredEnvelopeAck() with AckGate persisted()/failed(); createEnvelopeStaging() keys events by account:type:channel:ts, stage timeout 300 ms, replay claim 5 min, max 5 attempts; event dedupe by channel:ts.",
+    "evidence": [
+      "src/slack/deferred-ack.ts:1-60",
+      "src/slack/envelope-staging.ts:1-60",
+      "src/slack/events.ts:129-175",
+      "src/slack/message-gating.ts:167-200"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Directly relevant to Verevon's future Slack/Teams ingress (S5.1/S5.3): ack only after a durable receipt, dedupe by provider message id.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-103",
+    "category": "Realtime & sync architecture",
+    "name": "One multiplexed event stream per browser, resynced on reconnect and tab focus",
+    "what": "A single EventSource carries delivery nudges, session state changes and inbox item events; on reconnect or when a hidden tab becomes visible the client resumes live runs and refreshes lists, and 'resync' frames tell it to refetch instead of trusting missed deltas.",
+    "how": "subscribeDeliveries() opens /api/deliveries/events with listeners for delivery, session_state, inbox_item, session_state_resync, inbox_resync; ensureDeliveryStream() wires refreshSessions and conv.onDelivery and re-checks live runs on visibilitychange; the server pings every 25 s.",
+    "evidence": [
+      "plugins/web-ui/src/core-bridge.ts:1519-1563",
+      "plugins/web-ui/src/conversations.ts:82-115",
+      "src/api/routes/session-state.ts:1-45"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A minimal push channel for rooms (Verevon polls every 6 s and has no Convex subscription in the v3 SPA).",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-104",
+    "category": "Realtime & sync architecture",
+    "name": "Server-persisted UI state for multi-device layouts",
+    "what": "Per-person UI state such as the multiview layout is stored on the server (key pattern, 64 KB cap, last-write-wins by updatedAt with a clock-skew guard) so the same split layout reappears on another device.",
+    "how": "storeUiState() uses atomic update or insertIfAbsent and rejects older writes; /api/ui-state; split.ts fetchRemoteSplit/adoptRemoteSplit merge server and local layouts; layoutNeedsSessionList() defers rendering until sessions are known.",
+    "evidence": [
+      "src/surfaces/ui-state.ts:1-42",
+      "plugins/web-ui/src/split-layout.ts:1-75",
+      "plugins/web-ui/server/index.ts:1655"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Cheap multi-device continuity for layout and view state; Verevon could back the same with the Application plane.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-105",
+    "category": "Realtime & sync architecture",
+    "name": "Roster-versioned writes fence stale membership",
+    "what": "Writes into a project conversation (including imports of overheard messages) happen under the roster version the turn started with; if the roster changed the write is rejected so stale work cannot land under a different audience.",
+    "how": "ProjectStore.version()/withVersion()/withRosterLock(); orchestrator wraps session appends in withManagedRosterVersion and aborts with ProjectRosterChanged; fork and member mutations take the same lock.",
+    "evidence": [
+      "src/projects/project-store.ts:49-60",
+      "src/core/orchestrator.ts:2924-2960",
+      "src/api/app-sessions.ts:990-1002"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The baseline's 'versioned authority fencing' pattern in working form; Verevon should compare its membership/audience revision fences against this.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-106",
+    "category": "Realtime & sync architecture",
+    "name": "Blue-green core cohorts with a single background owner",
+    "what": "Production can run two core deployments (blue and green) against one database; a single shared owner record names which deployment may run background work (Slack ingress, run claims, cron callbacks, maintenance) and every process admits background work only while it is the owner.",
+    "how": "background_ownership durable map key 'ownership' {ownerDeploymentId, setAt, setBy}; BACKGROUND_DEPLOYMENT_ID and DEPLOYMENT_CONTROL_SECRET; operator endpoint to change owner; qm up can replace a relinquished cohort while members finish admitted work.",
+    "evidence": [
+      "docs/background-ownership.md:1-30",
+      "src/runs/background-ownership.ts",
+      "src/runs/drain.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A simple fencing model for zero-downtime deploys of schedulers and ingress; Verevon's R-5 rollback rehearsal can borrow the owner-record idea.",
+    "notes": "Blue-green drill scripts exist (scripts/aws/ecs-blue-green-drill.ts) but were not run."
+  },
+  {
+    "id": "qm-product-107",
+    "category": "Governance, security & compliance",
+    "name": "Security posture tiers that narrower scopes can only tighten",
+    "what": "An org picks Strict (every tool call pauses for human approval except the two no-effect turn enders), Auto (default; blocks private-network access) or Dangerous (no tool approval gates; screening only observes); scopes can only move toward stricter, and the command policy applies in every posture.",
+    "how": "POSTURE_POLICIES maps posture to toolApprovals and denyPrivateNetworks; resolveSecurityPolicy() caps screening at observe under Dangerous; POSTURE_RANK composes; per-scope posture stored durably and edited in Admin governance.",
+    "evidence": [
+      "src/security/security-posture.ts:14-45",
+      "README.md:108-130",
+      "src/resolution/resolution-service.ts:86",
+      "plugins/admin/ui/governance.ts:26-66"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A small, explainable posture lattice Verevon could expose per Space on top of its deny-by-default effect policies.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-108",
+    "category": "Governance, security & compliance",
+    "name": "Sharing posture: Isolated by default, Open as an explicit tradeoff",
+    "what": "Isolated keeps every resource in its scope unless explicitly shared; Open lets a live authenticated internal speaker's opted-in personal files, artifacts, skills and memory be read in an opted-in shared room, and lets files and skills from up to 25 recent shared rooms be carried into their DM, with org, personal, room and source-room settings composing fail-closed (Isolated wins).",
+    "how": "composeSharingPosture(); sharingSourcesForTurn() requires an internal actor, human or live-ambient origin and trusted live human, rechecks current membership and limits candidates to 100 sessions and 200 files; carried handles are read-only; admin toggles per scope.",
+    "evidence": [
+      "src/resolution/sharing-posture.ts:1-19",
+      "src/resolution/sharing-access.ts:12-126",
+      "SECURITY.md:84-100",
+      "plugins/admin/ui/governance.ts:294-344"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "The 'bring my context into the room' dial Verevon lacks; its fail-closed composition with membership rechecks respects 'Space access never widens an owner-plane ACL'.",
+    "notes": "SECURITY.md concedes the model can still disclose after authorisation; new since the Aug baseline (git 1366726e, 2026-09-10)."
+  },
+  {
+    "id": "qm-product-109",
+    "category": "Governance, security & compliance",
+    "name": "Prompt-injection screening with provenance labels, quarantine and a tester",
+    "what": "In Auto, external or overheard text, attachments and tool results are labelled by source and screened by a classifier (model or external proxy) under off, observe or enforce; flagged content is quarantined until a human releases it, and admins can replay recent screenings against a candidate rubric.",
+    "how": "SECURITY_SCREEN=off|observe|enforce; DEFAULT_SECURITY_SCREEN_RUBRIC distinguishes authority-bearing instructions from ordinary data; a classifier error or timeout (after one retry) yields an 'unscreened' verdict with decision auto so the turn proceeds with a notice (the Verevon baseline also lists unsupported attachments and oversize payloads; not re-verified here); /v1/admin/security/flags and /release; auto-flagger test route compares flag rates.",
+    "evidence": [
+      "src/security/security-posture.ts:49-143",
+      "src/security/security-screener.ts:176",
+      "src/core/orchestrator/security-screen.ts:21",
+      "plugins/admin/ui/governance.ts:67-150",
+      "src/api/routes/admin/security.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Use as a negative test list for Verevon (fail-open 'unscreened but effectful' must not be copied) while borrowing provenance labels and the rubric tester.",
+    "notes": "SECURITY.md: screening is heuristic and incomplete (command output, raw webhooks, replay across cutover)."
+  },
+  {
+    "id": "qm-product-110",
+    "category": "Governance, security & compliance",
+    "name": "Command policy floor with approval rules and hard denials",
+    "what": "An org floor requires approval for recursive deletes, force pushes, destructive SQL and pipe-to-shell and denies fork bombs and mkfs; scopes may add rules but cannot remove floor rules; allowlist mode is stricter; commands are normalised (quotes, heredocs, nested shells up to depth 8) before matching.",
+    "how": "ORG_FLOOR_RULES; composePolicy(orgFloor, scope) concatenates rules and keeps allowlist if the org uses it; parseCommandPolicy validates safe regexes; scannableCommand() expands executed shell payloads.",
+    "evidence": [
+      "src/policy/command-policy.ts:5-30",
+      "src/policy/command-policy.ts:66-100",
+      "SECURITY.md:133-137",
+      "plugins/admin/ui/governance.ts:187-226"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's baseline already found the policy floor gap; note SECURITY.md calls this a speed bump, not a sandbox boundary, so treat it as a UX approval trigger only.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-111",
+    "category": "Governance, security & compliance",
+    "name": "Egress allow/deny lists intersected across the audience",
+    "what": "Each scope can set allowed and denied outbound hosts; for a shared room the effective allowlist is the intersection across every audience member's org, team, personal and scope lists while denied hosts are the union, enforced by an Envoy egress proxy with an audit sink when a backend supports it.",
+    "how": "audienceEgressFloor() intersects, audienceDeniedFloor() unions; egress-policy and egress authorisation process; per-backend proxy URL env vars (fail-open warnings if absent); /v1/egress-audit and admin egress routes.",
+    "evidence": [
+      "src/resolution/audience-floor.ts:5-60",
+      "src/resolution/egress-policy.ts:19",
+      "plugins/admin/ui/governance.ts:344-420",
+      "src/config.ts:1262-1294",
+      "deploy/egress-proxy/envoy.yaml"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The audience-intersection rule is the right semantics for room agents; Verevon's Quarry-v2 egress is stronger, so port the rule not the proxy.",
+    "notes": "SECURITY.md: enforcement depends on the backend and deployment-runtime egress is not built."
+  },
+  {
+    "id": "qm-product-112",
+    "category": "Governance, security & compliance",
+    "name": "Human-only authority walls",
+    "what": "Admin grant changes, impersonation and command-approval decisions are deliberately absent from the agent API: each authorises future agent behaviour, so the decision must come from outside the agent. The doc tells maintainers these are walls, not parity gaps.",
+    "how": "Portal-only routes for grants; the agent always acts as the principal resolved for the turn; approval decisions are taken from the approver's own turn; keychain approvals and goal resume are likewise human-turn only.",
+    "evidence": [
+      "SECURITY.md:108-130",
+      "src/harness/agent-tools.ts:3999-4060",
+      "src/slack/approvals.ts:251-262"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Matches Verevon's rule that decisions authorising future agent behaviour come from outside the agent; adopt the explicit 'do not fix as parity' statement in docs.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-113",
+    "category": "Governance, security & compliance",
+    "name": "Audit trail and audited admin content reads",
+    "what": "Security-relevant actions land in an audit log; an org admin can read transcripts, exact captured model requests, files, memory, ambient-judge inputs and mirrored messages, and every such read is scope-authorised and audited but not separately consent-gated.",
+    "how": "AuditLog.record with principal, action, resource, scopeLabel; postgres audit log; /v1/admin/audit, /sessions/:id and /sessions/:id/llm; admin UI Live, History, Files, Errors, Audit tabs.",
+    "evidence": [
+      "src/audit/audit-log.ts:14",
+      "plugins/admin/README.md:61-71",
+      "SECURITY.md:170-173"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon must decide whether admins may read room content at all; QM's answer is yes with audit, which privacy-conscious tenants may reject.",
+    "notes": "Baseline notes log-and-drop behaviour of the Postgres audit log on failure."
+  },
+  {
+    "id": "qm-product-114",
+    "category": "Governance, security & compliance",
+    "name": "Signed surface requests with replay protection; no credentials in the browser",
+    "what": "Surfaces authenticate to core with HMAC-signed requests (portal identity as a short-lived signed header) checked against a replay cache; the browser holds only an HttpOnly session cookie and never an admin or model key.",
+    "how": "source-auth canonicalPayload signing, replay-dedupe, REQUIRE_SIGNED_PORTAL_IDENTITY, portal framed session cookies; admin whoami asks core on every action; capability tokens for agents.",
+    "evidence": [
+      "src/auth/source-auth.ts:8",
+      "src/auth/replay-dedupe.ts",
+      "plugins/chassis/src/core-client.ts:9",
+      "plugins/admin/README.md:61-65"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Mirrors Verevon's BFF rule that the browser holds no upstream credential.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-115",
+    "category": "Governance, security & compliance",
+    "name": "Single-organisation tenancy by design",
+    "what": "QM assumes one organisation of authenticated internal users and states it is not a hardened public or multi-tenant boundary; guests and externals sit outside the interaction boundary except through explicit Slack exceptions and published-app capability links.",
+    "how": "ORG_ID config; all scope ids and tables are keyed by one org; SECURITY.md Scope section.",
+    "evidence": [
+      "SECURITY.md:24-33",
+      "src/config.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Never inherit this: Verevon is multi-tenant by design; treat QM's single-org shortcuts as places to add tenant filters.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-116",
+    "category": "Governance, security & compliance",
+    "name": "Retention and data lifecycle are durable-by-default",
+    "what": "Sessions, memory and exact model request captures persist when durable stores are on (capture on by default); file artifacts have no expiry or reclamation; the admin Retention and Metrics tabs were removed from the UI while retention remains API-only.",
+    "how": "retention module and /v1/admin/retention route remain; git b7994395 removed the tabs; SECURITY.md lists durable data and no secret scanning on file write.",
+    "evidence": [
+      "SECURITY.md:174-180",
+      "src/admin/retention.ts",
+      "plugins/admin/ui/admin.ts:1-30"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Zero-Data-Retention must propagate in Verevon; QM shows what happens without it (full prompt captures retained by default).",
+    "notes": "No DLP, eDiscovery export or data residency controls found (negative greps)."
+  },
+  {
+    "id": "qm-product-117",
+    "category": "Governance, security & compliance",
+    "name": "Sign-in options and desktop/portal identity",
+    "what": "Sign-in works through a built-in broker (email one-time link, password), a trusted OIDC provider (with provider memory and switching), or Slack-linked identity, fronted by a portal with 8 hour renewable sessions; no SCIM and no passkeys.",
+    "how": "plugins/auth (password, email via SMTP or Resend, sessions, tokens), plugins/portal (oidc, trusted-entry, invite-login, desktop-login, proxy), admin invitation links; sessions default eight hours and renew on use.",
+    "evidence": [
+      "plugins/auth/src/password.ts",
+      "plugins/portal/src/oidc.ts",
+      "plugins/portal/src/trusted-entry.ts",
+      "SECURITY.md:190-193"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's SSO is partial and SCIM absent; QM is no further ahead except for the invite-link flow.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-118",
+    "category": "Governance, security & compliance",
+    "name": "Optional sanitised error reporting and analytics",
+    "what": "Backend and browser errors can be reported to Sentry with sanitisation and sampled tracing, optional PostHog analytics are company-scoped, and an admin Errors view reads a Postgres error log.",
+    "how": "instrument.ts initialises Sentry only when configured; browser-errors.ts; product-analytics.ts; postgres-error-log with paginated Errors view.",
+    "evidence": [
+      "src/instrument.ts",
+      "plugins/web-ui/src/browser-errors.ts",
+      "docs/error-reporting.md:1-23",
+      "src/admin/postgres-error-log.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Operational telemetry that must respect ZDR in Verevon; QM sanitises but still sends to third parties when enabled.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-119",
+    "category": "Governance, security & compliance",
+    "name": "Admin impersonation with a visible banner",
+    "what": "An org admin can impersonate a person to reproduce issues; the web shell shows an impersonation banner with a stop control, and impersonation is not available to the agent.",
+    "how": "POST /v1/admin/impersonate and /stop; Me.impersonatedBy drives impersonationBanner(); exitImpersonation() ends it.",
+    "evidence": [
+      "src/api/routes/admin.ts:168-169",
+      "plugins/web-ui/src/shell.ts:281-300",
+      "plugins/web-ui/src/shell.ts:484-488"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Support-style impersonation needs visibility and an audit trail in any room product.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-120",
+    "category": "Governance, security & compliance",
+    "name": "Anti-flab engineering governance: Wall of Shame review lenses",
+    "what": "QM's SPEC keeps a human-written 'Wall of shame' of past mistakes grouped into lenses (overengineering, band-aid fixes, duplication, hand-rolling and more) and CI requires every PR to be reviewed against them; AGENTS.md also forbids comments and AI co-author trailers.",
+    "how": "docs/SPEC.md lists lenses 'always reviewed' with PR references; wall-of-shame.yml workflow reads review reports; coauthor-trailers CI job; 'delete before you add' north star.",
+    "evidence": [
+      "docs/SPEC.md:33-80",
+      "AGENTS.md:10-30",
+      ".github/workflows/wall-of-shame.yml"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "A candidate process for Verevon's own agent-assisted engineering; also a warning list (loops subsystem, per-page UI designs, delivery retries) of what over-building looks like.",
+    "notes": "Workflow file existence from the scout; the SPEC text itself was read."
+  },
+  {
+    "id": "qm-product-121",
+    "category": "Client shell",
+    "name": "Electron desktop client (prototype)",
+    "what": "A thin Electron wrapper opens an existing QM web deployment in a sandboxed window with its own cookie partition, a first-run instance chooser, 'Change Instance' (Cmd/Ctrl+,), Back/Forward shortcuts, session shortcuts (hold Cmd then 1-9), up to 16 multiview panes and a registered qm-desktop:// protocol. It has no auto-update, tray or native notifications, and denies microphone, camera and notification permissions.",
+    "how": "single-instance lock; setAsDefaultProtocolClient('qm-desktop'); ipcMain handlers qm:open-browser, qm:current-instance, qm:connect with sender validation; contextIsolation, sandbox, nodeIntegration off; setPermissionRequestHandler denies all; off-origin links open in the browser; unsigned macOS prototype.",
+    "evidence": [
+      "desktop/README.md:1-30",
+      "desktop/main.mjs:23",
+      "desktop/main.mjs:140-170",
+      "desktop/main.mjs:242-330"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's shell needs real notifications, tray and update that QM's prototype lacks; copy the isolation settings and browser sign-in handoff only.",
+    "notes": "Download button in Settings targets Mac only (Apple Silicon, macOS 13+)."
+  },
+  {
+    "id": "qm-product-122",
+    "category": "Client shell",
+    "name": "Browser sign-in handoff for the desktop app",
+    "what": "The desktop app opens /auth/desktop in the default browser; after sign-in the browser returns a two minute, single-use code bound to a proof key and random state, which the app redeems over the instance connection; passwords and identity-provider cookies never enter the app.",
+    "how": "plugins/portal desktop-login routes, core claim store prevents replay across portal instances, proof key exists only for the in-progress attempt, isolated persistent cookie partition per instance.",
+    "evidence": [
+      "desktop/README.md:20-24",
+      "plugins/portal/src/desktop-login.ts",
+      "desktop/login.mjs:1-49"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A safe pattern for Verevon desktop and mobile shells to reuse the web SSO session without embedding credentials.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-123",
+    "category": "Client shell",
+    "name": "Theme import and density tiers",
+    "what": "Theme follows the system or is set to light or dark, or paints the app from an imported iTerm2 .itermcolors or VS Code colour-theme JSON with contrast checks; panes adapt their layout to four density tiers (full, compact, card, strip) by size.",
+    "how": "importTheme() parses JSONC/themes into a palette, themeTokens() derives tokens with contrast; densityTierFor(width,height) thresholds 96/300/540 px height and 250/470 px width; persisted choice with try/catch.",
+    "evidence": [
+      "plugins/web-ui/src/settings.ts:180-230",
+      "plugins/web-ui/src/theme-import.ts:58-120",
+      "plugins/web-ui/src/density.ts:1-14"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Cheap personalisation and responsive pane density for a multi-pane Space UI.",
+    "notes": "Corrects the scout note that dark mode support is limited: a .dark theme class and theme choices exist."
+  },
+  {
+    "id": "qm-product-124",
+    "category": "Client shell",
+    "name": "Deep links and URL-synced view state",
+    "what": "Every view, session and message has a URL (views under a base path, ?seq= message links, ?q= prefilled drafts, in-app session links that open in place); the address bar is kept in sync and old /web-ui/ links are redirected by the portal.",
+    "how": "syncUrlFromState(), deepLinkPath(), messageLinkSeq()/loadMessageTranscript() page older turns until the target seq is present; highlightMessage() scrolls and highlights.",
+    "evidence": [
+      "plugins/web-ui/src/shell.ts:156-235",
+      "plugins/web-ui/src/deep-link.ts",
+      "plugins/web-ui/src/message-link.ts:1-49"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Message-level permalinks are missing from Verevon rooms and are needed for Slack/Teams mirrors and notifications.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-125",
+    "category": "Client shell",
+    "name": "Accessibility basics and no internationalisation",
+    "what": "Dialogs trap focus and restore it to the opener, grids support arrow-key navigation, 49 web UI modules use ARIA attributes and eight or more reduced-motion media queries exist; the UI is English only with no i18n framework.",
+    "how": "trapDialogFocus/restoreDialogFocus, nextGridIndex, pane-focus; prefers-reduced-motion in shell.css; no i18next/lingui matches in web or admin UI.",
+    "evidence": [
+      "plugins/web-ui/src/dialog-focus.ts:1-32",
+      "plugins/web-ui/src/grid-nav.ts",
+      "plugins/web-ui/src/shell.css:166",
+      "plugins/web-ui/src/shell.css:723"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's i18n and accessibility requirements exceed this baseline; use it only for the dialog focus pattern.",
+    "notes": "ARIA count from a grep of web-ui sources."
+  },
+  {
+    "id": "qm-product-126",
+    "category": "Client shell",
+    "name": "Operator branding and per-user shell settings",
+    "what": "Operators set the product label, org name, accent colour, mark and SVG favicons for portal, web and auth; each person sets whether the app reopens last conversations or a new chat, whether the sidebar shows Slack conversations, and the AI account.",
+    "how": "ORG_BRAND_SELF_LABEL, ORG_BRAND_ORG_NAME, ORG_BRAND_ACCENT, ORG_BRAND_MARK; chassis branding; settings.ts rows 'When QM opens', 'Sidebar conversations', 'AI access', Desktop app, Admin link.",
+    "evidence": [
+      "plugins/chassis/src/branding.ts",
+      "src/resolution/branding.ts",
+      "plugins/web-ui/src/settings.ts:270-330",
+      "plugins/web-ui/src/settings.ts:405-470"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "White-label identity per org is a likely Verevon need; keep branding in Control.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-127",
+    "category": "UX patterns & layout",
+    "name": "Navigation: Home, Inbox, Search, Browse tile palette, New chat",
+    "what": "A compact sidebar offers Home (conversations), Inbox with a waiting count, Calendar (stub), Search and Browse, then Create New Chat; Browse opens a two-column tile palette of Projects, Files, Crons, Webhooks, Keychain, Apps, Memory, Skills, Loops and Admin with one-line blurbs.",
+    "how": "renderSidebarTop() with navRow/actionRow; destinations() builds the palette with permission checks (can('loops'), can('admin')); VIEWS list of 13 views; arrow-key tile navigation.",
+    "evidence": [
+      "plugins/web-ui/src/shell.ts:603-655",
+      "plugins/web-ui/src/browse.ts:20-55",
+      "plugins/web-ui/src/shell-state.ts:23-37"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's six-tab cockpit and QM's resource palette make different bets; QM hides resources behind Browse while chat dominates.",
+    "notes": "SPEC's Wall of Shame criticises each artifact page having its own design instead of one group-by backbone."
+  },
+  {
+    "id": "qm-product-128",
+    "category": "UX patterns & layout",
+    "name": "Scope-centred Projects page",
+    "what": "One page per scope shows its conversations, its files, webhooks, crons, apps and skills with manage actions, and a settings column for members, Slack link, model, pinned channel header and ambient policy. The list groups Personal, Web and Slack scopes with counts and last activity.",
+    "how": "gridTpl() groups contexts by kind; detailTpl() renders panels and aside (projectMembersSection, projectSlackSection, contextModelSection, channelHeaderSection, ambientPolicySection); loadScopeResources fetches /api/scope-resources; empty state says the project is ready for work.",
+    "evidence": [
+      "plugins/web-ui/src/contexts.ts:294-500",
+      "plugins/web-ui/src/contexts.ts:796-1010",
+      "plugins/web-ui/server/index.ts:1802"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "This is the 'one view of the room's computer and resources' the Verevon plan calls a QM lead (S1.6/S4.5); it is the closest reference for a Space home tab layout.",
+    "notes": "No full-page Space home beyond this page; 'Projects' and 'Contexts' are used interchangeably in code."
+  },
+  {
+    "id": "qm-product-129",
+    "category": "UX patterns & layout",
+    "name": "Session top bar shows the scope's tools with live counts",
+    "what": "Inside a conversation the top bar shows a breadcrumb to the project plus tool buttons for Crons, Files, Memory, Apps, Skills and Keychain scoped to that conversation's scope, with cached counts of enabled crons and live apps; opening a tool keeps the session context.",
+    "how": "sessionTopbarTpl(); TOOL_COUNTERS caches counts for 60 s per scope; setScopedSession() carries scope into crons/files/memory views; parent and fork badges link back.",
+    "evidence": [
+      "plugins/web-ui/src/session-scope.ts:20-130"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Makes the agent's context legible at the point of conversation; a good pattern for Space chat headers.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-130",
+    "category": "UX patterns & layout",
+    "name": "Sidebar organisation: pinned, recent by project, archive, colours, multi-select",
+    "what": "Conversations are split into Pinned and Recent, with project/channel groups holding their sessions, an Archived toggle, status filter (active, waiting, archived), per-conversation colours and emoji status, awaiting/working marks, read-only locks for non-continuable sessions, shift-click range selection with bulk actions, and a 'Web only' filter.",
+    "how": "splitPinned(), recentProjectSeeds() and ChatBrowseStatus in session-list.ts; session rows in sessions.ts carry colour via --session-color, status marks, share/archive/pin actions; selection state machine in session-select.ts; setWebOnly().",
+    "evidence": [
+      "plugins/web-ui/src/session-list.ts:14-110",
+      "plugins/web-ui/src/sessions.ts:335-400",
+      "plugins/web-ui/src/sessions.ts:760-860",
+      "plugins/web-ui/src/sessions.ts:978-1082"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Sidebar organisation is a gap in Verevon (no cross-room aggregates); this is a complete reference including bulk selection.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-131",
+    "category": "UX patterns & layout",
+    "name": "Composer design: pickers, paste chips and runtime inheritance",
+    "what": "The composer combines a model/effort/fast-mode picker with up to eight saved presets, long pastes that become viewable and editable chips, drag/drop and folder drop, emoji and slash completion, and an upgrade banner when the org's recommended runtime moves ahead of the scope's pinned runtime (Upgrade, Keep mine, Inherit future defaults).",
+    "how": "composer-loadout LOADOUT_CAP 8 with upsert/reconcile; pasteChipLabel and a paste dialog with 'Insert into message'; SLASH_TOKEN; upgradeAvailable banner calling changeScopeRuntime({harnessId,modelId}|{keep:true}|{inherit:true}); effort levels low..ultracode, adaptive and provider default.",
+    "evidence": [
+      "plugins/web-ui/src/composer-loadout.ts:1-80",
+      "plugins/web-ui/src/composer.ts:54",
+      "plugins/web-ui/src/composer.ts:575-590",
+      "plugins/web-ui/src/composer.ts:704-776",
+      "plugins/web-ui/src/runtime-capabilities.ts:1-30"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's room composer is a plain streamChat box; model presets and paste chips are cheap wins once Spaces allow model choice.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-132",
+    "category": "UX patterns & layout",
+    "name": "Transcript reading: collapsed prompts, completed-work disclosure, paged history",
+    "what": "Long latest prompts start as a two-line preview with Show more, finished tool work collapses into one timed disclosure while the answer stays visible, history loads by turns (older pages can load during live turns), scrolled-up readers are not yanked, and every message has a permalink.",
+    "how": "QA doc records the before and after; transcript-viewport.ts and timeline.ts; TAIL_TURNS paging; messageEntrySeqs() map messages to entry seqs for links.",
+    "evidence": [
+      "docs/qa/chat-streaming/README.md:1-17",
+      "plugins/web-ui/src/transcript-viewport.ts",
+      "plugins/web-ui/src/timeline.ts",
+      "plugins/web-ui/src/message-link.ts:30-49"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Reading ergonomics for long agent threads in a shared room; informs Verevon's tool-call card design.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-133",
+    "category": "UX patterns & layout",
+    "name": "Multiview with up to 16 tiled panes and responsive density",
+    "what": "People can tile up to 16 conversations or views side by side by dragging sidebar rows to pane edges; each pane picks a density tier from its size, restores on reload, syncs across devices, and shows a compact header in the desktop app.",
+    "how": "dockview-core layout with split-layout.ts limits MAX_TILES/MAX_PANES 16, pane-kinds for drag payloads, serializedTileCount guard, remote split sync, density.ts per-pane tier.",
+    "evidence": [
+      "plugins/web-ui/src/split-layout.ts:1-60",
+      "plugins/web-ui/src/pane-kinds.ts:1-34",
+      "plugins/web-ui/src/density.ts:1-14",
+      "plugins/web-ui/src/conversations.ts:60-75"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Watching several rooms and agent runs at once is a power-user feature neither Teams nor Slack offers; consider for Verevon's Work cockpit.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-134",
+    "category": "UX patterns & layout",
+    "name": "Empty states and suggested starters",
+    "what": "The empty personal chat shows up to three suggested activities (generated per person or from operator JSON) that fill an editable draft instead of sending; shared contexts and existing chats do not show them; new projects show a 'ready for work' panel.",
+    "how": "SuggestedActivity {id,title,prompt,icon}; suggestions fade when a draft or attachment exists and are inert to assistive tech when collapsed; welcome-ideas and cohort welcome copy.",
+    "evidence": [
+      "plugins/web-ui/README.md:48-80",
+      "plugins/web-ui/src/suggested-activities.ts",
+      "plugins/web-ui/src/contexts.ts:437-449",
+      "plugins/web-ui/src/welcome-ideas.ts",
+      "docs/SPEC.md:160"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Activation pattern for empty Spaces; the 'fill a draft, never send' rule avoids accidental agent runs.",
+    "notes": "docs/SPEC.md:160 records that YC-specific welcome copy remains in the public app after a scrub (qm#1504); the activity generation prompt also carries a 'yc' icon rule (src/suggestions/activities.ts:11-19)."
+  },
+  {
+    "id": "qm-product-135",
+    "category": "UX patterns & layout",
+    "name": "Slack-to-web continuity cues",
+    "what": "In Slack, a pinned channel header (or DM topic) names the model in use with a link to the scope's web settings, long-running work shows a 'Follow via QM Web' link, cron deliveries link to cron settings, and the web Projects page lists Slack channels and DMs under a 'Slack' group; conversations from Slack open read-only in the web.",
+    "how": "createSurfaceHeaderEnsurer() sets topic or pins/updates/removes a bot message according to the channel header setting (default off in org config); channelWelcomeMessage on join; sidebar 'Web only' setting hides Slack conversations.",
+    "evidence": [
+      "src/slack/delivery.ts:100-215",
+      "plugins/web-ui/src/channel-header.ts:1-60",
+      "src/slack/README.md:42-62",
+      "plugins/web-ui/src/contexts.ts:312-330"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A concrete way for an external channel adapter to point back to the canonical Space without duplicating its UI.",
+    "notes": "Header is skipped for externally shared channels and group DMs."
+  },
+  {
+    "id": "qm-product-136",
+    "category": "Org & membership",
+    "name": "Mixed rooms with external participants (org-wide, off by default)",
+    "what": "An admin can allow internal members to use the agent in Slack rooms whose audience includes an external user (Slack Connect member or guest). The agent's replies and anything it reads there are visible to those externals, and externals themselves still cannot interact. A separate override list marks trusted Slack users as internal.",
+    "how": "config-store getExternalSlackParticipants/getInternalMemberOverrides; the Slack turn handler refuses turns whose audience has an external guest unless the org flag is on; Admin Integrations shows two cards with explicit warnings that internal-member access includes organisation credentials in all-internal rooms.",
+    "evidence": [
+      "plugins/admin/ui/integrations.ts:33-90",
+      "src/slack/turn-handler.ts:343-350",
+      "src/slack/turn-handler.ts:918-925",
+      "src/resolution/config-store.ts:205-208",
+      "src/resolution/config-store.ts:231"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Explicit, default-off switch for shared rooms that include outsiders; Verevon's guest/external-channel design (plan S5.1) needs the same 'externals read but cannot act' stance.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-137",
+    "category": "Messaging core",
+    "name": "Slack context is mirror-first with live fallback and honest limits",
+    "what": "The agent reads conversation context from stored Slack events first, falls back to live history, and says plainly when context may be incomplete; a shared hosted Slack app uses a 15-message history limit and tells the user when Slack rate-limits history reads, offering to set up their own app.",
+    "how": "createSlackHistoryReader() with MIRROR_CONTEXT_NOTE, liveHistory fallback and expansion failure counters; SHARED_SLACK_HISTORY_LIMIT=15; createSlackRateLimitNotice() posts a DM notice or ephemeral hint once per minute per user.",
+    "evidence": [
+      "src/slack/history.ts:1-50",
+      "src/slack/history-rate-limit.ts:1-27",
+      "src/slack/rate-limit-notice.ts:1-54"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Any Verevon channel adapter will hit provider history limits; stating the limitation in-band avoids the agent confidently answering from partial context.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-138",
+    "category": "Agents in the room",
+    "name": "Agent plan task list shown in replies",
+    "what": "The agent's own per-run task list (pending, in progress, completed, skipped, failed) is stored per session and rendered as a section in the Slack reply and delivery, so people see the plan and progress without opening the web UI.",
+    "how": "TaskStore keyed by sessionId and originRunId with status events; surface tools attach taskList {id,title,status} to deliveries; Slack deliveries render renderTaskList() into a section block; harness adapters bridge their native todo tools.",
+    "evidence": [
+      "src/tasks/task-store.ts:1-40",
+      "src/core/orchestrator/surface-tools.ts:227-234",
+      "src/slack/deliveries.ts:315-325",
+      "src/delivery/run-result-delivery.ts:40-61"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A lightweight, agent-owned task list is the closest QM gets to tasks in a room; Verevon's orchestration todos are per thread and could surface the same way.",
+    "notes": "These are agent plans, not human task boards; no kanban or boards exist in QM."
+  },
+  {
+    "id": "qm-product-139",
+    "category": "Agents in the room",
+    "name": "Other bots can address the agent but never carry human authority",
+    "what": "Posts from other Slack bots can mention or reach the agent, but they are marked botAuthored/botActor, are not live-human turns and so cannot use a person's keychain or sharing posture; per-bot behaviour is set in the channel's bot ledger.",
+    "how": "eventIdentity() resolves bot ids via bots.info; dispatch sets botAuthored and omits liveActor for bots; allowActor refuses bots when an allowlist exists; the ambient judge treats ledger modes ignore, rollup, action and user.",
+    "evidence": [
+      "src/slack/events.ts:104-127",
+      "src/slack/turn-handler.ts:219-224",
+      "src/slack/turn-handler.ts:568-575",
+      "src/api/app-ambient.ts:59-87"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Bot-to-agent messaging is a realistic Space scenario (CI bots, alerting); the rule 'bots can ask, only people can authorise' is a clean boundary.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-140",
+    "category": "Agents in the room",
+    "name": "Acting as a person means drafting, not sending",
+    "what": "Skills create drafts in the person's own Slack composer (through their per-user OAuth) or Gmail drafts written from a learned voice profile; nothing is sent and the agent cannot list, edit or delete drafts afterwards, so the person always sends.",
+    "how": "slack-drafts skill uses the person's Slack user token on the sandbox ($VAULT_TOKEN_SLACK_COM) through a bundled helper; email-voice-profile builds voice/email-voice-profile.md and email-draft-in-voice requires reading the full thread and a self-check; authority stays with the human sender.",
+    "evidence": [
+      "skills-seed/slack-drafts/SKILL.md:1-40",
+      "skills-seed/email-draft-in-voice/SKILL.md:1-25",
+      "skills-seed/email-voice-profile/SKILL.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A strong pattern for 'agent works like a human' without impersonation: prepare in the person's own client, never post in their name.",
+    "notes": "Live Slack scenario 'mu-authority-not-on-behalf-of-others' pins the refusal to send on another person's behalf."
+  },
+  {
+    "id": "qm-product-141",
+    "category": "Agents in the room",
+    "name": "Agent can list, read, message, start and fork sidebar conversations",
+    "what": "On web turns the agent can list the sessions people see in their sidebar for this context, read their transcripts, send a private note to another session without starting a turn, start a clean new session, or fork the current one; new and forked sessions appear under the person's name and are refused on automated turns.",
+    "how": "sessions tool actions list/search/read/send_message/new/fork; list and read are scoped to the current context and viewer; messages arrive as internal context, not as a person's request; creation requires a person attending the turn.",
+    "evidence": [
+      "src/harness/agent-tools.ts:1741-1790",
+      "docs/persistent-subagent-sessions.md:1-4",
+      "src/api/app-sessions.ts:1000-1040"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Lets a room agent split a topic into its own thread at a human's request, comparable to Teams/Slack thread-from-message but agent-initiated.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-142",
+    "category": "Messaging core",
+    "name": "Each Slack thread is its own session inside a shared scope",
+    "what": "A channel is one scope (shared memory, files, computer) but every Slack thread, and every DM thread, is a separate conversation with its own transcript, so context stays tight per thread while resources are shared per room. A plain DM is one session per DM channel.",
+    "how": "thread refs are dm:<channel>[:<ts>], ch:<channel>:<root> and grp:<channel>:<root>; slackThreadRefCandidates() resolves which session a message belongs to; Session {scopeId, threadRef}; external-access accounts prefix refs with slack-account:<team>:.",
+    "evidence": [
+      "src/slack/message-gating.ts:134-165",
+      "src/types.ts:98-125",
+      "src/slack/turn-handler.ts:268-276",
+      "test/live-slack/README.md:14-17"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Clarifies the thread-versus-room split Verevon needs: threads are conversations, the Space owns the resources and instructions they share.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-143",
+    "category": "Messaging core",
+    "name": "Scheduled send through one-shot or recurring verbatim relays",
+    "what": "A person can ask the agent to send an exact message later or on a schedule to themselves, a teammate, a channel or a group DM; one-shot times (firstFireAt) auto-cancel after firing, and a message addressed to someone other than the owner carries an attribution footer and needs that recipient's consent when it is a standing delivery.",
+    "how": "cron tool with text (verbatim) instead of task, destination via recipient/channel/participants; runTrigger() takes the message branch (status ok) and calls reachEnqueue with attributeAs=<owner display name>; consent notice asks the recipient to accept or decline.",
+    "evidence": [
+      "src/harness/agent-tools.ts:2280-2300",
+      "src/triggers/run-trigger.ts:296-322",
+      "src/triggers/trigger-store.ts:15-34",
+      "src/triggers/consent-notice.ts:4-21"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Scheduled send is absent in Verevon rooms; reusing cron machinery for message relays (with attribution and consent) avoids a separate feature.",
+    "notes": "No user-facing 'schedule send' button in the web composer; it is agent-mediated."
+  },
+  {
+    "id": "qm-product-144",
+    "category": "Org & membership",
+    "name": "Several Slack accounts and workspaces per deployment",
+    "what": "One deployment can run multiple Slack apps or workspaces (including a partner workspace), each with its own tokens and events mode; deliveries and thread refs carry the account and team so replies go back through the right client.",
+    "how": "SLACK_ACCOUNTS JSON array validated for ids and tokens per mode; clientForAccount(accountId, teamId) routes deliveries; Destination.slackAccountId/slackTeamId/slackPolicyNamespace; Socket Mode or HTTP Events per account.",
+    "evidence": [
+      "src/slack/config.ts:133-170",
+      "src/slack/deliveries.ts:60-66",
+      "src/slack/deliveries.ts:196-198",
+      "src/slack/index.ts:441",
+      "src/types.ts:208-214"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Multi-workspace channel adapters (Slack workspaces, Teams tenants) need account-scoped identity on every destination; this is a working shape.",
+    "notes": ""
+  },
+  {
+    "id": "qm-product-145",
+    "category": "Apps & extensibility",
+    "name": "Agent can add custom emoji to the Slack workspace",
+    "what": "The agent can upload a custom Slack emoji (PNG or GIF) on the person's behalf using their own Slack web session or a configured fallback, then use it in reactions and replies.",
+    "how": "POST /v1/emoji requires an agent capability token; runEmojiUpload validates the emoji name and workspace URL (only https *.slack.com) and drives the browser-session uploader; the ack-emoji picker later samples the workspace's custom emoji.",
+    "evidence": [
+      "src/api/routes/emoji.ts:6-42",
+      "src/connectors/emoji-upload-service.ts:1-30",
+      "src/api/agent-api-catalog.ts:741-750"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "unique",
+    "verevonRelevance": "A niche personalization feature; the point for Verevon is that surface-specific admin actions can live behind the same capability-token API instead of in the core model.",
+    "notes": "Relies on a browser-session path, not an official API."
+  },
+  {
+    "id": "qm-product-146",
+    "category": "Agents in the room",
+    "name": "Instruction hierarchy: org SOUL, scope instructions and channel guidance with history",
+    "what": "Agent behaviour is layered: organisation instructions ('SOUL') take precedence over the scope's instructions, and the agent itself can read and edit its standing 'guidance' for the current channel or conversation (edit one exact passage or replace all). Admins edit the org SOUL with a saved revision, a current draft and a version history.",
+    "how": "composeSoul() puts org instructions first and labels scope instructions as subordinate; config-store setSoulIfVersion() is a compare-and-swap on a version number; the guidance tool has scope channel|conversation, actions edit/replace and fails unless the old passage appears exactly once; org-wide policy is always layered above and cannot be overridden by guidance.",
+    "evidence": [
+      "src/resolution/resolution-service.ts:25-43",
+      "src/resolution/config-store.ts:172-176",
+      "src/harness/agent-tools.ts:2902-2935",
+      "plugins/admin/ui/settings.ts:392-440"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Maps to Verevon's authored-instruction hierarchy (platform, org, Space, persona); QM adds agent-editable room guidance with exact-passage edits and CAS versions, while SECURITY.md concedes edits are not uniformly bounded by an org floor or human approval.",
+    "notes": "SECURITY.md lists unversioned or unbounded standing-instruction edits as a known governance gap."
+  }
+]

@@ -1,0 +1,2014 @@
+[
+  {
+    "id": "v-chat-agents-ui-001",
+    "category": "Chat experience",
+    "name": "Streaming chat over SSE through the BFF gateway with per-audience delegated tokens",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1811",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:17",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:18-132",
+      "apps/Frontend Plane/verevonv3/src/shared/api/sse.ts:29"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. POST /api/v1/chat/stream -> model-gateway /v1/invoke/stream; gateway mints model/data/ingestion/capability(best effort)/inference/execution/cost/session tokens, 503 on required mint failure."
+  },
+  {
+    "id": "v-chat-agents-ui-002",
+    "category": "Chat experience",
+    "name": "Rich SSE event taxonomy (artifact, reasoning, tool, citation, grounding, step, usage, timing, receipt, title, follow-ups, plan, verification, memory recall, queued input, retrieval notice, scope receipt)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1488-1760",
+      "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:462-484"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Producer and consumer names match; unknown events reach a UI-event hook instead of being dropped."
+  },
+  {
+    "id": "v-chat-agents-ui-003",
+    "category": "Chat experience",
+    "name": "Stream resume after disconnect (Last-Event-ID, 10-minute buffer) and durable-outcome reconciliation",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:268-278",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:134-167",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:1208-1528"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC + DOC. Buffer is in-memory; a model-gateway restart loses an in-flight turn (parity row: set REDIS_URL/Dragonfly)."
+  },
+  {
+    "id": "v-chat-agents-ui-004",
+    "category": "Chat experience",
+    "name": "Stop / cancel with server-side kill and recorded unconfirmed cancels",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1860",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:153",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:43-51",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:1455-1528"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-005",
+    "category": "Chat experience",
+    "name": "Continue after stop (\"Fortsett\")",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3582-3640",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:783"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Client-spliced: seedContent + continuation instruction in modelContent; no backend continue field; not flagged as regenerate."
+  },
+  {
+    "id": "v-chat-agents-ui-006",
+    "category": "Chat experience",
+    "name": "Send messages mid-run (queued input delivered at next tool-round boundary)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2000",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:39-44",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:475-493",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2105"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. Pending/delivered/refused states; server registry in-memory single replica (DOC)."
+  },
+  {
+    "id": "v-chat-agents-ui-007",
+    "category": "Chat experience",
+    "name": "Custom markdown renderer (tables with alignment, nested lists with start, task lists, nested quotes, details/summary)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:588-652",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1086-1600"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. No markdown library; own parser in chat-media-markdown.tsx."
+  },
+  {
+    "id": "v-chat-agents-ui-008",
+    "category": "Chat experience",
+    "name": "Code blocks with custom syntax highlighting and copy",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-code-highlight.ts:1",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1218-1288"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-009",
+    "category": "Chat experience",
+    "name": "Math rendering (KaTeX)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1428",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:645-649",
+      "apps/Frontend Plane/verevonv3/package.json:34"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Raw source until $$ closes."
+  },
+  {
+    "id": "v-chat-agents-ui-010",
+    "category": "Chat experience",
+    "name": "Mermaid diagrams (strict security level, render only when fence closed)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1360-1420",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:619-626"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-011",
+    "category": "Chat experience",
+    "name": "Native accessible charts from ```chart fences and table-to-chart, with SVG export",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx:1-15",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatTableTools.tsx:1",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-chart/spec.ts:1-20",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-chart/svg-export.ts:1"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Added in commit f5b8e1c7 (2026-10-08); parity doc of 2026-10-01 still says no native renderer."
+  },
+  {
+    "id": "v-chat-agents-ui-012",
+    "category": "Chat experience",
+    "name": "Citations with source groups, origin (web/knowledge) and server claim anchors",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:90-138",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:953-969",
+      "apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs:1"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Chips placed by client regex over [n]; claimId informational. Not live-proven (DOC); I6 plans number binding."
+  },
+  {
+    "id": "v-chat-agents-ui-013",
+    "category": "Chat experience",
+    "name": "Sources panel (read vs not-read, knowledge and web cards, grounding overview with graph summary)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:356-538",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:163-209"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-014",
+    "category": "Chat experience",
+    "name": "Artifacts canvas (document, code, sandboxed HTML, image, PDF, file viewers) fed by create/update/read_artifact tools",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:88-600",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4361-4383"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-015",
+    "category": "Chat experience",
+    "name": "Artifact version stepper and diff against the previous revision",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:54-79",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:202-343"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-016",
+    "category": "Chat experience",
+    "name": "User editing of artifacts (canvas edit, selection-scoped edit, restore version)",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:164"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "Searched textarea/contenteditable/onInput in ChatArtifactPanel.tsx, ChatWorkspaceCanvas.tsx, ChatAttachmentCanvas.tsx: none. Planned I17 (Wave 5)."
+  },
+  {
+    "id": "v-chat-agents-ui-017",
+    "category": "Chat experience",
+    "name": "Regenerate with 1/N version switcher",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3499-3531",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions.ts:44-137",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:734-751"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Final exchange only; not persisted (lost on reload); I9/I10 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-018",
+    "category": "Chat experience",
+    "name": "Edit a user message and resubmit",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3686-3750",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:886-954"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Non-final edit confirms and discards later turns."
+  },
+  {
+    "id": "v-chat-agents-ui-019",
+    "category": "Chat experience",
+    "name": "Branch conversation from a message",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3752-3786",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:226-281"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC + INF: branch is a client-minted thread with a local snapshot; the BFF ignores turns on save, so it is browser-local until it sends. I8 server branch planned."
+  },
+  {
+    "id": "v-chat-agents-ui-020",
+    "category": "Chat experience",
+    "name": "Effectful-turn immutability with \"Run as a new turn\"",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3502-3505",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3642-3676",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:767"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-021",
+    "category": "Chat experience",
+    "name": "Durable thread history from session-core (BFF cap 80, origin=chat) with run status chips",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:21",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:335-385",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2189",
+      "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:644"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. No paging beyond 80."
+  },
+  {
+    "id": "v-chat-agents-ui-022",
+    "category": "Chat experience",
+    "name": "Rename, pin, delete (hard erase) and clear threads",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:226-320",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:415-511",
+      "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:473"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. MG archive routes not exposed."
+  },
+  {
+    "id": "v-chat-agents-ui-023",
+    "category": "Chat experience",
+    "name": "Projects / folders for chats",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/chat-organization.ts:3-27",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:5-45",
+      "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx:16"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Browser-only localStorage organizer, max 100 projects, no project instructions/files/memory; I21 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-024",
+    "category": "Chat experience",
+    "name": "Conversation search",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:49-56",
+      "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx:209"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Substring over title/preview/project only. Grep recall_conversations|search_threads|SearchThreads in Model Plane Rust: none. I12 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-025",
+    "category": "Chat experience",
+    "name": "Thread deep links (?thread_id=) resolved through the owner-bound route",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-deep-link.ts:6-31"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-026",
+    "category": "Chat experience",
+    "name": "Shareable read-only chat link",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "Searched \"share\" in features/chat (non-test): no share feature. Planned I19 (Wave 6, owner-gated)."
+  },
+  {
+    "id": "v-chat-agents-ui-027",
+    "category": "Chat experience",
+    "name": "Import conversations from other assistants",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched features/chat, features/settings, shared/api for a conversation importer: none."
+  },
+  {
+    "id": "v-chat-agents-ui-028",
+    "category": "Chat experience",
+    "name": "Export answers to Word, Excel, PowerPoint and PDF (in-browser)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/index.ts:1-60",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:621-624",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:253-256"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Pure OOXML builders, no network; PDF via print iframe; no images/charts/math in files (grep \"chart\" in builders: none). H3/H4 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-029",
+    "category": "Chat experience",
+    "name": "Follow-up suggestion chips and generated thread titles",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1659-1672",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1870"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-030",
+    "category": "Chat experience",
+    "name": "Pin messages into protected context (max 5)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-pinned-messages.ts:33-43",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:95-106",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:681-690"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Stored per browser, not per user."
+  },
+  {
+    "id": "v-chat-agents-ui-031",
+    "category": "Chat experience",
+    "name": "Per-message feedback (thumbs + reason chips) bound to the run",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:491-494",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2724",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:480-494"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-032",
+    "category": "Chat experience",
+    "name": "Calm cold start with activity-based suggestions and resume offer",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3763-4035",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/prompt-suggestions.ts:1"
+    ],
+    "plannedIn": [
+      "VEREVON_CHAT_UX_DESIGN_SPEC.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-033",
+    "category": "Chat experience",
+    "name": "Findings, Reports and Routines utility pages",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/app/App.tsx:178-180",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatUtilityPage.tsx:23-70"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Untracked new file; Reports read the local transcript cache."
+  },
+  {
+    "id": "v-chat-agents-ui-034",
+    "category": "Chat experience",
+    "name": "Typed failure presentation (retry, reconnect, wait-until, open integrations; unsaved-text disclosure; truncation notice)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:231-324",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3277-3419"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-035",
+    "category": "Chat experience",
+    "name": "Long paste becomes an attachment",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:608"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Threshold 4,000 characters."
+  },
+  {
+    "id": "v-chat-agents-ui-036",
+    "category": "Multimodal & creation",
+    "name": "File attachments: images for vision, PDF/DOCX/XLSX/PPTX extraction via imports-core, text files, with size limits",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts:6-43",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:14-40",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:531-540"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. 1 MB/file, 60k chars/file, 120k chars/turn. Vision built_unit_tested (DOC). No OCR (H9 planned)."
+  },
+  {
+    "id": "v-chat-agents-ui-037",
+    "category": "Multimodal & creation",
+    "name": "Durable chat document upload to Data Plane documents-api",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2081-2118",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:43-109"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. uploadChatDocument has zero callers (grep); gateway route exists."
+  },
+  {
+    "id": "v-chat-agents-ui-038",
+    "category": "Multimodal & creation",
+    "name": "Add attachments to the knowledge base from the composer",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:187-205"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Blocked in temporary chat."
+  },
+  {
+    "id": "v-chat-agents-ui-039",
+    "category": "Multimodal & creation",
+    "name": "Connector attach picker (OneDrive, Gmail, Outlook mail, Google Drive, Google/Outlook calendar)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:175-181",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:5423",
+      "apps/Frontend Plane/verevonv3/src/shared/api/integrations-client.ts:1"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC + DOC. Not live-proven on real connections; SharePoint later."
+  },
+  {
+    "id": "v-chat-agents-ui-040",
+    "category": "Multimodal & creation",
+    "name": "One-shot screenshot capture as attachment",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1913-1945"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. getDisplayMedia single frame; continuous screen share absent (E13 hardening planned)."
+  },
+  {
+    "id": "v-chat-agents-ui-041",
+    "category": "Multimodal & creation",
+    "name": "Image generation in chat",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:477-485",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1107",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1427",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5958",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2687-2745"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. Not available on the ChatGPT subscription route; not live-proven (DOC)."
+  },
+  {
+    "id": "v-chat-agents-ui-042",
+    "category": "Multimodal & creation",
+    "name": "Generated files as download cards (from code_interpreter)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4356-4358",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2748-2790"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-043",
+    "category": "Multimodal & creation",
+    "name": "Office document / slide / sheet generation",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4357"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC + DOC. Only via code_interpreter libraries; no designed deck path (H8), no edit-in-place (G6)."
+  },
+  {
+    "id": "v-chat-agents-ui-044",
+    "category": "Multimodal & creation",
+    "name": "Data analysis in sandbox",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4357"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. pandas/numpy networkless ~30s; attachments not staged into the sandbox (H6 planned)."
+  },
+  {
+    "id": "v-chat-agents-ui-045",
+    "category": "Multimodal & creation",
+    "name": "Speech-to-text dictation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts:57-77",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs:46-78",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1887"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Governed route via model-gateway; blocked in temporary chat."
+  },
+  {
+    "id": "v-chat-agents-ui-046",
+    "category": "Multimodal & creation",
+    "name": "Voice mode (push-to-talk) with read-replies TTS and per-message read aloud",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx:40-60",
+      "apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts:6-26",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3683",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:816-818"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Azure Speech TTS; no browser-voice fallback."
+  },
+  {
+    "id": "v-chat-agents-ui-047",
+    "category": "Multimodal & creation",
+    "name": "Realtime full-duplex voice with barge-in",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "Searched realtime|WebRTC|RTCPeer|WebSocket in features/voice: only CSS class names. Owner ruling \"no duplex voice\" (I22)."
+  },
+  {
+    "id": "v-chat-agents-ui-048",
+    "category": "Multimodal & creation",
+    "name": "Video generation or video understanding in chat",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:43"
+    ],
+    "plannedIn": [],
+    "notes": "Searched src for video generation: none. Only a Quarry video search route exists."
+  },
+  {
+    "id": "v-chat-agents-ui-049",
+    "category": "Multimodal & creation",
+    "name": "AI enhance on attachments",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1744-1762"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Cosmetic: rewrites the draft locally into an analyse-the-files prompt; no model call."
+  },
+  {
+    "id": "v-chat-agents-ui-050",
+    "category": "Multimodal & creation",
+    "name": "Studio design canvas (social campaigns)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/studio/components/StudioPage.tsx:1",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:1-35"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Gateway store is in-memory (ephemeral); not an AI generation surface."
+  },
+  {
+    "id": "v-chat-agents-ui-051",
+    "category": "Research & web",
+    "name": "Web search toggle and fetch_url",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:32-41",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4341-4343",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1050-1070"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Web search gated server-side behind the explicit toggle; off on the subscription route."
+  },
+  {
+    "id": "v-chat-agents-ui-052",
+    "category": "Research & web",
+    "name": "Deep research pipeline (plan, concurrent search, concurrent read, cited report artifact)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:1-30",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1120-1126"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. live_proven per DOC; in-process, not Temporal; only read pages are numbered."
+  },
+  {
+    "id": "v-chat-agents-ui-053",
+    "category": "Research & web",
+    "name": "Wide research fan-out with per-item live cards",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs:1-40",
+      "apps/Model Plane/deploy/docker-compose.yml:1063-1074",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.tsx:1-30"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Do-mode only, model-initiated; no composer toggle (grep \"Bred forskning\" none); cards not in durable replay. C6/C7 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-054",
+    "category": "Research & web",
+    "name": "Knowledge grounding tools (search, graph, wiki, contradictions, document list, result query)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4323",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:163-209"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Data Plane v2 backed."
+  },
+  {
+    "id": "v-chat-agents-ui-055",
+    "category": "Research & web",
+    "name": "Per-turn retrieval-scope filter (auto / knowledge only / web only), server-enforced",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4268-4300",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1035-1047",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:650-657"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. built_unit_tested per DOC."
+  },
+  {
+    "id": "v-chat-agents-ui-056",
+    "category": "Research & web",
+    "name": "Conversation-only source scope",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4264-4266",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:233-236"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Locked after first turn."
+  },
+  {
+    "id": "v-chat-agents-ui-057",
+    "category": "Research & web",
+    "name": "Inbox, insights, social, shipping, weather and SSB statistics tools in Ask",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4346-4373"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Weather limited to 10 Norwegian cities; SSB only population."
+  },
+  {
+    "id": "v-chat-agents-ui-058",
+    "category": "Research & web",
+    "name": "Support-context enrichment and read-only support threads",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/support.rs:23-69",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1018-1031",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:709-770"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-059",
+    "category": "Research & web",
+    "name": "Answer confidence caveat and verification pass",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:211-229",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2801-2850",
+      "apps/Model Plane/rust/services/model-gateway/src/confidence.rs:1",
+      "apps/Model Plane/rust/services/model-gateway/src/verification.rs:1"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Threshold 0.75."
+  },
+  {
+    "id": "v-chat-agents-ui-060",
+    "category": "Research & web",
+    "name": "Retrieval notice (\"cannot answer without guessing\")",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:250",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1740"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-061",
+    "category": "Research & web",
+    "name": "Perplexity-style streamed answer search (dashboard, not /chat)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:39-45",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:596",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx:339"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Over Quarry-v2."
+  },
+  {
+    "id": "v-chat-agents-ui-062",
+    "category": "Research & web",
+    "name": "Connector reads by the agent (Outlook, Gmail, OneDrive, SharePoint, calendars)",
+    "status": "partial",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DOC only (not code-verified in depth here). Writes not built."
+  },
+  {
+    "id": "v-chat-agents-ui-063",
+    "category": "Agent runtime",
+    "name": "Ask / Do segmented control (Do = agentic run path)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3030-3052",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1145",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1085",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1110-1121"
+    ],
+    "plannedIn": [
+      "VEREVON_CHAT_UX_DESIGN_SPEC.md"
+    ],
+    "notes": "SRC. Labels \"Spør / Utfør\". Do disabled for conversation-only threads and for the subscription unless the catalogue advertises agentic."
+  },
+  {
+    "id": "v-chat-agents-ui-064",
+    "category": "Agent runtime",
+    "name": "Editable plan with confirm gate (edit/reorder/remove/add steps, authority rung, justification, reject)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2217-2542",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1873-1975",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents_runs.rs:43"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. built_unit_tested (DOC); plan continuation after an approval pause (B7) planned."
+  },
+  {
+    "id": "v-chat-agents-ui-065",
+    "category": "Agent runtime",
+    "name": "Tool-call approvals in chat (approve / reject cards)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1940",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:64-112",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1399"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Decide via /api/v1/orchestration/approvals/{id}/decide."
+  },
+  {
+    "id": "v-chat-agents-ui-066",
+    "category": "Agent runtime",
+    "name": "Durable runs with live event stream and durable replay",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:169-273",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:196",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-run-watch.ts:1"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-067",
+    "category": "Agent runtime",
+    "name": "Plan and todo view in Work; proof bundle in Trace",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1008-1160",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1271-1400",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:64-80"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-068",
+    "category": "Agent runtime",
+    "name": "Subagents and lineage",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741-744",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1041",
+      "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts:315-324"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. Spawn capability exists; lineage only fetched for the plan panel; live fan-out proven on Terra (DOC A6)."
+  },
+  {
+    "id": "v-chat-agents-ui-069",
+    "category": "Agent runtime",
+    "name": "Background runs with \"notify me when done\"",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/RunNotifyButton.tsx:1-20",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3685",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:535",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs:1-54"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Durable watcher via capability-core and notification-core."
+  },
+  {
+    "id": "v-chat-agents-ui-070",
+    "category": "Agent runtime",
+    "name": "Schedule a chat request (\"Schedule this\", /schedule, cron settings)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx:56",
+      "apps/Frontend Plane/verevonv3/src/shared/api/schedule-from-chat.ts:21-65",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:51",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:810"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC + DOC. A scheduled run is a single no-tool 1024-token call on Verevon Balance (DOC); D10/D11 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-071",
+    "category": "Agent runtime",
+    "name": "Context compaction with protected pins and need-driven reattachment",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4331-4338",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4310-4320"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-072",
+    "category": "Agent runtime",
+    "name": "Checkpoint / rewind of conversation state",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "Searched rewind|checkpoint in features/chat: only run-detail test fields. Planned I11."
+  },
+  {
+    "id": "v-chat-agents-ui-073",
+    "category": "Agent runtime",
+    "name": "Error recovery for interrupted and unresumable turns",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:1241-1528"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-074",
+    "category": "Agent runtime",
+    "name": "Agent Run Console (/agents/runs)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:168-330",
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:784-840",
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:1925",
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:2222"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Launch via streamChat planMode true; timeline, approvals, plan, proof bundle, history, browser shots, telemetry, watch toggle."
+  },
+  {
+    "id": "v-chat-agents-ui-075",
+    "category": "Agent runtime",
+    "name": "Preset agents in the run console",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/preset-agents.ts:11-85"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Four presets, all with empty action sets until owner adapters are live."
+  },
+  {
+    "id": "v-chat-agents-ui-076",
+    "category": "Agent runtime",
+    "name": "Agents overview with role blueprints, Workflow builder and Chatbot studio",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentsPage.tsx:47-134",
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/DesignPreviewBadge.tsx:1"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/FRONTEND_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC. Honestly labelled design previews / reference operating models."
+  },
+  {
+    "id": "v-chat-agents-ui-077",
+    "category": "Agent runtime",
+    "name": "Agent installations and Chief/Core routing pages",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx:5",
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/ChiefCoreRoutingPage.tsx:5"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Read-only, from spaces-client."
+  },
+  {
+    "id": "v-chat-agents-ui-078",
+    "category": "Agent runtime",
+    "name": "Fleet run console (/agents/fleets/:id)",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:1-30",
+      "apps/Frontend Plane/verevonv3/src/app/App.tsx:216",
+      "apps/Frontend Plane/verevonv3/nginx.conf:74-76"
+    ],
+    "plannedIn": [],
+    "notes": "SRC + INF. Fetches /v1/fleets directly; no gateway route (grep \"fleets\" in FE: only these files) and nginx proxies only /api/."
+  },
+  {
+    "id": "v-chat-agents-ui-079",
+    "category": "Agent runtime",
+    "name": "Pre/post-tool hooks in agentic runs",
+    "status": "partial",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "DOC only: hooks exist but hook_context is not fed into agentic runs."
+  },
+  {
+    "id": "v-chat-agents-ui-080",
+    "category": "Agent runtime",
+    "name": "Implicit dissatisfaction signals from regenerate/edit",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:141-152",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1160-1161",
+      "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs:1"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-081",
+    "category": "Agent runtime",
+    "name": "Ops quality and drift page (/agents/quality)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/quality/components/OpsQualityPage.tsx:1-40",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/eval.rs:39"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Basic run-success rate and drift."
+  },
+  {
+    "id": "v-chat-agents-ui-082",
+    "category": "Tools, plugins & extensibility",
+    "name": "Slash command menu (built-ins plus backend skills, capabilities and connectors)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:259-271",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:465-532",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-actions-client.ts:20-61"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-083",
+    "category": "Tools, plugins & extensibility",
+    "name": "User-authored slash command templates",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "Searched \"$ARGUMENTS\" in src: none. Planned I13."
+  },
+  {
+    "id": "v-chat-agents-ui-084",
+    "category": "Tools, plugins & extensibility",
+    "name": "Skills (CRUD, org/user scope, sharing, up to 4 picked per turn, reattach_skill)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts:1-91",
+      "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx:42",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:41",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:980-1010"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. Learning loop not proven (DOC)."
+  },
+  {
+    "id": "v-chat-agents-ui-085",
+    "category": "Tools, plugins & extensibility",
+    "name": "Plugins registry (manifest, risk level, rollout state)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/plugins-client.ts:1-66",
+      "apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx:32",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:46"
+    ],
+    "plannedIn": [],
+    "notes": "SRC + INF. Registry only; no install flow, marketplace or observable runtime effect from the UI side."
+  },
+  {
+    "id": "v-chat-agents-ui-086",
+    "category": "Tools, plugins & extensibility",
+    "name": "MCP servers (register, OAuth, scope, share) with Streamable HTTP client",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/mcp-client.ts:1-40",
+      "apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx:57",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:46-54",
+      "apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs:1-30",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:625-645",
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:965"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/FRONTEND_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC. Registration works, but MCP tools are denied in the inline loop and have no trusted capability in execution-core, so they fail closed in chat."
+  },
+  {
+    "id": "v-chat-agents-ui-087",
+    "category": "Tools, plugins & extensibility",
+    "name": "Capabilities catalogue endpoint",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:56"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-088",
+    "category": "Tools, plugins & extensibility",
+    "name": "Typed action registry shared by UI and agents, with model-executable allowlist",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:125-139",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:104-181"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. 168 actions; only 8 model-executable."
+  },
+  {
+    "id": "v-chat-agents-ui-089",
+    "category": "Tools, plugins & extensibility",
+    "name": "Layered instructions (org, Space, @-mentioned agent persona, personal persona) in Ask turns",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:55-96",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1855",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6375-6440"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Not applied in Do runs (see Memory gap)."
+  },
+  {
+    "id": "v-chat-agents-ui-090",
+    "category": "Tools, plugins & extensibility",
+    "name": "Provider actions (list/execute) for Do runs",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:766-840"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Trusted tool ids exist; writes behind approval designs (Wave 5)."
+  },
+  {
+    "id": "v-chat-agents-ui-091",
+    "category": "Tools, plugins & extensibility",
+    "name": "A2A agent-to-agent collaboration",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_DESIGN.md",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "DOC: not_built; no code found."
+  },
+  {
+    "id": "v-chat-agents-ui-092",
+    "category": "Computer & environment control",
+    "name": "Code interpreter sandbox (Python/sh, no network, ~30 s, file outputs)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4356-4358"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-093",
+    "category": "Computer & environment control",
+    "name": "Shell and process tools in Do runs",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:766-780",
+      "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts:38"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Governed execution-core tools; no terminal UI, generic tool cards with terminal intent."
+  },
+  {
+    "id": "v-chat-agents-ui-094",
+    "category": "Computer & environment control",
+    "name": "Space-scoped durable workspace lease",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:205-247"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Sandbox-manager token minted only for Space-scoped turns."
+  },
+  {
+    "id": "v-chat-agents-ui-095",
+    "category": "Computer & environment control",
+    "name": "Hosted governed browser (frames, tabs, DevTools, timeline, takeover, profiles)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1-25",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:1-15"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. Quarry-v2 executes; surface lives in Knowledge/Dashboard BrowserChrome, compact in chat run panel."
+  },
+  {
+    "id": "v-chat-agents-ui-096",
+    "category": "Computer & environment control",
+    "name": "Agent-driven browser runs with risk-classified per-action approvals",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:7-25",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1349",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:186-191"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC + DOC. Runs fail closed on an unissued broker grant (DOC)."
+  },
+  {
+    "id": "v-chat-agents-ui-097",
+    "category": "Computer & environment control",
+    "name": "Browser use started from a chat turn",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:1-15",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:425-450"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Chat can show browser evidence of a watched run; cannot open or drive a browser. E9/E10/E12 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-098",
+    "category": "Computer & environment control",
+    "name": "Desktop / OS-level computer use and driving the user's own Chrome",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "DOC: parked or ruled out by the owner; no code."
+  },
+  {
+    "id": "v-chat-agents-ui-099",
+    "category": "Computer & environment control",
+    "name": "Native mobile app",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWorkspaceCanvas.tsx:1-60"
+    ],
+    "plannedIn": [
+      "VEREVON_CHAT_UX_DESIGN_SPEC.md"
+    ],
+    "notes": "Responsive web only (sheet below 760 px per spec)."
+  },
+  {
+    "id": "v-chat-agents-ui-100",
+    "category": "Coding capability",
+    "name": "Code artifacts and unified-diff rendering",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:474",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1942",
+      "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts:61-243"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-101",
+    "category": "Coding capability",
+    "name": "LSP bridge",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC + DOC. Plumbing only, off, no consumer."
+  },
+  {
+    "id": "v-chat-agents-ui-102",
+    "category": "Coding capability",
+    "name": "Editable re-runnable code cell / code mode",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "DOC: REPL read-only, code mode not built; H7 deferred."
+  },
+  {
+    "id": "v-chat-agents-ui-103",
+    "category": "Coding capability",
+    "name": "Codebase indexing, tab completion, PR review bots",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched \"pull request|github\" in features/chat, features/agents, shared/api: none. Not an IDE by design."
+  },
+  {
+    "id": "v-chat-agents-ui-104",
+    "category": "Memory, learning & personalization",
+    "name": "Long-term memory with recall disclosure, provenance, correct and forget",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/memory-client.ts:16-175",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/memory.rs:50-143",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2907-3243",
+      "apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.tsx:71",
+      "apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs:1"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. live_proven per DOC; save/recall_memory tools only in Do runs."
+  },
+  {
+    "id": "v-chat-agents-ui-105",
+    "category": "Memory, learning & personalization",
+    "name": "Personal persona / custom instructions (global, per-thread off, shown in inspector)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/persona-client.ts:9-40",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs:1-60",
+      "apps/Frontend Plane/verevonv3/src/features/settings/components/PersonaSection.tsx:25",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:581-583"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Stored in Convex; max 1,500 chars; Ask turns only."
+  },
+  {
+    "id": "v-chat-agents-ui-106",
+    "category": "Memory, learning & personalization",
+    "name": "Persona, org and Space instructions applied in Do (agentic) runs",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1855",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9527-10128"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "Searched agentic_run_stream (sse.rs 9527-10128) for authored/persona/instruction: none."
+  },
+  {
+    "id": "v-chat-agents-ui-107",
+    "category": "Memory, learning & personalization",
+    "name": "Skill learning loop from completed runs",
+    "status": "partial",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DOC only: designed, never recorded on a real run (I23)."
+  },
+  {
+    "id": "v-chat-agents-ui-108",
+    "category": "Memory, learning & personalization",
+    "name": "Session search / recall over past conversations",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "See conversation search record; planned I12."
+  },
+  {
+    "id": "v-chat-agents-ui-109",
+    "category": "Memory, learning & personalization",
+    "name": "Org knowledge base as grounding corpus",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/knowledge/components/KnowledgePage.tsx:1",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4323"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-110",
+    "category": "Models & routing",
+    "name": "Model picker with Verevon intent modes and grouped catalogue, cost and privacy badges",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:808-866",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2665-2705",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1008-1095",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:2771-2842",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:453-470"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_DESIGN.md"
+    ],
+    "notes": "SRC. Budget/Balance/Genius resolved server-side; groups Subscription, Claude, OpenAI GPT, DeepSeek, Other (no Gemini group)."
+  },
+  {
+    "id": "v-chat-agents-ui-111",
+    "category": "Models & routing",
+    "name": "Bring-your-own ChatGPT subscription route",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chatgpt-subscription-client.ts:1",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1050",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1008-1030"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. Tools, browse, image, deep research, skills and attachments stripped on this route; live_proven (DOC)."
+  },
+  {
+    "id": "v-chat-agents-ui-112",
+    "category": "Models & routing",
+    "name": "Reasoning effort control and streamed reasoning trace",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:154-168",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:384-405",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:107-116",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1603"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. Auto / Raskt svar / Dyp research; reasoning not visible on the subscription route (I15)."
+  },
+  {
+    "id": "v-chat-agents-ui-113",
+    "category": "Models & routing",
+    "name": "Verbosity / tone dial",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:169-173",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:117-127"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-114",
+    "category": "Models & routing",
+    "name": "Router policy admin (mode x complexity table, weights, budget cap, cheap fallback)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/router-policy-client.ts:10-109",
+      "apps/Frontend Plane/verevonv3/src/features/router-policy/components/RouterPolicyPage.tsx:60",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/router_policy.rs:30-66"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Mounted inside settings."
+  },
+  {
+    "id": "v-chat-agents-ui-115",
+    "category": "Models & routing",
+    "name": "Minimum privacy-tier floor per turn",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:153-162",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-60"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Fails closed server-side."
+  },
+  {
+    "id": "v-chat-agents-ui-116",
+    "category": "Models & routing",
+    "name": "Served-by provenance line (provider, residency, tier)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:290-297",
+      "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:20-80"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-117",
+    "category": "Models & routing",
+    "name": "Side-by-side model comparison",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched side-by-side|compareModels|arena|multi-model in src: none."
+  },
+  {
+    "id": "v-chat-agents-ui-118",
+    "category": "Models & routing",
+    "name": "Provider failover and stream-failure handling",
+    "status": "partial",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "DOC only."
+  },
+  {
+    "id": "v-chat-agents-ui-119",
+    "category": "Models & routing",
+    "name": "Prompt-cache metric in run telemetry",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:926-940"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Cache read tokens when reported."
+  },
+  {
+    "id": "v-chat-agents-ui-120",
+    "category": "Models & routing",
+    "name": "Fine-tune jobs (list, upload, create, deploy)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/finetune/components/FinetuneJobsPage.tsx:1",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/finetune.rs:31-37"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Azure fine-tuning via model-gateway."
+  },
+  {
+    "id": "v-chat-agents-ui-121",
+    "category": "Transparency, observability & control",
+    "name": "Per-answer details: model/system time, confidence, cost basis, tokens, latency, turn timing",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1623-1835",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:333-553"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-122",
+    "category": "Transparency, observability & control",
+    "name": "Tool-call inspection cards (intent, count, truncation, args, output, diff)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2023-2100",
+      "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts:38-159"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-123",
+    "category": "Transparency, observability & control",
+    "name": "Work panel (now, left, needs-you, collapsed technical activity, live agent screen)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:722-1000"
+    ],
+    "plannedIn": [
+      "VEREVON_CHAT_UX_DESIGN_SPEC.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-124",
+    "category": "Transparency, observability & control",
+    "name": "Assembled-context inspector (tokens vs budget per segment)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:571-720",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2058",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:325-340"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-125",
+    "category": "Transparency, observability & control",
+    "name": "Trace tab: durable run event log (5,000 cap) with run proof and receipts",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1271-1466"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_DESIGN.md"
+    ],
+    "notes": "SRC. Owner-only audit record, not a sharing surface."
+  },
+  {
+    "id": "v-chat-agents-ui-126",
+    "category": "Transparency, observability & control",
+    "name": "Result receipts and effect class per turn",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:325-330",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:428-429"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-127",
+    "category": "Transparency, observability & control",
+    "name": "Cost dashboard (/agents/cost)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/cost/components/CostDashboardPage.tsx:1",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/cost.rs:37-42"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. From cost-core."
+  },
+  {
+    "id": "v-chat-agents-ui-128",
+    "category": "Transparency, observability & control",
+    "name": "Live spend meter during a run",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "Not found in ChatLiveRunPanel/ChatPanels; parity row not_built; I16 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-129",
+    "category": "Transparency, observability & control",
+    "name": "Screen-reader narration of stream lifecycle",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:449-540"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-130",
+    "category": "Safety, permissions & governance",
+    "name": "BFF authority boundary (session-derived org, per-audience tokens, 503 on mint failure)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:24-48",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:145-356"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-131",
+    "category": "Safety, permissions & governance",
+    "name": "ZDR propagation (body OR header, org posture one-way raise)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-118",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:99-109"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-132",
+    "category": "Safety, permissions & governance",
+    "name": "Temporary chat (zero data retention mode)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3055-3078",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2563-2615",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:468-480",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:6-20"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "SRC + DOC. Disabled when no catalogue model attests ZDR; no provider is attested on this stack, so unavailable in practice."
+  },
+  {
+    "id": "v-chat-agents-ui-133",
+    "category": "Safety, permissions & governance",
+    "name": "Typed ZDR refusal catalogue with localized actions",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts:1",
+      "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json:1"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-134",
+    "category": "Safety, permissions & governance",
+    "name": "Autonomy rungs with written justification on plan approval",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1873-1882",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2536-2542"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-135",
+    "category": "Safety, permissions & governance",
+    "name": "Tool gating: read-only inline loop, fail-closed capability policy, model-eligibility allowlist",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:625-645",
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:737-840",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:125-139"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-136",
+    "category": "Safety, permissions & governance",
+    "name": "Read-only support and foreign-origin threads",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:709-770",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:495-507"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-137",
+    "category": "Safety, permissions & governance",
+    "name": "Sandboxed HTML artifacts (no same-origin)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-138",
+    "category": "Safety, permissions & governance",
+    "name": "Gateway rate limiting (token bucket, 429 + Retry-After)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:1-20",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:367"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-139",
+    "category": "Safety, permissions & governance",
+    "name": "Moderation, PII redaction and prompt-injection defense",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:1",
+      "apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs:1"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC + DOC. Content-safety pass runs in shadow; input/output enforcement incomplete."
+  },
+  {
+    "id": "v-chat-agents-ui-140",
+    "category": "Safety, permissions & governance",
+    "name": "Enterprise admin (members, SSO, org security, trust, quotas)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:448-497"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Outside the chat page."
+  },
+  {
+    "id": "v-chat-agents-ui-141",
+    "category": "UI/UX & product design",
+    "name": "Contextual workspace canvas (Work/Output/Sources/Trace) opened by the work, resizable rail",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:410-447",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:635-672",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-surfaces.ts:1-60",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWorkspaceCanvas.tsx:1-60"
+    ],
+    "plannedIn": [
+      "VEREVON_CHAT_UX_DESIGN_SPEC.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-142",
+    "category": "UI/UX & product design",
+    "name": "Keyboard shortcuts and focus management",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:1-110",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:556-617"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-143",
+    "category": "UI/UX & product design",
+    "name": "Shortcut sheet and command palette",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "Searched CommandPalette|command-palette|cmdk in src: none. I1 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-144",
+    "category": "UI/UX & product design",
+    "name": "Norwegian / English i18n",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1917-1924",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2538-2542"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. Several Norwegian-only strings remain (approval buttons, rung labels, tool status, trace copy)."
+  },
+  {
+    "id": "v-chat-agents-ui-145",
+    "category": "UI/UX & product design",
+    "name": "Streaming render performance (virtualization, block-level re-render)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx:15-20"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. No virtualization (grep \"virtual\"); whole message reparsed per token. I5 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-146",
+    "category": "UI/UX & product design",
+    "name": "Composer extras (date autocomplete, work-period picker, expand, drag-and-drop, paste)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:441-447",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3436",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3874-3944",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/chat-work-period.ts:1"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-147",
+    "category": "UI/UX & product design",
+    "name": "Dashboard-to-chat handoff of draft and attachments",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/pending-chat-launch.ts:1",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:95"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-148",
+    "category": "UI/UX & product design",
+    "name": "Theme preference",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2266"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-149",
+    "category": "Platform architecture",
+    "name": "SolidJS 2 RC + Vite 8 feature-sliced SPA",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/package.json:22-39"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. @tanstack/ai and @tanstack/ai-client declared but never imported (INF: dead dependencies)."
+  },
+  {
+    "id": "v-chat-agents-ui-150",
+    "category": "Platform architecture",
+    "name": "Rust Axum same-origin BFF gateway (55 domain files)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:43",
+      "apps/Frontend Plane/verevonv3/nginx.conf:74-76"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. nginx proxies /api/ only."
+  },
+  {
+    "id": "v-chat-agents-ui-151",
+    "category": "Platform architecture",
+    "name": "Session-core as the only conversation owner; browser localStorage as a derived cache",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:272-277",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:6-20",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts:11-13"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-152",
+    "category": "Platform architecture",
+    "name": "Data-only conversation-node model with keyed renderer registry",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts:1-30",
+      "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts:81",
+      "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/registry.ts:41"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_DESIGN.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-chat-agents-ui-153",
+    "category": "Platform architecture",
+    "name": "AG-UI protocol endpoint and client adapter",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:23-62",
+      "apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts:668-753",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1188-1460"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "SRC. Client adapter has no non-test consumer (grep); native stream accepts AG-UI names inbound."
+  },
+  {
+    "id": "v-chat-agents-ui-154",
+    "category": "Platform architecture",
+    "name": "In-memory single-replica runtime registries (resume buffer, cancel, queue, idempotency)",
+    "status": "partial",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json"
+    ],
+    "notes": "DOC only. No per-send idempotency key in the SPA (grep \"idempotency\" in chat-client.ts: none); I2 planned."
+  },
+  {
+    "id": "v-chat-agents-ui-155",
+    "category": "Platform architecture",
+    "name": "Daily brief gateway route",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/briefs.rs:39",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/briefs.rs:94"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. /api/v1/briefs has no SPA caller (grep \"briefs\" in src: none)."
+  },
+  {
+    "id": "v-chat-agents-ui-156",
+    "category": "Platform architecture",
+    "name": "Scripted product-demo mode with mocked routes",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/demo/product-demo/DemoApp.tsx:141-142"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Marketing recordings only."
+  }
+]

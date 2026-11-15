@@ -1,0 +1,118 @@
+[
+ {
+  "finalId": "F-t2-015",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:17770 (SY=25 ms poll, CY=500 ms deadline, TY=0.5 px tolerance)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:17948-18010 (s0 hit test across frame hops, HO scroll+settle, covered-by-tag error)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:18044-18070 (MY/NY in-page probes using elementFromPoint through shadow roots, run via Runtime.callFunctionOn)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js (7 Input.dispatchMouseEvent call sites)",
+   "scratchpad/tmp/aside/daemon_sea_blob.bin@3025205 (waitForReady attached|visible|enabled|stable, 32 ms stability sample, 5 s timeout, 'Element is moving')",
+   "scratchpad/tmp/aside/daemon_sea_blob.bin ('obscured by another element', ACTIONABILITY_RETRY_DELAYS_MS)",
+   "findings/t2 records aside-agent-control-architecture-022/023, codexbrowser-automation-and-safety-056, codexbrowser-in-app-browser-081/100/115",
+   "REA tools not used; evidence re-read directly from pre-extracted/prettified copies and the Aside SEA blob via grep/dd"
+  ],
+  "corrections": "Mechanism must not say Codex uses DOM.getNodeForLocation: Codex hit-tests with an in-page elementFromPoint probe (shadow-root aware) injected via DOM.resolveNode + Runtime.callFunctionOn per frame hop, using getContentQuads/getBoxModel for coordinate transforms. Order is: hit-test first, DOM.scrollIntoViewIfNeeded only if not hittable, then poll every 25 ms (500 ms deadline, 0.5 px tolerance) for two consecutive matching samples (timer-based, not animation frames). Errors: 'covered by <tag> or otherwise not hittable', 'did not settle after scrolling', and 'couldn't be clicked' for unpositioned nodes. 'Rich input 1 of 3 (unique)' overstates: Aside also has trusted CDP input with modifiers, insertText, file-chooser interception and download events; only the virtual clipboard shim and held clicks/drag with xdotool key names are Codex-specific. Aside falls back to DOM activation (with checked-state verification) when the target is obscured rather than simply erroring.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Actionability is also built into Playwright (auto-wait), which Apify/Crawlee and Firecrawl's playwright-service inherit; the 2-of-3 count reflects custom implementations only (INF)",
+   "inputTargetToken semantics in Codex key synthesis are inferred from naming (INF); not a public CDP parameter",
+   "Codex AX action set (held clicks, drag, paste formats) is DOC-backed (plugin docs/api.json); clipboard bridge is SRC",
+   "Aside evidence comes from the daemon Node SEA blob (SRC), not a documented API"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-018",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/services/monitoring/scheduler.ts:45-135 (claimDueMonitors with workerId/limit/leaseSeconds=60, deferForJitter, clearFinishedOrStaleCurrentCheck, skipped_overlap)",
+   "C:/dev/firecrawl/apps/api/src/services/monitoring/jitter.ts:1-13 (sha256(id) mod min(interval/2, 5 min))",
+   "C:/dev/firecrawl/apps/api/src/services/monitoring/stale.ts:1-54 (60 min stale, 10 min for search-only)",
+   "C:/dev/firecrawl/apps/api/src/services/monitoring/cron.ts:1,172-200,339 (5 min minimum, IANA timeZone support)",
+   "C:/dev/firecrawl/apps/api/src/services/monitoring/runner.ts:35-37,1090-1105 (skipped_no_credits when credit lock denied; email/Slack/in-app summaries)",
+   "C:/dev/firecrawl/apps/api/src/db/rpc.ts:109 (claim is SQL RPC monitoring_claim_due_monitors; its body is not in the repo)",
+   "C:/dev/firecrawl/apps/api/src/services/queue-worker.ts:449-456 (scheduler tick)",
+   "https://docs.apify.com/platform/schedules (timezone/DST, input JSON overrides, email on failure to start, 10 s min, 10 actors + 10 tasks)"
+  ],
+  "corrections": "'FOR UPDATE SKIP LOCKED' is not observable in Firecrawl: the claim is the RPC monitoring_claim_due_monitors whose SQL is not in the open repo, so present SKIP LOCKED as the Verevon design choice (INF). Firecrawl's scheduler drives change-tracking monitors (scrape/crawl/search targets), not generic scheduled scrape/crawl/batch jobs. Timezone-aware cron exists in both Firecrawl (cron.ts) and Apify, not Apify-only. Apify's default failure email covers a scheduled run that fails to start due to misconfiguration, not every run failure; Firecrawl notifications are monitor result summaries (email/Slack/in-app). The credit check happens at run time via a credit lock in the runner (check recorded as skipped_no_credits), not before dispatch in the scheduler tick.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Apify side is DOC-only",
+   "Firecrawl monitoring is recent (2026) and partly routed through a billing rollout (firebill) for some orgs; behaviour may change",
+   "Firecrawl monitors require the DB-backed (cloud-style) deployment; self-host availability not verified"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-023",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:249-350 (MAX_ACTIONS=50, ACTIONS_MAX_WAIT_TIME=60, nine action literals incl. pdf, screenshot quality 1-100 and 7680x4320 viewport cap, executeJavascript script: z.string() with no length cap)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1518-1530 (results grouped as screenshots[], scrapes[], javascriptReturns[], pdfs[])",
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index.ts:252-430 (actions:true only for fire-engine;chrome-cdp[;stealth]; playwright engine actions:false)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:14574-14660 (JPEG q80, captureBeyondViewport+clip, Page.startScreencast fresh-frame timestamp check)",
+   "scratchpad/tmp/aside/daemon_sea_blob.bin@11465958 (planVerticalTiles with OVERLAP_CSS, 150 ms + double rAF, Page.captureScreenshot png with captureBeyondViewport:false, PNG bitblt compose); Page.printToPDF string present",
+   "findings/t2 records firecrawl-api-surface-057/051, firecrawl-engine-and-infra-012/020, apify-platform-060, codexbrowser-automation-and-safety-061, codexbrowser-in-app-browser-005, aside-agent-control-architecture-027",
+   "REA tools not used; direct reads of source and extracted copies"
+  ],
+  "corrections": "Firecrawl action execution happens only in the closed hosted fire-engine (chrome-cdp); the open-source playwright engine declares actions:false, so 'execute sequentially on one page' is not observable in source and self-hosted Firecrawl cannot run actions. Outputs are grouped into per-type arrays (screenshots, scrapes, javascriptReturns, pdfs), not one ordered per-action results array (an ordered array is a Verevon improvement, mark INF). The scrape executeJavascript action has no script-size cap; the 100,000-byte / 1-300 s limits belong to the separate hosted-browser /execute endpoint (Hangar), so do not attribute a script cap to the scrape action DSL. Aside always scroll-stitches with captureBeyondViewport:false (single tile when content fits the viewport); the 'captureBeyondViewport when within limit' branch is Codex/Firecrawl-style, so the merged mechanism blends sources and should say so. JPEG q80 and fresh-frame screencast are Codex-specific; Aside tiles are PNG and element shots default to webp.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Firecrawl actions: SRC for schema/limits, but runtime behaviour lives in closed fire-engine (cloud-only)",
+   "Apify page actions are DOC-only and are declarative per-Actor options (Website Content Crawler, RAG Web Browser), not a general action DSL",
+   "Screenshot prevalence may be undercounted: Apify/Crawlee likely also offers screenshots (INF, not re-checked)",
+   "Firecrawl OpenAPI spec lists eight action types (no pdf): spec drift"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-004",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/lib/otel-tracer.ts:40-147 (withZeroDataRetention context key, ZeroDataRetentionSampler NOT_RECORD, late-ZDR trace Set capped at 100,000)",
+   "C:/dev/firecrawl/apps/api/src/lib/otel-tracer.ts:153-185 (ZeroDataRetentionSpanProcessor.onEnd drops flagged traces before export)",
+   "C:/dev/firecrawl/apps/api/src/lib/logger.ts:28-70 (winston zeroDataRetentionFilter)",
+   "C:/dev/firecrawl/apps/go-html-to-md-service/handler.go:100-112 (X-Zero-Data-Retention omits request_id from logs)",
+   "C:/dev/firecrawl/apps/api/src/lib/html-to-markdown-client.ts:67 (only sender of the header found by grep)",
+   "scratchpad/extract/codex/.vite/build/logger-CUwSCKgw.js (logger normalises tags to {safe, sensitive}; buffers then flushes to sink; no drop/hash of sensitive seen there)",
+   "scratchpad/tmp/cxib/main.pretty.js:36771, 33652, 47081 ({safe, sensitive} usage app-wide, IAB_LIFECYCLE prefix)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:1231, 2092, 5172, 5231-5243 (BROWSER_USE_DISABLE_AMBIENT_NETWORK skips gates, Sentry tagging, analytics)"
+  ],
+  "corrections": "Prevalence conflates two different things: ZDR-aware telemetry is Firecrawl-only (Codex's BROWSER_USE_DISABLE_AMBIENT_NETWORK is a sandbox/eval kill switch for gates, Sentry and analytics, not a ZDR mechanism), and safe/sensitive classified log fields are Codex-only (Firecrawl filters whole log lines by a zeroDataRetention flag). State 1 of 4 for each, both differentiators. The late-ZDR registry is a Set with oldest-first (FIFO) eviction, not an LRU. 'Helper services' is one service in source (Go html-to-md); only that client sends X-Zero-Data-Retention. Codex's safe/sensitive split is observed at call sites and in the logger shape, but how sinks treat 'sensitive' (drop/hash/upload) was not found, so 'sinks drop or hash sensitive' is a Verevon proposal (INF), not Codex behaviour. The {safe, sensitive} convention is app-wide in Codex, not limited to browser lifecycle logs. Firecrawl's implementation is TypeScript OpenTelemetry; the Rust Sampler/SpanProcessor/tracing Layer wording is a port, not observed.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Firecrawl tracing is off unless an OTLP endpoint is configured; the ZDR sampler matters only when tracing is enabled",
+   "Codex evidence is from the shipped minified bundle (SRC via extracted copy); sink behaviour for sensitive fields unverified",
+   "BROWSER_USE_DISABLE_AMBIENT_NETWORK is an environment switch in the browser-use plugin runtime, not a user-facing privacy setting"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-013",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:14656, 14790-14800 (openai/user_took_over only inside the browserAuth sign-in elicitation: decline + meta flag -> declined/user_took_over)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:10160, 24913-24927, 25268 (tab_manual_handoff_request command)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:8521, 10246 (browser_user_claim_tab)",
+   "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/docs/tab-claiming-chrome.md, tab-mentions-iab.md, browser-control-interruption.md",
+   "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/.codex-plugin/plugin.json (Interrupt, SubagentStop, Stop hooks)",
+   "scratchpad/tmp/cxib/main.pretty.js:41154-41200 (markTab handoff|deliverable with turn_id; turnEnded restores clipboards, detaches debugger, keeps handoff temp tab but clears mark, releases marked/persistent tabs)",
+   "scratchpad/extract/codex/webview/assets/hidden-browser-use-webview-host-b6797e1e4891.js (hostKind hidden-browser-use, isVisible false, about:blank until URL known)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (strings 'Aside is controlling the tab', 'Take over', 'Tabs controlled by Aside while it works')",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (AsideAiTabsTakeOver symbol present)",
+   "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:101-102 (interactiveLiveViewUrl)",
+   "findings/t2 records aside-agent-control-architecture-030/031/032/061, aside-browser-product-062/063, codexbrowser-* 045/046/047/068/088/089/090"
+  ],
+  "corrections": "Codex has no general 'user took over' state that cancels in-flight steps: user_took_over is only the decline reason of the browserAuth secure sign-in elicitation, and in the IAB the user can interact with the page at any time with no input lock or control arbitration found. requestManualHandoff is supported only on the cloud CDP backend. The fail-closed mention resolution (match providerTabId + title + url, never guess ids) is written as model instructions in plugin docs, not code-enforced; claimTab is for the external-browser (extension/cloud) backends, while IAB mentions resolve via tabs.get. Aside shows a 'controlling the tab / Take over' strip (pak strings, DLL symbol) but no daemon-side takeover handling was found (absence claim, INF). So 'takeover enforced inside Quarry' via control_mode + USER_TOOK_OVER per step is a Verevon design with no reference implementation observed; say so. Confirmed: Codex markTab handoff|deliverable with turn-scoped release, Interrupt/SubagentStop/Stop hooks ending the turn, hidden agent tabs; Aside owned vs borrowed session_tabs with idle sweep and orphan reconciliation.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Codex fail-closed tab claiming is DOC (prompt instructions to the model), not runtime enforcement",
+   "Codex manual handoff is cloud-backend only",
+   "Aside takeover is UI-string/symbol evidence only; enforcement mechanism unknown",
+   "Firecrawl browser sessions expose an interactiveLiveViewUrl (human can interact with the agent's session), so a co-browsing-adjacent capability exists in a third source; the '3 sources' denominator is unclear",
+   "No source observed implements server-side control-mode arbitration of agent steps"
+  ],
+  "confidence": "high"
+ }
+]

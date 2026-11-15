@@ -1,0 +1,1470 @@
+{
+  "category": "Output formats & content processing",
+  "excluded": [],
+  "clusters": [
+    {
+      "id": "C-t2-02-001",
+      "name": "Selectable format registry and unified document response",
+      "description": "One scrape call takes a formats[] list (markdown, html, rawHtml, links, images, screenshot, json, summary, changeTracking, branding ...) and returns a single document object with all requested outputs plus provenance metadata (status code, source/final URL, cache state, proxy used, credits used).",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "common"
+      },
+      "members": [
+        "firecrawl-api-surface-038",
+        "firecrawl-api-surface-039"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-038",
+          "firecrawl-api-surface-039"
+        ],
+        "why": "q5/q5 SRC: a preprocess step lifts bare strings to typed objects and a zod discriminated union gives each format its own option schema; the Document type carries per-call billing, freshness (cacheState/cachedAt) and escalation (proxyUsed) metadata. Class set to common (not unique) because a per-call output-format choice is standard for scrape APIs; INF, only one source in this record set."
+      },
+      "mechanism": "Request: formats: Array<string | {type, ...opts}>; normalise strings to {type}; validate with a tagged-union schema (serde #[serde(tag=\"type\")] enum in Rust). Pipeline: fetch once, then run only the transformers whose format was requested, in a fixed order (html clean -> markdown -> links/images -> LLM formats -> redaction -> diff). Response: one Document struct with optional fields per format and a metadata block {statusCode, sourceURL, url, contentType, cacheState, cachedAt, proxyUsed, creditsUsed, warnings[]}. Exclusive formats (rawBase64) are rejected when combined.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-026",
+          "v-quarry-028",
+          "v-quarry-043",
+          "v-quarry-040",
+          "v-quarry-041",
+          "v-quarry-036"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:131-147",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:599-704",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:140"
+        ],
+        "gap": "POST /v1/scrape has no formats[] parameter (request fields are url, prev_fingerprint, cache, zdr, privacy, signals, ingest, render). The response is a NormalizedOutput with fixed markdown/html artifact refs; json/summary/screenshot/images/attributes cannot be requested per scrape. Under ZDR no artifact is written, so a ZDR scrape returns no content at all.",
+        "strengths": "Metadata block is already rich (title/desc/author/dates/canonical/og/robots, JSON-LD fallback, language detection, title provenance) , a determinism/policy stamp is attached (v-quarry-041), field-level source traces are recorded on ingest (v-quarry-040) and paragraph chunks feed the Data Plane (v-quarry-036); Firecrawl has no equivalent of the source trace in this record set."
+      },
+      "benefit": "A single typed formats contract is what the Model Plane agent and Verevon UI both call; it removes separate /v1/extract round-trips and makes cost per call predictable. Inline (non-persisted) return under ZDR keeps Zero-Data-Retention usable instead of returning empty.",
+      "approach": "Ingestion Plane (quarry-core contracts + quarry-runtime pipeline): add formats: Vec<FormatSpec> as a serde tagged enum; dispatch transformers by requested format; return small text formats inline (size threshold) and large ones as artifact refs; for zdr=true return inline only and never persist. Keep the gateway (Frontend Plane) a thin proxy.",
+      "effort": "M",
+      "dependencies": [
+        "quarry-core contract versioning",
+        "gateway knowledge/quarry.rs request builder",
+        "ZDR inline-return path"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Contract churn for existing gateway callers; inline payload size; must keep ZDR semantics (no write) while returning content.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Backbone that every other cluster in this category plugs into; the ZDR-returns-nothing behaviour is a visible defect.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-002",
+      "name": "Main-content extraction with selector filters and selectable extractors",
+      "description": "Strip page chrome (nav, header, footer, sidebars, modals, cookie banners, ads) to the main content, with include/exclude CSS selectors, an onlyMainContent toggle, a choice of extraction algorithm with fallback to full HTML, and optional LLM clean-up of residual noise.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl",
+          "apify"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "apify-platform-050",
+        "firecrawl-api-surface-040",
+        "firecrawl-engine-and-infra-086",
+        "firecrawl-api-surface-055"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-086",
+          "firecrawl-api-surface-040"
+        ],
+        "why": "SRC/high: streaming Rust transform with 42 non-main selectors plus force-include regions, include/exclude selectors, iframe selector rewriting and lazy-image/srcset resolution. Apify (DOC only) adds the useful idea of choosing among Readability/Extractus/Defuddle with a fallback to original HTML. Table-stakes: present in both web-scraping benchmarks (2 of 2); the two browser sources do not expose a scrape API."
+      },
+      "mechanism": "Parse with a DOM (kuchikiki/scraper or lol_html streaming). Remove head/meta/style/script/noscript. If includeTags given keep only matching subtrees; remove excludeTags. If onlyMainContent: remove a fixed list of chrome selectors unless the node contains a force-include region (main, article, [role=main]). Resolve lazy images (data-src, data-srcset, srcset largest width) against base href. Optional extractor choice: readability vs full-cleaned HTML, falling back to full HTML when readability yields too little text. Optional LLM clean pass (firecrawl onlyCleanContent, q2, unsupported under ZDR).",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-025"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/readability.rs:1-60",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/readability.rs:235",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:504"
+        ],
+        "gap": "One hard-coded Readability subset; no onlyMainContent toggle, no include/exclude selectors on /v1/scrape or crawl, no extractor choice or full-HTML fallback for non-article pages (listings, docs, tables), and images are stripped from markdown.",
+        "strengths": "Readability is native Rust and already strips nav/header/footer/aside and ARIA landmarks."
+      },
+      "benefit": "Output quality of every scrape, crawl, ingest and agent read depends on this; selectors let users fix bad pages without code, and a full-HTML fallback stops data loss on non-article pages feeding the Data Plane.",
+      "approach": "Ingestion Plane quarry-transform: add a clean_html(opts) stage before readability with include/exclude selectors and a chrome-selector list with force-include; expose onlyMainContent (default true), includeTags, excludeTags and extractor {readability|clean_full|raw} on the scrape/crawl contract; optionally keep images as markdown links. Skip the LLM clean pass.",
+      "effort": "M",
+      "dependencies": [
+        "format registry contract (C-t2-02-001)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Selector lists remove real content on some sites; needs golden-page regression fixtures.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Table-stakes for scrape APIs and cheap to add on top of the existing Rust transform.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-003",
+      "name": "HTML to Markdown conversion and agent web-fetch",
+      "description": "Convert HTML to clean (GitHub-flavoured) markdown with fallbacks, and expose a fetch-URL-as-markdown tool to agents with a browser fallback when a challenge page is hit.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl",
+          "aside"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "common"
+      },
+      "members": [
+        "firecrawl-api-surface-041",
+        "firecrawl-engine-and-infra-088",
+        "aside-browser-product-083"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-088",
+          "firecrawl-api-surface-041"
+        ],
+        "why": "Three-tier converter (Go HTTP service, in-process Go library over FFI, turndown) plus a native post-processor. Aside's webfetch (SRC) is the better agent-facing shape: citation id, non-HTML saved to the session folder, Cloudflare challenge retried through the real browser."
+      },
+      "mechanism": "Convert cleaned HTML to GFM (tables, code fences, links) in-process; post-process (collapse blank lines, strip base64 images, fix relative links). Agent tool: HTTP GET with a real-browser UA -> if HTML, clean + convert + attach citation id; if non-HTML, store as artifact; if a bot challenge is detected, retry via the browser driver.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-quarry-026",
+          "v-browser-app-021",
+          "v-quarry-037"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:599-690",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:119",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:580",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/charset.rs"
+        ],
+        "gap": "Minor: markdown quality of the html2md path vs a GFM-table-aware converter is unverified; base64-image stripping not confirmed.",
+        "strengths": "Native Rust conversion inside the Ingestion Plane (no extra service hop), charset sniffing, soft-404 detection and body cap; gateway preview falls back to /v1/extract markdown."
+      },
+      "benefit": "Already present; keep.",
+      "approach": "Keep. Add golden tests for GFM tables and code blocks; confirm data: image stripping.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "None material.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon is at parity on the core capability.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-004",
+      "name": "Screenshot and page-print (PDF) output",
+      "description": "Viewport, full-page, clipped and element screenshots and print-to-PDF as first-class outputs of a scrape or browser session, with very tall pages handled by scroll-and-stitch.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl",
+          "codexbrowser",
+          "aside"
+        ],
+        "n": 3,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "aside-agent-control-architecture-027",
+        "codexbrowser-in-app-browser-005",
+        "firecrawl-api-surface-051"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-agent-control-architecture-027"
+        ],
+        "why": "SRC/high: handles pages beyond the GPU texture limit by tiling with 200 CSS px overlap, waits (150 ms + double rAF) between scrolls and stitches PNG tiles; also element screenshots with margin and print-to-PDF. Firecrawl adds the API shape (fullPage, quality 1-100, viewport up to 8K, rawBase64, links/images lists)."
+      },
+      "mechanism": "CDP: Page.getLayoutMetrics -> if content height <= texture clamp use Page.captureScreenshot{captureBeyondViewport:true}; else plan vertical tiles with overlap, for each tile scroll, wait 150 ms + 2x requestAnimationFrame, capture, then compose tiles into one image (image crate) trimming overlap. Element shot: DOM.getBoxModel + margin -> clip. PDF: Page.printToPDF. Encode JPEG with quality for model use, PNG for archive.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-030",
+          "v-browser-app-023",
+          "v-browser-app-025"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:140-147",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:700-704",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2392",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2440",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1466"
+        ],
+        "gap": "Scrape output screenshot/pdf are always None; capture exists only as agent actions (chromiumoxide capture_beyond_viewport and page.pdf). No tile-and-stitch for very tall pages, no element/clip screenshots, no quality/viewport options, and the Verevon UI has no field for PDF artifacts.",
+        "strengths": "Browser screenshots and visual_observation artifacts are stored and served owner-gated through the gateway."
+      },
+      "benefit": "Visual evidence for citations, monitoring and agent grounding; users expect 'screenshot this page' and 'save as PDF'.",
+      "approach": "Ingestion Plane: add screenshot{fullPage,clip,quality,viewport} and pdf formats that force the browser driver and reuse the agent capture code; implement tile-and-stitch in quarry-browser; store as artifacts (inline-only under ZDR). Frontend Plane: render PDF/screenshot artifacts in BrowserTimelineDetail.",
+      "effort": "M",
+      "dependencies": [
+        "format registry (C-t2-02-001)",
+        "artifact tenant scoping (Quarry /v1/artifacts is not tenant-scoped; the gateway gate is the only isolation)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Memory for huge pages; artifact isolation currently relies on the gateway owner gate only.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Present in 3 of 4 sources and the capture code already exists in the agent path, so wiring is cheap relative to user impact.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-005",
+      "name": "Budgeted, frame-aware page-state projection for agents",
+      "description": "Compact text views of the page for the model: visible interactable elements with an attribute allowlist and hard element/character budgets, plus a DOM snapshot that exposes iframe hierarchy for exact frame locators.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-134",
+        "codexbrowser-in-app-browser-006"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-134",
+          "codexbrowser-in-app-browser-006"
+        ],
+        "why": "SRC/high for the visible-DOM projection (interactive tag set, rendered-attribute allowlist, cap 200 elements / 20,000 chars, child frames); DOC only for the frame-ownership snapshot."
+      },
+      "mechanism": "Page-side function walks the DOM, keeps elements that are visible, in viewport and interactive (a, button, input, select, textarea, summary, details, option or an interactive ARIA role), emits tag + allowlisted attributes (aria-*, name, placeholder, href, role, value) + short text, recurses into child frames, stops at 200 elements or 20k chars. A second view lists frames with owner element attributes so the agent can address iframes.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-browser-app-024",
+          "v-browser-app-025",
+          "v-quarry-042"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:374",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1701",
+          "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:32"
+        ],
+        "gap": "Quarry already emits a CDP AX projection (about 300 nodes per v-quarry baseline) with frame topology and @eN refs, but there is no alternative visible-DOM view with a character budget, and the Verevon UI type has no field for AX refs or frames (the UI still uses the old selector/coordinate actions).",
+        "strengths": "AX-ref targeting is the stronger primitive and is already what the Model Plane browser.act uses."
+      },
+      "benefit": "Smaller, cheaper observations and fewer wrong clicks; aligning the UI with AX refs lets user and agent share one vocabulary.",
+      "approach": "Ingestion Plane observation.rs: add a character budget and an optional visible-DOM projection; Frontend Plane: extend BrowserObservation with snapshot refs and frames. Overlaps the browser-automation category; coordinate there.",
+      "effort": "M",
+      "dependencies": [
+        "browser observation contract",
+        "UI action vocabulary migration"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Two projections to maintain; injected text in attributes reaches the model.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Verevon already has the core AX projection; this is tuning plus UI surfacing.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-006",
+      "name": "Page asset inventory and bundling",
+      "description": "List every asset a rendered page uses (scripts, fonts, images incl. CSS-only, stylesheets, video, inline SVG) with the node and CSS property that references it, and export selected assets as a local bundle with a manifest and failure list.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-in-app-browser-007",
+        "codexbrowser-automation-and-safety-113"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-in-app-browser-007"
+        ],
+        "why": "SRC/high; source attribution (attribute | computedStyle | resource) is what makes it useful for design and migration tasks."
+      },
+      "mechanism": "Combine Performance resource entries, DOM attributes (src, srcset, href, poster) and computed-style url(...) values per node; dedupe by URL; collect inline <svg> markup; return an inventory id. bundle(inventoryId, kinds|assetIds) downloads through the browser context and writes files + manifest + failures.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-031"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/images.rs:27-121"
+        ],
+        "gap": "Only an unwired static images.rs (srcset/lazy images); no CSS-referenced assets, fonts, inline SVG or bundle export.",
+        "strengths": ""
+      },
+      "benefit": "Useful for design/branding and site-migration tasks; low general demand.",
+      "approach": "Later: Ingestion Plane observation extension; downloads must go through BrowserBroker download grants.",
+      "effort": "M",
+      "dependencies": [
+        "download_ref grant flow"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Copyright and bulk download of third-party assets.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Single-source, niche capability.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-007",
+      "name": "Model-facing image preparation (detail levels, resize notices, image budget)",
+      "description": "Screenshots reach the model at a chosen detail (auto/low/high/original); oversize images are resized with an explicit notice; a global image budget applies across the conversation.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-092"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-092"
+        ],
+        "why": "SRC/medium; only source with an explicit conversation-wide image budget."
+      },
+      "mechanism": "Each image carries a detail hint; a preparation step downsizes to the target long edge for the detail level, appends a text notice when resized, and drops or downgrades older images once a per-conversation image budget is reached.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [
+          "grep image_budget|max_images|downscale in apps/Model Plane/rust: no matches (SRC, grep only; Go services not searched)"
+        ],
+        "gap": "Check Model Plane session-core / execution-core (Rust and Go) for how browser screenshots enter model context and whether any size or count budget exists.",
+        "strengths": ""
+      },
+      "benefit": "Controls cost and context overflow in long browser runs; the Model Plane owns cost, so this belongs there.",
+      "approach": "Model Plane (session/inference): add a detail hint on image parts, resize before the provider call, and a per-session image budget that evicts the oldest screenshots.",
+      "effort": "S",
+      "dependencies": [
+        "Model Plane cost accounting"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Low-detail images cause misreads of small text.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Small change with direct cost impact on agent browsing; verify current state first.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-008",
+      "name": "Rich rendering of agent output (diagrams, code, math, file previews, citations)",
+      "description": "Chat renders Mermaid diagrams, syntax-highlighted code, KaTeX math, CSV/file previews and inline citations.",
+      "prevalence": {
+        "sourcesWith": [
+          "aside"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "aside-browser-product-081"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-browser-product-081"
+        ],
+        "why": "SRC/high: about 28 Mermaid diagram families and Shiki grammars for about 200 languages."
+      },
+      "mechanism": "Markdown renderer with fenced-block plugins: mermaid -> render once the fence is closed; code -> highlighter; $..$ -> KaTeX; file/CSV artifacts -> preview components; citation markers -> source chips.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx:9",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx:1200",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1159-1178",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-code-highlight.ts:2-38",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts:103"
+        ],
+        "gap": "Highlighter is an in-house dependency-free one (fewer languages than Shiki).",
+        "strengths": "KaTeX math, Mermaid rendering gated on a closed fence (avoids streaming parse errors), code highlighting, CSV artifacts and grouped web citations are shipped (SRC, verified in this pass; no baseline record)."
+      },
+      "benefit": "Already shipped; keep.",
+      "approach": "Keep; lazy-load a fuller grammar set only if users ask.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "None.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon is at parity.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-009",
+      "name": "LLM structured extraction (json format with schema and prompt)",
+      "description": "Request structured JSON from a page by giving a JSON Schema and/or a prompt; the system picks a model, trims input to the context window, requests strict structured output, repairs malformed JSON and falls back across providers.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "common"
+      },
+      "members": [
+        "firecrawl-api-surface-042",
+        "firecrawl-engine-and-infra-090"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-090",
+          "firecrawl-api-surface-042"
+        ],
+        "why": "SRC/high: schema normalised and validated for OpenAI strict mode, model chosen by schema complexity ($ref/$defs -> larger model), trimming to 80 percent of context, JSON repair and provider fallback. Class common rather than unique: LLM extraction is widely offered by scrape platforms (INF; Apify has no record for it in this set)."
+      },
+      "mechanism": "normalizeSchema (additionalProperties:false, all fields required, resolve refs) -> validate for strict mode with clear errors; choose model by complexity; trim markdown by a char bound then tokenizer to 80 percent of context; call with response_format json_schema strict; on parse failure run a repair pass; on provider error fall back; return data + warnings + token usage.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-032",
+          "v-quarry-033"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:1-260",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:207-232",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json:40-73"
+        ],
+        "gap": "json is available only on /v1/extract, not as a scrape/crawl format; the schema is pasted into the prompt and validated after the fact (schema_issues returned) with no strict-mode request or repair pass; model-invoke is not granted in the shipped cross-plane token manifest, so it is off outside dev bypass.",
+        "strengths": "Non-LLM structured harvest (JSON-LD, hydration state, key figures, tables) already ships and is a cheap first pass; Model Plane routing and ZDR propagation exist."
+      },
+      "benefit": "Core for an AI-first product: agents and users turn pages into typed records for the Data Plane. Keeping the LLM call in the Model Plane (Quarry requests, Model Plane runs the model) preserves plane ownership and cost accounting.",
+      "approach": "Ingestion Plane: expose json{schema,prompt} as a scrape/crawl format; try structured harvest first, then call a Model Plane structured-output endpoint. Model Plane: own schema normalisation, strict mode, repair and fallback. Control Plane: grant model-invoke to Quarry per org with the ZDR flag propagated.",
+      "effort": "M",
+      "dependencies": [
+        "format registry (C-t2-02-001)",
+        "cross-plane token grant for model-invoke",
+        "Model Plane structured-output API"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Cost per page in crawls; prompt injection from page text into extraction.",
+      "tier": "priority",
+      "significance": 5,
+      "rationale": "Agents and users would notice immediately; most parts exist but are unwired or disabled.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-010",
+      "name": "LLM answer formats: summary, question, highlights",
+      "description": "Per-page summary, a direct answer to a question, and query-relevant highlights as scrape formats; search results can be hydrated with highlights and can advertise structured provider tools for a domain.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-046",
+        "firecrawl-api-surface-056"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-046"
+        ],
+        "why": "SRC/high: strict per-format objects with 10,000-char inputs and per-format pricing; the same formats work on search-result hydration."
+      },
+      "mechanism": "Each format = one LLM call over trimmed markdown with a fixed instruction (summarise / answer the question / extract verbatim highlights for the query), returned in document.summary|answer|highlights; billed per page. Search highlights come from an index-side highlight model.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-032"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:75-125"
+        ],
+        "gap": "summary exists only inside the answer pipeline; no question or highlights format on scrape; search has a highlight parameter (v-quarry baseline search params) but not per-page LLM highlights; no domain tool discovery.",
+        "strengths": "The answer endpoint with citations already covers the ask-the-web case."
+      },
+      "benefit": "Agents read less text per page (cheaper context) and users get quick page summaries in the browser.",
+      "approach": "Ingestion Plane formats calling the Model Plane; reuse answer-pipeline prompts; verify highlights are verbatim substrings.",
+      "effort": "S",
+      "dependencies": [
+        "C-t2-02-001",
+        "model-invoke grant"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Hallucinated highlights; require a verbatim-substring check.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Cheap once the json-format plumbing exists.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-011",
+      "name": "Cached LLM-generated extractors (deterministic JSON)",
+      "description": "An LLM writes a small DOM extractor once per (URL, schema, prompt); later scrapes run the cached extractor in a sandbox with selector self-repair, cutting per-page LLM cost.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-043",
+        "firecrawl-engine-and-infra-093"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-093"
+        ],
+        "why": "SRC/high: cache key sha256(version, codegen model, url, schema, prompt), anchor-context HTML for generation, sandboxed execution, model callbacks for sub-questions, self-repair when selectors break; 10 credits to generate vs 3 to reuse."
+      },
+      "mechanism": "Key = hash(cacheVersion, model, url, schema, prompt). Miss: build anchor context (HTML around elements matching schema field hints) -> codegen model returns an extractor -> run in sandbox -> validate against schema -> store. Hit: run cached extractor; if output fails validation or selectors miss, regenerate (repair).",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-042"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:259-300",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:2288"
+        ],
+        "gap": "No codegen or extractor cache. Verevon has declarative deterministic ExtractionProfiles (JSON-LD/DOM/AX sources) in agent observations, which is the right target format for generated extractors.",
+        "strengths": "A declarative profile format exists and is safer than generated JS."
+      },
+      "benefit": "Large cost reduction for monitors and recurring crawls of the same templates; fits 'Model proposes, Quarry executes': the Model Plane proposes a declarative profile and Quarry executes it deterministically.",
+      "approach": "Model Plane generates an ExtractionProfile (selectors + transforms, not arbitrary code); Quarry validates it, caches it per org (not under ZDR) and executes it; on validation failure Quarry requests regeneration.",
+      "effort": "L",
+      "dependencies": [
+        "C-t2-02-009",
+        "ExtractionProfile DOM source completeness"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Silently wrong data when a template changes but output still validates; per-org cache isolation.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Differentiating cost lever that maps onto an existing Verevon primitive.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-012",
+      "name": "Interaction-aware extraction escalation (SmartScrape)",
+      "description": "During JSON extraction the model can flag that data is hidden behind clicks, expansion or pagination and give a goal; only then is a browser agent invoked and its pages re-extracted.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-092"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-092"
+        ],
+        "why": "SRC/high: a wrapper schema adds shouldUseSmartscrape, reasoning and prompt next to extractedData, so the common case stays cheap."
+      },
+      "mechanism": "Wrap the user schema: {extractedData: <schema>, shouldUseSmartscrape: bool, smartscrape_reasoning, smartscrape_prompt}. If flagged, start a browser-agent session with the prompt, collect visited pages, re-run extraction over them and merge.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "no baseline record; v-quarry baseline: Model-Plane-backed extract is off by default"
+        ],
+        "gap": "No escalation from extract to a browser agent.",
+        "strengths": "Verevon has both halves (extract + Quarry agent runs with AX refs) to compose."
+      },
+      "benefit": "Matches the authority model exactly: the model proposes 'needs interaction + goal', Quarry runs a bounded agent session under policy.",
+      "approach": "Model Plane returns the escalation flag; Quarry starts a bounded agent run (allowed_domains = source host, step and cost budget) and re-extracts.",
+      "effort": "L",
+      "dependencies": [
+        "C-t2-02-009",
+        "agent budget enforcement (max_cost_usd is not enforced today)"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Runaway cost while agent budgets stay unenforced.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "Valuable but depends on json-on-scrape and enforced agent budgets.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-013",
+      "name": "Change tracking with normalised compare and diffs",
+      "description": "Compare current content with the previous scrape of the same URL (and tag) and return new|same|changed|removed, previous timestamp, plus a git-style text diff and/or a field-level JSON diff.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-044",
+        "firecrawl-engine-and-infra-094"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-094"
+        ],
+        "why": "SRC/high: whitespace- and iframe-insensitive markdown compare avoids false positives; a tag keeps separate histories per URL; git-diff and schema JSON-diff modes."
+      },
+      "mechanism": "Store the last snapshot per (org, url, tag) as a markdown pointer. Normalise (strip whitespace, iframe links, volatile tokens) before compare; status from presence/equality; on changed produce a unified diff (similar crate) and, if a schema is given, extract JSON on both sides and diff fields.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-038",
+          "v-quarry-039",
+          "v-browser-app-026"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:82-121",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:459-560",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/diff.rs:72",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:58"
+        ],
+        "gap": "Compare is a raw-byte blake3 fingerprint (noisy on ads/timestamps), the caller must supply fresh_fingerprint, it requires the postgres queue, and there is no text or JSON diff output; diff_paragraphs/SemanticDiff exist with no caller.",
+        "strengths": "Baseline-chain storage, Temporal schedules and a monitoring UI already ship end to end."
+      },
+      "benefit": "Monitoring ships in the UI, so false positives and missing diffs are visible to users today.",
+      "approach": "Ingestion Plane: fingerprint normalised main-content markdown instead of raw bytes; wire diff.rs to return a paragraph diff; add an optional schema JSON diff via C-t2-02-009; add tag.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-02-002",
+        "C-t2-02-009 for JSON diff"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Snapshot storage conflicts with ZDR: monitors must be refused or hash-only under ZDR.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Shipped feature with a user-visible quality gap and ready-made unwired code.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-014",
+      "name": "Goal-aware LLM judgement of monitor changes",
+      "description": "For a monitor with a stated goal, a model reads the diff and decides whether the change is meaningful, with confidence, reason and itemised before/after changes; it fails open (alerts) when judging fails.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-045",
+        "firecrawl-engine-and-infra-095"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-095"
+        ],
+        "why": "SRC/high: temperature 0, 30 s timeout, 3 retries with jitter, strict JSON {meaningful, confidence, reason, changes[]}, fail-open default."
+      },
+      "mechanism": "Prompt = goal + optional extraction prompt + unified diff + field diffs; strict JSON output; persist per page with the diff artifact; alert when meaningful or when the judge fails.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-browser-app-026"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:256"
+        ],
+        "gap": "Monitors alert on any fingerprint change; no goal field and no judgement.",
+        "strengths": ""
+      },
+      "benefit": "Turns monitoring into an agent-grade feature (alert only on what matters) and cuts notification noise in the Application Plane.",
+      "approach": "Model Plane judge endpoint; the Quarry monitor workflow calls it after a diff and attaches the verdict; Application Plane notifications filter on meaningful.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-02-013 diffs",
+        "model-invoke grant"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Missed alerts if the judge is too strict; keep fail-open.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "High value once diffs exist; not before.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-015",
+      "name": "PDF parsing with modes, OCR routing and layout outputs",
+      "description": "Classify PDFs (text, scanned, image, mixed), extract text natively when possible, route others to OCR/layout, and let callers choose mode (fast/auto/ocr), page caps, per-page markdown, typed layout blocks with bounding boxes and page markers.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-052",
+        "firecrawl-engine-and-infra-080",
+        "firecrawl-engine-and-infra-081"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-080",
+          "firecrawl-engine-and-infra-081"
+        ],
+        "why": "q5 SRC/high: native Rust pdf-inspector classification with confidence and pagesNeedingOcr, native fast path, OCR service only when needed, typed blocks with reading order."
+      },
+      "mechanism": "Sniff content-type/bytes -> classify per page (text-layer coverage, image area) -> if text-based with high confidence convert natively (lopdf/pdf-extract + heading ranking) -> else send the pages needing OCR to an OCR/layout service -> merge per page -> emit markdown, optional pages[] and blocks[{type,label,bbox,content}]; mode fast fails with a typed OCR_REQUIRED error on scans.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-034"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/pdf.rs:1-40",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:839",
+          "apps/Model Plane/rust/services/inference-core/src/provider/doc_intel.rs:1-20"
+        ],
+        "gap": "lopdf text extraction is used only by the answer fetcher; the scrape/crawl pipeline does not branch on PDF content-type, so PDF URLs are not converted; no OCR, page selection or layout blocks. The Model Plane has an Azure Document Intelligence prebuilt-layout provider that Quarry does not call (SRC, this pass).",
+        "strengths": "Native Rust text extraction exists; a layout/OCR provider already exists in the Model Plane."
+      },
+      "benefit": "Enterprise knowledge is heavily PDF; crawls that skip PDFs leave the Data Plane incomplete.",
+      "approach": "Ingestion Plane: branch on PDF in pipeline.rs with a native fast path and classification; for scans call the Model Plane doc_intel provider (Model Plane owns provider, cost and ZDR); expose parsers:[{type:pdf,mode,maxPages,pages,blocks}].",
+      "effort": "L",
+      "dependencies": [
+        "C-t2-02-001",
+        "Model Plane doc_intel exposed to Quarry",
+        "ZDR flag on the OCR provider"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "OCR cost and latency; the external OCR provider must honour ZDR.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Large content-coverage gap with existing building blocks in two planes.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-016",
+      "name": "Large-document async processing, content-addressed parse cache and parser resource limits",
+      "description": "Big PDFs are processed asynchronously by reference with in-flight job adoption; parsed results are cached by content hash with variants and a fail-closed refresh budget; native parsers run under a concurrency semaphore, size ceilings and per-page time budgets.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-082",
+        "firecrawl-engine-and-infra-083",
+        "firecrawl-engine-and-infra-084"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-082",
+          "firecrawl-engine-and-infra-083",
+          "firecrawl-engine-and-infra-084"
+        ],
+        "why": "SRC/high: sha256 cache key, variants for page/block outputs, per-team refresh budget, semaphore (default 3, FIFO), ceilings up to 256 MB by reference, PDFInsufficientTimeError when pages x 150 ms exceeds remaining time."
+      },
+      "mechanism": "key = sha256(bytes) (+variant); check cache -> else acquire a semaphore permit -> if size > inline limit upload by reference and submit an async job; a second request for the same hash adopts the running job; poll until terminal; timeouts do not cancel the job so a retry can pick up the result; refresh bypasses the cache only within a small per-org budget.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-034",
+          "v-quarry-037"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:430-500"
+        ],
+        "gap": "Only a body-size cap exists; no parse cache, async document jobs, job adoption or parser concurrency limits (there is little parsing to govern yet).",
+        "strengths": ""
+      },
+      "benefit": "Needed as soon as PDF/Office parsing ships, to keep Quarry workers stable and costs bounded.",
+      "approach": "Ingestion Plane: tokio semaphore around parsers, size ceilings, content-hash cache keyed per org (disabled under ZDR), Temporal activity for large documents.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-02-015",
+        "C-t2-02-017"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Cross-tenant cache leaks if keyed without org; ZDR must skip the cache.",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Infrastructure that should ship with document parsing, not before.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-017",
+      "name": "Office and e-book document conversion and file capture during crawl",
+      "description": "Convert DOC/DOCX/XLS/XLSX/PPT/PPTX/ODF/RTF/CSV/EPUB to markdown (with headers/footers) under zip-bomb budgets, and save linked office/PDF files found during a crawl.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl",
+          "apify"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "apify-platform-051",
+        "firecrawl-api-surface-053",
+        "firecrawl-engine-and-infra-085"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-085"
+        ],
+        "why": "SRC/high: one Rust crate (anydoc) detects the format from bytes, emits GFM, adds DOCX headers/footers, and reads OOXML under a ZipReadBudget (128 MB total, per-part limits). Table-stakes among the two web-scraping benchmarks (Apify record is DOC/medium)."
+      },
+      "mechanism": "Detect by magic bytes + extension hint; DOCX: unzip with byte/part budgets, parse document.xml + _rels + header/footer with roxmltree -> markdown; XLSX: sheets -> GFM tables (calamine); PPTX: slide text in order; CSV -> table; EPUB -> XHTML chapters -> html-to-markdown. A crawl option (saveFiles/contentTypes) stores matched binaries as artifacts.",
+      "verevon": {
+        "status": "stub",
+        "baselineIds": [
+          "v-quarry-035"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/docx.rs:1-30"
+        ],
+        "gap": "DOCX extract_text exists with no caller; no XLSX/PPTX/ODF/EPUB parsing; crawl does not capture linked files; no zip-bomb budgets.",
+        "strengths": ""
+      },
+      "benefit": "Company sites link office documents; ingesting them into the Data Plane is expected by enterprise users.",
+      "approach": "Ingestion Plane quarry-transform: a document module with budgets (zip + roxmltree + calamine); branch in the pipeline on content-type; crawl option to follow and store document links.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-02-016 resource limits"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Zip bombs and malformed files; must be bounded by budgets.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Table-stakes for scraping APIs, but PDF matters more and should land first.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-018",
+      "name": "Image OCR in the scrape pipeline",
+      "description": "Raster images fetched as URLs are OCRed like one-page scanned documents, behind a per-request and per-deployment gate.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-089"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-089"
+        ],
+        "why": "SRC/high: byte sniffing confirms formats and one gate combines request parsers with deployment config."
+      },
+      "mechanism": "If content is an image and parsers include image and OCR is enabled: send it as a one-page document to the OCR/layout service; else return a typed unsupported-file error.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-browser-app-025"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vision.rs:35-59",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:747-758",
+          "apps/Model Plane/rust/services/inference-core/src/provider/doc_intel.rs:1-20"
+        ],
+        "gap": "Quarry has OCR pre-conditioning of screenshots for an optional vision sidecar in observations and the Model Plane has OCR-capable providers, but image URLs in scrape are not OCRed and OCR artifacts are not shown in the UI.",
+        "strengths": "Vision sidecar plumbing exists."
+      },
+      "benefit": "Small; mostly covered once PDF OCR exists (same provider).",
+      "approach": "Reuse the PDF OCR path from C-t2-02-015 for image content types.",
+      "effort": "S",
+      "dependencies": [
+        "C-t2-02-015"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Cost; ZDR on the OCR provider.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Falls out of the PDF OCR work.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-019",
+      "name": "PII redaction of scraped content (fail closed)",
+      "description": "Replace people, emails, phones, locations, financial data and secrets in returned markdown with tags, masks or removal, with accuracy modes; return empty content if redaction fails.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-054",
+        "firecrawl-engine-and-infra-096"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-096"
+        ],
+        "why": "SRC/high: separate privacy service with model/Presidio/spaCy tiers, entity and replace-style controls, fail-closed semantics."
+      },
+      "mechanism": "After markdown derivation and before downstream transformers/LLM formats: send markdown + {mode, entities, replaceStyle} to a redaction service; replace spans; if the call fails or the size limit is exceeded return empty markdown plus a warning.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:3-13",
+          "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:83-106",
+          "apps/Model Plane/rust/services/inference-core/src/provider/language.rs:1-62"
+        ],
+        "gap": "The Model Plane redacts emails/long numbers on model input under a pii_filter policy and has a language PII provider, but Quarry scrape/crawl output and Data Plane ingest are not redacted; agent_memory::redact_sensitive is unwired (v-quarry baseline). No baseline record covers this; status from this pass (SRC).",
+        "strengths": "Policy-driven PII filtering exists at the model gateway."
+      },
+      "benefit": "GDPR posture: orgs can ingest web content into the Data Plane without storing personal data; complements ZDR.",
+      "approach": "Ingestion Plane transform stage calling the Model Plane language PII provider (Model Plane owns the model); fail closed; per-org policy from the Control Plane.",
+      "effort": "M",
+      "dependencies": [
+        "language/model grant to Quarry",
+        "Control Plane org policy"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Over-redaction damages content; latency on crawls.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Strong fit with Verevon's privacy rules; reuses existing Model Plane capability.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-020",
+      "name": "Learned per-domain boilerplate signatures",
+      "description": "Repeated page chrome is learned across many pages of a domain and removed by structural signature before the static main-content pass.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-087"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-087"
+        ],
+        "why": "SRC/medium; behind an experimental flag (__experimental_omce)."
+      },
+      "mechanism": "For a domain, compute structural node signatures across crawled pages; nodes whose signature appears on most pages are boilerplate; store signatures; at transform time remove matching nodes before selector-based cleaning.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-025"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/readability.rs:1-60"
+        ],
+        "gap": "No cross-page learning.",
+        "strengths": ""
+      },
+      "benefit": "Better main content on template-heavy sites; could be learned per crawl without cross-tenant data.",
+      "approach": "If ever: per-crawl (not global) signature learning inside the crawl workflow; skip under ZDR.",
+      "effort": "L",
+      "dependencies": [
+        "C-t2-02-002",
+        "live crawl frontier"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Cross-tenant learning would violate isolation; experimental quality.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Experimental in the source and depends on a shared domain index Verevon should not build; revisit after selector filters.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-021",
+      "name": "Attribute and image extraction formats",
+      "description": "Return values of named attributes for CSS selectors (data-* ids, hrefs, hreflang) and the list of images on the page.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-047"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-047"
+        ],
+        "why": "SRC/high: simple selector+attribute pairs, values[] per match, run natively on raw HTML."
+      },
+      "mechanism": "For each {selector, attribute}: select all matches in raw HTML and collect attribute values; images: collect img src/srcset/data-src resolved to absolute URLs.",
+      "verevon": {
+        "status": "stub",
+        "baselineIds": [
+          "v-quarry-031",
+          "v-quarry-027"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/images.rs:27-121",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/attributes.rs:23-329",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/links.rs:8-23"
+        ],
+        "gap": "Library functions exist (srcset/lazy images, hreflang, Dublin Core, tables) with no scrape caller.",
+        "strengths": "Implementation is already written; the links list (absolute href/text/rel) already ships on scrape (v-quarry-027)."
+      },
+      "benefit": "Cheap deterministic extraction without LLM cost; useful to agents.",
+      "approach": "Wire images.rs/attributes.rs into the format registry.",
+      "effort": "S",
+      "dependencies": [
+        "C-t2-02-001"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "None material.",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Near-zero effort because the code exists.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-022",
+      "name": "Branding and design-token extraction",
+      "description": "Return a brand profile from a rendered page: colour roles, logo, fonts, typography scale, spacing, radii and button/input styles.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-048"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-048"
+        ],
+        "why": "SRC/high: in-page extraction of computed styles, colour roles with CIEDE2000 tolerance, logo from JSON-LD/apple-touch-icon/heuristics, LLM to finalise roles."
+      },
+      "mechanism": "Inject a script that samples computed styles of body, headings, links, buttons and inputs; cluster colours with a perceptual distance; assign roles; pick logo candidates; optional LLM pass to label roles.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-029",
+          "v-browser-app-022"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/branding_rendered.rs:60",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:550-590",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/crawl_preview/quarry.rs:24"
+        ],
+        "gap": "Static-HTML branding (favicon, theme colour, palette, logo, font, og:image) only; rendered computed-style tokens only via an optional vision sidecar flag.",
+        "strengths": "Already used in the onboarding crawl preview."
+      },
+      "benefit": "Onboarding personalisation; modest.",
+      "approach": "Optional rendered-mode branding using the browser driver's computed styles.",
+      "effort": "M",
+      "dependencies": [
+        "browser driver"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Low.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Verevon covers the onboarding need already.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-023",
+      "name": "Domain-shaped extraction formats (product, menu)",
+      "description": "Canonical schema-less structured profiles for product pages (variants, sku, price, availability, images) and restaurant menus.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-049"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-049"
+        ],
+        "why": "SRC/medium: fixed canonical zod shapes backed by external extraction services."
+      },
+      "mechanism": "Fixed output schema per domain; extraction via a specialised service or an LLM with the canonical schema.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-browser-app-027",
+          "v-quarry-033"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:171",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:175",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:53"
+        ],
+        "gap": "No menu shape (not relevant to Verevon's B2B focus).",
+        "strengths": "Product extraction and summary ship with a picker UI; structured harvest (JSON-LD, hydration) supplies product data without an LLM."
+      },
+      "benefit": "Already shipped; keep.",
+      "approach": "Keep; add shapes only on demand.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "None.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon at parity for the shape that matters.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-024",
+      "name": "Session-authenticated media and document export (video/audio, transcripts, Google Workspace)",
+      "description": "Fetch non-HTML content that needs the user's session: export a Google Doc/Sheet/Slides to pdf/md/docx/xlsx/csv/pptx, a YouTube transcript, or audio/video files via a helper that advertises supported URLs and uses browser cookies.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-112",
+        "firecrawl-api-surface-050",
+        "firecrawl-engine-and-infra-107"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-112"
+        ],
+        "why": "SRC/high: strict URL validation (docs.google.com /d/<id>, not /pub), a type-to-format allowlist and use of the signed-in session. Firecrawl's media helper adds the capability-advertising pattern (supported-URL regex cached 5 minutes, typed unsupported error)."
+      },
+      "mechanism": "Validate the URL against an allowlist pattern; map document type to allowed export formats; fetch the export URL with session cookies inside the browser context; store the file as an artifact. Media: GET supported-urls (cached), reject unsupported URLs with a typed error, POST download {url, cookies} with a long timeout, return a public or artifact URL.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "v-browser-app baseline: download_ref is gated by a BrowserBroker grant (agent.rs:3479-3506); no export or media-download format found"
+        ],
+        "gap": "No transcript, document-export or media-download formats; /v1/audio is TTS/STT, not media fetch.",
+        "strengths": "BrowserBroker sensitive-action grants already exist to gate cookie use and downloads."
+      },
+      "benefit": "Agents often need a video transcript or a Google Doc's content. Google/Microsoft documents fit Verevon better through integration-corev2 provider actions with OAuth than through browser cookies.",
+      "approach": "Docs: integration-corev2 provider actions with OAuth export. Video transcripts: a Quarry format using public caption tracks, no cookies by default; any cookie use requires a BrowserBroker grant. Skip raw media download.",
+      "effort": "M",
+      "dependencies": [
+        "integration-corev2 Google/Microsoft providers",
+        "BrowserBroker grants"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Site terms and copyright for media download; cookie exfiltration risk.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "Transcripts are useful; media download and cookie-based export fit the authority model less well than OAuth providers.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-025",
+      "name": "Provider-agnostic model routing for content LLM features",
+      "description": "All LLM-backed formats go through one factory supporting many providers, with self-host overrides to an OpenAI-compatible endpoint.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-091"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-091"
+        ],
+        "why": "SRC/high: Vercel AI SDK providers with base-URL and model-name overrides and usage telemetry on every call."
+      },
+      "mechanism": "getModel(name, provider) factory; environment overrides; telemetry wrapper on every call.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs",
+          "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+          "apps/Model Plane/rust/services/inference-core/src/provider/zdr.rs"
+        ],
+        "gap": "Quarry's access is disabled by the shipped cross-plane token manifest (model-invoke false); that grant gap is tracked under C-t2-02-009.",
+        "strengths": "Verevon centralises routing, fallback and ZDR-aware provider selection in the Model Plane, which is architecturally stronger than per-service routing (SRC: file presence only, not read in depth)."
+      },
+      "benefit": "Keep; Quarry should never route models itself.",
+      "approach": "Keep in the Model Plane.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "None.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon ahead architecturally.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-02-026",
+      "name": "QR and barcode decoding from the live page",
+      "description": "Decode a QR code shown on a page (used for QR sign-in) and trust only HTTPS payloads without embedded credentials.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-in-app-browser-008"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-in-app-browser-008"
+        ],
+        "why": "SRC/medium: zxing-wasm reader with payload validation."
+      },
+      "mechanism": "Screenshot -> zxing decode -> accept only https URLs without userinfo.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "grep rqrr|zxing|qr_code in Quarry-v2 crates and verevonv3 src: no matches (SRC, grep)"
+        ],
+        "gap": "Not needed for this category.",
+        "strengths": ""
+      },
+      "benefit": "Low; QR sign-in by an agent touches authentication flows that Verevon routes through user approval.",
+      "approach": "Skip.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Agent-driven sign-in conflicts with the authority model.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Belongs to browser auth; low value for Verevon.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    }
+  ]
+}

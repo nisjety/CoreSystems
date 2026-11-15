@@ -1,0 +1,116 @@
+[
+ {
+  "finalId": "F-t1-019",
+  "verdict": "confirmed",
+  "checked": [
+   "C:/dev/qm/src/api/agent-api-catalog.ts:1-60,130-134,177-221,784-817 (families with guidance + when predicate on isAdmin/swarmsEnabled; GET /v1/apis)",
+   "C:/dev/qm/src/api/routes/surface.ts:1379 (GET /v1/apis route)",
+   "C:/dev/qm/src/auth/capability-token.ts:9,61-170 (DEFAULT_SANDBOX_CAPABILITY_TTL_HOURS=48; claims actorId, scopeId, orgId, optional sessionId/runId/runAttempt/runLeaseToken, exp)",
+   "C:/dev/qm/docs/capability-tokens.md:1-50 (48 h turn tokens, optional deflate compression behind CAPABILITY_TOKEN_COMPRESSION, exp:0 option)",
+   "C:/dev/qm/src/harness/agent-tools.ts:3315-3350 and C:/dev/qm/src/tools/admin.ts:1-40 (admin resource tool wraps /v1/admin HTTP routes; whoami-only fallback)",
+   "C:/dev/buzz/crates/buzz-cli/src/lib.rs:1-60,113 (exit codes 0-5, JSON CLI) and C:/dev/buzz/crates/buzz-cli/src/client.rs:78-107 (NIP-98 signed HTTP auth)"
+  ],
+  "corrections": "Say the token is minted per turn (sandbox turn token, 48 h default, configurable including no-expiry) and only optionally carries run id/attempt/lease; swarm operations are the ones that require a real durable run. Claims are actorId/scopeId/orgId (+ optional session/run fields), not literally 'principal'. Buzz: say 'about 25 CLI command groups covering most platform actions' rather than 'every action'; the CLI authenticates with NIP-98 signed HTTP auth events.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "qm feature-gated families (admin-only, swarmsEnabled); token compression is off by default (env switch)",
+   "Buzz 'everything a human can do' comes from VISION.md intent; code shows about 25 command groups",
+   "Admin authority recheck inferred from the admin tool routing through the /v1/admin handlers (SRC), not separately tested here"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-010",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/qm/src/slack/approvals.ts:38,243-251 (only requester may decide; ephemeral rejection)",
+   "C:/dev/qm/src/slack/approval-cards.ts:44-48 (threadOnly -> DM routing)",
+   "C:/dev/qm/docs/session-tape-spec.md:99-116 (retrySafe re-run vs interrupt marker on resume)",
+   "C:/dev/qm/src/harness/agent-tools.ts:436,4414-4437 (retrySafe field)",
+   "C:/dev/qm/src/core/orchestrator.ts:2172-2335,3792 (security-screen-release quarantine; 'data, not authority' resume text)",
+   "scratchpad/extract/grokbot/dist/local-exec-daemon/main.cjs SmartModeClassifierDecision enum (UNSPECIFIED|ALLOW|BLOCK), SmartModeClassifierRuleEffect (ALLOW|ASK_FIRST), SmartModeClassifierRuleSource (CUSTOM_RULE|TEAM_RULE)",
+   "scratchpad/extract/grokbot/dist/electron-main/proto.cjs AutoReview* message names (no built-in rule source found)",
+   "C:/Program Files/WindowsApps/MSTeams_26260.1701.5139.3736_x64__8wekyb3d8bbwe/desktop-assets/hashed-assets/main-locale-en-us-23ba9acb36586a4b.js.gz (odsl_hitl_pending_consent_request_all and agent_interaction_allow_button_text present)",
+   "Records slack-product-surface-087 (DOC guidance only), buzz-architecture-045, buzz-product-096, buzz-architecture-111"
+  ],
+  "corrections": "Approval cards are 3 of 5 shipped (Grok Bot, QM, Teams REA strings); Slack is DOC design guidance only (no platform approval protocol) and must not be counted as a shipped approval card. Untrusted-content quarantine is 1 of 5 (QM, unique); Buzz only has prompt-level trust-labelled framing, not quarantine. Grok Bot permission math: evidence shows effective = min(user setting, team ceiling); drop 'org floor' (QM vocabulary). Grok Bot auto-review: rule sources are custom (user) and team only, no 'built-in' layer found; the classifier decision enum is ALLOW|BLOCK while ASK_FIRST is a rule effect, so do not say the classifier returns allow|ask|block. QM tighten-only merge is tested but an admin setter can replace floors. QM sends the approval card to the requester's DM when the conversation is thread-only, not 'in channels' generally.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Grok Bot auto-review model and prompts run server-side; only the client interface is visible",
+   "Grok Bot standing grants are implemented only for messaging subjects (send-imessage) in this build",
+   "Teams HITL consent inferred from localized strings (REA), not a traced flow; 'odsl' prefix meaning unknown",
+   "Slack approvals are DOC guidance only",
+   "QM quarantine depends on a screening classifier that can fail open"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-021",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/extract/grokbot/dist/local-exec-daemon/main.cjs: win32 'proxy-only, no filesystem sandbox' message, '--preflight-only -- /bin/true', workspace_readwrite policy builder with networkPolicy/networkPolicyStrict, SandboxUnsupportedError, CURSOR_WORKLOAD_CGROUP with /sys/fs/cgroup path regex, cgroup.procs + oom_score_adj spawn prefix",
+   "grep for bubblewrap|bwrap|landlock|Landlock|seccomp across scratchpad/extract/grokbot/dist: 0 hits; dist/native contains only sand-webauthn-signer.exe (no sandbox helper binary shipped)",
+   "REA analyze_javascript_application on scratchpad/extract/grokbot/dist/local-exec-daemon (directory, summary; parent ev_2c385ca123dd86dc8aff742f46fadd22c4c868d2d2d7795e6898b38881c1da77; partial coverage, worker heap limit)",
+   "C:/dev/qm/src/resolution/audience-floor.ts:1-60 (allow intersection, deny union)",
+   "C:/dev/qm/src/config.ts:1258-1300 (fail-open warnings when per-backend egress proxy URL missing; backends sprites/e2b/modal/do-managed-agents/smolmachines)",
+   "C:/dev/qm/SECURITY.md:167-169 (egress enforcement conditional; deployment-runtime egress not built)",
+   "Records grokbot-agent-product-145 (link-preview SSRF re-validates redirects), buzz-product-157 (webhook redirects disabled, enumerated deny)"
+  ],
+  "corrections": "Remove 'bubblewrap, Landlock and seccomp': no such strings exist in the shipped Grok Bot code and the sandbox helper binary is not shipped, so the enforcement mechanism is unknown (only the policy JSON contract, a Linux kernel preflight and macOS support are visible). State that on Windows the helper is network-proxy-only with no filesystem isolation. The cgroup step only attaches spawned processes to an externally provided workload cgroup (env-gated, Linux Box) and resets oom_score_adj; it does not itself set resource caps. 'Sandbox confinement 1 of 5' undercounts: QM also runs agents in hosted sandbox backends (E2B, Modal, Sprites, DO, smolmachines) with an optional egress proxy. QM egress is fail-open when the backend proxy URL is unset, and auditing exists only where the backend supports it. SSRF: Grok Bot link previews pin IP + SNI and re-validate up to 5 redirects; Buzz pins IP but disables redirects for webhooks; do not merge these into one source's mechanism.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Grok Bot sandbox enforcement binary not shipped; only the client contract is observable (contract SRC, enforcement INF)",
+   "Grok Bot filesystem sandbox unsupported on Windows (proxy-only)",
+   "QM egress enforcement conditional per backend, fail-open if proxy URL missing",
+   "Buzz SSRF guard is enumerated-deny (unlisted special ranges pass)"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-004",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/desktop/src/features/agents/ui/agentSessionToolClassifier.ts:80-120 (15 render classes, provider chain)",
+   "C:/dev/buzz/crates/buzz-acp/src/config.rs:64-89,376,750-766 (Queue|Steer|Interrupt|owner-interrupt, requires DedupMode::Queue)",
+   "C:/dev/buzz/crates/buzz-acp/src/queue.rs:2540-2547 (new-message-arrived-while-you-were-working / new-request-supersedes-previous tags)",
+   "C:/dev/buzz/desktop/src/features/channels/ui/BotActivityBar.tsx:35,60-99,143-160 (HEADLINE_ROTATION_MS=2200, owner-side transcript, fallback 'Working')",
+   "C:/dev/qm/src/api/routes/run-events.ts:1-40 (TOOL_CALL_START/RESULT replay, getRun(runId, actor) auth)",
+   "C:/dev/qm/plugins/web-ui/src/core-bridge.ts:1572-1624 (offset validation; 'fallback' on gap)",
+   "scratchpad/extract/grokbot/dist/renderer/assets/index.eager-app-*.js committedIds latch helpers (vKe/AKe/kKe/wKe) for group rooms",
+   "C:/Program Files/WindowsApps/MSTeams_26260.1701.5139.3736_x64__8wekyb3d8bbwe/desktop-assets/hashed-assets/config-prod-960581273367874e.js.gz (enableBotStreaming=true, enableBotStreamingStopButton; no plan/task card flags found)",
+   "Records slack-product-surface-082 (DOC), grokbot-agent-product-012/124/148, grokbot-agent-runtime-098"
+  ],
+  "corrections": "'Activity/plan cards 5 of 5' is overstated: Teams evidence is bot-streaming/stop-button feature flags only (no plan or task cards found) and Slack's stream/plan contract is DOC-only; say 3 of 5 shipped (Buzz, QM, Grok Bot todos) plus Slack DOC and Teams streaming. The Slack record does not evidence 'task_update' block names; cite chat.startStream/appendStream/stopStream as DOC only. QM deltas are keyed by JS string offset (character index), not byte offset, and authorization is run visibility for the actor (getRun), not a 'room read decision'. The computer_actions frame belongs to Grok Bot's transcript-watch stream, not QM's SSE; present 'batch action frames onto the same stream' as Verevon design synthesis. The typed Row union (with 'approval' rows and {agentRef, ownerRef}) is synthesized: Grok Bot's row kinds come from a preload telemetry list (entry:message, send-message, event, notice, feedback, voice-call, user-attachment, spend-initiation, plus group rows) and contain no approval row; Buzz contributes the 'managed by' owner label. Buzz has 15 render classes (incl. relay-op, skill-read, image, status, generic, raw-rail, suppressed), not 8. The committed-ids latch comes from Grok Bot group chats with several bots.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Slack streaming contract DOC-only",
+   "Teams only feature-flag evidence (config-prod) for streaming and stop button",
+   "Grok Bot live state and row kinds observed as proto/telemetry names; behaviour partly INF",
+   "Buzz 'non-owners see a generic Working' is INF from the owner-only observer transcript plus the 'Working' fallback",
+   "Buzz unknown-is-not-offline rule is DOC (docs/agent-availability.md)"
+  ],
+  "confidence": "medium"
+ },
+ {
+  "finalId": "F-t1-001",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/crates/buzz-relay/src/handlers/ingest.rs:952,1149 ('reply parent not found' rejection)",
+   "C:/dev/buzz/crates/buzz-db/src/runtime/mod.rs:1394 (insert_event_with_thread_metadata_tx, same transaction)",
+   "C:/dev/qm/src/slack/message-gating.ts:29-46,120-129 (threadHasBotStake; negative-TTL cache)",
+   "C:/dev/qm/src/slack/turn-handler.ts:176 and C:/dev/qm/src/slack/events.ts:310 (stake check for un-mentioned thread replies)",
+   "scratchpad/extract/grokbot/dist/renderer/assets/index-Bo3NzkuN.js@714578 (agents-info-pane-close-linger), @540558/@713010/@1541902 (role=separator with aria-orientation and onPointerDown only)",
+   "C:/Program Files/WindowsApps/MSTeams_26260.1701.5139.3736_x64__8wekyb3d8bbwe/desktop-assets/hashed-assets/main-locale-en-us-23ba9acb36586a4b.js.gz (inline_slice_treegrid_compose_box_label 'Reply in thread compose box')",
+   "Records qm-architecture-087, slack-product-surface-002/150/151 (DOC), teams-product-surface-152/166 (REA)"
+  ],
+  "corrections": "Human-first rooms: QM has no native human-to-human room (Slack is its human chat system of record; web projects map to group sessions), so count 3 of 5 native (Buzz, Slack DOC, Teams REA) plus QM via Slack. The pane mechanism mixes observation and prescription: Grok Bot shows a ~300 ms close linger, inert while closing, focus to the first enabled control, and a pointer-only role=separator with aria-orientation; there is no aria-valuenow and no arrow-key resize on that separator, and per-user width persistence and a docked/overlay breakpoint were not observed. '<AuxPane ...>', '?thread=<id>' routing and 'follow state feeds a Threads list' are Verevon design synthesis (Slack Threads view and pop-out are DOC-only). Thread panel count: Teams evidence is inline thread replies in an inbox tree-grid, not a side panel, while Grok Bot does have a 'threads beside the main chat' pane, so the list should be Slack (DOC), Buzz, Grok Bot, with Teams as inline replies.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Slack threads, pop-out window and Threads view are DOC-only",
+   "Teams thread and contextual-pane evidence is localized strings (REA), not traced behaviour",
+   "Grok Bot threads are bot task threads, not human-to-human threads",
+   "QM ambient-turn rule is Slack-surface specific (src/slack)"
+  ],
+  "confidence": "high"
+ }
+]

@@ -1,0 +1,544 @@
+{
+ "task": "t3",
+ "title": "Model Plane and the Verevon chat and agent pages: audit of Claude, Hermes, DeepSeek harness, T3 Code, Manus, Codex, Antigravity, Cursor and the web chat products",
+ "asOf": "2026-10-14",
+ "verevonCommit": "afb83928 (2026-10-10), C:/dev/CoresSystem",
+ "sources": [
+  {
+   "key": "claude",
+   "name": "Claude desktop app",
+   "version": "2.31226.1",
+   "kind": "installed app",
+   "method": "REA on app.asar + extracted bundle",
+   "featureRecords": 449
+  },
+  {
+   "key": "hermes",
+   "name": "Hermes Agent",
+   "version": "commit b23600860f (2026-10-12)",
+   "kind": "open-source repo",
+   "method": "source and docs",
+   "featureRecords": 278
+  },
+  {
+   "key": "deepseek",
+   "name": "DeepSeek harness",
+   "version": "commit d743267388 (2026-10-09)",
+   "kind": "open-source repo",
+   "method": "source and docs",
+   "featureRecords": 335
+  },
+  {
+   "key": "t3code",
+   "name": "T3 Code",
+   "version": "0.0.35",
+   "kind": "installed app",
+   "method": "REA on app.asar + recovered sources",
+   "featureRecords": 203
+  },
+  {
+   "key": "manus",
+   "name": "Manus (Manus Studio)",
+   "version": "2.0.6",
+   "kind": "installed app",
+   "method": "REA on app.asar (targeted subdirectories) + extracted bundle",
+   "featureRecords": 218
+  },
+  {
+   "key": "codexagent",
+   "name": "Codex desktop app (plugins, agent runtime, models)",
+   "version": "26.1007.2314.0",
+   "kind": "installed app",
+   "method": "REA on app.asar/.vite build + native binary strings",
+   "featureRecords": 227
+  },
+  {
+   "key": "antigravity",
+   "name": "Google Antigravity (agent hub 2.11.0)",
+   "version": "2.11.0",
+   "kind": "installed app",
+   "method": "REA + direct reading of the embedded UI and protobuf descriptors",
+   "featureRecords": 247
+  },
+  {
+   "key": "cursor",
+   "name": "Cursor",
+   "version": "3.17.21",
+   "kind": "installed app",
+   "method": "REA on extension bundles + direct reading",
+   "featureRecords": 287
+  },
+  {
+   "key": "web-manus",
+   "name": "manus.im",
+   "version": "public docs, October 2026",
+   "kind": "public documentation",
+   "method": "public web docs only (provenance DOC)",
+   "featureRecords": 105
+  },
+  {
+   "key": "web-perplexity",
+   "name": "perplexity.ai",
+   "version": "public docs, October 2026",
+   "kind": "public documentation",
+   "method": "public web docs only (provenance DOC)",
+   "featureRecords": 112
+  },
+  {
+   "key": "web-chatgpt",
+   "name": "chatgpt.com",
+   "version": "public docs, October 2026",
+   "kind": "public documentation",
+   "method": "public web docs only (provenance DOC)",
+   "featureRecords": 155
+  },
+  {
+   "key": "web-claudeai",
+   "name": "claude.ai",
+   "version": "public docs, October 2026",
+   "kind": "public documentation",
+   "method": "public web docs only (provenance DOC)",
+   "featureRecords": 127
+  }
+ ],
+ "referenceRecordsTotal": 2743,
+ "clustersTotal": 595,
+ "verevonBaselineByCategoryStatus": {
+  "Chat experience": {
+   "shipped": 56,
+   "partial": 12,
+   "absent": 9
+  },
+  "Multimodal & creation": {
+   "shipped": 18,
+   "stub": 2,
+   "partial": 16,
+   "absent": 3,
+   "planned": 2
+  },
+  "Research & web": {
+   "shipped": 22,
+   "partial": 12
+  },
+  "Agent runtime": {
+   "shipped": 43,
+   "partial": 22,
+   "absent": 5,
+   "stub": 4,
+   "planned": 3
+  },
+  "Tools, plugins & extensibility": {
+   "shipped": 19,
+   "absent": 6,
+   "partial": 13,
+   "stub": 1,
+   "planned": 1
+  },
+  "Computer & environment control": {
+   "shipped": 11,
+   "partial": 9,
+   "absent": 9,
+   "stub": 1,
+   "planned": 1
+  },
+  "Coding capability": {
+   "shipped": 4,
+   "partial": 2,
+   "absent": 3,
+   "planned": 1
+  },
+  "Memory, learning & personalization": {
+   "shipped": 19,
+   "absent": 6,
+   "partial": 5,
+   "planned": 5
+  },
+  "Models & routing": {
+   "shipped": 25,
+   "absent": 10,
+   "partial": 4,
+   "planned": 2
+  },
+  "Transparency, observability & control": {
+   "shipped": 26,
+   "absent": 2,
+   "partial": 4,
+   "planned": 1
+  },
+  "Safety, permissions & governance": {
+   "shipped": 25,
+   "partial": 9,
+   "planned": 3
+  },
+  "UI/UX & product design": {
+   "shipped": 10,
+   "absent": 3,
+   "partial": 6,
+   "planned": 3
+  },
+  "Platform architecture": {
+   "shipped": 12,
+   "partial": 8,
+   "stub": 1,
+   "absent": 1
+  }
+ },
+ "categories": [
+  {
+   "n": 1,
+   "name": "Chat experience",
+   "refs": 207,
+   "base": 77
+  },
+  {
+   "n": 2,
+   "name": "Multimodal & creation",
+   "refs": 107,
+   "base": 41
+  },
+  {
+   "n": 3,
+   "name": "Research & web",
+   "refs": 71,
+   "base": 34
+  },
+  {
+   "n": 4,
+   "name": "Agent runtime",
+   "refs": 420,
+   "base": 77
+  },
+  {
+   "n": 5,
+   "name": "Tools, plugins & extensibility",
+   "refs": 304,
+   "base": 40
+  },
+  {
+   "n": 6,
+   "name": "Computer & environment control",
+   "refs": 237,
+   "base": 31
+  },
+  {
+   "n": 7,
+   "name": "Coding capability",
+   "refs": 84,
+   "base": 10
+  },
+  {
+   "n": 8,
+   "name": "Memory, learning & personalization",
+   "refs": 117,
+   "base": 35
+  },
+  {
+   "n": 9,
+   "name": "Models & routing",
+   "refs": 187,
+   "base": 41
+  },
+  {
+   "n": 10,
+   "name": "Transparency, observability & control",
+   "refs": 169,
+   "base": 33
+  },
+  {
+   "n": 11,
+   "name": "Safety, permissions & governance",
+   "refs": 367,
+   "base": 37
+  },
+  {
+   "n": 12,
+   "name": "UI/UX & product design",
+   "refs": 176,
+   "base": 22
+  },
+  {
+   "n": 13,
+   "name": "Platform architecture",
+   "refs": 297,
+   "base": 22
+  }
+ ],
+ "tiersAfterVerification": {
+  "priority": 22,
+  "recommended": 46,
+  "niceToHave": 30
+ },
+ "tiersBeforeVerification": {
+  "priority": 23,
+  "recommended": 45,
+  "niceToHave": 30
+ },
+ "verificationSummary": {
+  "items": 98,
+  "originalTier": {
+   "priority": 23,
+   "recommended": 45,
+   "nice-to-have": 30
+  },
+  "finalTier": {
+   "priority": 22,
+   "recommended": 46,
+   "nice-to-have": 30
+  },
+  "verevonStatus": {
+   "partial": 78,
+   "absent": 16,
+   "stub": 2,
+   "planned": 2
+  },
+  "verdict": {
+   "keep": 13,
+   "reword": 81,
+   "demote": 4
+  },
+  "refcheck": {
+   "partial": 21,
+   "confirmed": 2
+  },
+  "stillNeedsVerification": 0,
+  "lowConfidence": 0,
+  "effortRevised": 40,
+  "prevalenceWrong": 14
+ },
+ "waves": [
+  {
+   "wave": "W1",
+   "goal": "Make what already exists trustworthy and correct: one run context for Do runs, durable and multi-replica-safe runs, declared tool risk with MCP callable, audit delivery, ZDR live, learning and memory governance, cache and cost basics, render performance, release and CI guardrails.",
+   "items": [
+    "F-t3-001",
+    "F-t3-002",
+    "F-t3-003",
+    "F-t3-004",
+    "F-t3-005",
+    "F-t3-007",
+    "F-t3-016",
+    "F-t3-017",
+    "F-t3-020",
+    "F-t3-021",
+    "F-t3-022",
+    "F-t3-023",
+    "F-t3-029",
+    "F-t3-039",
+    "F-t3-066",
+    "F-t3-067"
+   ]
+  },
+  {
+   "wave": "W2",
+   "goal": "Close the agent-loop and governance gaps users feel in chat and Do mode: approvals v2, plan-continue and ask_user, working connectors and agent browser, history foundation, Spaces as projects, verified Office deliverables, scheduled Do runs, the attention model, file tools, the action registry for agents and the org policy registry; start the sandbox-computer seam.",
+   "items": [
+    "F-t3-006",
+    "F-t3-008",
+    "F-t3-009",
+    "F-t3-010",
+    "F-t3-011",
+    "F-t3-012",
+    "F-t3-013",
+    "F-t3-014",
+    "F-t3-015",
+    "F-t3-018",
+    "F-t3-025",
+    "F-t3-028",
+    "F-t3-030",
+    "F-t3-032",
+    "F-t3-033",
+    "F-t3-049",
+    "F-t3-063"
+   ]
+  },
+  {
+   "wave": "W3",
+   "goal": "Deliver the research, creation and personalisation table-stakes on top: deep and wide research, citations to passages, readable long runs, artifact canvas, decks, Agents and Automations hubs, takeover, goals, skills lifecycle, scoped memory and personalisation, model record and Gemini, eval gates, egress tiers and the microVM sandbox.",
+   "items": [
+    "F-t3-019",
+    "F-t3-026",
+    "F-t3-027",
+    "F-t3-031",
+    "F-t3-034",
+    "F-t3-036",
+    "F-t3-037",
+    "F-t3-038",
+    "F-t3-040",
+    "F-t3-041",
+    "F-t3-042",
+    "F-t3-043",
+    "F-t3-048",
+    "F-t3-052",
+    "F-t3-053",
+    "F-t3-054",
+    "F-t3-055",
+    "F-t3-056",
+    "F-t3-058",
+    "F-t3-060",
+    "F-t3-061",
+    "F-t3-062",
+    "F-t3-068"
+   ]
+  },
+  {
+   "wave": "W4",
+   "goal": "Become a computer-using platform: computer use in the sandbox desktop, the live computer panel, inline widgets and MCP Apps on a user-content origin, sharing, event triggers, replay, images, custom connectors, plugins, public Agent API and bring-your-own providers.",
+   "items": [
+    "F-t3-024",
+    "F-t3-035",
+    "F-t3-044",
+    "F-t3-045",
+    "F-t3-046",
+    "F-t3-047",
+    "F-t3-050",
+    "F-t3-051",
+    "F-t3-057",
+    "F-t3-059",
+    "F-t3-064",
+    "F-t3-065"
+   ]
+  },
+  {
+   "wave": "W5",
+   "goal": "Nice-to-have backlog, scheduled on demand or when a dependency makes them cheap.",
+   "items": [
+    "F-t3-069",
+    "F-t3-070",
+    "F-t3-071",
+    "F-t3-072",
+    "F-t3-073",
+    "F-t3-074",
+    "F-t3-075",
+    "F-t3-076",
+    "F-t3-077",
+    "F-t3-078",
+    "F-t3-079",
+    "F-t3-080",
+    "F-t3-081",
+    "F-t3-082",
+    "F-t3-083",
+    "F-t3-084",
+    "F-t3-085",
+    "F-t3-086",
+    "F-t3-087",
+    "F-t3-088",
+    "F-t3-089",
+    "F-t3-090",
+    "F-t3-091",
+    "F-t3-092",
+    "F-t3-093",
+    "F-t3-094",
+    "F-t3-095",
+    "F-t3-096",
+    "F-t3-097",
+    "F-t3-098"
+   ]
+  }
+ ],
+ "adrNeeded": [
+  {
+   "topic": "Sandbox computer backend and thread-scoped workspace (microVM per thread, snapshot retention and destruction, cost metering)",
+   "items": [
+    "F-t3-009",
+    "F-t3-024",
+    "F-t3-035",
+    "F-t3-043",
+    "F-t3-084",
+    "F-t3-085"
+   ],
+   "why": "Moves execution from hermetic per-call bwrap processes to long-lived machines and introduces durable state outside Spaces; must show ZDR snapshot destruction, that a thread workspace never bypasses Space ACLs, supply-chain ownership of guest images, and VM-second billing."
+  },
+  {
+   "topic": "Computer-use scope: desktop control only inside Verevon's sandbox VM; user-desktop control stays parked",
+   "items": [
+    "F-t3-024",
+    "F-t3-026"
+   ],
+   "why": "The owner parked OS-level desktop control; the Endpoint Plane can capture and inject input on real machines. An ADR should fix the boundary (sandbox only, consent tiers if ever unparked) and keep the 'Model proposes, executor executes' rule for desktop actions."
+  },
+  {
+   "topic": "Spaces as the chat project container, instruction precedence and multi-author authority (OD19)",
+   "items": [
+    "F-t3-013",
+    "F-t3-001",
+    "F-t3-060",
+    "F-t3-061",
+    "F-t3-012"
+   ],
+   "why": "Projects must not become a second container beside Spaces; precedence between org, Space, project and persona instructions, and whose delegated token runs a collaborator-triggered agent turn, need a ruling so Space access never widens an owner-plane ACL."
+  },
+  {
+   "topic": "Agent-browser domain policy ownership and model-blind credentials (OD13)",
+   "items": [
+    "F-t3-008",
+    "F-t3-026",
+    "F-t3-050",
+    "F-t3-081"
+   ],
+   "why": "Decides whether broker, Control or Quarry owns the domain fence and per-site read/act consent, and how vault secrets are substituted by Quarry so the Model never sees them, preserving 'the Model proposes browser actions and Quarry executes or rejects them'."
+  },
+  {
+   "topic": "Unattended authority: scheduled, goal and trigger runs, stored consent with expiry, renewable delegated credentials (owner ruling 2026-09-28, OD8, D10)",
+   "items": [
+    "F-t3-018",
+    "F-t3-037",
+    "F-t3-047",
+    "F-t3-002",
+    "F-t3-019"
+   ],
+   "why": "Today scheduled runs are draft-only by owner ruling and the delegated bearer lives 300 s. Tool-using unattended runs need a signed, expiring consent contract, a non-delegable set and a renewal path through Control, not a service-principal shortcut."
+  },
+  {
+   "topic": "Share model, public links and artifact hosting origin under ZDR and residency",
+   "items": [
+    "F-t3-046",
+    "F-t3-045",
+    "F-t3-080",
+    "F-t3-031"
+   ],
+   "why": "Public snapshots, published artifacts and a dedicated user-content origin create new egress and retention paths; connectors called from a shared artifact must run with the viewer's credentials. Must state which content types (ZDR threads, private connector content) can never be shared."
+  },
+  {
+   "topic": "Learned and distributed behaviour: three-tier skill library (vendor, org, user), promotion gate and plugin supply chain",
+   "items": [
+    "F-t3-007",
+    "F-t3-058",
+    "F-t3-059",
+    "F-t3-014"
+   ],
+   "why": "The promotion gate is deliberately unbuilt pending a product decision while the loop already writes org-matchable skills; executable skill and plugin bundles add code supply-chain risk. One ADR should define scopes, approval, pinning and kill lists."
+  },
+  {
+   "topic": "Model entitlements and provider credentials ownership (allowed_models has no owner; BYO keys custody)",
+   "items": [
+    "F-t3-023",
+    "F-t3-065",
+    "F-t3-042"
+   ],
+   "why": "model-gateway refuses the OrgPolicy allowed_models field because no service owns it. Control Plane should decide and Model Plane enforce; bring-your-own provider keys must stay in Integration Core custody with ZDR and residency attestation per connection."
+  },
+  {
+   "topic": "LLM reviewers on the permission path (revisit HAP WS-3 and ownership-matrix rule 12 for tighten-only monitors)",
+   "items": [
+    "F-t3-097"
+   ],
+   "why": "Codex-style guardian reviewers conflict with the standing 'no LLM on the permission hot path' decision; only a tighten-only (deny or escalate, never grant) design could be compatible and needs an explicit ruling."
+  },
+  {
+   "topic": "Connector content in shared Spaces and ZDR propagation for connector and web reads",
+   "items": [
+    "F-t3-010",
+    "F-t3-056",
+    "F-t3-027",
+    "F-t3-055"
+   ],
+   "why": "Personal mailbox and drive content read by an agent in a Space thread must not become visible to other members, and ZDR must propagate to connector reads, citations and research ledgers."
+  }
+ ],
+ "modelTiers": {
+  "inventory": "Claude Haiku 5.5, max effort",
+  "deepDive": "Claude Sonnet 5.5, extra-high effort",
+  "baselineAndComparison": "Claude Opus 5.5, high effort",
+  "webResearchAndWriting": "Claude Fable 5.1, medium effort"
+ }
+}

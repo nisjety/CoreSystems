@@ -1,0 +1,3050 @@
+{
+ "category": "Tools, plugins & extensibility",
+ "excluded": [
+  {
+   "id": "codexagent-plugins-and-extensibility-008",
+   "reason": "Implementation trivia: on-disk plugin install cache layout and remote-install marker file; no user-facing capability."
+  },
+  {
+   "id": "codexagent-plugins-and-extensibility-127",
+   "reason": "Licensing metadata of shipped assets (Apache vs proprietary); legal trivia, not a product capability."
+  },
+  {
+   "id": "t3code-architecture-065",
+   "reason": "Desktop-install support tooling (t3 triage hands a broken local install to a coding agent); no chat/agent capability relevant to Verevon."
+  },
+  {
+   "id": "t3code-architecture-088",
+   "reason": "Absence record: T3 only passes plugin/MCP lifecycle events through and has no extension management of its own; nothing to cluster."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t3-05-001",
+   "name": "MCP client runtime: transports, per-server/per-tool config, supervision and recovery",
+   "description": "The agent connects to MCP servers (Streamable HTTP/SSE, often stdio), lists their tools, lets users enable/disable servers and individual tools, isolates faults per server, reconnects and recovers per call, and refreshes tool lists without breaking the prompt cache.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-054",
+    "antigravity-architecture-051",
+    "claude-extensibility-and-safety-025",
+    "claude-extensibility-and-safety-026",
+    "claude-runtime-architecture-025",
+    "claude-runtime-architecture-026",
+    "codexagent-plugins-and-extensibility-013",
+    "codexagent-plugins-and-extensibility-044",
+    "codexagent-plugins-and-extensibility-046",
+    "cursor-ai-features-050",
+    "cursor-harness-architecture-073",
+    "deepseek-harness-architecture-058",
+    "hermes-architecture-and-surfaces-049",
+    "hermes-architecture-and-surfaces-054"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-049",
+     "hermes-architecture-and-surfaces-054"
+    ],
+    "why": "q5 SRC: each server is a supervised long-lived task on one background loop with a per-call recovery ladder (child exited, auth refresh, session expiry, circuit breaker) and an in-place tool-list swap that keeps the cached tools[] prefix; Claude's direct MCP host (claude-runtime-026, q5) is the best process-isolation design and Codex (codexagent-plugins-046) has the richest per-server/per-tool config surface."
+   },
+   "mechanism": "Per server: a supervisor task owns one MCP session (rmcp in Rust) and exposes call(tool,args). Dispatch wraps call in an ordered list of recoverers: 401/expired token -> refresh via vault and retry once; session-not-found -> reinitialize and retry; transport closed -> reconnect with backoff; N consecutive failures -> open a circuit breaker with cooldown and report 'server unavailable' as a tool result. Config per server: url, headers, enabled, enabled_tools/disabled_tools, startup and per-tool timeouts, env allow-list, approval mode. Validate each config entry independently and surface skipped entries. On notifications/tools/list_changed, rebuild only the MCP suffix of the tool list under a lock so the cached prefix stays byte-identical.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-084",
+     "v-modelplane-085",
+     "v-modelplane-086",
+     "v-chat-agents-ui-086",
+     "v-planned-decisions-071"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:327-343",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:55",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:870",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:2014-2018",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:639-644",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3723-3731",
+     "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs:1"
+    ],
+    "gap": "Registration, auto-connect and staged disclosure exist, but the model cannot actually call an MCP tool: plain chat denies mcp__* names and Do mode offers MCP tools whose trusted_capability_id resolves to None, so the capability gate denies every call (v-modelplane-086, SRC). v-planned-decisions-071 calls the agent-loop bridge shipped; the code-verified 086 record wins. Stdio is quarantined (by design). No evidence of a per-call recovery ladder, circuit breaker or cache-preserving list refresh (not checked: verify in runtime_registries.rs).",
+    "strengths": "Streamable-HTTP-only with SSRF guards and DNS revalidation is a stricter default than most references."
+   },
+   "benefit": "MCP is the universal connector bus in 9 of 12 sources; until calls work, every registered server, custom connector and future plugin is dead weight in Verevon chat and Do runs.",
+   "approach": "Model Plane: register each discovered MCP tool as a capability-core entry (Kind=mcp_tool) with a risk class derived from annotations (readOnlyHint -> read, else write/ask), so trusted_capability_id resolves and the existing signed policy gate decides. Allow read-only MCP tools in Ask/plain chat; route write tools only through Do with HITL. Add a recovery ladder and circuit breaker in mcp_gateway.rs. Block non-attested MCP servers on Zero-Data-Retention runs.",
+   "effort": "M",
+   "dependencies": [
+    "capability-core registry Kind=mcp_tool",
+    "approval card (C-t3-05-012)",
+    "vault refresh path in mcp_oauth.rs"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Third-party servers become an egress path for user data (ZDR leak) and a prompt-injection channel through tool descriptions and results; annotations are untrusted hints.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Blocks custom connectors, plugins and MCP Apps; the plumbing exists so the fix is a capability-mapping change, not a rebuild.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 13,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-002",
+   "name": "MCP and connector OAuth (DCR, refresh, auth states, IdP-managed)",
+   "description": "Remote MCP servers that need sign-in work through browser OAuth with discovery, dynamic client registration, token refresh that survives multiple windows/sessions, explicit auth states, and optionally admin-provisioned access through the enterprise IdP.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "hermes",
+     "manus",
+     "web-claudeai"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-045",
+    "cursor-ai-features-052",
+    "claude-runtime-architecture-035",
+    "manus-computer-control-architecture-080",
+    "web-claudeai-web-product-053",
+    "hermes-architecture-and-surfaces-055"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-052"
+    ],
+    "why": "q5 SRC: patched MCP SDK adds offline_access when advertised, refresh leases so only one window refreshes, sibling-already-refreshed handling and transient-error tolerance; Codex (codexagent-plugins-045) adds CIMD and issuer-change token drops; claude.ai (web-claudeai-053, DOC) adds IdP-federated org authorization."
+   },
+   "mechanism": "OAuth 2.1 + PKCE with RFC 8414/9728 metadata discovery, DCR or a client-id metadata document; request offline_access when supported; store tokens encrypted per (user, server, issuer); drop tokens when the issuer changes. Refresh under a distributed lease (Redis SETNX with TTL) so concurrent runs do not race and invalidate the refresh token; treat 5xx/network errors during refresh as transient. Model explicit states (connected, login_pending, expired, failed, unsupported) and surface them to the UI and to the model as tool-result text.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-084",
+     "v-planned-decisions-071"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs:1-15",
+     "apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs:105",
+     "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:377"
+    ],
+    "gap": "Core OAuth 2.1 + DCR + encrypted vault exists. Not verified: refresh leasing across replicas, issuer-change handling, explicit auth-state surfacing to the model, and IdP-federated org-wide authorization (admin authorizes once, members inherit by group).",
+    "strengths": "OAuth 2.1 + DCR, encrypted token vault and DNS revalidation are at reference parity (SRC)."
+   },
+   "benefit": "Keeps connectors working across sessions without repeated sign-in prompts; IdP federation matters for enterprise roll-out.",
+   "approach": "Keep. Add a Redis refresh lease and issuer binding in mcp_oauth.rs; later add Control Plane IdP group -> connector grant mapping.",
+   "effort": "S",
+   "dependencies": [
+    "Redis/Dragonfly already deployed"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Multi-replica refresh races silently revoke refresh tokens.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Already at parity; only hardening items remain.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-003",
+   "name": "User-added custom connectors (remote MCP or REST API) with scope and sharing",
+   "description": "Users or admins add their own MCP server by URL or JSON import (with OAuth auto-detection and a connection test) or an API connector with keys/headers, and scope it to themselves, a project or the whole organisation.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "manus-product-ux-092",
+    "web-manus-web-product-048",
+    "web-perplexity-web-product-061",
+    "web-claudeai-web-product-044"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-092"
+    ],
+    "why": "q4 SRC: one service validates the server, auto-detects OAuth, inspects tools before save, imports JSON configs, supports plain API connectors with secrets, and publishes to team or project; claude.ai (web-claudeai-044, q5 DOC) holds tokens server-side so credentials never enter the sandbox."
+   },
+   "mechanism": "Add flow: URL -> probe (initialize + tools/list) -> detect auth (401 with WWW-Authenticate / resource metadata) -> OAuth or API-key form -> show discovered tools with per-tool toggles -> save with scope (user|space|org). API connectors are an OpenAPI/headers definition executed by a server-side proxy that injects the secret. Tokens and secrets stay server-side; the model sees only tool names, schemas and results.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-086",
+     "v-modelplane-084"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/mcp-client.ts:1-40",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx:57",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:46-54"
+    ],
+    "gap": "Register, OAuth, scope and share exist, but calls fail closed (see C-t3-05-001). No plain REST/API-key connector type was seen, and no pre-save tool inspection or connection test was verified.",
+    "strengths": "Sharing and scoping are already modelled; tokens are vaulted server-side."
+   },
+   "benefit": "Lets a business plug in its own systems (ERP, CRM, internal APIs) without waiting for first-party connectors; this is a main reason teams pick Claude or Manus.",
+   "approach": "After C-t3-05-001: add an Inspect/Test step to McpServersSection that calls a gateway probe endpoint; add an 'API connector' kind in capability-core backed by an egress proxy that injects vaulted secrets (see C-t3-05-040). Keep Space sharing inside the owner ACL.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-001",
+    "C-t3-05-040"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Org-scope sharing must not widen an owner-plane ACL; API connectors need SSRF guards like MCP.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Most value is unlocked by C-t3-05-001; the remaining work is UX and an API-connector kind.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-004",
+   "name": "First-party connector catalogue (Gmail, Outlook, Drive, Slack, GitHub, CRM...)",
+   "description": "The product ships ready, OAuth-connected integrations with curated action sets that the agent can read and act through, enabled per user, project or organisation.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-128",
+    "claude-extensibility-and-safety-131",
+    "claude-runtime-architecture-034",
+    "codexagent-plugins-and-extensibility-055",
+    "web-perplexity-web-product-058",
+    "web-manus-web-product-093",
+    "web-manus-web-product-094"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-131",
+     "claude-extensibility-and-safety-128"
+    ],
+    "why": "q5 SRC: the bundled GitHub server uses device-code sign-in, binds the token to host, client and scope, and exposes read-only and toolset switches; admins enable built-in connectors as typed policy entries. Perplexity (web-perplexity-058, DOC) has the widest catalogue with project-level binding."
+   },
+   "mechanism": "Each connector = provider OAuth app + curated action catalogue (typed inputs, read/write class, confirmation rule) + scopes. Read actions are directly callable; write actions require approval. Admin policy enables a connector per org and can force read-only or select toolsets; project/Space binding limits which connectors a thread can use.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-090",
+     "v-modelplane-081"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:766-840",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4116-4330",
+     "apps/Model Plane (v-modelplane.baseline.md:128 OAuth provider connectors row)"
+    ],
+    "gap": "Provider actions exist only in Do mode through integration-corev2 (list_provider_actions / execute_provider_action); Outlook/Gmail/OneDrive/Calendar are listings only and have never run against a real mailbox; Ask mode cannot read connectors; writes wait for Wave 5 approval designs (SRC + DOC).",
+    "strengths": "Single provider-action contract through integration-corev2 keeps credentials in the Ingestion Plane rather than in the agent."
+   },
+   "benefit": "Users notice immediately whether the assistant can read their mail, calendar and files; this is table stakes for a Perplexity/ChatGPT-class product.",
+   "approach": "Ingestion Plane (integration-corev2) owns provider tokens and executes actions; Model Plane exposes them as capability entries. Order: live-prove Gmail/Outlook/Drive/Calendar reads; enable read actions in Ask mode via the gateway; then writes with per-action approval (C-t3-05-012).",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-012",
+    "integration-corev2 live accounts",
+    "Ask-mode read path in model-gateway"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Mailbox content is highly sensitive (ZDR propagation, retention of tool results); OAuth app verification lead time with Google/Microsoft.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Present in 6 of 12 sources and core to 'chat with my work'; Verevon has the contract but no proven end-to-end path.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 3,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-005",
+   "name": "Local MCP servers and desktop extension packages (MCPB/DXT)",
+   "description": "Desktop apps run local stdio MCP servers or install packaged extensions (manifest + runtime + typed user config), using a bundled Node or managed Python runtime, with signing and blocklists.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "manus",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-023",
+    "claude-extensibility-and-safety-024",
+    "claude-extensibility-and-safety-033",
+    "claude-runtime-architecture-027",
+    "claude-runtime-architecture-028",
+    "claude-runtime-architecture-030",
+    "claude-product-ux-091",
+    "manus-computer-control-architecture-071",
+    "web-claudeai-web-product-052",
+    "web-perplexity-web-product-060"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-027",
+     "claude-runtime-architecture-028",
+     "claude-runtime-architecture-030"
+    ],
+    "why": "q5 SRC: Node extensions run inside the app's own utility process with stdio virtualised over a MessagePort and self-exec blocked; MCPB manifest v0.1-0.4 with platform overrides; Python via a pinned, checksum-verified uv."
+   },
+   "mechanism": "Extension = zip with manifest (server type node|python|binary, entry point, mcp_config with ${__dirname} substitution, typed user_config incl. sensitive fields, compatibility). Install: verify signature/hash against policy, unpack, prompt for user_config, store secrets in OS keychain, launch in an isolated host process with stdio bridged.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-084"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:55",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:870"
+    ],
+    "gap": "Verevon is a web product; stdio MCP is quarantined server-side by design and there is no desktop host.",
+    "strengths": "Refusing server-side stdio avoids running arbitrary user binaries in shared infrastructure."
+   },
+   "benefit": "Low for a web-first product; local tools are better reached through a tunnel or device relay (C-t3-05-006).",
+   "approach": "Do not build. If a desktop client ever ships, adopt MCPB as-is rather than a bespoke format.",
+   "effort": "L",
+   "dependencies": [
+    "a desktop client (none planned)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Server-side stdio would be remote code execution in shared infrastructure.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Does not fit a multi-tenant web architecture; the quarantine is correct.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 7,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-006",
+   "name": "Reaching private or local resources from the cloud agent (tunnels, device relay, own-browser extension)",
+   "description": "A cloud agent uses MCP servers inside a customer network, or tools on the user's own machine/browser, without opening inbound ports: a tunnel client inside the network, a desktop that announces its local tools to cloud sessions, or a browser extension with a native host.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "manus-product-ux-093",
+    "claude-extensibility-and-safety-030",
+    "claude-extensibility-and-safety-082"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-093"
+    ],
+    "why": "q4 SRC: admins create a tunnel with a hostname, add one route per MCP service, run a small outbound-only tunnel client from generated instructions, and can rotate the agent token and test the connection; Claude (claude-extensibility-030) relays desktop tools to cloud sessions."
+   },
+   "mechanism": "Outbound-only tunnel: an agent inside the customer network dials the vendor edge over mTLS/WebSocket and registers routes (subdomain -> internal MCP URL). The cloud MCP client connects to the edge hostname; the edge forwards over the tunnel. Token rotation, per-route publish scope (org/project) and connection stats.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane (v-modelplane.baseline.md:195 remote devices/channels stub in bridge-core)"
+    ],
+    "gap": "No baseline record covers tunnels or device relay. Check bridge-core (BC/internal/channel, session registry) and Quarry for any outbound tunnel agent; INF: likely absent.",
+    "strengths": ""
+   },
+   "benefit": "Lets enterprise customers expose on-prem systems to Verevon agents without a public endpoint, which also sidesteps the stdio quarantine.",
+   "approach": "Ingestion Plane edge service terminating tunnels; Model Plane treats tunnelled servers as ordinary Streamable HTTP MCP servers subject to the same SSRF and capability rules.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-001"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Tunnel edge becomes a high-value target; must scope routes per org and never allow cross-tenant routing.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Valuable for enterprise but only after MCP calls work; only 2 sources.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-007",
+   "name": "Progressive tool disclosure and tool search (deferred tool loading)",
+   "description": "Large tool catalogues are not all placed in the prompt; the model sees a compact listing and searches or describes tools on demand (BM25, meta-tools, tools-as-files), with user-facing modes such as Auto / Always / On demand.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "hermes",
+     "web-claudeai"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-036",
+    "cursor-ai-features-053",
+    "cursor-harness-architecture-074",
+    "cursor-harness-architecture-075",
+    "hermes-architecture-and-surfaces-046",
+    "hermes-architecture-and-surfaces-047",
+    "web-claudeai-web-product-046"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-046",
+     "hermes-architecture-and-surfaces-047"
+    ],
+    "why": "q5 SRC: tool_search / tool_describe / tool_call bridge with core and session-gated tools never deferred, plus BM25 gated on the query's rarest token and a term-coverage floor so one-word matches do not flood results; Cursor (cursor-ai-053, q5) materialises MCP descriptors as files read with normal file tools."
+   },
+   "mechanism": "Classify tools as visible (core, direct_only) or deferrable. Replace deferrable schemas with a one-line catalogue entry; give the model tool_search(query, limit) that runs BM25 (k1=1.5, b=0.75, stemming) over name+description+param names, admitting only documents containing the query's highest-IDF token and above a coverage floor; matched tools become callable for the rest of the turn (append to the tool list suffix to keep the cache prefix). Report omitted counts.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-085",
+     "v-planned-decisions-083"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:559-616",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:830",
+     "apps/Model Plane/docs/decisions/ledger.md (Needle entry, catalogue budget)"
+    ],
+    "gap": "MCP staged disclosure (mcp_catalog/mcp_call, threshold 40, ceiling 200) is shipped, but built-in and Do-mode tool catalogues are unbounded (about 16k chars against an 8k skill cap) with no search over them; the ledger notes selection would collide with the purpose-lock.",
+    "strengths": "MCP staged disclosure already exists, unlike T3 or Manus."
+   },
+   "benefit": "Keeps context small and cache-stable as connectors, provider actions and plugins grow; directly reduces cost per run.",
+   "approach": "Model Plane: one deferred-tool index (BM25) over built-ins, provider actions and MCP tools; keep purpose-locked tools always visible; add degrade-before-drop description budgeting like the skill budget.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Wrong search results hide the right tool; must keep safety-relevant tools always visible.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common (5 sources) and Verevon is half-way; matters more once connectors scale.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-008",
+   "name": "Typed tool definitions and per-request tool registry",
+   "description": "Tools are declared once with typed schemas, availability probes and concurrency/timeout metadata, and the registry computes the tool set per request from model, mode, surface and policy, with collision and schema-size hygiene.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "cursor-harness-architecture-071",
+    "cursor-harness-architecture-072",
+    "deepseek-harness-architecture-055",
+    "hermes-architecture-and-surfaces-041",
+    "hermes-architecture-and-surfaces-042",
+    "hermes-architecture-and-surfaces-043",
+    "hermes-architecture-and-surfaces-044",
+    "hermes-architecture-and-surfaces-045",
+    "codexagent-plugins-and-extensibility-121",
+    "claude-runtime-architecture-036"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-055"
+    ],
+    "why": "q4 SRC: one defineTool DSL declares params, outputs, timeouts, parallel-safety, deferred loading and UI presenters and projects to JSON Schema and SDK types; Hermes (hermes-architecture-044) adds cached check_fn availability probes and Cursor (cursor-harness-071) a per-request builder."
+   },
+   "mechanism": "Rust: a Tool trait with const metadata (name, schema via schemars, is_concurrency_safe(args), timeout, defer_loading, risk_class) plus an availability probe cached per tenant with TTL. Registry::for_request(model, mode, surface, policy) filters and orders tools, errors on name collisions, caps schema bytes and groups tools by namespace.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-080",
+     "v-modelplane-081",
+     "v-modelplane-083",
+     "v-chat-agents-ui-087",
+     "v-modelplane-094"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4323-4470",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4086",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741-836",
+     "apps/Model Plane/go/services/capability-core/internal/api/capabilities.go:52-76",
+     "apps/Model Plane/rust/services/execution-core/src/health_attest.rs:1004"
+    ],
+    "gap": "Minor: no evidence of per-tool cached availability probes or schema-size caps; the LSP bridge (v-modelplane-094) is not agent-visible.",
+    "strengths": "Do-mode catalogue is capability-bound and the registry has ranked listing, rollout, scopes, audit log and health attestation, which is more governance than most references (SRC)."
+   },
+   "benefit": "Already provides the base for every other extensibility feature.",
+   "approach": "Keep; add availability probes so tools whose credentials are missing are hidden instead of failing.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is at or above parity.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-009",
+   "name": "Client-registered (dynamic) tools per thread",
+   "description": "A host or API client registers its own tools when starting a thread; the model calls them and the calls are routed back to the client to execute.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-052"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-052"
+    ],
+    "why": "q4 SRC: ThreadStartParams.dynamicTools with optional namespaces and deferLoading, persisted per thread in SQLite so resumed threads keep them."
+   },
+   "mechanism": "Thread start carries [{name, description, inputSchema, deferLoading} | {namespace, tools[]}]; persist per thread; on call, emit a tool-request event to the client and wait for its result with a timeout; built-ins win collisions.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-091"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6807-6811",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:659-684"
+    ],
+    "gap": "Not verified: persistence of client tools across thread resume and namespace grouping.",
+    "strengths": "Client-declared tools are merged into runs, built-ins win collisions and calls remain capability-gated in Do (SRC)."
+   },
+   "benefit": "Lets the Verevon SPA and API customers extend the agent without server deploys.",
+   "approach": "Keep; persist the declared set per session so resumed runs are deterministic.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Shipped; unique among the references to Codex.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-010",
+   "name": "Tool result contract: validated outputs, large-result spill, truncation markers, follow-up context",
+   "description": "Tool outputs follow a declared schema and are validated before reaching the model; oversized results are stored and replaced by a pointer; truncation and sources are annotated; tools may attach follow-up context ordered after their result.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "deepseek"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-131",
+    "deepseek-harness-architecture-132",
+    "cursor-harness-architecture-139",
+    "codexagent-plugins-and-extensibility-056"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-131",
+     "deepseek-harness-architecture-132"
+    ],
+    "why": "q5 SRC: tools cannot return free text; a JSON value is validated against the declared output schema, frozen and rendered purely, so presentation is replayable; deferred follow-up context is ordered after the result. Cursor (cursor-harness-139) spills results over 40 KB to files."
+   },
+   "mechanism": "Tool returns a typed value; registry validates against output schema (error code INVALID_TOOL_OUTPUT), snapshots it, then render(args,value) produces model text and UI presentation separately. If rendered size exceeds a threshold, store the full value in the object store and return {outputLocation, size, preview}; annotate truncated:{original_bytes,max_bytes}.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-085",
+     "v-planned-decisions-082",
+     "v-planned-decisions-081",
+     "v-modelplane-093"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs:1-12",
+     "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:1278",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:9461"
+    ],
+    "gap": "Tool-result handles (result_query) and pre-dispatch argument validation exist; strict schemas were deliberately deferred. No declared output schemas or validation of tool outputs was found, and no follow-up-context ordering.",
+    "strengths": "Result handles with a query tool already avoid stuffing large results into context."
+   },
+   "benefit": "More reliable rendering and replay of tool output; fewer malformed results reaching the model.",
+   "approach": "Model Plane: add optional output schemas to the Tool trait and validate in debug and canary; keep handles.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Breaking changes for existing tools if made mandatory at once.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Verevon already covers the user-visible part (handles); the rest is engineering hygiene.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-011",
+   "name": "Guarded tool-dispatch pipeline (policy, guards, approval, post-execute)",
+   "description": "Every tool call passes an ordered pipeline: pre-execute policy (allow/deny/ask), monotonic deny-only guards, around-dispatch wrappers and post-execute accept/block/replace, so no extension can widen what policy denies.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "deepseek-harness-architecture-056",
+    "deepseek-harness-architecture-065"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-056"
+    ],
+    "why": "q5 SRC: five stages with deny-only monotonic guards checked global then scope chain, an approval ask resolved before guards, and post-execute replace; its own doc (deepseek-harness-065) admits pre-tool argument rewriting is unsolved, which is honest."
+   },
+   "mechanism": "pre_execute waterfall (permission, sandbox, hooks) -> ask resolved by approval service -> guards (deny-only; cannot re-allow) -> dispatch wrapped by middlewares -> post_execute (accept/block/replace) -> content projection. Every decision is logged with evidence.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-082"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:501-552",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:350-390",
+     "apps/Model Plane/go/services/capability-core/internal/policy/engine.go"
+    ],
+    "gap": "The capability-policy -> hook -> permission -> HITL pipeline exists, but hooks receive an empty hook_context in Do mode (see C-t3-05-018).",
+    "strengths": "Signed decision evidence and fail-closed gating before every dispatch is ahead of most references (SRC)."
+   },
+   "benefit": "Core of Verevon's authority model; keep it as the single choke point that MCP, plugins and provider actions all pass.",
+   "approach": "Keep; ensure every new tool source (MCP, plugins, client tools) is mapped to a capability id so it cannot bypass the gate.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Strength; only 1 reference source has an equally explicit pipeline.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-012",
+   "name": "Per-tool approval and trust modes for connector and MCP tools",
+   "description": "Users or admins set each connector tool to Always allow / Always ask / Never allow, with approve-once or allow-for-this-thread grants; untrusted servers ask before any tool not annotated read-only; fine-grained repository or account policies.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "hermes",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-050",
+    "web-perplexity-web-product-059",
+    "antigravity-agent-ux-and-gemini-058"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-059"
+    ],
+    "why": "q5 DOC: per-tool three-state policy plus thread-level grants inherited by recurring runs; Hermes (hermes-architecture-050, q4 SRC) gives the implementable rule: untrusted servers ask for any tool lacking readOnlyHint=true."
+   },
+   "mechanism": "Policy store keyed (principal, connector, tool) -> allow|ask|never, default from annotations and trust tier (trusted server: read tools allow, write ask; untrusted: everything not readOnlyHint asks). On ask, emit awaiting_approval with tool, args summary and destination; answers: once, this thread, always (writes policy), deny. Grants are scoped to the thread and inherited by its scheduled runs.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-082",
+     "v-chat-agents-ui-090"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:350-390",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:766-840",
+     "apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs:56-109"
+    ],
+    "gap": "Capability gate and HITL approvals exist, but there is no user-visible per-tool allow/ask/never setting, no thread-scoped grants and no annotation-based trust tiers; provider-action writes are still behind Wave 5 designs. A grep in this audit found MCP readOnlyHint parsing that treats annotations as untrusted (model-gateway/src/mcp_jsonrpc.rs:56-109, SRC), which is the right base.",
+    "strengths": "Server-side signed policy decisions are stronger than client-side approval prompts; MCP annotations are already parsed as untrusted hints."
+   },
+   "benefit": "Prerequisite for safely enabling MCP and connector writes; users notice approval friction and trust immediately.",
+   "approach": "Model Plane (capability-core policy) stores per-tool policies; Frontend Plane adds an approval card with once/thread/always and a per-connector tool table in Settings. Map MCP annotations to defaults but never trust them to auto-allow writes.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-001",
+    "live approval continuation (release gate)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Over-broad 'always allow' grants; approvals in scheduled runs need a non-interactive policy.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Gates connector and MCP writes, which are the main reason to have connectors at all.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-013",
+   "name": "Code mode: the model orchestrates tools by writing a program",
+   "description": "Instead of one tool call per round trip, the model writes a short JavaScript/TypeScript/Python program in a sandbox that calls many tools, aggregates results and returns compact output; direct calls can be collapsed to a single run_code tool.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-035",
+    "codexagent-plugins-and-extensibility-037",
+    "deepseek-harness-architecture-057",
+    "deepseek-harness-architecture-133"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-035"
+    ],
+    "why": "q5 SRC: raw JS runs as an async module in a fresh V8 isolate with no Node, filesystem or network; tools are injected as async functions; yield time and output tokens are bounded. DeepSeek PTC (deepseek-harness-057) re-enters the full guarded pipeline for every sub-call, which is the right safety property."
+   },
+   "mechanism": "Expose exec(code). Run in a V8 isolate (rusty_v8/deno_core) or the existing bwrap sandbox with a tool-RPC bridge: each tools.name(args) call is sent back to the host, passes the normal capability gate and approval pipeline, and returns JSON. Generate a typed SDK prompt section from the visible tool schemas; cap wall time, calls and output size; return text/images.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-095"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:14-16",
+     "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md (section 23.4)"
+    ],
+    "gap": "The code interpreter has network disabled and no tool-RPC bridge; code mode is greenfield (backlog #11).",
+    "strengths": "A hermetic sandbox already exists to host it."
+   },
+   "benefit": "Fewer model round trips and much smaller context for multi-step data work across connectors (wide research, spreadsheet ops), which cuts cost and latency.",
+   "approach": "Model Plane execution-core: add a host-mediated RPC channel into the sandbox (unix socket, no network) where every call re-enters capability_policy; start with read-only tools.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-001",
+    "C-t3-05-012"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Sub-calls must not bypass approvals or ZDR; runaway loops; harder for users to see what happened unless each sub-call is shown.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Differentiator (2 sources) with clear cost benefit, but depends on MCP and approvals first.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-014",
+   "name": "MCP elicitation and sampling as host services",
+   "description": "MCP servers can ask the user structured questions (forms, file/image pickers, step-up verification) during a tool call, or ask the host to run a bounded LLM completion.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-051",
+    "hermes-architecture-and-surfaces-052"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-051"
+    ],
+    "why": "q4 SRC: form elicitation with an extension for file/image pickers and user verification; Hermes (hermes-architecture-052, DOC) bounds sampling per server with model override, token cap, timeout and rate limit."
+   },
+   "mechanism": "Declare elicitation (form) and optionally sampling capabilities at initialize. On elicitation/create, pause the tool call, render the requestedSchema as a form in the approval lane, return accept/decline/cancel. On sampling/createMessage, run through the host's own model route with per-server caps and billing attribution.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. A grep in this audit for 'elicitation' in Model Plane services found only tool-argument elicitation prompt guidance (model-gateway/src/sse.rs:2076, tool_loop.rs:652), not an MCP elicitation/create handler; INF: absent. Verify MCP initialize capabilities in mcp_jsonrpc.rs and mcp_gateway.rs.",
+    "strengths": ""
+   },
+   "benefit": "Lets connectors ask for missing parameters instead of failing; sampling lets servers use the user's model without their own keys.",
+   "approach": "Model Plane MCP client handles elicitation by emitting the existing awaiting_approval-style event; sampling routed via inference-core with cost-core attribution and ZDR inheritance.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Sampling is a covert model-usage channel; must inherit the run's ZDR and budget.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Only 2 sources; useful after MCP calls work.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-015",
+   "name": "Interactive tool and plugin UI widgets in chat (MCP Apps)",
+   "description": "Tools return a UI resource that renders as a sandboxed interactive widget inline, in a panel or fullscreen; the widget can call tools and update model context; UI-only tools are hidden from the model; text fallback when blocked.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-031",
+    "claude-product-ux-094",
+    "codexagent-plugins-and-extensibility-048",
+    "cursor-ai-features-051",
+    "manus-product-ux-091",
+    "web-chatgpt-web-product-068",
+    "web-claudeai-web-product-045"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-048"
+    ],
+    "why": "q5 SRC: implements the ext-apps standard end to end (registerAppTool/registerAppResource, legacy openai/outputTemplate bridging) and ships a full pull-request review workspace as an MCP App; ChatGPT (web-chatgpt-068, q5 DOC) documents the postMessage JSON-RPC and CSP model; Manus (manus-product-091) adds file bindings with revision checks."
+   },
+   "mechanism": "Tool metadata _meta.ui.resourceUri (ui:// scheme) -> host fetches the text/html;profile=mcp-app resource -> renders in an iframe on a separate origin with sandbox=allow-scripts (no same-origin) and a CSP from _meta. JSON-RPC over postMessage: ui/initialize (theme, locale, displayMode), tools/call (proxied through the host's policy gate), ui/update-model-context. Tools whose ui.visibility excludes 'model' are omitted from the model's list. Text result shown when widgets are disabled.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519"
+    ],
+    "gap": "No baseline record. Verevon renders HTML artifacts in a srcdoc iframe without same-origin, which is the right sandbox base, but no MCP Apps resource handling was recorded; a grep in this audit for 'resourceUri' across Model Plane services and the SPA/gateway found nothing. INF: absent (and unusable while MCP calls are blocked). Confirm by searching for 'ui://' and 'mcp-app'.",
+    "strengths": "Existing sandboxed HTML artifact renderer can host widgets."
+   },
+   "benefit": "Connectors from Canva, Figma, Asana and similar already ship MCP Apps; supporting the standard gives Verevon rich in-chat UIs without building them.",
+   "approach": "Frontend Plane: widget host component reusing the artifact sandbox on a dedicated origin served by the Rust gateway; tool calls from the widget go through the gateway to Model Plane and the capability gate.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-001"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Widgets are third-party code: strict CSP, separate origin, no cookies; tool calls from widgets need the same approvals.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Common (6 sources incl. claude.ai and ChatGPT) and visible to users; depends on MCP calls.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-016",
+   "name": "Artifacts as apps with a host bridge (call the model, connectors and storage)",
+   "description": "Generated HTML artifacts run in a locked-down origin with an allow-listed, integrity-pinned library set and can call the model, connector tools and key-value storage on behalf of the viewer.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-claudeai"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-031",
+    "claude-runtime-architecture-141",
+    "web-claudeai-web-product-055"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-031",
+     "claude-runtime-architecture-141"
+    ],
+    "why": "q5 SRC: artifacts load only SRI-pinned CDN libraries, run in a separate partition/origin through a pinned frame shell, and call back into MCP tools or the model; claude.ai (web-claudeai-055, q5 DOC) bills viewer usage to the viewer's plan."
+   },
+   "mechanism": "Frame shell page on a separate origin with a pinned runtime; artifact HTML injected; allowed script URLs carry sha384 integrity; a postMessage bridge exposes complete(prompt), callTool(name,args) and kv.get/set, each proxied through the host with the viewer's identity and policy.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2618"
+    ],
+    "gap": "Artifacts with versions and a sandboxed HTML preview exist (narrative baseline, SRC), but there is no bridge for model calls, connector calls or storage, and no pinned library allow-list was recorded.",
+    "strengths": "Artifacts already have versions and a safe sandbox."
+   },
+   "benefit": "Turns artifacts into small shareable apps (dashboards over connector data), a visible differentiator versus ChatGPT/Perplexity.",
+   "approach": "Frontend Plane bridge in the artifact iframe; Model Plane endpoint for viewer-scoped completions; storage in Application Plane projections. Viewer's ZDR and quotas apply.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-015",
+    "C-t3-05-001"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Abuse as a free model proxy; data exfiltration from connectors through shared artifacts.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Strong differentiator but only Anthropic has it; build after widgets.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-017",
+   "name": "Plugin-contributed host UI surfaces (panes, sidebars, panels, slots)",
+   "description": "Plugins add UI to the host itself: sidebar apps, thread side panels, file viewers/editors, status-bar items, palette commands, or engine-driven panes and toasts.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "hermes",
+     "web-chatgpt"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-143",
+    "claude-runtime-architecture-032",
+    "hermes-architecture-and-surfaces-073",
+    "web-chatgpt-web-product-069"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-073"
+    ],
+    "why": "q4 SRC: plugin SDK with read-only state views, curated host actions, a backend namespace per plugin and slot registries (panes, routes, nav, status bar, palette, keybinds, themes) with hot reload; ChatGPT (web-chatgpt-069, DOC) declares entrypoints on MCP tools."
+   },
+   "mechanism": "Slot registry in the SPA (Solid context) keyed by slot id; plugins register components loaded in sandboxed iframes (or declarative JSON UI) with a narrow host API (read-only stores, a whitelisted action set) and a backend route namespace /api/plugins/<id>.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; check Frontend Plane for a slot or extension registry. INF: absent.",
+    "strengths": ""
+   },
+   "benefit": "Long-term ecosystem lever; low immediate user impact.",
+   "approach": "Defer; when needed, use MCP Apps entrypoints (C-t3-05-015) rather than in-process plugin code in the SPA.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-015",
+    "C-t3-05-019"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "In-process third-party UI code breaks the SPA's security model.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "4 sources, mostly desktop-oriented; MCP Apps covers the web case.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-018",
+   "name": "Lifecycle hooks (command, HTTP, prompt and agent handlers; veto and transform)",
+   "description": "Admins or plugins attach handlers to agent lifecycle events (pre/post tool, prompt submit, session start/stop, compaction, subagent) that can observe, block, rewrite or add context, with fail-closed options.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-077",
+    "claude-extensibility-and-safety-089",
+    "cursor-ai-features-060",
+    "cursor-harness-architecture-076",
+    "hermes-architecture-and-surfaces-059",
+    "hermes-architecture-and-surfaces-060",
+    "hermes-architecture-and-surfaces-061",
+    "codexagent-plugins-and-extensibility-018"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-077",
+     "claude-extensibility-and-safety-089"
+    ],
+    "why": "q5 SRC: 33 events and four handler types (exec-form command, HTTP POST with env-allowlisted headers, LLM prompt, agent verifier); Hermes (hermes-architecture-059/060) cleanly separates observers, transforms, vetoes and middleware with schema-versioned payloads."
+   },
+   "mechanism": "Hook config {event, matcher (tool glob/regex), type command|http|prompt|agent, timeout, failClosed, loop_limit}. Payload JSON on stdin/body; response {decision allow|deny|ask, reason, additionalContext, updatedInput?}. For a SaaS: HTTP hooks to tenant endpoints (egress-allowlisted) and prompt hooks run on the host model; no shell. Store hooks durably per org/Space; evaluate inside the capability pipeline.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1927",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2032",
+     "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:2"
+    ],
+    "gap": "Narrative baseline (SRC): the PreToolUse/PostToolUse engine is real (allow/deny/ask, glob match) but rules live in an in-memory HookRegistry fed by gRPC RegisterHook, are passed only on browser runs, and Do mode gets an empty hook_context. No durable store, no HTTP/prompt handler types, no admin UI.",
+    "strengths": "Engine already sits inside the capability pipeline."
+   },
+   "benefit": "Gives org admins policy and audit hooks (DLP checks, logging to SIEM, blocking destinations) without code changes; required for enterprise deals.",
+   "approach": "Model Plane: persist hooks in capability-core (Postgres), pass hook_context in every Do run, add HTTP and prompt handler types; Control Plane owns who may define org hooks.",
+   "effort": "M",
+   "dependencies": [
+    "capability-core migration"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "HTTP hooks leak run data to tenant endpoints (respect ZDR); slow hooks add latency; fail-closed hooks can block all runs.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common (4 sources); Verevon is half-built, fix is mostly wiring and persistence.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-019",
+   "name": "Plugin package: one installable bundle of skills, connectors/MCP, commands, agents, hooks and templates",
+   "description": "A plugin is a folder with a JSON manifest that bundles several capability kinds (skills, MCP servers/apps, slash commands, subagents, hooks, scheduled-task templates, typed user config); the runtime tells the model what a selected plugin provides.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-051",
+    "claude-extensibility-and-safety-056",
+    "claude-extensibility-and-safety-098",
+    "claude-extensibility-and-safety-137",
+    "codexagent-plugins-and-extensibility-001",
+    "codexagent-plugins-and-extensibility-002",
+    "codexagent-plugins-and-extensibility-012",
+    "codexagent-plugins-and-extensibility-014",
+    "codexagent-plugins-and-extensibility-016",
+    "cursor-ai-features-056",
+    "cursor-harness-architecture-077",
+    "manus-computer-control-architecture-070",
+    "manus-product-ux-090",
+    "web-chatgpt-web-product-063",
+    "web-claudeai-web-product-049"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-056",
+     "claude-extensibility-and-safety-137"
+    ],
+    "why": "q4/q5 SRC: .claude-plugin manifest with component folders plus extension points (typed userConfig to env vars with secure storage, sha256-pinned binaries, themes, workflows, channels); Codex (codexagent-plugins-002/014) shows has-skills/has-apps summaries and injects a 'capabilities from this plugin' prompt block; Manus addons (manus-product-090) split tools into model-visible and host-callable."
+   },
+   "mechanism": "Manifest (agent-plugins.org 1.0 compatible): name, version, description, skills/, commands/, agents/*.md (frontmatter: model, tools allow/deny, permission mode), mcpServers (.mcp.json, URL-only for Verevon), hooks, scheduledTasks templates, userConfig schema. Install = resolve components into capability-core entries (Kind=plugin parent with children), prompt for userConfig, vault secrets. When selected (@plugin), add a short capabilities block to the prompt.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [
+     "v-modelplane-088",
+     "v-chat-agents-ui-085",
+     "v-planned-decisions-070",
+     "v-planned-decisions-072"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/capability-core/internal/api/plugins.go:15-22",
+     "apps/Model Plane/go/services/capability-core/internal/api/plugins.go:41",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:380-391",
+     "apps/Frontend Plane/verevonv3/src/shared/api/plugins-client.ts:1-66",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx:32"
+    ],
+    "gap": "Durable plugin registry with manifest JSON, risk level and rollout state exists and a single Capability registry with a Kind discriminator is shipped, but nothing loads manifests, so plugins have no runtime effect; no install flow.",
+    "strengths": "Single Capability registry with Kind discriminator and health attestation is a good foundation."
+   },
+   "benefit": "One unit to distribute a vertical solution (e.g. 'Shipping ops' = provider actions + skills + routines) to an org; this is how Claude, ChatGPT, Codex and Cursor package capability today.",
+   "approach": "Model Plane capability-core: implement a manifest loader that expands a plugin into child capabilities (skills, MCP servers, commands, agent presets, routine templates); reject stdio/bin components. Frontend Plane: install/enable UI.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-001",
+    "C-t3-05-027",
+    "C-t3-05-021"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Plugins aggregate risk; one install can add write tools and hooks at once, so install must show every component and its risk.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Table stakes in 9 sources, but its value depends on MCP and skill bundles working first.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 13,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-020",
+   "name": "Plugin and connector marketplaces / catalogues",
+   "description": "Catalogues of plugins and MCP servers from git, URL, npm or an account-hosted service, with search, install, atomic upgrade/rollback, workspace sharing and curated trust notes.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-055",
+    "claude-product-ux-090",
+    "codexagent-plugins-and-extensibility-004",
+    "codexagent-plugins-and-extensibility-006",
+    "codexagent-plugins-and-extensibility-009",
+    "cursor-ai-features-055",
+    "cursor-harness-architecture-081",
+    "hermes-architecture-and-surfaces-056"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-055"
+    ],
+    "why": "q5 SRC: marketplaces from GitHub, git or URL that admins allow-list and pin to a commit or manifest SHA-256 with per-entry install preference (available / auto-install); Codex (codexagent-plugins-006/009) adds atomic upgrades with rollback and an account-hosted catalogue with workspace publishing."
+   },
+   "mechanism": "Marketplace = signed index (name, entries {source, ref/sha, manifestSha256, policy}). Upgrade: clone to staging, validate manifest and name, swap roots atomically, keep a backup for rollback. Org catalogue = server-side index with publish-for-review workflow; suggested entries ranked by relevance.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-085",
+     "v-planned-decisions-072"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx:32"
+    ],
+    "gap": "No marketplace, catalogue or install flow; the Hermes install-vs-load governance split was not adopted.",
+    "strengths": ""
+   },
+   "benefit": "Discovery of capability for non-technical users; an org catalogue is how admins roll out approved plugins.",
+   "approach": "Control Plane owns the org catalogue and publishing review; Model Plane resolves and pins entries. Start with an org-curated catalogue only (no public marketplace).",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-019",
+    "C-t3-05-021",
+    "C-t3-05-022"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Supply-chain attacks through catalogue entries; review workload.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Only useful once plugins have a runtime; an org-curated list is enough at first.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-021",
+   "name": "Extension supply-chain safety (pins, signatures, malware preflight, kill lists)",
+   "description": "Install-time and continuous protections: pinned commits/SHA-256 archives, signed bundles, no install scripts, path-escape checks, OSV malware preflight, known-bad kill lists and re-checking installed extensions.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-140",
+    "codexagent-plugins-and-extensibility-007",
+    "codexagent-plugins-and-extensibility-011",
+    "codexagent-plugins-and-extensibility-017",
+    "hermes-architecture-and-surfaces-051",
+    "hermes-architecture-and-surfaces-064",
+    "claude-runtime-architecture-029"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-064"
+    ],
+    "why": "q5 SRC: about 570 catalogue entries each pinned to a 40-hex commit with a data-disclosure sentence, CI that clones every entry, and a removed.yaml kill list; Claude (claude-runtime-029, q5) re-checks installed extensions and disables newly blocked ones; Codex (codexagent-plugins-007) installs npm packages with --ignore-scripts."
+   },
+   "mechanism": "Every source resolves to an immutable digest (commit SHA or sha256 of archive); verify signature where available; never run install scripts; validate that every referenced path stays inside the package root; check package names against OSV advisories; maintain a server-side blocklist and re-evaluate installed packages on each load.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; plugins have no install path yet. Check capability-core plugin registry schema for digest/signature fields.",
+    "strengths": ""
+   },
+   "benefit": "Prevents a plugin catalogue from becoming an attack path into tenants.",
+   "approach": "Model Plane capability-core: store digest + signature per plugin version, refuse unpinned sources, central kill list checked at load.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-019"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Must ship together with any install flow; cheap if designed in from the start.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-022",
+   "name": "Admin governance of extensions (allow-lists, plugin-only mode, egress, publish review)",
+   "description": "Admins restrict which MCP servers, tools, plugins and marketplaces are allowed, lock customisation to admin-provided sources, see which network hosts each feature needs, and review custom apps before publishing with frozen tool snapshots.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "web-chatgpt"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-063",
+    "claude-extensibility-and-safety-068",
+    "claude-extensibility-and-safety-090",
+    "claude-extensibility-and-safety-144",
+    "codexagent-plugins-and-extensibility-005",
+    "codexagent-plugins-and-extensibility-010",
+    "cursor-ai-features-054",
+    "web-chatgpt-web-product-067",
+    "web-chatgpt-web-product-153"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-090",
+     "claude-extensibility-and-safety-063"
+    ],
+    "why": "q5 SRC: strictPluginOnlyCustomization per surface, known-marketplace allow-lists, sideload and command-source blocks, plus per-setting egress requirements that generate a firewall allow-list; ChatGPT (web-chatgpt-067, DOC) freezes a custom app's tool list after admin approval."
+   },
+   "mechanism": "Org policy document: allowedMcpServers (URL patterns), allowedTools, pluginOnly surfaces, allowed marketplaces, network mode for servers; publish flow: developer scans tools -> private test -> admin approves -> frozen snapshot (tool names + schema hashes); any upstream change re-enters review.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-083",
+     "v-planned-decisions-071",
+     "v-chat-agents-ui-085"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/capability-core/internal/api/capabilities.go:52-76",
+     "apps/Model Plane/go/services/capability-core/internal/registry/capabilities_store.go:553",
+     "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:377"
+    ],
+    "gap": "Capability registry has rollout, scopes and audit log; MCP registry has SSRF guards and allow-lists; plugin records carry risk level and rollout state. Not found: org-level 'only these servers/tools' policy UI, frozen tool snapshots with re-review on change, egress requirement listing.",
+    "strengths": "Audit log, rollout state and health attestation exceed most references."
+   },
+   "benefit": "Enterprise buyers require admin control before allowing connectors.",
+   "approach": "Control Plane owns org policy and review; Model Plane enforces at the capability gate; snapshot tool schema hashes at approval and block drift.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-001"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Policy split between Control and Model planes must not require cross-plane DB access (use signed policy bundles).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common (4 sources); Verevon has the enforcement core but not the admin product.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-023",
+   "name": "Unified customisation hub (skills, connectors, plugins) with origin and broken-state visibility",
+   "description": "One place to discover, enable, disable and publish skills, connectors and plugins, showing where each item came from (built-in, org, plugin, user) and keeping broken items visible with their error.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "deepseek",
+     "web-claudeai"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-089",
+    "codexagent-plugins-and-extensibility-019",
+    "web-claudeai-web-product-050",
+    "antigravity-agent-ux-and-gemini-138",
+    "deepseek-transparency-and-customization-104",
+    "deepseek-transparency-and-customization-126"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-089"
+    ],
+    "why": "q4 SRC: one Customize area with list filters, discover home and search, detail tabs, broken-connector banners and publish-to-org; Antigravity (antigravity-agent-138) labels every item's origin; DeepSeek (deepseek-transparency-126) keeps broken bundles visible and deselectable."
+   },
+   "mechanism": "One list API over capability-core returning {kind, name, origin (builtin|org|space|plugin|user), status (ok|broken|needs_auth), error, enabled}; UI tabs per kind with a Discover view and a 'Your organisation' view.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-084",
+     "v-chat-agents-ui-085",
+     "v-chat-agents-ui-086"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx:42",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx:32",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx:57"
+    ],
+    "gap": "Separate Settings sections for skills, plugins and MCP servers exist; no unified hub, origin labels, broken-state banners or discovery view were recorded.",
+    "strengths": ""
+   },
+   "benefit": "Clarity about what the agent can do and why; matches Verevon's transparency goal.",
+   "approach": "Frontend Plane: merge the three sections into one Customize page reading a unified capability listing.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Polish over existing sections.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-024",
+   "name": "Model-suggested installs and in-chat connection flows",
+   "description": "When a request needs a connector, plugin or skill that is not active, the model proposes it and the user installs or connects from a card in the conversation; the turn waits for the connection to settle; marketplaces can declare relevance signals.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-099",
+    "claude-extensibility-and-safety-142",
+    "codexagent-plugins-and-extensibility-015",
+    "hermes-architecture-and-surfaces-048"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-048"
+    ],
+    "why": "q4 SRC: manage_connections is a typed state machine (pending, initiated, connected, skipped, failed, expired) with actors and settle reasons, so the turn waits until every target resolves; Codex (codexagent-plugins-015) and Claude (claude-extensibility-099) keep installation in user hands."
+   },
+   "mechanism": "Tool request_connection(targets[], reason). Emit a card; per target state transitions driven by user action, OAuth callback watcher or timeout; when all targets settle, resume the turn with a summary. The model may only suggest; the install or OAuth grant is executed by the user through the normal flow.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check model-gateway tool_loop.rs for any connect/suggest tool and the SPA for an in-chat connect card. INF: absent.",
+    "strengths": ""
+   },
+   "benefit": "Users connect Gmail or a CRM at the moment of need instead of hunting in Settings; fits 'the model proposes, the user/platform executes'.",
+   "approach": "Model Plane tool that proposes; Frontend Plane card; Ingestion/Control execute the OAuth or enable. Never auto-install.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-004"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Prompt injection could trigger install suggestions; show source and scopes on the card.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Differentiator in 3 sources with direct UX payoff once connectors work.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-025",
+   "name": "Plugin-native runtime substrate (everything is a plugin; capability seams; isolated plugin hosts)",
+   "description": "The harness itself is composed of plugins on one context (model adapter, tools, session log, sandbox, UI), with typed services, reversible effects, Service Definition/Provider/Consumer seams, live config, and third-party plugins in a child process.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-051",
+    "deepseek-harness-architecture-052",
+    "deepseek-harness-architecture-060",
+    "deepseek-harness-architecture-064",
+    "deepseek-harness-architecture-119",
+    "deepseek-harness-architecture-120",
+    "deepseek-harness-architecture-151",
+    "hermes-architecture-and-surfaces-058",
+    "hermes-architecture-and-surfaces-062",
+    "hermes-architecture-and-surfaces-063",
+    "hermes-learning-and-memory-023",
+    "hermes-learning-and-memory-076"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-051",
+     "deepseek-harness-architecture-052"
+    ],
+    "why": "q5 SRC: Cordis context with services, typed events, reversible effects and generated capability-seam graph; Hermes (hermes-architecture-058/062) adds plugin kinds and per-profile child-process isolation."
+   },
+   "mechanism": "Context object with service registry; every registration returns a disposer; seams = interface crate + provider crates + consumers; plugin host process speaks framed JSON to the core.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable as a feature: Verevon composes capability through planes and services (capability-core, execution-core, model-gateway) rather than an in-process plugin substrate.",
+    "strengths": "Plane separation already provides isolation boundaries that these substrates build in-process."
+   },
+   "benefit": "Low; architectural rewrite with no user-visible gain for Verevon.",
+   "approach": "Do not adopt. Borrow two ideas only: experimental capabilities ship off and isolated from the default product (deepseek-harness-064), and pluggable provider kinds for memory/context engines.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Conflicts with the plane architecture; ideas already covered by capability-core.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-026",
+   "name": "Layered profile/config composition with inspectable effective config",
+   "description": "The running configuration is composed from ordered layers (shipped bundles, global, workspace, profile patch, command-line overlays) with inheritance and a command to print the effective result; optional reference overlays ship switched off.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-053",
+    "deepseek-transparency-and-customization-103",
+    "deepseek-transparency-and-customization-109",
+    "antigravity-architecture-050"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-053",
+     "deepseek-transparency-and-customization-103"
+    ],
+    "why": "q5 SRC: ordered bundles + profile patch + home patch + --patch overlays, patches target rows by id, and --dump-config prints the composed tree."
+   },
+   "mechanism": "Config = fold(layers) where each layer can replace or insert rows by id; keep provenance per resolved field; expose an 'effective config' view.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-076"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs",
+     "apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md:1"
+    ],
+    "gap": "Verevon layers platform, org, Space and user only for authored instructions; there is no general layered configuration of tools/capabilities with an effective-config view.",
+    "strengths": "Org > Space > persona layering already fits a multi-tenant SaaS better than file-based profiles."
+   },
+   "benefit": "Low for end users; the useful part is an 'effective capabilities for this thread' view, which belongs in C-t3-05-041.",
+   "approach": "Do not build file-based profiles; expose per-thread effective capability and instruction provenance instead.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Developer-harness concept; Verevon's tenancy model replaces it.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-027",
+   "name": "Skill packages (SKILL.md open standard) with progressive disclosure",
+   "description": "A skill is a folder with SKILL.md (name, description, instructions) plus references, templates, scripts and assets; the model sees only names and descriptions until it opens one; users invoke skills by /name or upload them as zip.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 9,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-049",
+    "antigravity-agent-ux-and-gemini-139",
+    "antigravity-architecture-097",
+    "codexagent-plugins-and-extensibility-021",
+    "cursor-ai-features-057",
+    "cursor-harness-architecture-078",
+    "deepseek-harness-architecture-059",
+    "hermes-architecture-and-surfaces-065",
+    "hermes-learning-and-memory-037",
+    "web-chatgpt-web-product-066",
+    "web-claudeai-web-product-047",
+    "web-manus-web-product-045",
+    "web-perplexity-web-product-056"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-047"
+    ],
+    "why": "q5 DOC: the Agent Skills open standard (name <= 64, description <= 200, optional dependencies) with three-stage loading, zip upload and package installs, now adopted by Manus, OpenAI, Perplexity, Cursor and Antigravity; Hermes (hermes-learning-037, SRC) shows a cached, tiered index with 60-character descriptions."
+   },
+   "mechanism": "Parse SKILL.md frontmatter (name, description, optional metadata/dependencies) and keep the body and resources in object storage. Stage 1: catalogue entry (name + one-line description) in the prompt within a budget. Stage 2: model calls open_skill(name) or the user types /name -> body injected. Stage 3: body references files the model reads via a skill_file tool; scripts run in the code sandbox with the skill directory mounted read-only.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-087",
+     "v-chat-agents-ui-084",
+     "v-planned-decisions-073"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/skills.rs:1-8",
+     "apps/Model Plane/rust/services/model-gateway/src/skills.rs:775",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5662-5700",
+     "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts:1-91",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx:42"
+    ],
+    "gap": "Skills exist as text records (disk + learned) with CRUD, sharing, per-turn matching, a char budget and reattach_skill, but there are no SKILL.md folder bundles with references or scripts, no zip import, and skills are off on the Terra route; context:fork skills are not built.",
+    "strengths": "Budgeted per-turn matching and reattach_skill are already ahead of several references."
+   },
+   "benefit": "Interoperability with the skill ecosystem (users can bring the same SKILL.md they use in Claude/ChatGPT/Manus) and richer, deterministic skills via scripts.",
+   "approach": "Model Plane skills.rs: accept SKILL.md + resources (zip or GitHub path), store files in MinIO, expose skill_file read and run scripts via code_interpreter with the bundle mounted; keep current budget/matcher.",
+   "effort": "M",
+   "dependencies": [
+    "code_interpreter mount of skill bundle"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Imported skills carry prompt-injection and script risk; scan on upload and run scripts only in the hermetic sandbox.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Table stakes (13 records across 11 sources); Verevon has the runtime half and lacks the open format.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 5,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-028",
+   "name": "Skill catalogue budgeting, selection and per-skill invocation policy",
+   "description": "The skill list given to the model is bounded and degrades descriptions before dropping skills, says how many were omitted, can be selected by retrieval, and each skill can be implicit (model may pick) or explicit-only (slash only), name-only or off, with conditional activation.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-022",
+    "codexagent-plugins-and-extensibility-024",
+    "codexagent-plugins-and-extensibility-025",
+    "codexagent-plugins-and-extensibility-026",
+    "codexagent-plugins-and-extensibility-034",
+    "codexagent-plugins-and-extensibility-103",
+    "claude-extensibility-and-safety-093",
+    "hermes-learning-and-memory-047"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-024",
+     "codexagent-plugins-and-extensibility-026"
+    ],
+    "why": "q4 SRC: SkillMetadataBudget shortens then removes descriptions and tells the model how many were omitted; allow_implicit_invocation per skill; Claude (claude-extensibility-093) adds on / name-only / user-invocable-only / off overrides and a shell-execution kill switch."
+   },
+   "mechanism": "Render catalogue under a char budget: full descriptions -> truncated -> names only -> omitted count. Per skill policy {implicit: bool, listing: on|name_only|user_only|off, requires: conditions}. Optional retrieval (BM25/char n-gram) over descriptions to pick top-k per turn.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-073",
+     "v-modelplane-087"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/skills.rs:775",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/skill_budget.rs:62",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1006"
+    ],
+    "gap": "Minor: no per-skill implicit/explicit or name-only listing policy found.",
+    "strengths": "About 1% (8000-char) budget with degrade-before-drop, per-turn matching (max 3 injected) and reattach_skill are at parity with Codex (SRC)."
+   },
+   "benefit": "Keep; adding an explicit-only flag protects expensive or risky skills from accidental use.",
+   "approach": "Add policy fields to the skill record; honour them in the matcher.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Strength; small additions only.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-029",
+   "name": "Skill distribution: team/org libraries, project locks, hubs, versions and hash pins",
+   "description": "Skills are shared as personal, team, project and official libraries with versions, restore and update-to-latest; projects can lock which skills may trigger; hubs and installers import from GitHub or curated lists; org bundles are hash-pinned and bundled skills sync without clobbering user edits.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "hermes",
+     "manus",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-059",
+    "claude-product-ux-134",
+    "codexagent-plugins-and-extensibility-023",
+    "codexagent-plugins-and-extensibility-030",
+    "hermes-architecture-and-surfaces-067",
+    "hermes-learning-and-memory-046",
+    "manus-computer-control-architecture-079",
+    "manus-product-ux-089",
+    "web-manus-web-product-047",
+    "web-perplexity-web-product-057"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-089",
+     "web-manus-web-product-047"
+    ],
+    "why": "q5 SRC: personal, team, project and official hub skills with upload/GitHub import, versions, restore, subscribe and apply policies; projects lock their skill library so only listed skills can trigger. Claude (claude-product-134) refuses org skill downloads whose SHA-256 differs; Hermes (hermes-learning-046) does 3-way origin-hash sync."
+   },
+   "mechanism": "Skill versions table (skill_id, version, digest, created_by); library membership per scope (user, team/org, Space/project) with mode subscribe|copy; Space-level lock list consulted by the matcher; import from GitHub path or zip -> scan -> new version; org bundles pinned by digest.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-084"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts:1-91",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:41"
+    ],
+    "gap": "CRUD with org/user scope and sharing exists; no versions/restore, no Space-level skill library lock, no import from GitHub/zip, no curated hub.",
+    "strengths": "Org/user scoping and sharing exist."
+   },
+   "benefit": "Teams standardise how the agent does recurring work (reports, tenders, customer replies) per Space.",
+   "approach": "Model Plane skills registry: add versions and digests; Application Plane exposes Space skill libraries as projections; never let Space membership widen the skill owner's ACL.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-027"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Space sharing vs owner ACL rule; stale subscribed versions.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common (6 sources); natural next step after the SKILL.md format.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-030",
+   "name": "Executable skills and bundled first-party skills (scripts, validators, tests, dependencies)",
+   "description": "Skills ship deterministic scripts and validators (e.g. docx/pptx/xlsx/pdf builders) with tests, can depend on other skills with a hard-fail contract, run under their own approval category, and a first-party set ships always-on.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-151",
+    "claude-runtime-architecture-033",
+    "codexagent-plugins-and-extensibility-028",
+    "codexagent-plugins-and-extensibility-029",
+    "codexagent-plugins-and-extensibility-032",
+    "codexagent-plugins-and-extensibility-033"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-151"
+    ],
+    "why": "q5 SRC: six always-on document skills (docx, pdf, pdf-reading, pptx, xlsx, frontend-design) each ship scripts and validators that turn 'create a document' into a verified procedure; Codex (codexagent-plugins-033/028) adds tested helpers and a distinct skill approval category."
+   },
+   "mechanism": "Skill bundle with scripts/ executed in the sandbox; the SKILL.md tells the model to run the validator before returning; dependency declarations checked at load (missing dependency -> stop and ask, never degrade silently); skill script runs count as their own approval class.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-073"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/skills.rs:775",
+     "apps/Model Plane (v-modelplane.baseline.md:110 office documents via code interpreter only)"
+    ],
+    "gap": "No on-disk skill bundles with scripts; office documents come from ad-hoc code interpreter code or client-side export, with no validated first-party document skills.",
+    "strengths": "Hermetic code interpreter (bwrap, no network) is a safe place to run skill scripts."
+   },
+   "benefit": "Reliable Office/PDF outputs are a top request for business users; validated skills reduce broken files.",
+   "approach": "Model Plane: after C-t3-05-027, ship first-party document skills whose scripts run in code_interpreter with pinned Python libraries; add a skill-script approval class in capability policy.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-027"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Library licensing for bundled scripts; sandbox resource caps (8/16 MiB) may be too small for decks.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common (2 app sources plus Anthropic's web product relying on it); high user value for documents.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-031",
+   "name": "Agent-assisted authoring of skills and plugins (creator agents, record-a-skill, package this workflow)",
+   "description": "Users ask the agent to turn a conversation or workflow into a skill, scaffold a plugin, or record a screen session that is synthesised into a skill; the creator follows lean-skill doctrine and uploaded items are scanned.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-031",
+    "web-chatgpt-web-product-065",
+    "web-chatgpt-web-product-070",
+    "web-manus-web-product-046",
+    "web-claudeai-web-product-048"
+   ],
+   "bestInClass": {
+    "source": "web-manus",
+    "recordIds": [
+     "web-manus-web-product-046"
+    ],
+    "why": "q4 DOC: 'package this workflow as a Skill' analyses the interaction, writes SKILL.md, bundles scripts and offers download; Codex (codexagent-plugins-031, SRC) ships the authoring doctrine; claude.ai (web-claudeai-048) records a skill from a narrated screen recording."
+   },
+   "mechanism": "A built-in skill-creator skill: read the transcript and tool trace, extract the reusable procedure, write SKILL.md (discriminating description, stepwise body), move repeated logic into scripts, propose for review; save as a new skill version owned by the user.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-087",
+     "v-chat-agents-ui-084"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/skills.rs:1-8"
+    ],
+    "gap": "Learned skills exist in the registry, but the learning loop is not proven (DOC) and there is no explicit 'save this as a skill' flow or skill-from-real-run proof (I23 deferred).",
+    "strengths": "Learned-skill storage already exists, matching the Hermes self-improving goal."
+   },
+   "benefit": "Directly serves the 'learns and tailors itself to its user' goal; users notice when the assistant remembers how they like a task done.",
+   "approach": "Model Plane: a skill-creator action invoked from a message menu or /skill-create, writing a draft skill version the user approves; reuse the memory plane's review UX.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-027"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low-quality auto-skills pollute the catalogue; require user approval and evaluation.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common (4 sources), aligned with Hermes-style learning.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-032",
+   "name": "Composer slash commands and @/$ mentions (built-in commands, skills, plugins, context references)",
+   "description": "Typing / or @ in the composer lists built-in commands, skills, plugins, apps and context references (files, URLs, diffs) with their source; one command registry feeds every surface; skills can be stacked.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "manus",
+     "t3code",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 9,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-055",
+    "codexagent-plugins-and-extensibility-020",
+    "codexagent-plugins-and-extensibility-040",
+    "cursor-ai-features-059",
+    "deepseek-transparency-and-customization-152",
+    "hermes-architecture-and-surfaces-068",
+    "hermes-architecture-and-surfaces-069",
+    "hermes-learning-and-memory-101",
+    "manus-product-ux-096",
+    "t3code-ui-and-multimodel-078",
+    "web-chatgpt-web-product-072",
+    "web-claudeai-web-product-051"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-068",
+     "hermes-learning-and-memory-101"
+    ],
+    "why": "q4 SRC: one CommandDef registry feeds CLI, gateway, Telegram/Slack menus, autocomplete and the desktop palette with aliases, categories and busy policy; up to five skills can be stacked in one message. Codex (codexagent-plugins-020) labels each mention's source."
+   },
+   "mechanism": "CommandDef {name, description, category, aliases, args_hint, busy_policy, surfaces}. Composer fetches built-ins + skills + plugins + connectors, shows source labels, inserts typed mention tokens (not plain text) so the server can resolve them; leading /skill tokens are parsed into explicit skill invocations.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-082",
+     "v-planned-decisions-074",
+     "v-modelplane-089"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:259-271",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:465-532",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-actions-client.ts:20-61",
+     "apps/Model Plane/go/services/capability-core/internal/commands/handler.go:1-60"
+    ],
+    "gap": "Built-in commands (/file, /image, /search, /research, /schedule) plus backend skills, capabilities and connectors are listed; backend /models and /compact are not integrated in the composer; no source labels or skill stacking were recorded.",
+    "strengths": "Composer already merges built-ins with backend skills, capabilities and connectors, each degrading to empty (SRC)."
+   },
+   "benefit": "Keep; adding source labels improves trust in what will run.",
+   "approach": "Wire capability-core commands into the composer menu; add source labels.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Table stakes and shipped.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-033",
+   "name": "User-authored slash commands and prompt shortcuts",
+   "description": "Users save reusable prompts as / shortcuts with arguments, optional mode, model and sources, and can share them; commands remain available to subagents.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "web-perplexity"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "web-perplexity-web-product-063",
+    "cursor-harness-architecture-134"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-063"
+    ],
+    "why": "q3 DOC: Comet Shortcuts save instructions plus mode, model and source and expand into the full prompt; Cursor (cursor-harness-134, SRC) passes user commands to subagents."
+   },
+   "mechanism": "Template {name, body with $ARGUMENTS/$1.., default mode, model, sources, scope user|space|org}; expand client-side into the composer before send, recording the template id in the message metadata.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-083"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (I13)"
+    ],
+    "gap": "No user-authored templates ($ARGUMENTS search found nothing); planned as I13, recommended user-authored first (OD19).",
+    "strengths": ""
+   },
+   "benefit": "Cheap power-user feature; teams share standard prompts per Space.",
+   "approach": "Frontend Plane + Application Plane (store templates as Space-scoped records); no Model Plane change needed.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small effort, already planned, visible to users.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-034",
+   "name": "Persistent instructions and rules (org policy, custom instructions, project rules, activation modes)",
+   "description": "Admins and users set persistent instructions applied to every chat (org policy, personal custom instructions, project/Space instructions), and file-based rules with always / model-decides / glob / manual activation.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "hermes",
+     "web-chatgpt"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-050",
+    "claude-extensibility-and-safety-062",
+    "cursor-ai-features-058",
+    "cursor-harness-architecture-079",
+    "hermes-learning-and-memory-055",
+    "web-chatgpt-web-product-073"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-058"
+    ],
+    "why": "q4 SRC: four rule types derived from frontmatter (alwaysApply, globs, description-only = agent-fetched, else manual) from project files, AGENTS.md, team and user rules; ChatGPT (web-chatgpt-073, DOC) shows the chat-product shape: 5,000-character custom instructions plus workspace policy, project overriding global."
+   },
+   "mechanism": "Instruction sources ordered org > Space/project > agent persona > user, each with activation always|model_decision (description listed, body fetched on demand)|manual; inject 'always' bodies and list 'model_decision' descriptions within a token budget; record which sources were applied per turn.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-089",
+     "v-modelplane-090",
+     "v-planned-decisions-076"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:55-96",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1855",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6375-6440",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6844",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6850"
+    ],
+    "gap": "Org, Space, @-mentioned agent persona and personal persona are applied in plain chat (Ask) but not passed into Do/Plan runs; no model-decision activation mode.",
+    "strengths": "Four-level hierarchy (ADR-0003) is richer than ChatGPT's two levels."
+   },
+   "benefit": "Users expect the same instructions in agent runs as in chat; their absence in Do mode makes the agent feel like a different product.",
+   "approach": "Model Plane: pass the resolved instruction stack from model-gateway into execution-core run creation and the compositional prompt.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Prompt budget in long Do runs; precedence conflicts between org policy and persona.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Small fix with immediate user-visible effect.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-035",
+   "name": "System prompt composed from ordered, owned sections",
+   "description": "The system prompt is assembled from named sections with explicit order values contributed by the owning components, with scoped overrides and an optional complete-prompt override.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-063",
+    "deepseek-transparency-and-customization-106",
+    "antigravity-agent-ux-and-gemini-053"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-063"
+    ],
+    "why": "q4 SRC: ctx.systemPrompt.section({name, order, text}) with centrally allocated orders, agent-scoped shadows and a complete-section override."
+   },
+   "mechanism": "Sections registry; each offered tool or capability contributes its own section; the final prompt is the ordered concatenation; overrides are scoped to an agent preset.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-075"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:208"
+    ],
+    "gap": "Compositional prompt from offered tools is shipped; no user-visible section list or scoped override was recorded.",
+    "strengths": "Prompt grows only with offered tools (pi idea, HAP 4.4)."
+   },
+   "benefit": "Keep; a read-only 'what the agent was told' view would serve the transparency goal.",
+   "approach": "Expose section names and sizes in the trace tab.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Strength.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-036",
+   "name": "Custom agents, presets and profiles (draft/publish, versions, pinned per session)",
+   "description": "Users or admins build named agents (instructions, model, tools, skills, connectors), publish them to a team directory with versions, and sessions pin the preset revision they started with.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "web-chatgpt",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-076",
+    "deepseek-harness-architecture-054",
+    "deepseek-harness-architecture-121",
+    "deepseek-transparency-and-customization-105",
+    "web-perplexity-web-product-065",
+    "web-chatgpt-web-product-076"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-076"
+    ],
+    "why": "q4 SRC: workspace agent builder with draft and publish lifecycle, version history, directory publishing and conflict-safe editing; DeepSeek (deepseek-harness-121) keeps running agents on the exact preset revision they started with; Perplexity (web-perplexity-065, DOC) reuses agents by id with pinned versions over API."
+   },
+   "mechanism": "Agent preset {id, version, instructions, model route, tool/capability allow-list, skills, connectors, approval defaults}; draft/publish with optimistic concurrency; run records preset_id + version; edits create a new version and never mutate running runs.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-089"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:55-96",
+     "apps/Frontend Plane/verevonv3 (v-chat-agents-ui.baseline.md:289 preset agents have empty action sets)"
+    ],
+    "gap": "@-mentioned agent personas apply instructions in Ask turns, but preset agents have empty action sets, there is no publish/version lifecycle and runs do not pin a preset revision.",
+    "strengths": "Agent persona already participates in the instruction hierarchy."
+   },
+   "benefit": "Lets a business define 'Tender assistant' or 'Customer reply agent' with fixed tools and share it across a Space.",
+   "approach": "Model Plane agent preset registry in capability-core (Kind=agent) with versions; Frontend builder; run creation pins version.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-034"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Presets granting tools beyond the user's own permissions; resolve tools against the invoking user's ACL.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common (4 sources); Verevon has half of it.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-037",
+   "name": "Product-as-tool: the app exposes its own state, settings and actions to the agent",
+   "description": "The host exposes its own UI, sessions, settings and actions to the model as tools (often MCP servers), with per-setting model-access classes and scoped per-session credentials, so the agent can operate the product itself.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "deepseek",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-040",
+    "claude-extensibility-and-safety-060",
+    "claude-extensibility-and-safety-104",
+    "claude-product-ux-092",
+    "codexagent-plugins-and-extensibility-053",
+    "codexagent-plugins-and-extensibility-054",
+    "deepseek-transparency-and-customization-108",
+    "t3code-architecture-062",
+    "t3code-architecture-063",
+    "t3code-ui-and-multimodel-077"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-092",
+     "claude-extensibility-and-safety-040"
+    ],
+    "why": "q5 SRC: built-in MCP servers for sessions, sidebar, panes, settings and host actions, and a Preferences schema where each key declares whether Claude may read or change it; T3 (t3code-062, q5) issues a per-session scoped bearer credential stored only as a hash."
+   },
+   "mechanism": "Typed action registry shared by UI and agent; each action declares model access (none|read|write-with-approval|write) and risk; expose admitted actions as tools; issue per-session scoped tokens limited to the thread and capability set; honest annotations (readOnly, destructive, idempotent).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-088",
+     "v-planned-decisions-077"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:125-139",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:104-181"
+    ],
+    "gap": "168 typed actions exist but only 8 are model-executable (tickets.create, inbox.*, chat.save_thread_snapshot, chat.submit_feedback, org.*); no per-setting model-access classes; no session-scoped tool credentials recorded.",
+    "strengths": "A single typed action registry shared by UI and agents is exactly the reference design."
+   },
+   "benefit": "Core of Verevon's AI-first thesis: users can say 'move this to my Space and notify the team' and the agent does it with the same actions as the UI.",
+   "approach": "Frontend Plane registry + Model Plane capability gate: classify all 168 actions by risk, admit read actions first, write actions with approval; mint per-run scoped tokens in the gateway.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-012"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Agents acting on account settings; keep security settings non-model-accessible.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Differentiator (4 sources) that is central to Verevon's own plan; infrastructure already exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-038",
+   "name": "Outward interop: the product as an MCP server and WebMCP site tools",
+   "description": "The product exposes its conversations or tools as an MCP server for other agents, publishes an MCP server/plugin for third-party clients, or consumes WebMCP tools that websites expose to the in-app browser.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes",
+     "web-chatgpt",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-057",
+    "web-perplexity-web-product-069",
+    "web-chatgpt-web-product-071"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-057"
+    ],
+    "why": "q3 SRC: 'mcp serve' exposes conversations as MCP tools to any MCP client; ChatGPT (web-chatgpt-071, DOC) consumes WebMCP site tools where site instructions cannot authorise sensitive actions."
+   },
+   "mechanism": "An MCP server endpoint (Streamable HTTP, OAuth) exposing selected typed actions and search over the user's workspace; WebMCP: the browser surface lists tools a page registers and offers them to the model under the same policy.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-078"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/Verevon-ai-first-plan.md (Phase 4, M4)"
+    ],
+    "gap": "No outward MCP server and no WebMCP bridge (only a consumer mcp-bridge); planned M4 after M2.",
+    "strengths": ""
+   },
+   "benefit": "Lets users reach Verevon from Claude, ChatGPT or Cursor, growing usage; WebMCP gives Quarry structured site actions.",
+   "approach": "Frontend Plane gateway hosts an MCP endpoint over the typed action registry (C-t3-05-037); WebMCP discovery runs in Quarry and returns proposals the Model Plane may select, Quarry executes.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-05-037"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "External agents acting with user tokens; ZDR must propagate to outward calls.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "3 sources, low confidence (DOC/SRC q3); after the action registry is opened to agents.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-039",
+   "name": "Agent-to-agent protocol (A2A client and server)",
+   "description": "The agent discovers and calls other A2A-compliant agents and can itself be called through an Agent Card.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-072"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-072"
+    ],
+    "why": "q3 SRC: platform plugin with outbound discover/call/list/history/orchestrate tools and an inbound Agent Card at /.well-known/agent-card.json."
+   },
+   "mechanism": "Agent Card JSON describing skills and auth; outbound client tools; inbound task endpoint mapped to a Verevon run with the caller's delegated identity.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [
+     "v-chat-agents-ui-091",
+     "v-planned-decisions-080"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:116"
+    ],
+    "gap": "Design phase 9; needs an Application-owned registry and Control authorization; no code.",
+    "strengths": ""
+   },
+   "benefit": "Speculative; few customers ask for it yet.",
+   "approach": "Keep in design; reuse the outward MCP endpoint first.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-038"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Cross-org delegation and authority confusion.",
+   "tier": "nice-to-have",
+   "significance": 1,
+   "rationale": "Unique to one source.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-040",
+   "name": "Host-brokered secrets and services for extensions (credential vault with proxy injection, host-owned LLM access)",
+   "description": "Secrets for connectors, CLIs and plugins are stored in a vault and injected by a proxy at egress so they never enter agent context or sandboxes; plugins get LLM access through the host without seeing provider credentials; per-operation confirm rules and network allow-lists.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "hermes",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-057",
+    "web-perplexity-web-product-062",
+    "hermes-architecture-and-surfaces-070"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-057"
+    ],
+    "why": "q5 SRC: plugin CLIs get OAuth tokens and secrets injected from an encrypted vault, with declarative rules mapping CLI invocations to named operations that require confirmation and a network allow-list; Perplexity (web-perplexity-062, q5 DOC) does the same for custom APIs via an egress proxy with session/personal/project scopes."
+   },
+   "mechanism": "Vault entries {scope session|user|space, secret, allowed hosts}. Sandbox/tool egress goes through a proxy that matches host and injects the header or token; the model and sandbox see only a placeholder. Operation rules map requests (method+path or CLI argv pattern) to named ops with confirm/deny. Host LLM service for plugins enforces the run's budget and ZDR.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-084"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs:105",
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:14-16"
+    ],
+    "gap": "MCP OAuth tokens are vaulted and provider tokens stay in integration-corev2, but there is no general secret vault with egress-proxy injection for API connectors or sandbox code (the sandbox has no network at all).",
+    "strengths": "Credentials already never enter the model context for MCP and provider actions."
+   },
+   "benefit": "Enables API connectors and networked skills without ever exposing keys; strong ZDR/security story.",
+   "approach": "Ingestion Plane (or a Model Plane egress service) proxy with vault-backed injection; sandbox gets a proxy-only network namespace when a skill/connector needs it.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-003",
+    "C-t3-05-030"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Proxy becomes an exfiltration path if host allow-lists are loose.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Differentiator (3 sources) that fits Verevon's security posture.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-041",
+   "name": "Extension observability (hook runs and tool calls as transcript items, resource activity chips, per-server logs, attribution telemetry)",
+   "description": "Users and admins can see what extensions did: hook runs and MCP calls as typed transcript items, chips for resources read/created/updated, per-server logs, and telemetry attributing skills and scripts to their plugin.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-032",
+    "claude-extensibility-and-safety-065",
+    "codexagent-plugins-and-extensibility-027",
+    "codexagent-plugins-and-extensibility-050",
+    "codexagent-plugins-and-extensibility-106"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-106",
+     "codexagent-plugins-and-extensibility-050"
+    ],
+    "why": "q4 SRC: hook runs, MCP calls, dynamic tool calls, sub-agent activity, commands and file changes are typed thread items with status, and tool results declare resource activities (read/created/updated) rendered as chips."
+   },
+   "mechanism": "Event types hook_started/hook_completed {event, handler, source, status}; tool results may include _meta.resourceActivities [{url, title, activity}] rendered as chips; per-capability logs and counters tagged with plugin id and skill id.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane (v-modelplane.baseline.md:70 typed SSE taxonomy, 23 ChatEvent variants)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:41"
+    ],
+    "gap": "Rich SSE taxonomy (tool_call, tool_result, step_update, awaiting_approval) and chat/sources/artifacts/steps/trace tabs exist (narrative baseline, SRC); no hook-run items, resource-activity chips or skill attribution telemetry recorded.",
+    "strengths": "Trace and steps tabs already exceed most chat products in transparency."
+   },
+   "benefit": "Matches the DeepSeek-style transparency goal; admins can audit extension behaviour.",
+   "approach": "Model Plane emits hook and resource-activity events behind the existing features[] gating; Frontend renders chips.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-05-018"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Verevon already strong here; incremental.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-042",
+   "name": "Cross-vendor compatibility (reads other agents' plugin, skill and hook formats)",
+   "description": "The product loads plugin folders, skills, instruction files and hook configs authored for other agents (Claude, Codex, Cursor, agent-plugins.org manifest) so users can reuse them unchanged.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "web-chatgpt"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-003",
+    "cursor-ai-features-061",
+    "cursor-harness-architecture-080",
+    "deepseek-harness-architecture-062",
+    "deepseek-transparency-and-customization-107",
+    "deepseek-transparency-and-customization-140",
+    "web-chatgpt-web-product-064"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-003"
+    ],
+    "why": "q4 SRC: validates the open agent-plugins.org 1.0.0 manifest and treats .codex-plugin, .claude-plugin and .cursor-plugin as namespace roots; Cursor (cursor-ai-061) also translates Claude Code hook settings."
+   },
+   "mechanism": "Manifest adapters that normalise foreign layouts into the internal plugin model; unknown fields ignored; unsupported components (stdio, bin) reported, not silently dropped.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. A grep in this audit found no 'agent-plugins.org' reference and 'SKILL.md' only in capability-core docs/gap-analysis.md and internal/roadmap/data.go (intent, not code). INF: absent.",
+    "strengths": ""
+   },
+   "benefit": "Instant catalogue: users bring existing skills/plugins; lowers switching cost from Claude/ChatGPT.",
+   "approach": "Model Plane: build C-t3-05-019/027 directly on the open formats so compatibility is free; map only URL MCP servers.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-05-019",
+    "C-t3-05-027"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Foreign plugins assume local shell/stdio which Verevon will refuse.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Common (4 sources); near-zero cost if formats are chosen right.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-043",
+   "name": "Import configuration from other AI tools",
+   "description": "On first run or from settings, detect another agent's setup and offer to import instructions, skills, plugins, MCP servers, subagents, hooks and memory, showing exactly what will run.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-057",
+    "codexagent-plugins-and-extensibility-042",
+    "claude-product-ux-093"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-042"
+    ],
+    "why": "q4 SRC: typed migration items (AGENTS_MD, CONFIG, SKILLS, PLUGINS, MCP_SERVER_CONFIG, SUBAGENTS, HOOKS, COMMANDS, MEMORY, SESSIONS) with detect/import RPCs and history; Claude (claude-product-093) shows command, args and env names before importing MCP servers."
+   },
+   "mechanism": "Importer per source format producing a reviewable diff of items; user selects; items created as user-scoped records.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. INF: absent; for a web product the relevant imports are ChatGPT custom instructions/memory export and Claude skills zips.",
+    "strengths": ""
+   },
+   "benefit": "Lower switching cost from ChatGPT/Claude.",
+   "approach": "Frontend Plane import wizard; Model Plane creates skills/instructions; memory import belongs to the memory category.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-05-027"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Imported content may carry injection; review step required.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "3 desktop sources; modest value for web.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-044",
+   "name": "Background monitors and sidecars that push events to the agent",
+   "description": "Plugins declare long-running watchers or managed background processes whose output reaches the model as notifications (armed always or when a skill is invoked), optionally with their own UI pane.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-052",
+    "claude-extensibility-and-safety-138"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-138"
+    ],
+    "why": "q4 SRC: plugin monitors run for the session, each printed line becomes a task notification, armed always or on skill invoke; Antigravity sidecars (antigravity-agent-052) add restart policy and UI panes."
+   },
+   "mechanism": "Monitor {name, source, trigger always|on_skill:<id>} -> runner emits events into the session inbox; the agent wakes on events.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane (v-modelplane.baseline.md: scheduled runs are a single no-tool call)"
+    ],
+    "gap": "No baseline record. For Verevon the equivalent is event triggers from Ingestion (new mail, webhook) waking a routine; check routines/scheduler code.",
+    "strengths": ""
+   },
+   "benefit": "Event-driven agents ('when a tender arrives, draft a reply') rather than local shell watchers.",
+   "approach": "Ingestion Plane triggers -> Application Plane notifications -> Model Plane routine runs; do not run user processes.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-004"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Runaway runs and cost; per-trigger budgets.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "2 sources, desktop-oriented; the event-trigger version belongs with routines.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-045",
+   "name": "Agents in external channels and work tools (Slack, Telegram, email, GitHub, Linear)",
+   "description": "Users message or mention the agent from Slack, Teams, Telegram, email or issue trackers; tasks start from there and results post back, with a consent card describing who posts as whom.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "manus",
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-083",
+    "cursor-ai-features-062",
+    "manus-product-ux-095",
+    "web-chatgpt-web-product-075",
+    "web-manus-web-product-054",
+    "web-manus-web-product-055"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-062"
+    ],
+    "why": "q4 SRC: Slack, Linear, GitHub, GitLab, Jira, Teams, PagerDuty and Sentry start cloud agents with routing rules per channel or project and progress mirrored back; Claude (claude-extensibility-083) binds a session to a Slack thread with a disclosure-bearing consent card; Manus (web-manus-054/055) adds email and IM channels."
+   },
+   "mechanism": "Channel adapters (webhook/events API) -> identity binding (channel user -> Verevon user) -> routing rule -> run creation with channel as origin -> progress and result posted back; consent card states channel, workspace and posting identity.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go:1-20",
+     "apps/Model Plane/go/services/bridge-core/cmd/main.go:55-64"
+    ],
+    "gap": "Narrative baseline (SRC): bridge-core has a session registry, webhook channel adapter and delivery worker; the Channel Plane is docs-only and Slack/Teams continuity needs an ADR before code.",
+    "strengths": ""
+   },
+   "benefit": "Meets users where they work; strong for teams.",
+   "approach": "Wait for the Channel Plane ADR; implement adapters there, not in Model Plane.",
+   "effort": "L",
+   "dependencies": [
+    "Channel Plane ADR"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Identity binding errors post private data to shared channels.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Common (5 sources) but blocked by an architecture decision (Channel Plane is future).",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-046",
+   "name": "Public API, SDKs and programmatic control of the same agent",
+   "description": "The same agent harness is reachable from REST/OpenAI-compatible APIs, typed SDKs, a headless CLI or a bidirectional control protocol, with runs, approvals, steering, webhooks and usage.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "manus",
+     "t3code",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 10,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-056",
+    "antigravity-architecture-101",
+    "claude-extensibility-and-safety-135",
+    "cursor-ai-features-063",
+    "deepseek-harness-architecture-061",
+    "hermes-architecture-and-surfaces-071",
+    "hermes-architecture-and-surfaces-074",
+    "t3code-architecture-064",
+    "t3code-architecture-067",
+    "manus-product-ux-094",
+    "web-manus-web-product-049",
+    "web-manus-web-product-052",
+    "web-perplexity-web-product-064",
+    "web-perplexity-web-product-070",
+    "web-claudeai-web-product-054"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-071"
+    ],
+    "why": "q4 SRC: OpenAI-compatible /v1 plus richer /v1/runs with events, approvals, steer and stop, idempotency and capability discovery; Manus (manus-product-094) adds webhooks with a public key, usage and API key rotation; Claude (claude-extensibility-135) has the richest bidirectional control protocol."
+   },
+   "mechanism": "REST + SSE run API (create, stream events, approve, steer, cancel) with idempotency keys; webhooks signed with a published key; capability discovery endpoint; generated SDKs from OpenAPI.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-092",
+     "v-planned-decisions-079"
+    ],
+    "evidence": [
+     "apps/Model Plane/api/openapi.yaml",
+     "apps/Model Plane/api/generate-sdk.sh",
+     "apps/Model Plane/proto/model_plane/v1/gateway.proto:17-178",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:58"
+    ],
+    "gap": "OpenAPI spec, generated SDK, gRPC ModelGateway (60+ RPCs) and an AG-UI adapter exist; signed webhooks, API keys for customers and OpenAI-compatible endpoints were not verified.",
+    "strengths": "Generated SDK and AG-UI interop adapter are at or above reference level."
+   },
+   "benefit": "Keep; customer-facing API keys and webhooks are the missing commercial pieces.",
+   "approach": "Control Plane issues API keys; Model Plane adds signed webhooks for run events.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Shipped core; remaining items are commercial packaging.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 8,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-047",
+   "name": "Third-party OAuth apps and 'Sign in with' the assistant",
+   "description": "Third parties register OAuth apps with scopes to act on a user's account, can send hidden application context, and users sign in to partner products with their assistant account with plan allowance sharing.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "web-chatgpt-web-product-074",
+    "web-manus-web-product-050",
+    "web-manus-web-product-051"
+   ],
+   "bestInClass": {
+    "source": "web-manus",
+    "recordIds": [
+     "web-manus-web-product-050"
+    ],
+    "why": "q4 DOC: client types (standard team, trusted team, trusted public) with scopes, PKCE + secret, rotating secrets, one webhook per app and token invalidation on scope expansion."
+   },
+   "mechanism": "OAuth authorisation server in the identity plane with app registry, scopes mapped to API capabilities, consent screen, token rotation.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; belongs to Control Plane identity. Check Control Plane for an OAuth app registry.",
+    "strengths": ""
+   },
+   "benefit": "Low near-term; platform play.",
+   "approach": "Defer to Control Plane roadmap.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-05-046"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Hidden context is an injection channel by design.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "DOC-only, web sources only, not a chat/agent page need. Provenance note: supported only by DOC/INF reference records.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-048",
+   "name": "Platform APIs beyond chat and bring-your-own inference",
+   "description": "Raw search, embeddings, decision and routing APIs, and running the product's harness on the user's own model provider keys.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "web-manus-web-product-053",
+    "web-perplexity-web-product-066",
+    "web-perplexity-web-product-067",
+    "web-perplexity-web-product-068"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-066"
+    ],
+    "why": "q5 DOC: Search API returns ranked raw results with multi-query, domain filters and token caps; Manus Flex (web-manus-053) runs the harness on the user's own OpenRouter/Fireworks key."
+   },
+   "mechanism": "Expose internal retrieval and routing services as metered APIs; BYO key stored in vault and used as a provider route with the same harness.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3 (v-chat-agents-ui.baseline.md:196 BYO ChatGPT subscription route)"
+    ],
+    "gap": "A user-owned ChatGPT connection exists as a provider route (tools, browsing, images, research and skills stripped on that route); no public search/embeddings API recorded.",
+    "strengths": "BYO subscription route already exists."
+   },
+   "benefit": "Low for chat/agent pages.",
+   "approach": "Out of scope for this audit; Model Plane inference routing and Quarry own these.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "DOC-only, Perplexity/Manus platform plays. Provenance note: supported only by DOC/INF reference records.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-05-049",
+   "name": "Checked-in project config and per-instance harness settings (t3.json, binary paths, launch args)",
+   "description": "A repository ships a config file defining team scripts, preview URL and defaults, and each provider instance can be pointed at its own binary, arguments, home and environment.",
+   "prevalence": {
+    "sourcesWith": [
+     "t3code"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "t3code-architecture-066",
+    "t3code-ui-and-multimodel-071",
+    "t3code-architecture-087"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-071"
+    ],
+    "why": "q4 SRC: t3.json with a published JSON Schema and shared scripts that run on worktree creation."
+   },
+   "mechanism": "Schema-validated project file loaded best-effort; scripts run in a terminal on worktree creation.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable: Verevon is not an IDE and has no local repositories or provider binaries.",
+    "strengths": ""
+   },
+   "benefit": "None for Verevon.",
+   "approach": "Do not build.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "IDE/local-harness feature.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

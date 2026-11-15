@@ -59,6 +59,8 @@ LOCKFILE_EXCLUDES=(
   ':(exclude,glob)**/.plan-work/**'
   ':(exclude,glob)apps/Frontend Plane/Ingestion Plane/**'
   ':(exclude,glob)**/audit-verify.exe'
+  # Audit working set behind the 01-03 audit reports: same path as .gitleaks.toml.
+  ':(exclude,glob)audit-evidence/**'
 )
 
 # Nothing staged outside the lockfile excludes (a mode-only change, an empty

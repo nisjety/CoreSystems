@@ -1,0 +1,763 @@
+[
+  {
+    "finalId": "F-t3-024",
+    "title": "Computer use inside the agent's own sandbox desktop (consent tiers only if user-desktop control is ever unparked)",
+    "searches": [
+      "rg -i 'computer[_ -]?use|computer_tool|computerUse|ComputerTool' over whole repo, code then *.md",
+      "rg -i 'accessibility[ _-]?tree|AT-SPI|atspi|xdotool|ydotool|uinput|xvfb|novnc|get_app_state|screen_capture|input_inject' over Model Plane, Quarry-v2, Endpoint Plane",
+      "rg -i 'request_access|consent_tier|deny_list|machine lock|click-only|view-only' over whole repo",
+      "rg -i 'xvfb|xfce|wayland|novnc|vnc|x11|xdotool' over Model Plane, gateway, learning-plane, Application Plane code (generated pb excluded)",
+      "rg 'screenshot|click|press' over execution-core and model-gateway; grep BROWSER_ACTION_SCHEMA and browser_agent tool names",
+      "rg -i 'computer' over Model Plane go, rust, proto and py code",
+      "rg -i 'computer use|screenshot.*(agent|tool)|accessibility tree|desktop control' over *.md"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+        "line": 56,
+        "why": "OS-level computer use parked by the owner; would need an Endpoint Plane tool.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PAGE_GAP_PLAN_2026-09-28.md",
+        "line": 90,
+        "why": "OS-level computer use absent; outside the web app, parked with Windows.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Endpoint Plane/src/consent.rs",
+        "line": 33,
+        "why": "Native consent prompt before input control; not wired to any Model Plane tool.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Endpoint Plane/src/main.rs",
+        "line": 540,
+        "why": "Input granted after consent prompt, or unattended for permanent passwords.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "line": 866,
+        "why": "Matches browser_agent, browser.observe and browser.act tool names in dispatch.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 1996,
+        "why": "Browser-agent action schema: navigate, click, type, press, scroll, screenshot, done.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+        "line": 425,
+        "why": "Fires one execution-core ExecuteStep with tool_name browser_agent.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+        "line": 179,
+        "why": "Browser observation carries screenshot_ref; browser agent loop lives here.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+        "line": 640,
+        "why": "Quarry AgentAction enum: navigate, click, ClickRef from snapshot, type, screenshot.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 1143,
+        "why": "Chromium accessibility projection built via CDP for browser observations.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/Dockerfile",
+        "line": 30,
+        "why": "sandbox-manager service image: Alpine with curl and postgresql-client; no desktop packages.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox.rs",
+        "line": 273,
+        "why": "Capability profile says one child process, not a durable computer.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/chat-parity-audit.md",
+        "line": 441,
+        "why": "Combined computer-use timeline for browser-agent steps; browser scope only.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/docs/BROWSER_WORKSPACE_PLAN.md",
+        "line": 73,
+        "why": "Frames plan is done; raw remote desktop deferred until needed.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/master-ownership-matrix.md",
+        "line": 60,
+        "why": "Ownership matrix lists computer-use screenshot agents as prototype only.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/packages/remote-core/docs/architecture.md",
+        "line": 183,
+        "why": "Remote-core test rig is loopback; no separate Verevon Agent machine yet.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-030",
+    "title": "Workspace file tools for Do mode: versioned read, grep, glob and list, plus governed edit and write on one small Rust edit engine",
+    "searches": [
+      "rg -i 'fs.edit|fs.write|edit_file|write_file|str_replace|StrReplace|apply_patch|search_replace|old_string|unique[_ -]?match' over Model Plane, gateway and SPA src",
+      "rg '(read_file|read_workspace|workspace_read|file_read|grep_workspace|glob_files|list_dir|list_files)' as tool names over Model Plane rust and gateway",
+      "rg 'name: grep|name: glob|name: edit|name: write|name: list_workspace|name: shell' over Model Plane rust tool catalogues",
+      "rg -i 'stale[_ -]?read|content_hash|per[_ -]?path[_ -]?lock|expected_version|if_match|did[_ -]?you[_ -]?mean|CRLF' over Model Plane rust and gateway",
+      "rg -i 'ripgrep|output_mode|head_limit|workspace file' over Model Plane rust and gateway",
+      "rg -i 'str_replace|StrReplace|fs.edit|apply_patch|edit tool|grep tool|glob tool' over Model Plane docs and Frontend plans (*.md)",
+      "read tool_loop read_artifact and update_artifact definitions; frontend diff.ts and tool-presentation.ts"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 1598,
+        "why": "MCP allowlist fixture uses read_file, write_file and list_dir; no native file tools.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/bridges/mcp-bridge/bridge.example.json",
+        "line": 6,
+        "why": "Example MCP bridge allowlist exposing read_file, write_file and list_dir.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs",
+        "line": 117,
+        "why": "Per-file content hash baseline and changed-file detection after a run.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs",
+        "line": 238,
+        "why": "Hydrate rejects ../, absolute and traversal paths before CAS fetch.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+        "line": 608,
+        "why": "Workspace content hashing detects files a code run changed.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+        "line": 773,
+        "why": "code_interpreter is low-risk sandbox; arbitrary shell maps to high-risk capability.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 4339,
+        "why": "read_artifact and update_artifact: versioned artifact read and rewrite, not workspace files.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts",
+        "line": 1,
+        "why": "Unified-diff producer for artifact revisions and patch-shaped tool output.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts",
+        "line": 137,
+        "why": "Diff card chosen when tool output looks like a unified diff.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go",
+        "line": 132,
+        "why": "Overlay merge compares base_hash against the Space content hash first.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs",
+        "line": 64,
+        "why": "Explicit promotion of workspace files to knowledge, not every file.",
+        "kind": "code"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t3-043",
+    "title": "Sandbox egress tiers and a credential-injecting egress proxy, with per-call enforcement reports and shell-grammar approvals",
+    "searches": [
+      "rg -i 'egress|MpNetworkPolicy|NetworkPolicy|AllowDomains|network_tier|cidrs?' over execution-core, sandbox-manager, capability-core, proto",
+      "rg -i 'sentinel|credential[_ -]?inject|vault|SigV4|credential[_ -]?mask' over execution-core, sandbox-manager, capability-core",
+      "rg -i 'enforcement|denial_detail|mechanisms|sandboxed' over execution-core, model-gateway, sandbox-manager and SPA chat and agents",
+      "rg -i 'shell[_ -]?grammar|allow[_ -]?always|command[_ -]?approv|shlex' over execution-core and Model Plane crates",
+      "rg -i 'expected_version|if_version|base_hash|content_hash' over sandbox-manager and proto",
+      "rg -i 'HTTPS_PROXY|ALL_PROXY|egress proxy|proxy' over Model Plane deploy compose"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/policy.rs",
+        "line": 23,
+        "why": "MpNetworkPolicy has Disabled and AllowDomains only; no tier enum.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs",
+        "line": 24,
+        "why": "AllowDomains is not self-enforcing; needs an egress proxy or refuses.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs",
+        "line": 113,
+        "why": "egress_proxy_configured: process-level check; AllowDomains refused when none.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs",
+        "line": 185,
+        "why": "ExecOutcome carries a bare sandboxed boolean; no enforcement level.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_client.rs",
+        "line": 290,
+        "why": "Capability profile egress field is a fixed disabled_by_default string.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+        "line": 581,
+        "why": "code_interpreter hard-codes network Disabled for every call.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go",
+        "line": 132,
+        "why": "Overlay merge compares base_hash against the Space content hash first.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sandboxes.proto",
+        "line": 254,
+        "why": "Workspace file overlay carries base_hash per file for merge guarding.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/cmd/main.go",
+        "line": 97,
+        "why": "MCP OAuth token vault exists; not injected into sandbox egress.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/deploy/docker-compose.yml",
+        "line": 1142,
+        "why": "Only proxy reference is coresystem-internal-tls-proxy in Infra Plane, not egress.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+        "line": 2935,
+        "why": "Ledger lists sandbox full/partial enforcement vocabulary as an open design item.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-040",
+    "title": "Eval and replay release gates for prompts, tools and routing: recorded-session replay in CI, required eval stages and an eval gate on RoutingPolicy edits",
+    "searches": [
+      "rg -i 'replay[_ -]?provider|ReplayProvider|llm[_-]replay|recorded[_ -](completion|session|response)|record_replay' across apps",
+      "rg -i 'replay' over Model Plane rust, python and go code (generated files excluded)",
+      "rg -i 'eval-lab|eval_lab|make selftest|EVAL_LIVE' over .github/workflows and eval-lab-py",
+      "rg -i 'routing[_ -]?policy|RoutingPolicy|experiment[_ -]?id|ab[_ -]test|a/b' over Model Plane and gateway (gate, admin, experiment terms)",
+      "rg -i 'compaction[_ -]?recall|recall[_ -]?eval|eval[_ -]?harness|task[_ -]?suite|golden' over Model Plane code and docs",
+      "rg -i 'latency[_ -]?budget|path[_ -]?budget|budget_ms|p95|user[_ -]?path' over Model Plane",
+      "rg -i 'compar|candidate|variant|promot' over eval-lab-py src"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/.github/workflows/eval-lab.yml",
+        "line": 8,
+        "why": "CI runs only the credential-free selftest; live evals deliberately excluded.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/python/eval-lab-py/README.md",
+        "line": 3,
+        "why": "README claims A/B comparisons and promotion reports; no such code in src.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/python/eval-lab-py/cases/compaction/13_early_fact_survives_head_summary.yaml",
+        "line": 1,
+        "why": "Compaction eval case: an early fact should survive the head summary.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/python/eval-lab-py/src/eval_lab/metrics.py",
+        "line": 1,
+        "why": "Four metric runners over recorded fixtures; LLM judge optional, skips without it.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/AGENT_QUALITY_PLAN_2026-07-29.md",
+        "line": 301,
+        "why": "Plan says eval-lab is not in CI and should run on change.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/routing_policy_grpc.rs",
+        "line": 124,
+        "why": "Routing policy set: admin or service scope only, version bump, no eval gate.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs",
+        "line": 25,
+        "why": "RoutingPolicy holds budget, complexity and mode table; no experiment or role field.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/tests/replay_deterministic.rs",
+        "line": 1,
+        "why": "Replay here is event-fold determinism, not recorded LLM completions.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/chat-parity-audit.md",
+        "line": 418,
+        "why": "SSE resume replay via Last-Event-Id buffer; transport-level, not inference replay.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-slo/src/lib.rs",
+        "line": 1,
+        "why": "SLO harness: first-token p95, step throughput, checkpoint recovery, context budget.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/tests/slo.rs",
+        "line": 3,
+        "why": "Wires mp-slo against real execute_step; a test harness, not a user-path budget.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/.github/workflows/dataplane-v2-eval-nightly.yml",
+        "line": 3,
+        "why": "Data Plane nightly retrieval-quality gate on self-hosted runner; precedent only.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/.github/workflows/model-plane-rust-ci.yml",
+        "line": 92,
+        "why": "Model Plane CI checks contract goldens and runs cargo tests; no eval stage.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/.github/workflows/sse-taxonomy.yml",
+        "line": 3,
+        "why": "Producer/consumer taxonomy gate on the ChatEvent surface; precedent for required stages.",
+        "kind": "config"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-042",
+    "title": "Model record v2 and role table: one inference-core model record (context, modalities, effort ladder, lifecycle, price, privacy, residency) rendered by a searchable picker, and purpose-tagged role routing for every inference call",
+    "searches": [
+      "rg -i 'ModelRecord|model_record|ModelDescriptor|ListModels|model/list|ModelInfo' over Model Plane proto, rust, go and SPA src",
+      "rg -i 'context_window|max_context|effort_levels|reasoning_effort|supported_efforts|modalities' over Model Plane and SPA src",
+      "rg -i 'ModelPicker|model[-_ ]?picker|model[-_ ]?selector|ModelSelect' over SPA src",
+      "rg 'TITLE_MODEL|FOLLOW_UPS_MODEL|VERIFICATION_JUDGE_MODEL|gpt-4o-mini' over model-gateway src",
+      "rg -i 'memory_extract|RoutingRole|role_slot|purpose_tag|auxiliary|side[_ -]task' over Model Plane rust",
+      "rg 'QUARRY_BROWSER_AGENT_MODEL|resolve_planner_model' over execution-core"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/inference.proto",
+        "line": 493,
+        "why": "ModelInfo: id, provider, one modality, streaming, features, privacy, residency; no context.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+        "line": 431,
+        "why": "ProviderCapabilities holds context and output limits per provider, not per model.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+        "line": 394,
+        "why": "ListModels merges chain, speech, translation and vision catalogues; no context field.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 866,
+        "why": "SPA ModelInfo type: id, name, provider, modality, cost tier, privacy, residency.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx",
+        "line": 172,
+        "why": "Picker disables ZDR-blocked subscription model with tooltip; no search input.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 2683,
+        "why": "groupChatModels buckets models by provider for the picker menu.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 7839,
+        "why": "TITLE_MODEL is a pinned gpt-4o-mini side-task constant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 7894,
+        "why": "VERIFICATION_JUDGE_MODEL is also a gpt-4o-mini constant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+        "line": 258,
+        "why": "Comment: deep research keeps a tier, unlike the pinned TITLE_MODEL.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs",
+        "line": 60,
+        "why": "ModeTable is budget, balance, genius by complexity; no role dimension.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/llm_planner.rs",
+        "line": 113,
+        "why": "Planner model read from QUARRY_BROWSER_AGENT_MODEL env, not routing table.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/vision.rs",
+        "line": 255,
+        "why": "Image model list from OPENAI_IMAGE_MODELS env; no role or purpose tag.",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-033",
+    "title": "Content-safety hardening: an injection normaliser, enforcing semantic screening for web and browser content, one policy check on every memory and skill write, and safe links",
+    "searches": [
+      "rg -i 'nfkc|zero[_ -]?width|confusable|homoglyph|U+E0000|tag[_ -]?block|unicode-normalization' over Model Plane, gateway and SPA",
+      "rg -i 'scan_injection|injection_defense|INJECTION_MARKERS|prompt[_ -]?injection' over Model Plane rust and go",
+      "rg -i 'semantic[_ -]?screen|ContentSafety|shadow|enforc' over model-gateway, inference-core and Model Plane go",
+      "rg 'TrustClass|ExternalWeb|BrowserScraped|ThirdPartyMcp' over Model Plane rust",
+      "rg -i 'special[_ -]?category|sensitive[_ -]?data|card[_ -]?number|credit card|iban|credential' over session-core, crates and model-gateway",
+      "rg -i 'safe[_ -]?link|phish|unsafe[_ -]?url|link[_ -]?warning|noopener' over SPA and Model Plane",
+      "rg -i 'install[_ -]?scan|scan[_ -]?skill|skill[_ -]?(scan|promot)|PromoteSkill|CheckSkillPromotion|learned[_ -]?skill' over Model Plane rust, go and gateway"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+        "line": 64,
+        "why": "Injection defence is a lowercased substring list of 16 phrases.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+        "line": 183,
+        "why": "scan_injection: case-insensitive substring check; no Unicode normalisation first.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+        "line": 206,
+        "why": "TrustClass: OrgInternal, ExternalWeb, BrowserScraped, ThirdPartyMcp.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+        "line": 437,
+        "why": "Full-payload scan with size bound, deadline and fail-closed Degraded posture.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 2382,
+        "why": "Screening wired for web_search, fetch_url and browser_agent; shadow pass alongside.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs",
+        "line": 94,
+        "why": "Semantic ContentSafety pass is shadow-only, sampled at 20 percent by default.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/provenance.rs",
+        "line": 184,
+        "why": "Duplicate injection scanner in execution-core, used by the Do-mode render seam.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "line": 811,
+        "why": "Do-mode render seam screens tool output via provenance::assess.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/retrieval.rs",
+        "line": 495,
+        "why": "Retrieval path applies the same marker scan to retrieved text.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grounding.rs",
+        "line": 946,
+        "why": "Web-page grounding also scans page text and facts for injection markers.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dream_extractor.rs",
+        "line": 134,
+        "why": "Memory extraction excludes credentials and payment data by prompt wording only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_grounding.rs",
+        "line": 90,
+        "why": "Memory grounding pass gated by MEMORY_GROUNDING_ENABLED; default off.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "line": 2125,
+        "why": "Preflight gates ZDR only; no sensitive-content check found in memory writes.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/skill_promotion.go",
+        "line": 142,
+        "why": "Skill promotion gate exists; registry update still returns not-supported error.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+        "line": 1153,
+        "why": "External links carry only rel noopener noreferrer; no safe-link check.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/security_events.rs",
+        "line": 1,
+        "why": "Screening signals published as hash-only security events, never flagged content.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0003_capabilities_registry.up.sql",
+        "line": 298,
+        "why": "safety_policies kinds: pii_filter, content_safety, injection_defense.",
+        "kind": "config"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-049",
+    "title": "Typed run lifecycle events and status cues: retry, turn end, compaction, context-change source chips, thread status, connector incidents",
+    "searches": [
+      "rg -i 'retry_scheduled|RetryScheduled|retry_attempt|turn_end|TurnEnd|outcome[_ ]unknown|context_change|ContextChange|trigger_kind' over Model Plane rust, proto and go",
+      "awk over model-gateway sse_events.rs to list the ChatEvent enum variants",
+      "rg -i 'CompactionItem|compaction_marker|tokens_before|tokens_after|items_condensed' over Model Plane and SPA chat",
+      "rg -i 'unseen|needs[_ -]?you|lastVisited|last_visited|completedAt|completed_at' over SPA chat, agents and dashboard",
+      "rg -i 'retrying|waiting to retry|retry_after_ms|retryAfter' over SPA chat and shared",
+      "rg -i 'incident' over capability-core and SPA integrations",
+      "rg -i 'message_source|MessageSource|source_kind|trigger_source' over Model Plane and SPA"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "line": 147,
+        "why": "ChatEvent variants start here; none are retry, turn-end, compaction or context-change.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "line": 372,
+        "why": "Typed end signals: Stopped with reason; Error with retryable flag.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/compaction.rs",
+        "line": 215,
+        "why": "compact_with_retry retries (3 attempts default); no ChatEvent variant reports it.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+        "line": 205,
+        "why": "outcome_unknown is a reconciliation-only terminal code for lost runs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "line": 536,
+        "why": "Maps unknown inference outcomes to a retryable inference_outcome_unknown code.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs",
+        "line": 1,
+        "why": "Tool-dispatch retry policy; the chat event enum has no retry variant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs",
+        "line": 352,
+        "why": "reattach_context is a conditional tool offered after compaction.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 931,
+        "why": "failureTiming reads retry_after_ms into typed error retryAfterMs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+        "line": 330,
+        "why": "Rate-limit notices show a retry delay; no scheduled-retry row exists.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+        "line": 853,
+        "why": "Work panel shows a needs-you attention note; no unseen-completion state.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+        "line": 99,
+        "why": "RunStatus union: idle, running, paused, done, failed, cancelled; no unseen state.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts",
+        "line": 136,
+        "why": "Memory recall count rendered as recalled N only when non-zero.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0003_capabilities_registry.up.sql",
+        "line": 39,
+        "why": "Capability rows keep an aggregate incident_count integer, not an incident ring.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql",
+        "line": 52,
+        "why": "Space watches exist with source_kind adapters; no trigger chip found in UI.",
+        "kind": "config"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-051",
+    "title": "Make images a governed agent tool: typed generation, an edit endpoint with a mark tool, a second provider, and C2PA provenance",
+    "searches": [
+      "rg -i 'generate_image|image_gen_stream|gpt-image|image_generation|GenerateImage|dall-?e|imagen' over Model Plane, gateway and SPA src",
+      "rg -i 'edit_image|images/edit|inpaint|mask|reference_ids|image_paths|reference image' over Model Plane and SPA src",
+      "rg -i 'c2pa|content[_ -]?credential|claim_generator' over Model Plane and SPA (only hash-string noise found)",
+      "rg -i 'revised[_ -]?prompt|/image|image mode' over Model Plane rust and SPA chat and dashboard",
+      "file listing of inference-core/src/provider for a Gemini image adapter (none present)",
+      "rg '/v1/ai/images|ai_images|generate_image' over model-gateway routes and ZDR feature table"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 1427,
+        "why": "generate_image flag routes the whole turn to image generation, not an agent tool.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 5985,
+        "why": "Image stream hard-codes 1024x1024, standard quality, one image, empty provider hint.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 6200,
+        "why": "Requested image model accepted only if its name contains dall, gpt-image or image.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/vision.rs",
+        "line": 142,
+        "why": "generate_image walks providers, logging a warning and moving on after errors.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/vision.rs",
+        "line": 31,
+        "why": "GeneratedImage carries revised_prompt; response carries model_used and provider_used.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/inference.proto",
+        "line": 51,
+        "why": "GenerateImage RPC and request/response messages exist with an optional model field.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/vision.rs",
+        "line": 255,
+        "why": "Image models come from OPENAI_IMAGE_MODELS env; default gpt-image-1.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 3673,
+        "why": "/v1/ai/images dispatches generate, analyze and ocr; no edit operation.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+        "line": 202,
+        "why": "ZDR feature table refuses generate_image as image_generation.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+        "line": 477,
+        "why": "Generate image is a composer builtin; no revised-prompt display found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+        "line": 5774,
+        "why": "End-to-end test: generate_image emits an attachment and persists it.",
+        "kind": "test"
+      }
+    ],
+    "impression": "partial"
+  }
+]

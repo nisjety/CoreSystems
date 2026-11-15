@@ -1,0 +1,742 @@
+{
+ "category": "Safety, permissions & governance",
+ "items": [
+  {
+   "id": "R-t3-11-01",
+   "title": "Agent-browser governance: real per-run grants, per-site consent, allow/block lists and model-blind logins",
+   "summary": "Mint a real browser-broker grant for every agent browser run (replacing the placeholder session:{id} grant id) whose AllowedDomains come from a per-user site table (control / read-only / no-access) intersected with admin allow/block lists (block wins) and the Space decision. Add a first-action consent card per new domain (allow once / always / read-only) while Quarry keeps rejecting any navigation outside the grant. Phase 2 adds origin-bound secret references so Quarry fills logins and the model only ever sees handles, never credentials.",
+   "whyItMatters": "The browser agent is the Manus/Perplexity-class headline capability and today it cannot start: the gateway sends a fake grant id and the run fails closed with 403. Per-site consent and admin lists are what make users and security teams willing to switch it on, and model-blind logins unlock sites behind a login without leaking credentials into model context, traces or ZDR-restricted logs.",
+   "referenceBestPractice": {
+    "bestSource": "Claude (per-site consent, admin default site policy with allow/block lists, DNS-pinned private origins) plus Perplexity Comet's per-domain Control / Read only / No access model; Manus for model-blind secrets",
+    "others": [
+     "antigravity",
+     "cursor",
+     "manus",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity",
+     "hermes (vault fill re-asserts origin in the injected script)"
+    ],
+    "prevalence": "site governance 7 of 12 sources (table-stakes); model-blind credentials 4 of 12 (common)",
+    "mechanism": "Per (org, user) site table: domain -> {control | read_only | no_access, source}; first action on a new domain asks; admin lists override user lists and block wins; sensitive actions (login, purchase, download, permission grant) always ask; private-network origins only when trusted and resolved IPs match pinned addresses; the per-run grant carries the allowed domains. For secrets: vault items bound to origins, the model types a handle like {{secret:name.field}}, the executor substitutes only when the live frame origin matches, plain typing into password/payment fields is refused and handed to human takeover, and the exact bytes are registered with the redaction boundary."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/go/services/browser-broker/internal/grant/grant.go:26-47,130-156",
+     "Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1-8",
+     "Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235",
+     "Model Plane/rust/services/model-gateway/src/browser_run.rs:138-200",
+     "Model Plane/go/services/capability-core/internal/api/registry_apis.go:345,416-420,805-820",
+     "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:121-122"
+    ],
+    "gap": "The broker grant already carries a canonical AllowedDomains list (max 32) and execution-core classifies login/checkout/form-post/cross-domain/cookie actions into durable approvals, but the gateway sends grant_id 'session:{id}' (domains/browser.rs:1235, verified) so agent runs fail closed. There is no per-site consent memory, no user or admin allow/block list or UI, no site-category screening, and no origin-bound secret substitution. capability-core already has an AAD-bound crypto.Vault and secret-reference scheme for MCP OAuth tokens that a browser secret store can reuse."
+   },
+   "approach": "Model Plane owns site policy and grant minting: add a site_policy table in capability-core (org and user rows, source column, block-wins resolution) and the model-gateway grant issuer from plan tasks E1/E2 (BFF forwards a broker bearer; grant carries canonical AllowedDomains plus run clamps). The consent card reuses the approval flow with the scopes from R-t3-11-02 (once / always writes a site row). Quarry (Ingestion Plane) keeps the 'Model proposes, Quarry executes or rejects' split and re-checks every navigation and frame against the grant. Phase 2: secret references resolved by Quarry from the capability-core vault, bound to origin, with only handles passed through Model Plane.",
+   "effort": "L",
+   "dependencies": [
+    "R-t3-11-02 approval decision scopes",
+    "CHAT_GAP_CLOSURE_PLAN tasks E1/E2/E11 (grant issuer, broker-owned domain policy)",
+    "Owner decision OD13 (hosted-browser domain scope and policy ownership)",
+    "Quarry executor change for secret substitution (phase 2)"
+   ],
+   "planeOwner": "Model Plane (site policy, grant minting); Ingestion Plane (Quarry enforcement, secret substitution); Control Plane (admin lists)",
+   "risks": "Domain lists are coarse against redirects and embedded frames, so Quarry must re-check every navigation and sensitive actions must ask regardless of site mode. The vault is a high-value target: origin binding must fail closed and ZDR runs must never persist secret-bearing frames or traces. Phase 2 (L) is a recommended-tier follow-on; phase 1 (M) is what unblocks the headline capability.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md E1/E2/E11 and OD13 plan the real grant issuer and broker-owned domain policy but it is not built; the per-site consent table, admin allow/block lists and secret vault are not in the plan"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-11-012",
+    "C-t3-11-025",
+    "C-t3-11-027"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 23,
+    "DOC": 6,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-02",
+   "title": "Approvals v2: scoped decisions, denial memory, informative cards and step-up for high-risk effects",
+   "summary": "Extend the approval decision contract (orchestration proto, model-gateway approvals, session-core store) from approve/reject to a scoped decision: once, this run, this thread, or always as a reviewed rule, where an 'always' clicked on a card is stored at session scope until confirmed in settings. Remember denials per run so a rephrased retry of a refused action is refused with the original reason, render cards from per-capability templates (recipients and subject first, duplicate-recipient and truncation warnings, permission delta, raw arguments behind a disclosure), and let admins require a fresh passkey proof before NeverAuto effects execute.",
+   "whyItMatters": "Approvals on the Do page are Approve/Reject only, so every repeated action asks again; approval fatigue pushes users to full access. Scoped decisions keep humans in the loop for new things only, informative cards reduce social-engineering through injected recipients, and denial memory stops retry loops, which together make the agent page usable and trustworthy.",
+   "referenceBestPractice": {
+    "bestSource": "Codex (typed decisions approved / approved_for_session / approved_with_amendment / denied / abort and about 55 versioned card templates) combined with Claude (anti-decoy card, 'always' coerced to session scope, plan fingerprint re-checked at execution)",
+    "others": [
+     "deepseek (no answerer resolves to deny)",
+     "t3code",
+     "manus (permission-delta badges)",
+     "antigravity (denied-action equivalence)",
+     "web-chatgpt (passkey step-up documented)"
+    ],
+    "prevalence": "decision scopes 4 of 12 (common); card content 4 of 12 (common); denial equivalence 1 of 12 (unique); step-up 2 of 12 (differentiator)",
+    "mechanism": "Request {kind, tool, args, reason_code, matched_rule, suggestions[]}; Decision {allow|deny, scope once|session|always, updatedInput?, ruleUpdates[]}; a missing or throwing answerer resolves deny; pending approvals survive restarts. Card renders recipients/subject first from a (connector, tool) template registry, flags duplicate recipient keys and discloses truncation; the app, not the model, writes the plan summary and the executor re-verifies the effect against it. Per-run denial list {rule, resource} compared before each risky call. WebAuthn assertion bound to the approval id before high-risk effects run."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/approvals.rs:1-14",
+     "Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:459-463",
+     "Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476,4558",
+     "Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60",
+     "Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1940",
+     "Model Plane/rust/services/session-core/src/continuation_crypto.rs:1-8",
+     "Control Plane/auth-core/src/auth/auth.ts:1379-1389"
+    ],
+    "gap": "Approvals are durable, restart-safe rows with encrypted exact-effect descriptors and postcondition re-checks (stronger than T3 Code's in-process approvals), but the decision body is only approve/reject with an optional reason (domains/orchestration.rs:459-463). There is no run/thread scope, no rule amendment, no denial memory, and cards show tool name and arguments with partly Norwegian-only strings but no templates, recipient-first or anti-decoy rendering. After approval only three effect kinds are re-executed and the LLM loop does not resume (runtime gap). Passkeys exist in Control Plane auth-core for sign-in only; no step-up bound to approvals was found."
+   },
+   "approach": "Model Plane: extend the approval decision proto with scope and rule_updates; session-core stores run/thread-scoped grants keyed by capability + target hash; execution-core consults them before creating a human approval and keeps a per-run denial list (deterministic same-capability + same-target match first). Constraint from master-ownership-matrix rule 12: scopes change when the user is asked, not who authorises, so every provider effect must still carry a signed per-effect authorisation; ship scopes first for sandbox, workspace and browser effect classes and add a grant-to-authorisation derivation (as for Control-signed scheduled decisions) before provider writes. Templates live in capability-core per provider action and are rendered by the SPA card; step-up reuses the auth-core passkey plugin to issue a signed assertion that execution-core verifies for NeverAuto effects.",
+   "effort": "L",
+   "dependencies": [
+    "LLM-loop resume after approval (runtime category)",
+    "R-t3-11-03 risk classes and NeverAuto set",
+    "integration-corev2 action catalogue metadata for templates",
+    "A rule-12-compatible grant-derived authorisation contract for provider writes"
+   ],
+   "planeOwner": "Model Plane (contract, session-core, execution-core); Frontend Plane (cards); Control Plane (step-up assertion)",
+   "risks": "An 'always' scope silently widening authority: default to session scope, audit every grant and list grants in settings. Template drift from real arguments: bind the card to the encrypted exact-effect descriptor and keep raw arguments behind a disclosure. Step-up adds friction, so reserve it for NeverAuto effects.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md G8 (always-ask on provider writes, effect summaries); claude-hermes-deepseek.md section 13.3 lists editable don't-ask-again rules and a durable approval queue UI as open, not built"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-11-014",
+    "C-t3-11-008",
+    "C-t3-11-015",
+    "C-t3-11-049"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 17,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-03",
+   "title": "Declared tool risk classes, a never-auto set and per-connector allow/ask/block policy",
+   "summary": "Replace the substring classifier is_risky_tool with a declared SideEffectClass (read, read_sensitive, local_mutation, open_world_mutation, external_effect) plus MCP-style hints on every capability, bound in capability-core's trusted map with unknown tools defaulting to external_effect and shared with the frontend action registry. Add a RiskClass::NeverAuto set (payments, sends to new recipients, memory and skill writes, schedule creation, permission raises) that forces a human card in every mode, and make subagent capability sets the intersection of parent and profile. On top, add a connector_tool_policy table (org default, user override, never-allow set from the catalogue) with graduated tiers and write tools defaulting to ask, plus connector write-path safeguards in integration-corev2 (per-user send and recipient throttles, scope-filtered tool exposure, an AI-generated marker on outbound mail, content-free audit).",
+   "whyItMatters": "Risk is decided by lowercase substring matching on tool names (delete, write, send, create ...), which can misclassify tools such as create_artifact and cannot express per-connector trust. A declared taxonomy makes approvals predictable, gives Do-mode a floor no future mode can lower, and lets users enable Gmail/Slack/GitHub/Microsoft connectors with per-tool confidence, which is core to the Manus-like vision.",
+   "referenceBestPractice": {
+    "bestSource": "Manus (five declared side-effect levels plus MCP annotations drive policy) for the taxonomy; ChatGPT (graduated Always ask / read / low-risk / all app permissions) with Claude (per-connector never-allow set, Microsoft 365 write-path throttles) for connector policy",
+    "others": [
+     "claude (static never-auto set, mode-rank ratchet)",
+     "cursor",
+     "web-claudeai",
+     "codexagent (shared vs personal connections)",
+     "web-manus"
+    ],
+    "prevalence": "connector policy 5 of 12 (common); write-path safeguards 4 of 12 (common); taxonomy 1 of 12 (unique); never-auto set 1 of 12 (unique)",
+    "mechanism": "Static map tool -> {side_effect_class, readOnly/destructive/idempotent/openWorld hints}; approval routing keys on class not name. A never_auto set requires a card in every mode and a rank check makes any model-requested permission increase card-only. Policy per (org, user, connector, tool) with tiers derived from declared side effects, default ask for writes, per-connector never-allow tools that wildcards cannot open, enforced server-side per call. Connector side: per-user sliding-window buckets keyed by a hashed principal, recipients charged per send, tools registered only for granted OAuth scopes, denials naming the missing permission."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/permission/mod.rs:77-79,195-260",
+     "Model Plane/rust/services/execution-core/src/integration_tools.rs:8-40,73-102",
+     "Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+     "Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:125-139",
+     "Model Plane/go/services/capability-core/internal/registry/capabilities_store.go:344-425",
+     "Model Plane/rust/services/execution-core/src/capability_policy.rs:350-390",
+     "Model Plane/rust/services/execution-core/src/postcondition.rs:1-10"
+    ],
+    "gap": "execution-core classifies by substring (permission/mod.rs:229-260, verified) with argument-aware nuance only for execute_provider_action via operation_is_write; the autonomy rung table reuses the same classifiers. requires_durable_owner_approval is an always-human class but covers one tool. The frontend registry declares risk, approval and reversibility for 168 actions but does not drive dispatch. There is no user or admin per-connector allow/ask/block setting, only 8 registry actions are model-executable, and no per-user send/recipient throttles, scope-aware exposure or AI-generated marker were found (unverified in integration-corev2). Subagent capability inheritance is unverified."
+   },
+   "approach": "Model Plane: add SideEffectClass and NeverAuto to mp-contracts and the capability-core trusted map; execution-core permission uses the class instead of substrings (and the rung table follows) with a contract test that every registered capability has a class; share the metadata with the frontend registry. capability-core: connector_tool_policy table and never_allow set resolved in EvaluatePolicy, SPA connector settings page with tier selector. Ingestion Plane (integration-corev2): per-principal write/recipient buckets, scope-filtered action lists and typed 'missing permission' errors. Execution-core: subagent capability set = intersection(parent, subagent profile).",
+   "effort": "L",
+   "dependencies": [
+    "integration-corev2 catalogue metadata",
+    "R-t3-11-02 scoped grants for 'allow for this run'"
+   ],
+   "planeOwner": "Model Plane (taxonomy, policy table); Ingestion Plane (write-path safeguards in integration-corev2); Frontend Plane (connector settings)",
+   "risks": "Mislabelling a tool as read: default unknown to external_effect and test coverage. Under master-ownership-matrix rule 12 a write-class tool cannot move to an 'allow' tier until a durable standing-authorisation contract exists, so offer allow tiers for read and local_mutation classes only. Throttles can frustrate bulk use, so make them org-configurable. The write-path safeguards (nice-to-have) can follow the taxonomy and policy table.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md G8 (always-ask in front of every provider write) and G10 (per-bundle consent) cover the write default but not a declared taxonomy or a user/admin per-tool policy"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-11-061",
+    "C-t3-11-018",
+    "C-t3-11-060",
+    "C-t3-11-038",
+    "C-t3-11-039"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 16,
+    "DOC": 6,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-04",
+   "title": "Unattended and scheduled runs: stored approval contract with expiry, non-delegable tools and off-surface notifications",
+   "summary": "Define what happens when nobody can answer: at schedule creation the owner signs an explicit consent card whose approved capabilities are stored on the schedule with an expiry, and at run time an effect proceeds only if it is covered by an unexpired stored consent and its tool is delegable (never-auto tools, browser logins, schedule and memory writes are not); otherwise the run pauses with a durable approval and an instructive denial. Add a consumer for the already-published approval.requested event in Application Plane notification-core so owners get an in-app or web-push notice, with an inline Approve only for low-risk classes, and relay child-run approvals to the parent thread.",
+   "whyItMatters": "Scheduled and background agents are central to the Manus-style vision, but scheduled steps are single no-tool calls today and need a defined approval contract before they receive tools. Long runs also stall silently when a human approval is pending and the tab is closed.",
+   "referenceBestPractice": {
+    "bestSource": "Claude (scheduled tasks store approvedPermissions with expiry, a non-delegable tool set, and notifications that drop the Allow action for high-risk tools) with Hermes (headless modes deny by default with a narrowed toolset and auto-pause on injection hits)",
+    "others": [
+     "antigravity",
+     "web-manus"
+    ],
+    "prevalence": "unattended policy 4 of 12 (common); off-surface approvals 1 of 12 (unique)",
+    "mechanism": "Each schedule stores approvedPermissions [{tool, rule, expiresAt}] captured at creation; at run time a request auto-approves only if every suggested rule is covered, unexpired and the tool is delegable; otherwise pause with an instructive denial; unattended prompts are scanned before execution. On approval_requested push {title, tool, session} with an Approve action only for low-risk classes and a deep link to the card; child runs forward requests to the parent."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/scheduled_step_decision.rs:1-8",
+     "Model Plane/go/services/capability-core/internal/cron/control_authorizer.go",
+     "Model Plane/rust/services/model-gateway/src/approvals.rs:755",
+     "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:119,183-184"
+    ],
+    "gap": "Scheduled effects need Control-signed decisions (stricter than any reference), but scheduled steps are a single no-tool call today and there is no per-schedule stored approval set with expiry or a declared non-delegable list. model-gateway publishes agents.approval.requested on NATS (approvals.rs:755, verified) but a search of apps/ found no consumer in Application Plane notification-core, so no push or email on a pending approval. Whether child-run approvals surface on the parent is unverified."
+   },
+   "approach": "session-core: schedule.approved_capabilities {capability, target pattern, expires_at} written from an explicit consent card at creation. execution-core: unattended runs consult it (after capability policy, before human approval) and otherwise pause with a durable approval; never-delegable list lives in mp-contracts alongside NeverAuto. Application Plane notification-core: new consumer for agents.approval.requested that creates an in-app/web-push notification with ids only (no content), Approve action only for low-risk classes. Scan unattended prompts with the R-t3-11-07 normaliser and auto-pause on hits.",
+   "effort": "M",
+   "dependencies": [
+    "R-t3-11-03 NeverAuto class",
+    "Tools in scheduled steps (runtime category)",
+    "Unattended owner identity (D10)",
+    "Application Plane notification-core consumer"
+   ],
+   "planeOwner": "Model Plane (contract, session-core, execution-core); Application Plane (notification projection)",
+   "risks": "Stale consents: enforce expiry and list them in settings. Approving from a notification without context: restrict to low-risk classes and deep-link to the card. Notification payloads must carry ids only to respect ZDR.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md D10 (unattended owner identity), D11 (cadence floor, quotas, auto-pause, ZDR block) and D9 (notify-me control); stored per-schedule approvals with expiry and notification fan-out are not in the plan"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-11-017",
+    "C-t3-11-016"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 11,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-05",
+   "title": "Unblock Zero Data Retention: attest one provider and run the live proof",
+   "summary": "Complete the operator step Z-40: attest one ZDR-capable provider surface in inference-core with contract evidence and a review-by date (Azure OpenAI and Azure AI Foundry carry separate attestations), run the live proof Z-60 for the org ZDR switch, ship the gateway ZDR notice and SPA wording (Z-41b, Z-20), and only then enable Temporary chat. Keep the own-connection waiver enforcement (Z-15) held until reviewed.",
+   "whyItMatters": "Verevon's ZDR design is the best seen in the comparison (one resolver, signed non-downgradable claim, evidence-bound provider attestation, typed localised refusals, fail-closed propagation across planes), but with no attested provider every ZDR turn is refused and Temporary chat is unavailable. A paper strength becomes a shipped differentiator, and ZDR orgs get service instead of refusals.",
+   "referenceBestPractice": {
+    "bestSource": "Claude (per-product ZDR toggle with propagation notice); ChatGPT and Claude.ai (documented lists of features excluded under ZDR). Verevon's own design already exceeds all three",
+    "others": [
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "prevalence": "3 of 12 sources (differentiator)",
+    "mechanism": "Org or product flag; a feature matrix states what is disabled under ZDR; residency per tenant; admin UI notice that changes take minutes to propagate."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/crates/mp-contracts/src/retention.rs:1-5",
+     "Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs:1-5",
+     "Model Plane/rust/services/inference-core/src/provider/zdr.rs:1-8",
+     "Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12",
+     "Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-118",
+     "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md:112,122",
+     "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/BUILD_PASS_6_8_2026-10-13.md:65"
+    ],
+    "gap": "The design is complete and mostly built dark, but no provider is attested on this stack (open operator and commercial step Z-40), so every ZDR request is refused; the org ZDR switch awaits the live proof; Temporary chat is gated off; the own-connection waiver is designed with Z-15 held 'do not ship'. Everything ships undeployed in a dirty tree."
+   },
+   "approach": "Operator and commercial step, not new code: collect contract evidence for one provider surface, set the attestation fields read by inference-core zdr.rs (artifact names plus review-by date), deploy the already-built Control, BFF and Model Plane waves in the order recorded in BUILD_PASS_6_8 (session-core, then execution-core, then model-gateway; inference-core before any waiver minter), run Z-60 with a ZDR test org, land Z-41b and Z-20 wording, then un-gate Temporary chat in the SPA (chat-retention.ts).",
+   "effort": "S",
+   "dependencies": [
+    "Provider contract evidence (owner and commercial)",
+    "Z-16 before any waiver minter",
+    "Z-41b gateway notice and Z-20 SPA wording"
+   ],
+   "planeOwner": "Model Plane (inference-core attestation); Control Plane (org switch)",
+   "risks": "Attesting without real contractual ZDR would be a compliance failure; attestation must name exact artifacts and expire. Do not enable ZDR orgs before the gateway notice ships.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md (Z-40 operator action, Z-60 live proof) and BUILD_PASS_6_8_2026-10-13.md deploy order; all dark and undeployed"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-11-044"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-06",
+   "title": "Deliver the audit trail and add a compliance query API with SIEM export",
+   "summary": "Deploy the built-but-undeployed session-core audit outbox fixes (publisher fix, requeue function, new metrics), replay the 4,992 stuck events and alert on the terminal-row gauge. Then expose Control Plane Audit Core through a scoped compliance query API with webhook/SIEM fan-out, with each approval event carrying actor, decision, scope, evidence ids and the run proof-bundle id, using ids and hashes only so the log itself respects ZDR.",
+   "whyItMatters": "Every governance claim (approvals, ZDR, connector writes, the 'Used by AI?' Trust Center column) rests on an audit trail that between 2026-09-04 and 2026-10-01 never reached audit-core. Enterprise and regulated buyers expect an immutable, queryable and exportable record of agent actions.",
+   "referenceBestPractice": {
+    "bestSource": "ChatGPT (immutable Compliance Logs Platform plus a stateful API with per-category admin keys) and Perplexity (audit JSON streamed by webhook to Splunk/Slack); Cursor for breadth of recorded events (tool, hook, sandbox, classifier)",
+    "others": [
+     "cursor",
+     "deepseek (counter-example: approvals recorded without actor identity)",
+     "web-chatgpt",
+     "web-perplexity"
+    ],
+    "prevalence": "4 of 12 sources (common)",
+    "mechanism": "Transactional outbox per service -> audit core (append-only, hash-chained) -> query API with scoped admin keys plus webhook/SIEM fan-out; each approval event carries actor, decision, scope and evidence ids."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/session-core/src/audit_publisher.rs:1-8",
+     "Model Plane/rust/services/session-core/migrations/0043_audit_outbox_requeue.sql",
+     "Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md",
+     "Model Plane/go/services/capability-core/internal/registry/capabilities_store.go:553"
+    ],
+    "gap": "The postmortem (2026-10-06) shows 4,992 governed-action events queued in session_audit_outbox never reached audit-core because the broker had no stream for the subject; the broker side is fixed and deployed, while the publisher fix, requeue function and metrics are built and tested but not deployed and the rows are not replayed. No compliance query API or SIEM export was found; the capability registry keeps its own separate audit log."
+   },
+   "approach": "Operator: deploy the publisher fix, run the requeue replay and verify with a fresh read of audit_events; add an alert on mp_session_audit_outbox_terminal. Control Plane: Audit Core compliance API (scoped keys, time and category filters) and webhook export; Model Plane: include approval actor, decision, scope, evidence ids and proof-bundle id in each event, ids and hashes only.",
+   "effort": "M",
+   "dependencies": [
+    "Audit Core in Control Plane",
+    "Operator deployment of the postmortem 0002 fixes"
+   ],
+   "planeOwner": "Control Plane (Audit Core, compliance API); Model Plane (session-core publisher)",
+   "risks": "Audit logs must themselves respect ZDR (ids and hashes only); replay must be idempotent and proven by a fresh read, not assumed.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md (fix built, not deployed, replay not run); the compliance API and SIEM export are not planned"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-11-047"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-07",
+   "title": "Content-safety hardening: injection normaliser and enforcing screening, governed memory and skill writes, safety UX, safe links",
+   "summary": "Add a normaliser in model-gateway moderation.rs before scan_injection (NFKC, strip tag-block and zero-width characters, confusable folding, neutralise forged envelope tags) and promote the semantic ContentSafety pass from shadow to enforcing for ExternalWeb and Browser trust classes after a false-positive evaluation. Scan memory text at write and at load, deny memory writes from subagent and scheduled contexts, add an optional review queue reusing the approvals table and a promotion gate for learned skills, and scan skill or plugin uploads before activation. Extend the typed refusal catalogue to safety categories with a dismissible banner and report action, and add a link interstitial and scheme filter for model-generated links in the SPA.",
+   "whyItMatters": "Injection is the main risk once the browser agent and connectors run, and today's scan is a lowercase substring match that cheap Unicode tricks bypass. Memory that learns about the user (a headline goal) and learned skills are prime persistent-injection targets, and a public chat product needs visible, explainable moderation. Sequence this with R-t3-11-01 so it lands before the browser agent goes live.",
+   "referenceBestPractice": {
+    "bestSource": "Perplexity (most layered documented stack: intent anchoring, screening classifier, containment, runtime monitoring) and Claude (homoglyph-aware scrubber neutralising forged envelope tags) for injection; Hermes for memory and skill write governance (staged entry-pinned writes, review fork limited to an allowlist, install-scan trust matrix)",
+    "others": [
+     "cursor",
+     "deepseek",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai",
+     "codexagent (typed safety errors)",
+     "claude (safety banners)"
+    ],
+    "prevalence": "injection defences 8 of 12 (table-stakes); skill supply chain 5 of 12; moderation UX 4 of 12; memory write governance 2 of 12",
+    "mechanism": "Normalise untrusted text (NFKC, strip U+E0000 tag block and zero-width, neutralise lookalike '<' plus reserved tag names), wrap in a trust-class envelope, tiered pattern scan (strict for context files and memory, advisory for tool results), semantic classifier on external content. Memory write -> scan -> optional staged review pinned to the entry -> apply only if unchanged; subagents and cron cannot write; memory re-scanned when loaded into a prompt. Install pipeline: private copy, hash against allowlist and blocklist, static scan, trust-tier x verdict matrix, previous version serves until the scan passes."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/moderation.rs:183-186",
+     "Model Plane/rust/services/model-gateway/src/semantic_screening.rs:1-10",
+     "Model Plane/rust/services/model-gateway/src/security_events.rs:1-10",
+     "Model Plane/rust/services/execution-core/src/provenance.rs:1-8",
+     "Model Plane/rust/services/session-core/src/dream_extractor.rs:20-40",
+     "Model Plane/go/services/capability-core/internal/llmreviewer/reviewer.go",
+     "Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts:1",
+     "Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx:1153,1275,1279"
+    ],
+    "gap": "Trust-class provenance, a fail-closed scan over the full payload before truncation, hash-only security events, closed-slot memory extraction with an extractor:llm tag and a typed localised refusal catalogue are shipped and ahead of most references. Gaps: scan_injection is a lowercase substring match with no normalisation (moderation.rs:183-186, verified); the semantic pass runs in shadow only; no injection scan of memory text at write or load, no staging or review of memory writes, no learned-skill promotion gate (listed known gap) and no install scanning; no safety banner or report flow found in chat; SPA links carry rel noopener noreferrer but no interstitial or scheme filter was found (unverified)."
+   },
+   "approach": "model-gateway moderation.rs: normaliser plus envelope-tag neutralisation before scan_injection; enforce semantic_screening per trust class once measured. session-core: run the same scan on every memory value before accept and in memory_prefetch assembly, deny memory writes from subagent and scheduled contexts, optional per-user review queue on the approvals table, a promotion gate on the learning reviewer output (capability-core llmreviewer/skillsink). Skills: scan on upload, version pinning, org allowlist (publisher signatures later). Frontend: safety_notice events rendered as banner with report action into Application Plane, link interstitial for model-generated links to new domains, block non-http(s) schemes; keep persistent agent state behind session-core APIs so sandboxes mount no agent config.",
+   "effort": "L",
+   "dependencies": [
+    "Evaluation set for false positives",
+    "Skills/plugin system (extensibility category) for install scanning",
+    "Policy content in capability-core safety_policies"
+   ],
+   "planeOwner": "Model Plane (moderation, session-core memory, skill registry); Frontend Plane (banners, link safety)",
+   "risks": "Over-blocking legitimate pages: enforce by trust class with measured false positives. Review queues nobody reads: default to auto-accept with visible provenance. Scanners give false confidence, so state the trust model. Over-moderation hurts B2B usefulness.",
+   "tier": "recommended",
+   "significance": 4,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "claude-hermes-deepseek.md section 13.4 recommends Hermes-style install-versus-load governance and scanning of agent-authored items (not built); a learned-skill promotion gate is a listed known gap"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-11-022",
+    "C-t3-11-021",
+    "C-t3-11-020",
+    "C-t3-11-023",
+    "C-t3-11-053",
+    "C-t3-11-041"
+   ],
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 50,
+    "DOC": 13,
+    "INF": 1
+   }
+  },
+  {
+   "id": "R-t3-11-08",
+   "title": "Named agent modes, org policy registry with locks, lockdown profile and persisted hooks",
+   "summary": "Add a typed AgentMode (ask every time / allow reads / workspace write / full access) in mp-contracts that resolves to the existing posture plus autonomy rung, persisted per thread or Space with an org-capped default and shown in the Do composer; model-gateway clamps to min(org cap, user choice), renders the effective policy into the system prompt and announces changes. Build a typed, versioned Control Plane agent-policy registry (allowed modes, browser/connector/MCP enablement, egress tier, memory, scheduled agents, lockdown) with a fail-closed value per key, tighten-only resolution, a signed snapshot read at run start and visible lock states, with Lockdown as a profile clamp. Persist hook rules in capability-core and pass them to the Do-mode loop, and add one shared elevated-risk badge plus a persistent banner while a run holds the top rung.",
+   "whyItMatters": "Do-page users get one understandable control instead of an invisible server profile, enterprises can cap autonomy, and a fail-closed registry stops silent widening when configuration breaks. Admin-defined hooks currently never run on Do runs because the loop passes an empty hook context.",
+   "referenceBestPractice": {
+    "bestSource": "Codex (typed mode vocabulary with a granular per-effect approval config, full-access confirmation listing risks) for modes and friction; Claude (schema-as-source registry with a fail-closed value per key, tighten-only remote config) for the registry; ChatGPT for Lockdown mode and Requirements-versus-Defaults admin framing",
+    "others": [
+     "antigravity (presets map to settings bundles, Strict mode)",
+     "cursor",
+     "deepseek (policy meaning injected into the prompt)",
+     "t3code",
+     "manus",
+     "web-claudeai",
+     "web-perplexity",
+     "hermes"
+    ],
+    "prevalence": "named modes 8 of 12 and admin registry 7 of 12 (table-stakes); elevated-risk labels 6 of 12 (common); lockdown 3 of 12 (differentiator)",
+    "mechanism": "Enum of modes, each resolving to {sandbox, approval policy per effect class, reviewer}; stored per thread with an org default; admin requirements remove disallowed modes from the picker; the server resolves the effective bundle at run start. Registry key = {schema, default, failClosedValue, scopes, lockable, restrictiveDirection}; merge org requirement over org default over user choice, most restrictive wins; invalid or unreadable -> failClosedValue; UI shows managed-by-organisation. Lockdown = boolean profile that forces approval on every effect and disables open-world egress tools and remote image rendering."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/profile.rs:1-20,95,119",
+     "Model Plane/rust/services/execution-core/src/permission/mod.rs:6-20",
+     "Model Plane/rust/crates/mp-contracts/src/autonomy.rs:1-60",
+     "Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2536-2542",
+     "Model Plane/rust/services/execution-core/src/hook/mod.rs:1-18,113",
+     "Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1923-1927",
+     "Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2032-2057",
+     "Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:448-497",
+     "Model Plane/go/services/capability-core/internal/api/capabilities.go:52-76"
+    ],
+    "gap": "Posture is server-resolved per profile (chat=auto with read-only tools, Do and deployed_agent=ask) and the user can only tighten it; the autonomy rung is chosen only on plan approval and DangerFullAccess requires a typed justification of 12 or more characters. Missing: a persisted named mode selector per thread or Space (composer not verified), an org default or cap, a typed registry with per-key fail-closed values and lock states (Control Plane admin covers members, SSO, org security, trust and quotas; capability-core has per-capability rollout and scopes), a lockdown profile, a persistent banner or shared elevated-risk vocabulary (rung labels are Norwegian-only), a durable hook store (hook rules live in an in-memory gateway registry and Do passes an empty hook_context, verified at agent.rs:1923-1927), and verification that the model is told its effective policy."
+   },
+   "approach": "mp-contracts: AgentMode enum mapped to posture plus rung (no auto-review mode until R-t3-11-12 is ruled on), persisted on the thread in session-core, selectable in the Do composer. Control Plane owns the registry schema (shared Rust/Go JSON schema, start with 10 to 15 keys) and issues a signed org policy snapshot that model-gateway reads at run start and clamps against (like Space decisions); the SPA renders lock states from the same schema. Lockdown clamps the tool catalogue (drops web_fetch, browser, provider writes), forces ask and disables remote image rendering. capability-core persists hook rules and execution-core passes them into hook_context for Do runs. Prompt builder renders posture, rung and network tier and emits a system note on change; frontend adds an ElevatedRiskBadge with an en/no copy catalogue and a run-header banner driven by the effective rung from the run stream.",
+   "effort": "L",
+   "dependencies": [
+    "R-t3-11-03 risk classes",
+    "R-t3-11-02 scoped grants (for the allow-reads mode)",
+    "Control Plane signed policy snapshot"
+   ],
+   "planeOwner": "Control Plane (registry, snapshot); Model Plane (mode resolution, hooks, prompt); Frontend Plane (selector, banner, lock states)",
+   "risks": "A full-access mode in a hosted product enlarges blast radius, so ship it behind admin opt-in. Schema sprawl. Banner fatigue: reserve for the top rung. Lockdown can leave users with a crippled product, so explain locks clearly.",
+   "tier": "recommended",
+   "significance": 4,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "claude-hermes-deepseek.md section 13.3 status note (2026-08-24): the autonomy ladder and plan-approval control are built; the durable hook store is a listed known gap in the planned-decisions baseline"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-11-001",
+    "C-t3-11-002",
+    "C-t3-11-003",
+    "C-t3-11-035",
+    "C-t3-11-042",
+    "C-t3-11-058"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 39,
+    "DOC": 10,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-09",
+   "title": "Editable permission rules, CEL policy and an MCP tool gate with consent receipts",
+   "summary": "Add a rule store in capability-core (org, Space, user and thread scopes) over typed targets such as read_url(domain), send_mail(recipient) and command(prefix), resolved strictest-wins (deny > ask > ask-session > allow, with a wildcard allow surviving a merge only if both layers state it), so 'don't ask again' shows and edits the exact rule with its scope and org-scope rules are audited admin-gated changes. Optionally accept admin CEL expressions evaluated inside EvaluatePolicy (any deny wins, validated with dry-run), and when MCP tools are enabled add one execution-core gate that spends single-use consent receipts bound to the SHA-256 of the canonical arguments, reusing the approval descriptors.",
+   "whyItMatters": "Editable 'don't ask again' rules are an acknowledged open item and the deterministic way to cut approval fatigue without an LLM in the permission path. Verevon already has the central decision point (capability-core EvaluatePolicy with signed Allow evidence and fail-closed unknown tools) that Claude is only now adding externally, and MCP is how users bring their own tools.",
+   "referenceBestPractice": {
+    "bestSource": "Antigravity (action(target) grant store with deny > ask > allow and per-conversation grants) with Claude (strictness lattice and strictest-wildcard folding, CEL rules and an external decision endpoint that fails closed, MCP gate with single-use consent receipts)",
+    "others": [
+     "claude",
+     "antigravity"
+    ],
+    "prevalence": "declarative rules 2 of 12 (differentiator); CEL policy and MCP gate 1 of 12 each (unique)",
+    "mechanism": "Rule = {action, target-pattern, effect deny|ask|ask_session|allow, scope, source}; exact match first, else fold the strictest over matching wildcards; deny from any scope wins; grants recorded per conversation. CEL rules {id, condition over (tool, args, session, user), action, reason}, any deny wins. MCP: wrap the transport, reject malformed frames and unlisted tools, mint a short-lived receipt (session, tool, sha256(canonical args)) on approval and execute only by spending a live matching receipt; reserve internal server-name prefixes."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/capability_policy.rs:737-840",
+     "Model Plane/go/services/capability-core/internal/policy/engine.go",
+     "Model Plane/rust/services/execution-core/src/hook/mod.rs:1-18",
+     "Model Plane/rust/services/model-gateway/src/tool_loop.rs:625-645",
+     "Model Plane/go/services/capability-core/internal/api/mcp_dns_revalidator.go"
+    ],
+    "gap": "capability-core EvaluatePolicy returns Allow/Ask/Deny per capability with Ed25519-signed Allow evidence and the hook engine supports allow/deny/ask globs, but there is no user- or admin-authored rule set over typed targets, no ask-session level and editable don't-ask-again is not built. MCP tool names are denied by the inline loop (tool_loop.rs:625-645, verified) and execution-core rejects dynamic MCP names until capability-core provides a durable binding, so none of the MCP gating exists yet; nine capabilities sit in an unattested quarantine baseline."
+   },
+   "approach": "capability-core: rules table keyed by capability id plus target pattern with strictest-wins resolution in Go; execution-core passes the target (domain, recipient, path) in EvaluatePolicy and surfaces the matched rule and reason on denials and cards; SPA Rules settings page (reusing R-t3-11-02 scoped grants as the producer of rules). Optional cel-go rules per org inside EvaluatePolicy. MCP gate after capability-core issues per-tool capability ids: execution-core spends argument-hash receipts built on the existing exact-effect descriptors, with reserved server-name prefixes in capability-core.",
+   "effort": "L",
+   "dependencies": [
+    "R-t3-11-02 decision scopes",
+    "R-t3-11-03 side-effect classes",
+    "capability-core MCP binding (for the gate)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Wildcard allows can silently widen authority: strictest-wins, audit every rule change and always show scope. Rule errors can lock users out, so validate and dry-run. Under master-ownership-matrix rule 12 an 'allow' rule for a provider write still needs a signed per-effect authorisation. MCP servers can return injected content, so combine with R-t3-11-07.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "claude-hermes-deepseek.md section 13.3 records editable don't-ask-again rules as an open item; no scheduled task found"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-11-004",
+    "C-t3-11-037",
+    "C-t3-11-040"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 14,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-10",
+   "title": "Sandbox egress tiers, per-call denial transparency and a credential-injecting egress proxy",
+   "summary": "Add an org and user network_tier setting (off / package registries only / allowlisted domains / all) in capability-core, stamped on the sandbox lease and mapped by execution-core to the existing fail-closed MpNetworkPolicy, backed by a deployed egress proxy with a curated package-registry allowlist; the model is told the current tier. Classify bwrap and Landlock denials (EROFS, EACCES, EPERM, network disabled) after runner-failure rules, attach sandbox {mode, enforcement, denied} to tool results and the trace, and render a 'blocked by sandbox' chip. Later extend the proxy to swap per-lease opaque tokens for real credentials per host so sandboxed code can call authenticated APIs without holding secrets.",
+   "whyItMatters": "Data analysis that needs pip, npm or public APIs is a common request but code_interpreter ships with no network, and tiers make it safe to offer. Telling the model and the user that a failure was a policy denial stops the model from 'fixing' code that failed for policy reasons and matches Verevon's transparency contracts and the DeepSeek reference goal.",
+   "referenceBestPractice": {
+    "bestSource": "Claude.ai (four egress tiers with plan-dependent defaults) and Manus (admin policy sets with glob and CIDR applied to sandbox and browser) for egress; DeepSeek (enforcement reported as full or partial per call, denial signatures matched only after runner-failure rules) for transparency; Antigravity (TLS-intercepting proxy with fine-grained resource grants) for credential injection",
+    "others": [
+     "cursor",
+     "codexagent (violations recorded centrally)",
+     "hermes (iron-proxy token swap)",
+     "web-manus",
+     "web-claudeai"
+    ],
+    "prevalence": "egress tiers 3 of 12 and denial transparency 2 of 12 (differentiator); credential isolation 5 of 12 (common)",
+    "mechanism": "Policy set {mode allowlist|blocklist, patterns[], cidrs[]} per org, a tier enum on the sandbox lease enforced by a proxy (domains) plus a net namespace (off), changes applying to new leases. Backend returns {enforcement full|partial, denialSignatures, runnerFailureRules}; results carry sandbox {mode, denied}. Sandbox gets HTTPS_PROXY plus a CA; the proxy maps an opaque token to the real credential per host and checks requests against granted resource scopes."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/policy.rs:23-46",
+     "Model Plane/rust/services/execution-core/src/sandbox.rs:182-187,210-222,271-300",
+     "Model Plane/rust/services/model-gateway/src/tool_loop.rs:4356-4358",
+     "Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-34"
+    ],
+    "gap": "MpNetworkPolicy has Disabled and AllowDomains variants and the code requires fail-closed behaviour without an egress proxy; code_interpreter ships with no network and the executor never forwards service credentials to model-authored code. A SandboxCapabilityProfile reports backend, egress and credential_mode (sandbox.rs:271-300) but the ledger records no consumer of the full/partial probe, and no per-call denial marker or signature classification was found. No org-facing tier setting, package-registry tier or deployed egress proxy was found. Child-process environment hygiene is already satisfied: bwrap launches with --clearenv plus a --setenv allowlist (sandbox.rs:182-187, verified)."
+   },
+   "approach": "capability-core org setting network_tier (key in the R-t3-11-08 registry); sandbox-manager stamps it on the lease; execution-core maps it to MpNetworkPolicy and deploys an egress proxy with a package-registry allowlist and full egress logging. execution-core classifies bwrap/Landlock denials, attaches sandbox {mode, denied, enforcement} to results and the run trace and surfaces the probe result; SPA shows the chip. Credential-injecting proxy: per-lease opaque tokens resolved by sandbox-manager, scoped per resource, as a later phase.",
+   "effort": "M",
+   "dependencies": [
+    "Egress proxy deployment",
+    "R-t3-11-08 registry key for the tier"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Package registries are an exfiltration and supply-chain channel, so log all egress. TLS interception adds complexity for the credential proxy. Report partial Landlock ABI support honestly.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Model Plane/docs/decisions/ledger.md (2026-08-26) records the sandbox full/partial vocabulary as an open design call: the probe exists but no Go consumer reads it"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-11-031",
+    "C-t3-11-034",
+    "C-t3-11-030"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 5,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-11-11",
+   "title": "Enterprise compliance posture: retention windows and legal hold, data-use disclosure, regime tags, sharing policy, telemetry scrub, signed releases",
+   "summary": "Add a Control Plane retention policy per org and surface with a legal-hold flag that a session-core sweeper obeys (dry-run and audited), propagating deletes to Data Plane indexes and derived memory, and finish Temporary chat once ZDR is attested. Show each provider's training and data-use posture in the model picker from capability-core provider metadata, generalise the ZDR feature-gate pattern into org regime tags in the Control-signed posture, design share links with an org-only default, an admin policy key and a ZDR refusal, scrub telemetry through a typed event registry at the OTel exporter, and build and sign a release artifact in CI with SHA-pinned actions and cargo-deny/govulncheck gates.",
+   "whyItMatters": "Enterprises require retention windows and legal hold before deploying chat broadly, and a signed reproducible release is a prerequisite for credible security claims to enterprise buyers. Most pieces reuse designs Verevon already has (ZDR gate matrix, erasure consumers, privacy-tier routing, hash-only security events).",
+   "referenceBestPractice": {
+    "bestSource": "Claude (policy-driven retention per surface with legal hold and a headless sweep; sticky HIPAA verdict gate; telemetry scrub framework); Cursor (purpose-by-classification privacy matrix); Hermes (SHA-pinned dependencies, release-age check)",
+    "others": [
+     "web-chatgpt",
+     "web-manus",
+     "web-perplexity",
+     "web-claudeai (org-only sharing)",
+     "deepseek",
+     "t3code",
+     "antigravity",
+     "manus"
+    ],
+    "prevalence": "retention 4 of 12, telemetry privacy 5 of 12, release integrity 5 of 12 (common); data-use controls 3 of 12 (differentiator); regime tags and sharing governance 1 of 12 each (unique)",
+    "mechanism": "Retention policy per org and surface, a sweep deleting inactive sessions past the window unless on hold, deletions propagating to search indexes and derived memory. Org taints from the server latch a restricted verdict and a gate throws a typed error for listed surfaces. Typed telemetry events with scrubbers per sink. Lockfiles with exact pins, CI actions by SHA, minimum release age, signed artifacts with rollback."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "Model Plane/rust/services/session-core/src/gdpr.rs:1-8",
+     "Model Plane/rust/services/session-core/src/space_deletion_reconciler.rs:1-8",
+     "Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:6-20",
+     "Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql:21",
+     "Model Plane/rust/crates/mp-contracts/src/retention.rs:1-5",
+     "Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12",
+     "Model Plane/rust/crates/mp-contracts/src/dataplane_posture.rs:1-5",
+     "Model Plane/rust/services/model-gateway/src/security_events.rs:1-10",
+     "Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:709-770",
+     "Model Plane/scripts/release-artifact.sh"
+    ],
+    "gap": "GDPR org and user erasure and Space deletion reconciliation are shipped, and privacy tiers route by residency and contract with ZDR as a non-downgradable claim. Missing or unverified: org-configurable retention windows and legal hold for threads and runs; a user-visible per-provider training and data-use statement; regime tags beyond ZDR and residency; share links (not built, and Space access must never widen an owner-plane ACL); an audit of product analytics and frontend telemetry (only hash-only security events verified); and a signed release candidate with rollback (artifact v3 tooling exists but none has been built; dependency pinning not audited)."
+   },
+   "approach": "Control Plane: retention policy schema and legal-hold flag; session-core retention sweeper (extend gdpr.rs and the deletion reconciler) with dry-run, audit and propagation to Data Plane and memory consumers. capability-core provider metadata for the data-use label; regime tags added to the Control-signed org posture and checked with the zdr_features gate pattern. Share links designed in session-core (org-only default, admin policy key, ZDR refusal). Support Plane: typed telemetry event registry scrubbed at the OTel exporter; CI builds and signs the release artifact, pins Actions by SHA and adds dependency gates.",
+   "effort": "L",
+   "dependencies": [
+    "Control Plane retention policy",
+    "R-t3-11-05 ZDR attestation (for Temporary chat)",
+    "Share links (chat category)",
+    "R-t3-11-06 audit delivery for deletion and hold events"
+   ],
+   "planeOwner": "Control Plane (retention policy, regime tags); Model Plane (sweeper, provider metadata, share links); Support Plane (telemetry, release pipeline)",
+   "risks": "Accidental mass deletion: dry-run and audit. Do not claim signed releases before a signed candidate with rollback exists. Share links must never widen an owner-plane ACL. Several sub-workstreams are independent and can be sequenced separately, retention and legal hold first.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Temporary chat is built but gated by ZDR attestation (Z-40); Model Plane/scripts/release-artifact.sh exists without a signed candidate; an external audit is listed as owner-only and planned"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-11-045",
+    "C-t3-11-043",
+    "C-t3-11-050",
+    "C-t3-11-051",
+    "C-t3-11-046",
+    "C-t3-11-056"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 30,
+    "DOC": 8,
+    "INF": 1
+   }
+  },
+  {
+   "id": "R-t3-11-12",
+   "title": "Tighten-only runtime monitors: asynchronous action reviewer and information-flow control",
+   "summary": "If the owners revisit the standing 'no LLM on the permission path' ruling for a restricted role, add an asynchronous reviewer between capability policy and the human card that can only deny or escalate and never grant, fed user turns plus the proposed tool call and never tool outputs, using a versioned rule set (must-name intent-clearing rules, agent-authored argument provenance, deterministic forced-card checks) and failing closed to a human card. Separately, add admin-defined data classification on threads and connectors with session taint and approval on downward flows, built from the existing restricted-context write block and privacy tiers.",
+   "whyItMatters": "A trajectory monitor is a second line of defence against injection-driven actions in Do-mode, and classification-aware flow control stops confidential Data Plane content leaking to Slack or email through agents. Neither is needed to make approvals usable: that is delivered deterministically by R-t3-11-02, -03 and -04. The comparator rated the reviewer priority (7 of 12 sources) but Verevon's architecture rules exclude the approval-granting form, so it is re-tiered here.",
+   "referenceBestPractice": {
+    "bestSource": "Codex Guardian v2 (asynchronous trajectory scoring with thresholds, gating later actions, fail closed) plus Claude (classifier policy discipline: must-name rules, tool-result blindness, forceAsk escalations) for the reviewer; Manus (admin classification levels, per-connector input and output levels, approval on downward flow) for flow control",
+    "others": [
+     "antigravity (vet_data_flow, denied-action equivalence)",
+     "cursor",
+     "deepseek",
+     "hermes (consecutive-denial circuit breaker)",
+     "web-chatgpt",
+     "claude"
+    ],
+    "prevalence": "auto-review 7 of 12 (table-stakes elsewhere); classifier policy text 1 of 12 (unique); flow control 3 of 12 (differentiator)",
+    "mechanism": "Reviewer gets user messages plus proposed tool name and arguments (not tool outputs) and a policy prompt, returns {decision, reason, risk 0..1}; allow below a threshold, escalate above it, deny on clear violation; N consecutive denials pause the run; reviewer failure fails closed to a human card; every verdict is logged. Flow control: ordered levels, a session level that rises when it reads higher-classified data, connector max input levels, writes above the destination level need approval or are blocked, downgrades explicit and audited."
+   },
+   "verevonToday": {
+    "status": "absent",
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/permission/mod.rs:160-181,229-260",
+     "Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql:21",
+     "harness-adoption-execution-plan.md:914",
+     "claude-hermes-deepseek.md:1278",
+     "apps/master-ownership-matrix.md:168"
+    ],
+    "gap": "No reviewer model exists; risk is a coarse substring classifier. The repo has a standing decision against LLM-on-the-permission-hot-path (HAP WS-3, CHD 13.3 anti-pattern) and ownership-matrix rule 12 says effectful calls need a signed durable authorisation, so an LLM auto-approve tier is excluded. Flow control is partial: a consent-to-disclose predicate, a restricted-context write block and privacy-tier routing exist, but no admin-defined classification with session taint."
+   },
+   "approach": "execution-core: Reviewer step after EvaluatePolicy using a cheap inference-core route; the verdict can only lower Allow to Ask or Deny, consecutive denials pause the run, verdicts go to the run trace and audit outbox, ZDR runs use a ZDR-attested reviewer or force a human, and NeverAuto and hard floors stay outside the classifier. Policy text is versioned data in capability-core with red-team fixtures. Flow control: Data Plane labels documents, Model Plane raises a thread's level on retrieval, capability-core stores connector levels, execution-core checks before provider writes and routes to HITL with an explicit audited downgrade.",
+   "effort": "XL",
+   "dependencies": [
+    "Owner ruling revisiting HAP WS-3 and ownership-matrix rule 12 for a tighten-only role",
+    "R-t3-11-03 risk classes",
+    "R-t3-11-07 semantic screening",
+    "Data Plane document labels"
+   ],
+   "planeOwner": "Model Plane (reviewer, taint checks); Data Plane (document labels); Control Plane (classification levels)",
+   "risks": "Conflicts with the standing decision if it ever grants; keep it tighten-only and asynchronous. Classifier false negatives under injection and policy drift from tool semantics. Taint over-propagation makes threads unusable, so provide a reviewed downgrade.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-11-006",
+    "C-t3-11-007",
+    "C-t3-11-009"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 19,
+    "DOC": 8,
+    "INF": 0
+   }
+  }
+ ],
+ "dropped": [
+  {
+   "cluster": "C-t3-11-005",
+   "reason": "Not an IDE: commands run only in a hermetic bwrap sandbox with no network, so tree-sitter command parsing adds little; the substring classifier is replaced by declared side-effect classes in R-t3-11-03. Revisit if networked process_* ships."
+  },
+  {
+   "cluster": "C-t3-11-026",
+   "reason": "Agent payments with one-time cards is unique to Manus, has no planned Verevon payment capability and a large fraud and compliance surface; revisit only after the browser secret vault (R-t3-11-01) and step-up (R-t3-11-02) exist."
+  },
+  {
+   "cluster": "C-t3-11-029",
+   "reason": "Already satisfied: bwrap launches with --clearenv and an explicit --setenv allowlist (SRC execution-core/src/sandbox.rs:182-187) and the executor never forwards service credentials to model-authored code; only a contract test is left, noted in R-t3-11-10."
+  }
+ ],
+ "strengthsToKeep": [
+  "Service authority and tenancy are ahead of every reference: fail-closed RS256/JWKS on every service, authorize_rpc over every RPC and per-audience delegated bearers (Model Plane/rust/services/model-gateway/src/grpc.rs:271, auth.rs:1-20). Remaining gaps to track: NATS without mTLS and the org quota failing open on an org-core outage (Model Plane/rust/services/model-gateway/src/org_quota.rs:1-12).",
+  "ZDR design is the best seen: one resolver, a signed non-downgradable claim, evidence-bound provider attestation, typed localised refusals and a fail-closed feature matrix (Model Plane/rust/services/inference-core/src/provider/zdr.rs, mp-contracts/src/zdr_refusal.rs, model-gateway/src/zdr_features.rs).",
+  "Approvals are durable and restart-safe with encrypted exact-effect descriptors, postcondition read-back and a post-approval delivery worker, stronger than T3 Code's in-process approvals (Model Plane/rust/services/model-gateway/src/approvals.rs:1-14, execution-core/src/approval_delivery_worker.rs, session-core/src/continuation_crypto.rs, execution-core/src/postcondition.rs).",
+  "Per-call autonomy ladder (read_only, workspace_write, danger_full_access) with a mandatory written justification for the widest rung, derived from the same classifiers as the posture gates (Model Plane/rust/crates/mp-contracts/src/autonomy.rs:1-60, execution-core/src/permission/mod.rs:100-160).",
+  "Capability-core is a central policy decision point: Allow needs Ed25519-signed evidence and unknown tools fail closed (Model Plane/rust/services/execution-core/src/capability_policy.rs:737-840, go/services/capability-core/internal/policy/engine.go).",
+  "Server-side kernel sandbox (bwrap with Landlock/seccomp, boot probe, --clearenv allowlist, egress disabled by default) and Space-scoped workspace leases (Model Plane/rust/services/execution-core/src/sandbox.rs, deploy/seccomp-bwrap.json, go/services/sandbox-manager/internal/lease/lease.go).",
+  "Prompt-injection provenance: trust-class envelope, fail-closed scan over the full payload before truncation, hash-only security events (Model Plane/rust/services/execution-core/src/provenance.rs:1-8, model-gateway/src/security_events.rs:1-10).",
+  "Browser architecture rule 'Model proposes, Quarry executes or rejects' with a broker-owned immutable AllowedDomains policy per grant and risk-classed durable approvals (Model Plane/go/services/browser-broker/internal/grant/grant.go:26-47, execution-core/src/browser_agent/browser_risk.rs).",
+  "SSRF guards with DNS revalidation and secret/PII redaction on Rust and Go sides (Model Plane/go/services/capability-core/internal/api/mcp_dns_revalidator.go, rust/services/execution-core/src/scrub.rs, go/services/sandbox-manager/internal/redact/redact.go).",
+  "HTML artifacts render in an opaque-origin sandboxed iframe (Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519), and Dreaming memory extraction uses closed slots with an extractor:llm provenance tag (Model Plane/rust/services/session-core/src/dream_extractor.rs:20-40).",
+  "Engineering honesty culture: decision ledger and candid postmortems (Model Plane/docs/decisions/ledger.md, docs/postmortem/0002-session-audit-trail-never-delivered.md), and Control-signed per-effect decisions for scheduled and watch runs, stricter than any reference (Model Plane/rust/services/execution-core/src/scheduled_step_decision.rs:1-8)."
+ ]
+}

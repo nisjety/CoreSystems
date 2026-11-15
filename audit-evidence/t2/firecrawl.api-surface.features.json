@@ -1,0 +1,2142 @@
+[
+  {
+    "id": "firecrawl-api-surface-001",
+    "category": "Acquisition API surface",
+    "name": "Synchronous scrape returning the finished document",
+    "what": "POST /v2/scrape runs the whole scrape inside the HTTP request and returns the finished Document (markdown, metadata, requested formats) as {success,data}; there is no job to poll for the common case.",
+    "how": "scrapeController validates with scrapeRequestSchema, resolves Safe Mode, threat protection, permissions and per-key restrictions, then builds an in-memory NuQ job with skipNuq:true and calls processJobInternal inside teamConcurrencySemaphore.withSemaphore (lock wait capped at 2/3 of the request timeout). Response metadata carries concurrencyLimited and concurrencyQueueDurationMs; rawHtml is stripped unless requested; scrape_id is only echoed at top level for origin 'website' (clients read metadata.scrapeId).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:364",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:443",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:457",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:254"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry /v1/scrape returns artifact references (html/markdown fetched via GET /v1/artifacts/:id) and has no formats, timeout or maxAge fields; an inline-document response contract is the biggest ergonomic gap for model and SDK callers.",
+    "notes": "Quality 5: one call, deterministic envelope, sync semantics with explicit queue-wait telemetry. Quarry baseline section 1 confirms the thin Quarry scrape request (url, prev_fingerprint, cache, zdr, privacy, signals, ingest, render.*)."
+  },
+  {
+    "id": "firecrawl-api-surface-002",
+    "category": "Acquisition API surface",
+    "name": "Strict scrape option schema (one options object reused everywhere)",
+    "what": "A single scrape-options object (formats, onlyMainContent, onlyCleanContent, includeTags, excludeTags, waitFor, mobile, parsers, actions, location, skipTlsVerification, removeBase64Images, fastMode, blockAds, proxy, maxAge, minAge, storeInCache, lockdown, checkPromptInjection, safeMode, redactPII, threatProtection, auditMetadata, profile, timeout) is embedded in scrape, batch, crawl, search, extract, monitor targets and parse.",
+    "how": "zod strictObject scrapeOptionFields (unknown keys rejected with a custom 'review the v2 API documentation' message); baseScrapeOptions adds refinements (profile cannot combine with lockdown, checkPromptInjection is incompatible with rawBase64); each endpoint safeExtend()s it. SDKs keep SDK-only knobs (autoResume) off this type so they never leak onto the wire of strict endpoints.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:762",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:95",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:850",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/methods/scrape.ts:60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry should define one reusable scrape-options contract (not per-route ad hoc fields) so crawl, batch, search hydration and schedules inherit the same knobs.",
+    "notes": "Strictness is double-edged: it catches typos but makes every new option a coordinated SDK release (see SDK parity record)."
+  },
+  {
+    "id": "firecrawl-api-surface-003",
+    "category": "Acquisition API surface",
+    "name": "Option normalisation side effects (timeouts, waits, TLS default)",
+    "what": "Requests are silently adjusted: json or changeTracking formats raise the default 30 s timeout to 60 s, proxy stealth/enhanced/auto raise it to 120 s, changeTracking forces waitFor >= 5000 ms, and skipTlsVerification defaults to true unless custom headers or actions are present.",
+    "how": "extractTransformImpl and applyScrapeOptionsDefaults post-process the parsed options; waitForRefine requires waitFor <= timeout/2; actions are capped at 50 and total wait (waitFor + wait actions) at 60 s.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:908",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:950",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:249",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:250"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Hidden defaulting (especially skipTlsVerification=true) is a security-relevant surprise; Verevon should echo effective options in its response if it copies the pattern.",
+    "notes": "Quality 3: pragmatic but undocumented in the in-repo spec; the TLS default is a notable footgun."
+  },
+  {
+    "id": "firecrawl-api-surface-004",
+    "category": "Acquisition API surface",
+    "name": "Retrieve a past scrape by id",
+    "what": "GET /v2/scrape/:jobId returns the stored Document of an earlier scrape owned by the caller's team until its access row expires.",
+    "how": "scrapeStatusController looks up an operational job-access row, compares the normalised team id (keyless callers map to a placeholder UUID), fetches the stored return value; refused with 400 for teams forced into zero data retention.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-status.ts:34",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:271"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry artifacts are retrievable but there is no job-scoped re-read of a scrape result; a team- and ZDR-aware result-by-id is cheap and enables the interact-on-scrape pattern.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-005",
+    "category": "Acquisition API surface",
+    "name": "Interact on a finished scrape (scrape-bound browser session)",
+    "what": "POST /v2/scrape/:jobId/interact opens (or reuses) a live browser on the page of an earlier scrape and runs either a natural-language prompt or code; DELETE stops the session and returns duration and credits billed.",
+    "how": "Request: prompt (<=10 000 chars) or code (<=100 000 UTF-8 bytes), language node|python|bash, timeout 1-300 s, existingSessionId, zeroDataRetention, url (ZDR scrapes keep no URL). First call lazily creates a Hangar browser session and replays the original scrape (URL, waitFor, actions) via a generated Node script, then selects the visible tab; response returns sessionId, cdpUrl, liveViewUrl, interactiveLiveViewUrl, output (agent answer), stdout, result, stderr, exitCode, killed, truncated.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-browser.ts:61",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-browser.ts:490",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/scrape-replay.ts:204",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:275",
+      "C:/dev/firecrawl/README.md (Interact section)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Bridging a stateless scrape to a stateful browsing session by id is a clean contract Verevon could mirror between /v1/scrape and its agent run API (run_id continuity, replay of the original render context).",
+    "notes": "Quality 4: elegant lifecycle; requires USE_DB_AUTHENTICATION (501 otherwise) and is rejected for Safe Mode orgs. Scout said there is no accessibility-snapshot loop; it exists (see AI-browser control records)."
+  },
+  {
+    "id": "firecrawl-api-surface-006",
+    "category": "Acquisition API surface",
+    "name": "Standalone hosted browser session API (/v2/browser, aliased /v2/interact)",
+    "what": "Create, list, inspect, execute code in, replay and delete remote browser sessions; the same routes answer under /v2/browser and /v2/interact.",
+    "how": "POST create (ttl 30-3600 s default 600, activityTtl 10-3600 default 300, streamWebView default true, recordSession default false, blockAds default true, profile{name,saveChanges}, location.country, zeroDataRetention) returns id, cdpUrl, liveViewUrl, interactiveLiveViewUrl, expiresAt; POST /:id/execute runs node|python|bash (timeout 1-300 s, code <=100 000 bytes) returning stdout/stderr/exitCode/killed; GET /:id returns status and settled billing; GET /:id/replay(/:pageId) returns HLS; DELETE /profiles/:name deletes saved state. Separate rate-limit modes Browser, BrowserExecute, BrowserReplay. Minimum 2 credits to create.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:41",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:651",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:665",
+      "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:98",
+      "C:/dev/firecrawl/apps/api/src/services/rate-limiter.ts:59"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry exposes agent runs plus tabs/frames/live-view routes but no code-execution endpoint and no absolute-plus-inactivity TTL contract; the two-timer TTL would close the missing idle reaper (baseline Known gap 10).",
+    "notes": "Quality 4. The alias shows an in-flight rebrand from 'browser' to 'interact'; the SDK deprecates scrapeExecute in favour of interact()."
+  },
+  {
+    "id": "firecrawl-api-surface-007",
+    "category": "Acquisition API surface",
+    "name": "Batch scrape with append and per-batch concurrency",
+    "what": "POST /v2/batch/scrape takes many URLs plus the shared scrape options, supports adding more URLs to an existing batch, and exposes status, errors and cancel like crawl.",
+    "how": "batchScrapeRequestSchemaBase: urls[], appendToId (uuid of an existing batch), ignoreInvalidURLs (default true; invalid URLs returned as invalidURLs), maxConcurrency, webhook, zeroDataRetention. Status and cancel reuse crawlStatusController/crawlCancelController with an isBatch flag, so pagination, the 10 MiB page cap and warnings are identical. No explicit per-request URL cap in the controller; backlog is bounded by the team queue limit.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1299",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1304",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:289",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:367"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry /v1/batch (urls, ingest, zdr) is sequential with no status route; appendToId and maxConcurrency are small contract additions with high leverage for ingestion jobs.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-008",
+    "category": "Acquisition API surface",
+    "name": "Crawl request surface (v2 vocabulary)",
+    "what": "POST /v2/crawl starts an async crawl of a site; the response is {success,id,url}. Options: includePaths/excludePaths (regex, optionally on full URL), maxDiscoveryDepth, limit (default 10 000), crawlEntireDomain, allowExternalLinks, allowSubdomains, sitemap skip|include|only, deduplicateSimilarURLs (default true), ignoreQueryParameters, delay (seconds, <=60), maxConcurrency, robotsUserAgent, ignoreRobotsTxt, prompt, webhook, zeroDataRetention, scrapeOptions.",
+    "how": "crawlerOptions zod schema; path patterns validated by addPathRegexIssues (max 1000 patterns, 2000 chars each, 100 000 total); ignoreRobotsTxt and robotsUserAgent are enterprise-gated by team flags (ignoreRobots, customRobotsAgent). The scout inventory listed v1-era names (maxDepth, ignoreSitemap, allowBackwardLinks, includeSubdomains); v2 replaced them and server-side URL dedupe is confirmed. The crawl limit is clamped to the team's remaining credits before the job is created.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1367",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1403",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:312",
+      "C:/dev/firecrawl/apps/api/src/lib/crawl-regex.ts:12",
+      "C:/dev/firecrawl/apps/api/src/lib/permissions.ts:55"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Baseline Known gap 1: Quarry's live crawl has no scoping, include/exclude, robots, sitemap or canonicalisation; this option set is the target contract for roadmap Phase 5 and its field names are directly reusable.",
+    "notes": "Corrects scout section 3.5 field names. Quality 4: broad, but regex-only path filters (no globs)."
+  },
+  {
+    "id": "firecrawl-api-surface-009",
+    "category": "Acquisition API surface",
+    "name": "Natural-language crawl configuration (prompt and params-preview)",
+    "what": "A crawl accepts a free-text prompt that an LLM turns into crawler options; POST /v2/crawl/params-preview returns the generated options without starting a crawl so a UI or agent can review them.",
+    "how": "Both paths call buildPromptWithWebsiteStructure (maps up to 50 site URLs, index-assisted) then generateCrawlerOptionsFromPrompt. In crawl, prompt-generated fields overlay only fields the caller did not explicitly send, and the merged includePaths/excludePaths are re-validated against the same caps. ZDR crawls run the LLM step outside traces.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-params-preview.ts:47",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:251",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:279",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:318"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A preview-then-commit pattern fits Verevon's rule that the Model proposes and Quarry executes or rejects: the model proposes crawl options, Quarry validates and returns them for approval.",
+    "notes": "The scout marked the LLM use as inference; it is confirmed in source."
+  },
+  {
+    "id": "firecrawl-api-surface-010",
+    "category": "Acquisition API surface",
+    "name": "Crawl/batch status with size-capped pagination and actionable warnings",
+    "what": "GET /v2/crawl/:id returns status (scraping|completed|failed|cancelled), completed, total, creditsUsed, expiresAt, createdAt, completedAt, duration, a page of documents and a next URL; warnings tell the caller what to change (robots-blocked pages, 'try crawlEntireDomain').",
+    "how": "skip/limit query params; page size defaults to 100 docs and stops early at 10 MiB of JSON, advancing the cursor by what was actually returned; creditsUsed read from a per-request credit store (Bigtable) with an analytics fallback; failed-at-kickoff crawls return success:false with the stored error. Results live for crawlTtlHours (default 24), after which the job is gone.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-status.ts:287",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-status.ts:369",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:206",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2034"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry has no public crawl status route (baseline section 1); copy the payload-size-capped cursor and the warning field, and expose creditsUsed once billing-core enforcement exists.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-011",
+    "category": "Acquisition API surface",
+    "name": "Crawl error report with robots-blocked list; ongoing crawls list",
+    "what": "GET /v2/crawl/:id/errors returns per-URL errors (id, timestamp, url, code, error, requiresAction) plus robotsBlocked URLs; GET /v2/crawl/ongoing (alias /active) lists the team's running crawls with their options.",
+    "how": "crawlErrorsController reads failed jobs and the Redis set crawl:<id>:robots_blocked; ongoing uses crawlGroup.getOngoingByOwner(team) and rebuilds v2 options from stored v0 options.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-errors.ts:101",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-ongoing.ts:16",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2077",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:325"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry's Temporal pause/resume/cancel exist only as workflow signals (baseline section 1); public errors/ongoing/cancel routes are the missing async-job lifecycle.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-012",
+    "category": "Acquisition API surface",
+    "name": "Crawl/batch progress over WebSocket",
+    "what": "WS /v2/crawl/:id (the JS SDK also uses a batch variant) pushes a catch-up snapshot then each finished document, then a done message.",
+    "how": "express-ws handler authenticates with the normal API key flow; messages are {type:'catchup',data:CrawlStatusResponse}, {type:'document',data:Document}, {type:'done'}, {type:'error',error}; close codes 1008 not found, 3003 forbidden, 3000 auth, 1011 internal; the server polls the queue every second rather than being event-driven; the SDK Watcher falls back to polling.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-status-ws.ts:30",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-status-ws.ts:112",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:350",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/watcher.ts:84"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry offers SSE for scrape and frames but its job event stream drains once and closes (baseline section 1); a catch-up-then-stream protocol is the right shape for job progress.",
+    "notes": "Quality 3: simple and works, but 1 s server polling, no resume cursor, and only /crawl/:jobId is registered as WS in routes/v2.ts (the SDK builds a batch WS URL; whether the server serves it is unverified). No SSE anywhere in the API."
+  },
+  {
+    "id": "firecrawl-api-surface-013",
+    "category": "Acquisition API surface",
+    "name": "Map: URL discovery with relevance search",
+    "what": "POST /v2/map returns up to 100 000 links (default 5 000) with title and description, from sitemaps plus previously indexed pages plus a site: search, optionally ranked by a search string.",
+    "how": "mapRequestSchemaBase: url, search, limit, includeSubdomains (default true), sitemap skip|include|only, ignoreQueryParameters (default true), filterByPath (default true), useIndex, ignoreCache, location, headers, timeout; billing is a flat 1 credit; getMapResults combines index results, SERP discovery via fire-engine (cache key fireEngineMap:<url>) and sitemap, with lockdown serving the index only; media URLs short-circuit through avgrab and are billed per result.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1446",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1444",
+      "C:/dev/firecrawl/apps/api/src/lib/map-utils.ts:325",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/map.ts:284"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry /v1/map is sitemap + seed-page links only with limit<=1000 and no search-index assist (baseline section 1); the index+SERP union is what makes Firecrawl map fast on large sites.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-014",
+    "category": "Acquisition API surface",
+    "name": "Map search ranking is crude lexical matching on the URL string",
+    "what": "The 'search' parameter on /map reorders discovered URLs by a term-frequency cosine over the URL text only.",
+    "how": "performCosineSimilarityV2 builds per-query-word counts over link.url (a TODO notes title/description could be used); no embeddings are involved (embedding ranking exists separately in lib/ranker.ts for extract).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/map-cosine.ts:49",
+      "C:/dev/firecrawl/apps/api/src/lib/map-utils.ts:325"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Do not copy as-is: Verevon's Data Plane owns reranking, so Quarry should send candidate URL+title lists to the Data Plane rerank contract instead of reimplementing ranking.",
+    "notes": "The README promises relevance ordering; the implementation is weak, a reliability gap competitors can beat."
+  },
+  {
+    "id": "firecrawl-api-surface-015",
+    "category": "Acquisition API surface",
+    "name": "Search request surface (sources, categories, filters)",
+    "what": "POST /v2/search returns web, images, news and (optionally) discovered provider tools; options include limit (<=100), tbs time filter, lang, country, location, safe, includeDomains or excludeDomains (mutually exclusive), timeout (60 s default), ignoreInvalidURLs, scrapeOptions, highlights, objective, clientModel, enterprise[default|anon|zdr].",
+    "how": "sources accepts strings or per-source objects (web/news carry tbs, filter, lang, country, location); categories github, research, pdf, developer, gov (developer and gov exclusive; aliases repo, code, docs, devdex, repo_search, developer_index normalise to developer); asyncScraping is parsed but referenced nowhere else in the source (dead option). Search billing is 2 credits per 10 results (10 under ZDR); gov-index results are free.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2559",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2504",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2613",
+      "C:/dev/firecrawl/apps/api/src/search/execute.ts:284"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry search is already Tavily-shaped (topic, time_range, include/exclude_domains, chunks_per_source); the delta worth adopting is per-source option objects and an enterprise anon/zdr routing switch tied to Verevon ZDR.",
+    "notes": "Scout missed lang, safe, enterprise, asyncScraping, includeDomains/excludeDomains and objective/clientModel."
+  },
+  {
+    "id": "firecrawl-api-surface-016",
+    "category": "Acquisition API surface",
+    "name": "Search categories are query rewrites, not separate indexes",
+    "what": "The github, research and pdf categories are implemented by appending site: operators or filetype:pdf to the SERP query; the research category's 14 academic domains are overridable per request in the object form.",
+    "how": "buildSearchQuery maps categories to (site:github.com), a 14-domain research OR-group (arxiv, pubmed, nature, ieee, springer, ...) and filetype:pdf; includeDomains become bare 'site:' OR chains and excludeDomains '-site:' (bare operators because some backends drop parenthesised groups). The research category is scheduled to switch to the real Research Index on 2026-11-16 (results move from data.web to data.research).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/search-query-builder.ts:24",
+      "C:/dev/firecrawl/apps/api/src/lib/search-query-builder.ts:117",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/search.ts:60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "A cheap way to give agents 'search only docs/papers/PDFs' without new indexes; Quarry could add the same rewrite layer in front of Brave/SearXNG/Serper.",
+    "notes": "Skills docs stress that these categories are website filters and do not query the research or developer indexes."
+  },
+  {
+    "id": "firecrawl-api-surface-017",
+    "category": "Acquisition API surface",
+    "name": "Search that hydrates results with full scrapes in the same response",
+    "what": "Passing scrapeOptions.formats makes /v2/search scrape each hit and attach markdown, html, rawHtml, links, screenshot, metadata, answer and highlights to the result objects, grouped under data.web, data.images, data.news and data.tools.",
+    "how": "executeSearch over-fetches (limit x 2 buffer), applies category and domain filters, then scrapeSearchResults with the shared scrape pipeline (bypassBilling when internal); threat-protection filtering removes blocked domains from results; response includes id, creditsUsed and scrapeIds per source; the search schema allows a reduced formats list (no rawBase64/branding).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/search/execute.ts:13",
+      "C:/dev/firecrawl/apps/api/src/lib/entities.ts:147",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2559"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry /v1/answer already does search-then-fetch; exposing the same hydration as a /v1/search option (formats on results) removes a client round trip.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-018",
+    "category": "Acquisition API surface",
+    "name": "Search backend fallback chain for self-hosting",
+    "what": "Search uses fire-engine when configured, else SearXNG, else a DuckDuckGo HTML scrape; domain include/exclude is only enforced on result URLs on the fire-engine path.",
+    "how": "search/v2/index.ts checks FIRE_ENGINE_BETA_URL, then SEARXNG_ENDPOINT (accepted only if it returns web results), then ddgSearch with rotating user agents; failures return an empty response.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/search/v2/index.ts:71",
+      "C:/dev/firecrawl/apps/api/src/search/v2/ddgsearch.ts:8"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Confirms that self-hosted Firecrawl search is a thin SERP shim; Quarry's smart_router (Tantivy, Stract, SearXNG, Brave, Serper plus Data Plane vectors) is already stronger here.",
+    "notes": "DDG fallback raises DDGAntiBotError when blocked."
+  },
+  {
+    "id": "firecrawl-api-surface-019",
+    "category": "Acquisition API surface",
+    "name": "Parse API: upload your own files through the same pipeline",
+    "what": "POST /v2/parse converts an uploaded HTML, PDF, office, e-book or image file to markdown and the other scrape formats; large files use a two-step signed upload.",
+    "how": "POST /v2/parse/upload-url returns a signed uploadRef (HMAC-SHA256 over a base64url payload with driver, teamId, objectPath, filename, expiresAt, maxBytes; 10-minute TTL, 50 MB cap; GCS signed URL or local PUT /v2/parse/upload/:id); POST /v2/parse accepts multipart 'file' or JSON {uploadRef}; GET /v2/parse/formats lists accepted extensions/MIME types with an 'available' flag (image formats depend on OCR being enabled) with Cache-Control private, max-age=3600; /parse is never cached and ignores maxAge; unparsed uploads are rate-limited (10 per 24 h).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/parse-upload.ts:17",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/parse-upload.ts:94",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/parse-formats.ts:11",
+      "C:/dev/firecrawl/apps/api/src/lib/parse-formats.ts:49",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:223"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's Data Plane document import is separate; a Quarry-side parse of user-provided files would let the same format/OCR stack serve chat attachments, and the signed uploadRef pattern avoids proxying large bodies through the gateway.",
+    "notes": "Added 2026-10-02 (git #4905); the Verevon parity docs do not mention it."
+  },
+  {
+    "id": "firecrawl-api-surface-020",
+    "category": "Acquisition API surface",
+    "name": "Agent API: describe what you need, optionally with URLs and a schema",
+    "what": "POST /v2/agent starts an autonomous web research/extraction run that returns an id; GET /v2/agent/:id polls status and result; GET /v2/agent lists runs; DELETE cancels.",
+    "how": "agentRequestSchema: prompt (<=10 000), urls[], schema (AJV-validated JSON Schema), maxCredits, effort low|medium|high, strictConstrainToURLs, overrideWhitelist, webhook (started|action|completed|failed|cancelled), mode extract|chat, threadId, exchange{...}, threatProtection, auditMetadata; the model enum is still accepted but a transform forces spark-2. Status returns data, partial results on failure, partialSchemaValid, stopReason credit_limit_reached, expiresAt, creditsUsed, suggestions, pendingApproval. maxCredits > 2500 always bills as paid; otherwise a daily free request is consumed (pricing page: 5 free runs per day).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1153",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1860",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent.ts:183",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:412",
+      "https://www.firecrawl.dev/pricing"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already has a Model Plane agent; the portable pieces are the status contract (partial result, partialSchemaValid, stopReason, suggestions) and credit-capped runs via maxCredits.",
+    "notes": "Agent logic is external (EXTRACT_V3_BETA_URL /internal/extracts); only validation, billing hooks and status passthrough are in this repo."
+  },
+  {
+    "id": "firecrawl-api-surface-021",
+    "category": "Acquisition API surface",
+    "name": "Agent service calls the public API back through a trusted interop channel",
+    "what": "The agent runtime calls scrape, search and browser endpoints of the same API with an __agentInterop block (shared secret, requestId, shouldBill, boostConcurrency), so tool calls are not double-billed and get a 3x concurrency boost.",
+    "how": "agentController forwards the request with Authorization: Bearer AGENT_INTEROP_SECRET to the agent service; scrape/search/browser controllers validate __agentInterop (403 'Invalid agent interop' / 'not enabled'), set shouldBill from it and multiply team concurrency by AGENT_INTEROP_CONCURRENCY_BOOST (3); rate limits for trusted agent traffic are floored at the hobby multiplier.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent.ts:213",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:62",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:245",
+      "C:/dev/firecrawl/apps/api/src/services/rate-limiter.ts:143"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Same shape as Verevon's service-token principals (Model Plane calling Quarry); copy the idea that an internal call carries billing intent and request id so one agent run bills once.",
+    "notes": "Shared-secret trust is coarse (any holder can set shouldBill:false)."
+  },
+  {
+    "id": "firecrawl-api-surface-022",
+    "category": "Acquisition API surface",
+    "name": "Agent threads: multi-turn follow-ups on a prior run",
+    "what": "An agent run returns threadId and threadTurn; passing threadId continues the conversation in 'chat' or 'extract' mode; threads can be fetched with their runs and optionally their data.",
+    "how": "GET /v2/agent/threads/:threadId returns {id, createdAt, updatedAt, status idle|running, runs[]}; follow-ups are validated (thread_not_found, thread_busy 409 with the running runId, thread_expired, threads_disabled) before the free request is consumed; run status values processing|succeeded|failed|cancelled|refused|credit_limit_reached.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1914",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1192",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent-thread.ts:45",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent.ts:139"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Model Plane already owns sessions/runs; this is a reference for exposing 'one active run per thread' (409 with runId) and a thread listing in the web-agent API.",
+    "notes": "New in Oct 2026 (git #4984-#4990). Server-side thread semantics live in the external agent service."
+  },
+  {
+    "id": "firecrawl-api-surface-023",
+    "category": "Acquisition API surface",
+    "name": "/extract is deprecated in favour of scrape with a json format and the agent",
+    "what": "POST /v2/extract (multi-URL LLM extraction, wildcard and web search) still works but returns Deprecation headers pointing callers to /v2/scrape with a json format object; the Elixir SDK generator skips extract and token-usage operations.",
+    "how": "deprecationMiddleware('v2_extract') and 'v2_extract_status' (deprecatedAt @1778025600, replacement /v2/scrape); extractOptions still carries urls (max 10 in beta), prompt, systemPrompt, schema, enableWebSearch, showSources, urlTrace, agent, __experimental_* flags; the README positions Agent as the evolution of /extract.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/deprecations.ts:19",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:394",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1037",
+      "C:/dev/firecrawl/apps/elixir-sdk/generate.exs:16"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry /v1/extract (<=25 URLs, sequential, prompt dead code) should not chase the old multi-URL extract; the maintained direction is per-page json format plus an agent for discovery.",
+    "notes": "Scout and Verevon GAP.md treat extract as a core endpoint; in Firecrawl it is now legacy."
+  },
+  {
+    "id": "firecrawl-api-surface-024",
+    "category": "Acquisition API surface",
+    "name": "Monitor API: scheduled scrape/crawl/search targets with diffs and alerts",
+    "what": "POST /v2/monitor creates a recurring watch over up to 50 targets (scrape URLs, crawl, or search queries) with a cron or plain-English schedule, optional goal, webhook and email/Slack notifications; checks and per-page results are queryable.",
+    "how": "createMonitorSchema: name, schedule{cron|text, timezone}, targets[1..50], retentionDays (<=365, default 30), goal, judgeEnabled, webhook (monitor.page, monitor.check.completed), notification{email{recipients<=25,includeDiffs}, slack{channelId}}; routes: POST/GET /monitor, GET/PATCH/DELETE /monitor/:id, POST /monitor/:id/run, GET /monitor/:id/checks and /checks/:checkId (page status same|new|changed|removed|error); minimum interval 5 minutes; ZDR teams refused (needs retained snapshots); public pricing says 1 credit per page per check (7 with the deterministic-extraction engine).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/types.ts:191",
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/types.ts:104",
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/cron.ts:1",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:559",
+      "https://www.firecrawl.dev/pricing"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's schedules map only change_monitor targets and trigger/backfill return 501 (baseline Known gap 4); the monitor resource (targets + check history + per-page status) is the complete shape of what Quarry schedules/change routes are missing.",
+    "notes": "Verevon GAP.md section 6 marks POST /v1/schedules as absent in Firecrawl; that is wrong as of Oct 2026."
+  },
+  {
+    "id": "firecrawl-api-surface-025",
+    "category": "Acquisition API surface",
+    "name": "Outbound webhooks with HMAC signature, event filters and metadata echo",
+    "what": "Crawl, batch, extract, agent and monitor jobs can POST signed events to a caller URL: crawl.started/page/completed, batch_scrape.*, extract.started/completed/failed, monitor.page, monitor.check.completed, and agent started/action/completed/failed/cancelled.",
+    "how": "Webhook config: url (a bare string is accepted), custom headers (X-Firecrawl-Signature cannot be overridden), metadata (string map echoed in every payload), events[] with legacy short names matching; payload {success,type,id|jobId,webhookId,data,error,metadata}; signature sha256=<hex HMAC of the JSON body> using a per-team secret (teams.hmac_secret); private-IP destinations are refused unless ALLOW_LOCAL_WEBHOOKS; delivery is a single 10 s attempt in-process (30 s for v0) with logging to webhook_logs, or published to a RabbitMQ 'webhooks' queue when WEBHOOK_USE_RABBITMQ is set (the consumer is not in the repo).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/services/webhook/types.ts:6",
+      "C:/dev/firecrawl/apps/api/src/services/webhook/schema.ts:5",
+      "C:/dev/firecrawl/apps/api/src/services/webhook/delivery.ts:168",
+      "C:/dev/firecrawl/apps/api/src/services/webhook/config.ts:38"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry's control dispatcher has better retry (1s,5s,30s,5m,1h, DLQ) but webhooks are not tenant-scoped or exposed by edge (baseline section 1); adopt the event naming, metadata echo and header allowlist, keep Quarry's retry.",
+    "notes": "Quality 3: no retry/backoff visible in this repo's in-process path and one HMAC secret per team rather than per webhook. Scout omitted monitor.check.completed."
+  },
+  {
+    "id": "firecrawl-api-surface-026",
+    "category": "Acquisition API surface",
+    "name": "Idempotency-Key on crawl is a global one-shot guard",
+    "what": "POST /v2/crawl (and v1 crawl/batch) honours an x-idempotency-key header; a reused key returns 409 'Idempotency key already used'.",
+    "how": "idempotencyMiddleware validates the key is a UUID, checks the idempotency_keys table and inserts it; keys are not team-scoped, not tied to a payload hash and the first response is not replayed; scrape, batch v2, search and agent do not use it. SDKs expose prepareHeaders(idempotencyKey).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/routes/shared.ts:347",
+      "C:/dev/firecrawl/apps/api/src/services/idempotency/validate.ts:18",
+      "C:/dev/firecrawl/apps/api/src/services/idempotency/create.ts:13",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:314"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Avoid copying this shape; Verevon should follow the Alexandria design instead (key + payload hash, replay of the original response, 409 duplicate_request / request_in_flight) for any paid or side-effecting Quarry call.",
+    "notes": "Check-then-insert is not atomic, so two concurrent requests with one key can both pass."
+  },
+  {
+    "id": "firecrawl-api-surface-027",
+    "category": "Acquisition API surface",
+    "name": "Uniform error envelope with machine-readable codes",
+    "what": "Every error is {success:false, code?, error, details?}; codes include SCRAPE_TIMEOUT, SCRAPE_ALL_ENGINES_FAILED, SCRAPE_DNS_RESOLUTION_ERROR (HTTP 200 on purpose), SCRAPE_NO_CACHED_DATA, SCRAPE_PROMPT_INJECTION_DETECTED, SAFE_MODE_BLOCKED, unsafe_domain_blocked, CONCURRENCY_QUEUE_TIMEOUT and about 50 more; auth failures add Retry-After, retry_after_seconds and signup_url.",
+    "how": "TransportableError(code,message) is thrown in workers and serialised across the queue; scrapeController maps codes to HTTP statuses (403 policy, 404 cache-miss, 408 timeout, 400 option errors, 429 queue/keyless limits, 402 insufficient credits); the 402 text names the currency (credits vs tokens); crawl and search clamp 'limit' to the remaining balance instead of failing when the balance is low.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/error.ts:3",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:497",
+      "C:/dev/firecrawl/apps/api/src/routes/shared.ts:240",
+      "C:/dev/firecrawl/apps/api/src/routes/shared.ts:285",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1632"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's gateway rule is { error: { code, message, details } }; importing Firecrawl's code vocabulary (and the rule that a DNS failure is a result, not a server error) would give Quarry a stable, typed failure surface instead of generic 502/500.",
+    "notes": "Mixed casing of codes (lowercase for threat protection and threads) is deliberate for user-facing documented codes."
+  },
+  {
+    "id": "firecrawl-api-surface-028",
+    "category": "Acquisition API surface",
+    "name": "'Processing continues' timeout contract for long documents (server and SDK)",
+    "what": "When a large PDF outlives the request window the 408 response carries details.state='processing_continues', estimated remaining seconds, and a Retry-After header; the SDK sleeps and retries the same call, which re-attaches to the in-flight job and returns the finished document.",
+    "how": "getTimeoutProcessingDetails builds details {state, documentPages, jobStatus, estimatedRemainingSeconds, retryAfterSeconds, mayExceedProcessingWindow}; the JS SDK scrape() autoResume (default on) is bounded at 5 resumes / 20 minutes, is never sent on the wire, and extends its HTTP timeout so the signal is not lost.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:661",
+      "C:/dev/firecrawl/apps/api/src/lib/error.ts:192",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/methods/scrape.ts:17"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "A directly reusable pattern for slow OCR/browser work behind Verevon's gateway: server keeps the job, client retries idempotently, no duplicate work.",
+    "notes": "Quality 5: well-bounded, documented in code and mirrored in SDK tests."
+  },
+  {
+    "id": "firecrawl-api-surface-029",
+    "category": "Acquisition API surface",
+    "name": "Agent hints: opt-in next-step guidance in responses (X-Firecrawl-Agent-Hints)",
+    "what": "Callers that send X-Firecrawl-Agent-Hints: true get an agent_hints[] array on search/scrape/parse/map responses (and refusals) telling an LLM caller what to do next, e.g. fetch remaining PDF pages or use search instead of scraping a SERP.",
+    "how": "agentHintsMiddleware wraps res.json; hint rules are a bounded declarative language (max 32 rules, conditions eq/ne/lt/lte/gt/gte/in/exists over locally computed signals such as document_pages_returned/total, text placeholders {signal:first=N}, <=500 chars) supplied by an optional external provider (AGENT_HINTS_PROVIDER_URL); built-in rules were removed 2026-10-08; URLs inside hints are parsed, length-capped and JSON-quoted so third-party page content cannot smuggle instructions; any failure sends the original body unchanged.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/middlewares/agent-hints.ts:19",
+      "C:/dev/firecrawl/apps/api/src/lib/agent-hint-rules.ts:44",
+      "C:/dev/firecrawl/apps/api/src/lib/agent-hint-signals.ts:53"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry results consumed by the Model Plane could carry bounded, server-computed 'what to do next' hints (page truncation, empty results, blocked, SERP URL) without trusting page text, aligned with Verevon's prompt-injection posture.",
+    "notes": "Rules are remotely tunable without an API deploy; per code comment, signal values never leave the API."
+  },
+  {
+    "id": "firecrawl-api-surface-030",
+    "category": "Acquisition API surface",
+    "name": "Research Index endpoints (papers, inspect/read, similar)",
+    "what": "Under /v2/search/research: GET /papers (query, k<=500, authors, categories, from, to), GET /papers/:id (metadata; with query= it reads relevant passages), GET /papers/:id/similar (intent, mode similar|citers|references, rerank, anchor). About 43M abstracts per SDK docs; calls are free (0 credits).",
+    "how": "research-proxy forwards to RESEARCH_PROXY_URL with firecrawl-team-id, billing 0 for paper kinds (freeResearchKinds), per-endpoint timeouts (search 30 s, read 120 s, inspect 5 s, similar 10 s), legacy snake_case aliases for old clients, keyless access unless disabled per operation; GET /github is deprecated with sunset 2026-11-03 in favour of /search/developer.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/research-proxy.ts:238",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/research-proxy.ts:83",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:716",
+      "C:/dev/firecrawl/apps/api/src/lib/deprecations.ts:19"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Shows the direction of 'domain indexes behind the same key' (papers, code, gov); Verevon could expose curated corpora as Data Plane collections rather than as web pages.",
+    "notes": "The upstream index is not in the repo; endpoint contracts only."
+  },
+  {
+    "id": "firecrawl-api-surface-031",
+    "category": "Acquisition API surface",
+    "name": "Developer index search with GitHub-aware filters and skills mode",
+    "what": "GET or POST /v2/search/developer searches issues, PRs, READMEs and curated docs and returns matched passages; filters: types, repos, sources, passages (<=5), language, topic, license, min_stars, max_stars, archived, fork and skills:'only' (agent skills).",
+    "how": "developerSearchSchema validated with zod; canonical path under /search (legacy /v2/developer kept because published CLI/MCP builds call it); billed like web search per 10 results; keyless allowed; 15 s timeout.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/research-proxy.ts:110",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:731",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/research-proxy.ts:128"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "An example of a vertical search contract with typed filters; Verevon's code/doc retrieval inside Data Plane could adopt passage-level results and a 'skills' source filter.",
+    "notes": "The skills:only filter implies a searchable corpus of agent skills (INF)."
+  },
+  {
+    "id": "firecrawl-api-surface-032",
+    "category": "Acquisition API surface",
+    "name": "SDK family: nine languages, two full-featured",
+    "what": "Official SDKs exist for JS/TS, Python, Go, Rust, Java, .NET, PHP, Ruby and Elixir; JS and Python cover the whole surface (watchers, Alexandria, research, monitors, browser, agent threads); the others lack at least one of watcher, find-tools, Alexandria, interact or gov search.",
+    "how": "Hand-written clients for JS (v2 client with .v1 compat) and Python (sync + async + Pydantic types, typed exceptions); Elixir is generated from the vendored v2 OpenAPI spec; per-SDK CI test and publish workflows. Keyword survey of the SDK trees (approximate): Go/Rust/Java/.NET/PHP/Ruby have no WebSocket watcher; .NET has no interact or Alexandria; Java/PHP/Ruby/.NET lack find-tools. Versions drift (Python 4.50.0 vs JS 4.46.0).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/client.ts:142",
+      "C:/dev/firecrawl/apps/python-sdk/firecrawl/__init__.py:44",
+      "C:/dev/firecrawl/apps/elixir-sdk/generate.exs:16",
+      "C:/dev/firecrawl/.github/workflows/publish-js-sdk.yml"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry has OpenAPI-generated TS and Python clients (0.1.0) and no CLI/MCP; hand-craft the two main SDKs for ergonomics and generate the rest from one maintained spec.",
+    "notes": "The parity matrix is grep-based; treat gaps as indicative."
+  },
+  {
+    "id": "firecrawl-api-surface-033",
+    "category": "Acquisition API surface",
+    "name": "SDK transport safeguards",
+    "what": "SDKs refuse to send credentials to a different host when following server-provided next URLs, retry only 502s with exponential backoff, tag every POST body with an origin (js-sdk@version), and omit the Authorization header entirely when no key is set so the keyless tier works.",
+    "how": "pinToApiOrigin rewrites any absolute or protocol-relative URL onto the configured apiUrl origin; HttpClient retries status 502 up to 3 times (0.5 s x 2^n) and injects origin unless it already contains 'mcp'; typed errors carry status, code, details, jobId, chargeId and requiresAction; Python adds RateLimitError, PaymentRequiredError, DNSResolutionError, TLSError, WebsiteNotSupportedError, ProviderTermsRequiredError.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/utils/apiOrigin.ts:7",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/utils/httpClient.ts:105",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/utils/errorHandler.ts:36",
+      "C:/dev/firecrawl/apps/python-sdk/firecrawl/__init__.py:31"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry's generated SDKs should add origin pinning for pagination/next links (gateway and browser clients must never follow a server link to another host) and typed error classes.",
+    "notes": "Retrying only 502 leaves 429/503 handling to callers."
+  },
+  {
+    "id": "firecrawl-api-surface-034",
+    "category": "Acquisition API surface",
+    "name": "SDK ergonomics: waiters, watchers, schema-typed JSON",
+    "what": "SDKs expose both start* (job id) and waiting helpers (crawl, batchScrape, agent, extract) with poll interval, timeout and AbortSignal (abort also sends a best-effort cancel); JS infers the TypeScript type of the json field from a Zod schema placed in formats.",
+    "how": "waitForCrawlCompletion polls every >=1 s, re-raises 4xx but retries transient errors, throws JobTimeoutError; fetchAllPages follows next with maxPages/maxResults/maxWaitTime; zod-to-json-schema converts schemas; Watcher (EventEmitter) uses WebSocket with a polling fallback and de-duplicates emitted documents.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/methods/crawl.ts:179",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/utils/pagination.ts:7",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/client.ts:109",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/watcher.ts:84"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's TypeScript action contracts could reuse the pattern of deriving response types from the request schema for Quarry extract formats.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-035",
+    "category": "Acquisition API surface",
+    "name": "CLI, MCP server and skills distributed outside the core repo",
+    "what": "Agent integration is a one-line install: npx -y firecrawl-cli@latest init --all --browser installs the CLI, CLI skills and build skills and opens browser auth; a firecrawl-mcp server (npx) exposes tools such as firecrawl_scrape, firecrawl_crawl, firecrawl_search, firecrawl_map and index tools (research, developer).",
+    "how": "The repo only holds README pointers (firecrawl-cli/, firecrawl-cli-skills/, firecrawl-skills/, firecrawl-workflows/) and five build skills under skills/ mirrored to the firecrawl/skills catalog by CI; routing rule: CLI skills live in firecrawl/cli, workflow skills in firecrawl/firecrawl-workflows; hosted MCP supports keyless use and OAuth (see Integration records).",
+    "evidence": [
+      "C:/dev/firecrawl/README.md (Power Your Agent)",
+      "C:/dev/firecrawl/skills/README.md:1",
+      "C:/dev/firecrawl/skills/firecrawl-build/references/endpoint-selection.md:1",
+      "C:/dev/firecrawl/.github/workflows/sync-skills-catalog.yml"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry defers MCP (OSS_PARITY_BACKLOG skip list) because Verevon is the only client; the agent-distribution channel (CLI + skills + MCP) is now Firecrawl's main growth surface and a thin read-only MCP over Quarry search/scrape would let internal coding agents use the same web layer.",
+    "notes": "CLI and MCP source are not in this repo; behaviour is taken from README and skill references."
+  },
+  {
+    "id": "firecrawl-api-surface-036",
+    "category": "Acquisition API surface",
+    "name": "OpenAPI is maintained outside the repo and the in-repo spec is stale",
+    "what": "The authoritative v2 OpenAPI lives in the firecrawl-docs repo; the repo's apps/api/openapi.json is a v1-era spec (server /v1, deep-research, llmstxt) with a few feedback paths, and the Elixir SDK vendors a current 45-path v2 spec.",
+    "how": "generate.exs fetches raw.githubusercontent.com/firecrawl/firecrawl-docs/main/api-reference/v2-openapi.json and regenerates lib/firecrawl.ex (with a hand-written region for monitors, research, trace); v1-openapi.json (18 paths) is separate. The 20-path in-repo openapi.json lacks agent, interact/browser, monitor, parse, research, developer, gov.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/elixir-sdk/generate.exs:16",
+      "C:/dev/firecrawl/apps/elixir-sdk/openapi.json",
+      "C:/dev/firecrawl/apps/api/openapi.json",
+      "C:/dev/firecrawl/apps/api/v1-openapi.json"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry's openapi.yaml covers about 60 percent of routes (baseline section 7); pick one spec as the source of truth and generate SDK, docs and a CI drift check from it.",
+    "notes": "Resolves the scout's 'proxy default basic vs auto' question: the v2 spec says default auto (enum basic, enhanced, auto); only the stale spec says basic; the code also accepts 'stealth', undocumented in the spec."
+  },
+  {
+    "id": "firecrawl-api-surface-037",
+    "category": "Acquisition API surface",
+    "name": "Team usage and queue endpoints",
+    "what": "GET /v2/team/credit-usage (+/historical), /token-usage (+/historical), /queue-status, /activity and /v2/concurrency-check expose balances, historical consumption, queued/active job counts and current vs max concurrency.",
+    "how": "Handlers read Autumn/Bigtable/ClickHouse-backed stores through the Account rate-limit mode; concurrency-check returns {concurrency, maxConcurrency}.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:469",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:499",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/concurrency-check.ts:11"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry already forwards /v1/team/{credit-usage,token-usage,concurrency,queue-status,activity} (baseline section 1); parity exists, but values depend on billing-core enforcement that Quarry does not have.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-038",
+    "category": "Output formats & content processing",
+    "name": "Format registry: twenty selectable output formats, string or object form",
+    "what": "formats[] accepts strings or typed objects: markdown, html, rawHtml, rawBase64, links, images, summary, json, deterministicJson, changeTracking, screenshot, attributes, branding, product, menu, question, highlights, query (deprecated), audio, video; markdown is the default.",
+    "how": "A preprocess step lifts bare strings into {type}; a zod union gives each format its own option object (json{schema,prompt}, screenshot{fullPage,quality,viewport<=7680x4320}, changeTracking{modes,tag,schema,prompt}, attributes{selectors[]}, branding{mode}, question{question}, highlights{query}); cross-format rules: one screenshot, changeTracking requires markdown, rawBase64 cannot be combined, json and deterministicJson are mutually exclusive. The in-repo v1-era spec lists only ten; the code is the truth.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:479",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:808",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:815",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:415"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry scrape carries only html/markdown artifacts plus links/metadata/branding; screenshot, pdf, json, summary, images, attributes exist as library code but are not selectable (baseline section 2). A typed formats union is the fastest way to close that gap.",
+    "notes": "Quality 5: breadth and consistent option objects."
+  },
+  {
+    "id": "firecrawl-api-surface-039",
+    "category": "Output formats & content processing",
+    "name": "Document response model with rich provenance metadata",
+    "what": "Each document carries title, description, markdown, pages/blocks (PDF), html, rawHtml, links, images, screenshot, json, summary, answer, highlights, branding, product, menu, attributes, actions outputs, changeTracking and metadata (statusCode, sourceURL, url, scrapeId, contentType, numPages, proxyUsed basic|stealth, cacheState hit|miss, cachedAt, creditsUsed, postprocessorsUsed, concurrencyLimited, provider, plus OpenGraph/Dublin-Core fields).",
+    "how": "Document type in controllers/v2/types.ts; metadata.creditsUsed gives per-call billing visibility, proxyUsed shows what escalation happened, cacheState/cachedAt expose freshness, provider records which Exchange provider served a result and what each step cost.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1490",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1598"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry emits a NormalizedOutput with a determinism stamp and artifact refs; adding creditsUsed/cacheState/proxyUsed-style per-call provenance would help the Model Plane reason about cost and staleness.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-040",
+    "category": "Output formats & content processing",
+    "name": "Main-content extraction and tag filters",
+    "what": "onlyMainContent (default true) strips navigation, footer and similar chrome; includeTags/excludeTags accept CSS selectors (iframe selectors are rewritten to match inlined iframe content).",
+    "how": "Selector lists are applied by the Rust html module (lol_html / kuchikiki) before markdown conversion; transformIframeSelector maps 'iframe' to div[data-original-tag='iframe'].",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:831",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:688",
+      "C:/dev/firecrawl/apps/api/native/src/html.rs:661"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry already ships a Readability-subset cleaner; the extra value is caller-supplied include/exclude selectors, which Quarry's scrape request lacks.",
+    "notes": "Exact boilerplate selector list was read by the scout in html.rs, not re-verified here."
+  },
+  {
+    "id": "firecrawl-api-surface-041",
+    "category": "Output formats & content processing",
+    "name": "HTML to markdown conversion with three fallbacks",
+    "what": "Markdown is produced by a Go html-to-markdown service when configured, else an in-process Go shared library called through koffi FFI, else a turndown plus GFM-plugin fallback; a native post-processor cleans the result.",
+    "how": "lib/html-to-markdown.ts loads the c-shared library (ConvertHTMLToMarkdown/FreeCString) lazily and falls back on error; a separate Go HTTP service (apps/go-html-to-md-service) offers POST /convert for horizontal scaling.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/html-to-markdown.ts:12",
+      "C:/dev/firecrawl/apps/go-html-to-md-service/handler.go:33"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry's html2md is in-process Rust; the lesson is isolating the converter behind an optional service so a pathological page cannot stall the scrape worker.",
+    "notes": "A TODO in the source notes the Go parser has no timeout."
+  },
+  {
+    "id": "firecrawl-api-surface-042",
+    "category": "Output formats & content processing",
+    "name": "json format: LLM extraction with user schema and prompt",
+    "what": "formats:[{type:'json', schema, prompt}] returns structured data in document.json; schemas are normalised and validated for OpenAI strict mode, with a clear error for schema-less dictionaries.",
+    "how": "jsonFormatWithOptions: schema -> normalizeSchemaForOpenAI -> validateSchemaForOpenAI -> addStrictSchemaIssue; prompt <=10 000 chars; extraction in transformers/llmExtract via the Vercel AI SDK with many providers; default timeout bumped to 60 s; +4 credits per page; markdown over a size cap fails with SCRAPE_JSON_CONTENT_TOO_LARGE; model roles configurable (code-gen, anchor, light).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:357",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:20",
+      "C:/dev/firecrawl/apps/api/src/lib/error.ts:42"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry /v1/extract validates schema output (schema_issues) but only per URL and prompt is dead code; exposing json as a scrape format with prompt support is the parity step, routed through Model Plane.",
+    "notes": "Per project rules model calls must go through Model Plane, so Verevon cannot copy the in-process AI SDK approach."
+  },
+  {
+    "id": "firecrawl-api-surface-043",
+    "category": "Output formats & content processing",
+    "name": "deterministicJson: LLM-generated, cached extractor code run in a sandbox",
+    "what": "A json-like format that asks a code-gen model once for a JavaScript extractor for the page and reuses the cached extractor on later scrapes, billed 10 credits on generation and 3 on reuse instead of per-run LLM cost.",
+    "how": "extractDeterministicJson keys the cache with sha(cacheVersion, codegen model, url, schema, prompt); buildAnchorContext picks anchor HTML; generateExtractor produces code; runExtractorInSandbox runs it over jsdom in a code sandbox (CODE_SANDBOX_URL) with a capped askLlm callback for fuzzy fields; too-strict selectors trigger one automatic repair; output validated with parseWithSchema.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/deterministicJson/extract.ts:41",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:189",
+      "C:/dev/firecrawl/apps/api/src/lib/deterministicJson/extract.ts:92"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "For Verevon monitors and recurring ingests, 'compile an extractor once, run it cheaply' is the strongest cost lever and keeps model calls out of the hot path; code execution would need Quarry's existing sandbox/security posture.",
+    "notes": "The cache key includes the full URL, so reuse is per exact URL (monitoring) rather than per site template."
+  },
+  {
+    "id": "firecrawl-api-surface-044",
+    "category": "Output formats & content processing",
+    "name": "changeTracking format: per (team, URL, tag) diff against the previous scrape",
+    "what": "Adding changeTracking returns changeStatus new|same|changed|removed, previousScrapeAt, visibility, and optionally a git-style diff and/or a JSON field-level diff for a caller schema; a tag lets callers keep separate histories per URL.",
+    "how": "deriveDiff loads the last scrape for (team_id, url, tag) from change-tracking-store (Bigtable) and its content from GCS; 'changed' is decided by comparing whitespace-stripped, iframe-stripped, character-sorted markdown (order-insensitive); 404 means removed; modes git-diff uses parse-diff/diff, json runs the LLM with the schema on both versions and diffs per key; unsupported under ZDR.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/diff.ts:130",
+      "C:/dev/firecrawl/apps/api/src/lib/change-tracking-store.ts:108",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1532"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry's change detection is a raw-byte blake3 compare so tokens and timestamps cause false positives and its semantic diff is unwired (baseline section 2); a normalised comparison plus a tag dimension is the cheap fix and git-diff/JSON diff outputs are reusable shapes.",
+    "notes": "Quality 3: the sorted-characters comparison is crude (misses reordering, ignores meaning); judging is delegated to monitors (see monitor judge record)."
+  },
+  {
+    "id": "firecrawl-api-surface-045",
+    "category": "Output formats & content processing",
+    "name": "Monitor change judging: LLM decides whether a change matters to the goal",
+    "what": "For monitors with a goal, each changed page is judged: meaningful true/false, confidence high|medium|low, reason and a list of goal-relevant changes (added/removed/changed with before/after); search monitors alert only on new, goal-matching results.",
+    "how": "services/monitoring/judgeChange.ts (model moved to gemini-3.5-flash on 2026-10-09, traced from 2026-10-06), results stored per page in monitor_check_pages with diff artifacts in GCS; search targets track per-result dispositions alert|already_seen|watching|ignored|skipped; judgeEnabled defaults on when a goal is present.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/judgeChange.ts:185",
+      "C:/dev/firecrawl/apps/elixir-sdk/openapi.json (MonitorPageJudgment)",
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/types.ts:178"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Turns 'something changed' into 'something relevant to what the user cares about', which is the right unit for Verevon notifications (Application Plane) and avoids alert fatigue.",
+    "notes": "Judge prompt internals were not read; behaviour is from schema, types and OpenAPI."
+  },
+  {
+    "id": "firecrawl-api-surface-046",
+    "category": "Output formats & content processing",
+    "name": "LLM answer formats: summary, question, highlights (and deprecated query)",
+    "what": "summary returns a page summary, question{question} returns a direct answer in document.answer, highlights{query} returns query-relevant excerpts in document.highlights; the old query format (freeform|directQuote) is deprecated in favour of question/highlights.",
+    "how": "Each format is a strict object with a <=10 000-char text field; question/query/highlights/audio/video each add 4 credits per page; the search endpoint accepts the same formats on result hydration and has its own highlights flag backed by a highlight model.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:447",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:454",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:208",
+      "C:/dev/firecrawl/apps/api/src/search/highlights.ts:26"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry /v1/answer synthesises over search results; a per-page question/highlights format would let the Model Plane ask a focused question of one URL without a full answer pipeline.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-047",
+    "category": "Output formats & content processing",
+    "name": "attributes format: extract named attributes by CSS selector",
+    "what": "formats:[{type:'attributes', selectors:[{selector, attribute}]}] returns the values of those attributes for every match (for example data-* ids, hrefs, hreflang).",
+    "how": "performAttributes transformer uses the native extract_attributes helper on the raw HTML and returns attributes[] with {selector, attribute, values[]}.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:429",
+      "C:/dev/firecrawl/apps/api/native/src/html.rs:764",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/performAttributes.ts:9"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry has an unused attributes.rs library; wiring a selector-attribute format gives deterministic structured capture without an LLM.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-048",
+    "category": "Output formats & content processing",
+    "name": "branding format: design tokens from a rendered page",
+    "what": "formats:[{type:'branding'}] returns a BrandingProfile: colour scheme, brand name, logo and logo link, fonts, colour roles (primary, accent, background, text, link, status), typography scale, spacing, border radii, and primary/secondary button and input component styles.",
+    "how": "lib/branding runs an in-page extraction script, derives colour roles with CIEDE2000 tolerance (culori), picks logos from declared sources (JSON-LD, apple-touch-icon) and heuristics, then asks an LLM (or the TypeSafe 'Jev' fast path for allow-listed teams) to decide roles; shadow mode compares engines; scoped to the fire-engine browser path (BrandingNotSupportedError otherwise).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/types/branding.ts:1",
+      "C:/dev/firecrawl/apps/api/src/lib/branding/jev.ts:37",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:474"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry already extracts rendered branding (favicon, palette, logo, font); the richer token model (component styles, role-based colours) matters for Verevon's design-clone and theming workflows.",
+    "notes": "Recent commits (#5093, #5098, #5099) are branding fixes, so this is actively iterated."
+  },
+  {
+    "id": "firecrawl-api-surface-049",
+    "category": "Output formats & content processing",
+    "name": "Domain-shaped formats: product and menu",
+    "what": "formats product and menu return canonical, schema-less structured profiles: a product with variants (sku, price, sale, availability, images) or a restaurant menu with sections and items (price, dietary, calories, option groups).",
+    "how": "transformers/product.ts and menu.ts call external product-extraction and menu-extraction services; types/product.ts and types/menu.ts define the canonical zod shapes; a menuBeta team flag exists (whether it gates the menu format was not traced).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/types/product.ts:33",
+      "C:/dev/firecrawl/apps/api/src/types/menu.ts:38",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/product.ts:6"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Pre-baked vertical schemas (commerce, menus, procurement) echo Quarry's unmounted Go collectors; a registry of named canonical schemas would be a better product shape than one-off collectors.",
+    "notes": "Upstream extraction services are external; only contracts are visible."
+  },
+  {
+    "id": "firecrawl-api-surface-050",
+    "category": "Output formats & content processing",
+    "name": "audio and video formats via a media-grabber service",
+    "what": "formats audio and video return a public URL (audio) or video items with url, source, kind, provider, title, thumbnail, duration, mimeType, width, height for supported sites such as video platforms; unsupported URLs fail with a clear code.",
+    "how": "Transformers fetch a supported-URL regex from AVGRAB_SERVICE_URL (cached 5 minutes), POST /download with optional cookies, and return data.public_url; +4 credits; lockdown skips media; map short-circuits media URLs through avgrab resolve and bills per result.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/audio.ts:21",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/video.ts:25",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1616"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Media extraction is out of Quarry's current scope; relevant only if Verevon wants transcription or video ingestion into the Data Plane.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-051",
+    "category": "Output formats & content processing",
+    "name": "Screenshot, rawBase64 and images/links formats",
+    "what": "screenshot supports fullPage, quality 1-100 and a viewport up to 8K, one per request; rawBase64 returns the unparsed bytes (exclusive format); links and images return extracted URLs; base64 images are removed from markdown by default (removeBase64Images true).",
+    "how": "screenshotFormatWithOptions; rawBase64 only on the chrome-cdp engine; images via native extract_images; screenshots also available as a page action and stored to GCS in cloud.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:415",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:842",
+      "C:/dev/firecrawl/apps/api/native/src/html.rs:947"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Baseline: Quarry scrape never captures screenshots (browser adapter only does goto/wait/content); screenshots only exist in agent runs, so the format surface is a direct gap.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-052",
+    "category": "Output formats & content processing",
+    "name": "PDF parsing modes and layout outputs",
+    "what": "parsers:[{type:'pdf', mode:'fast'|'auto'|'ocr', maxPages<=10000, pages, blocks, pageMarkers, refresh}] controls PDF conversion; fast fails with SCRAPE_PDF_OCR_REQUIRED on scanned PDFs, ocr forces OCR, pages returns per-page markdown, blocks returns typed layout blocks with bounding boxes, pageMarkers inserts page separators; an empty parsers list returns the PDF as base64 for a flat 1 credit.",
+    "how": "The pdf engine classifies with the Rust pdf-inspector (TextBased/Scanned/ImageBased/Mixed), extracts text natively when eligible, otherwise routes to FirePDF (async submit/poll/cancel, GCS cache), MinerU via RunPod or pdf-parse as fallbacks, with shadow comparison and per-page billing (+1 per extra page).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:505",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/pdf/index.ts:461",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:17"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry parses PDFs only on the answer path (lopdf) and runs readability over PDFs in scrape; the fast/auto/ocr mode switch and per-page outputs are the contract worth adopting for Verevon document-heavy sources.",
+    "notes": "Scout described the engines; the option set and the fast-mode fail-fast behaviour are new here."
+  },
+  {
+    "id": "firecrawl-api-surface-053",
+    "category": "Output formats & content processing",
+    "name": "Image OCR and office/e-book parsing in the scrape pipeline",
+    "what": "Raster images (PNG, JPEG, JPEG 2000, TIFF, GIF, BMP) are OCRed by default where the deployment enables it, and DOC/DOCX/XLS/XLSX/PPT/PPTX/ODT/ODS/ODP/RTF/CSV/EPUB are converted to markdown.",
+    "how": "parsers default [pdf, image] (an explicit list without 'image' opts out); image OCR is gated by lib/image-ocr-gate and routed through FirePDF; office formats go through the Rust anydoc crate (document.rs convert_document_to_markdown) with DOCX header/footer extraction; the scrape-engine README still describes LlamaParse/mammoth and is stale.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:559",
+      "C:/dev/firecrawl/apps/api/src/lib/parse-formats.ts:49",
+      "C:/dev/firecrawl/apps/api/native/src/document.rs:46"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry has DOCX as unused library code and no XLSX/PPTX/ODT/RTF/EPUB; this is the format list to target (baseline section 2).",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-054",
+    "category": "Output formats & content processing",
+    "name": "redactPII: in-pipeline PII redaction with entity and mode controls",
+    "what": "redactPII:true|{mode:'accurate'|'aggressive'|'fast', entities:[PERSON,EMAIL,PHONE,LOCATION,FINANCIAL,SECRET], replaceStyle:'tag'|'mask'|'remove'} replaces PII in the returned markdown before the caller sees it.",
+    "how": "performRedactPII posts markdown to the fire-privacy service (model, Presidio, spaCy tiers documented as precision/recall trade-offs in code comments) and fails closed (empty markdown) if redaction fails or content is too large; +4 credits flat, +4 per extra PDF page.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:742",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/redactPII.ts:12",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:21"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Directly aligned with Verevon's ZDR/privacy posture: PII redaction at the ingestion edge, fail-closed, before content reaches the Data Plane; Model Plane or a Verevon privacy service could provide the redactor.",
+    "notes": "The fail-closed choice (empty output over leaking) is the right default."
+  },
+  {
+    "id": "firecrawl-api-surface-055",
+    "category": "Output formats & content processing",
+    "name": "onlyCleanContent: LLM rewrite of markdown (scout-missed option)",
+    "what": "onlyCleanContent:true asks a model to strip residual noise from the generated markdown; it is skipped when content exceeds the model's output limit and is unsupported under ZDR.",
+    "how": "performCleanContent trims to 120 000 tokens with gpt-4o-mini limits, preserves the original markdown if too long, and adds warnings instead of failing; no surcharge was found in scrape-billing.ts (INF: unbilled or billed elsewhere).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/llmExtract.ts:1190",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:832"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Optional model-backed cleaning must route through Model Plane and respect ZDR; treat it as an opt-in post-process rather than part of the default scrape.",
+    "notes": "Warning-instead-of-failure is the pattern to copy; the feature itself looks experimental."
+  },
+  {
+    "id": "firecrawl-api-surface-056",
+    "category": "Output formats & content processing",
+    "name": "Search result enrichment: highlights and tool discovery",
+    "what": "Search results can be replaced by query-relevant highlights from the index (highlights flag), and results can include discovered provider tools (domainTools) so an agent learns which structured source covers a domain.",
+    "how": "search/highlights.ts and highlight-model.ts (HIGHLIGHT_MODEL_URL, rollout percent, shadow mode when unset); domainTools adds a free discovery call against the Exchange (up to 24 items) and is refused under ZDR.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2617",
+      "C:/dev/firecrawl/apps/api/src/search/highlights.ts:26",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:767"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Highlight-level results are what Verevon's chunks_per_source search param is approximating; the domain-tool hint shows how search can steer an agent toward an API instead of scraping.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-057",
+    "category": "Rendering & browser engines",
+    "name": "Page actions DSL on scrape (nine action types)",
+    "what": "actions[] runs an ordered script before extraction: wait (ms or selector), click (selector, all), write (text), press (key), scroll (direction, selector), screenshot (fullPage, quality, viewport), scrape (snapshot sub-document), executeJavascript (script) and pdf (landscape, scale, format); outputs come back under document.actions.screenshots, scrapes, javascriptReturns and pdfs.",
+    "how": "actionSchema zod union; at most 50 actions and 60 s total wait (waitFor plus wait actions); selectors are CSS; actions force a browser-capable engine (SCRAPE_ACTIONS_NOT_SUPPORTED when the chosen engine cannot run them); skipTlsVerification stays false when actions are present; the stale OpenAPI lists eight (no pdf).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:271",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:250",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1523"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry has an unrouted ActionRuntime with 13 variants (baseline section 3) and the scrape request has no actions; wiring this typed list (with caps) is the lowest-risk way to expose it, adding the 'scrape' and 'pdf' sub-actions.",
+    "notes": "Selector-only targeting: no accessibility refs in the declarative DSL (refs exist only in the prompt-driven agent loop)."
+  },
+  {
+    "id": "firecrawl-api-surface-058",
+    "category": "Rendering & browser engines",
+    "name": "Persistent browser profiles available on scrape and sessions",
+    "what": "profile:{name, saveChanges:true} keeps cookies and browser state between scrapes or sessions (for logged-in flows); profiles are named per team (1-128 UTF-8 bytes) and can be deleted via DELETE /v2/browser/profiles/:name.",
+    "how": "scrapeOptions.profile is rejected with lockdown, Safe Mode disableAuthentication, and ZDR (recordings and saved profiles unsupported); sessions pass the profile to Hangar (profile.save_changes); delete returns 409 while a session is still saving to the profile.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:859",
+      "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:138",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:244"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry profiles lack IndexedDB capture, cookie expiry and at-rest encryption (baseline Known gap 9); the policy matrix (no profiles under ZDR, lockdown or Safe Mode) is a ready template for Verevon's rules.",
+    "notes": "Scout's GAP.md says Firecrawl has no persistent profiles; it does."
+  },
+  {
+    "id": "firecrawl-api-surface-059",
+    "category": "Rendering & browser engines",
+    "name": "Session browser options: ad blocking by extension, mobile stealth pool, country egress",
+    "what": "Browser sessions block ads by default through a bundled uBlock Origin Lite extension, optionally egress from a chosen country, and the 'stealth' proxy maps to a mobile proxy pool.",
+    "how": "hangarBrowserOptions builds the Hangar create request: extensions ['ublock'] when blockAds, proxy {country, type 'basic'|'mobile'}; browserOptionsFromScrape maps scrape options (blockAds, profile, location.country, proxy stealth/enhanced -> stealth) so an interact session matches the page the scrape saw; us-generic/us-whitelist are not countries and keep default US egress.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/browser-options.ts:57",
+      "C:/dev/firecrawl/apps/api/src/lib/browser-options.ts:14"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry blocks ads via CDP Fetch lists; the extension approach also hides cookie notices, and mapping scrape options onto session options guarantees agent sessions inherit the same egress and blocking as the original scrape.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-060",
+    "category": "Rendering & browser engines",
+    "name": "Location, language and mobile emulation as first-class options",
+    "what": "location:{country (ISO alpha-2, default US), languages[]} and mobile:true shape the egress country, Accept-Language and device emulation for a scrape; special values us-generic and us-whitelist select default or customer-allow-listed US egress.",
+    "how": "locationSchema validates against a country table and lower-cases; permissions gate us-whitelist behind the team ipWhitelist flag; Safe Mode can disable country selection; location and mobile are part of the index cache variant key so cached copies are not mixed.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:697",
+      "C:/dev/firecrawl/apps/api/src/lib/permissions.ts:176",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index/index.ts:319"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry threads locale through but has no country proxy routing beyond chromiumoxide (GAP.md 2.1); caching must include locale/mobile in its key, which Firecrawl does.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-061",
+    "category": "Rendering & browser engines",
+    "name": "Which engine runs is mostly implicit; callers steer with feature options",
+    "what": "Callers do not name an engine; options such as actions, screenshot, mobile, location, fastMode, proxy and skipTlsVerification turn on feature flags and the engine waterfall picks a capable engine, escalating on failure.",
+    "how": "buildFeatureFlags maps options to flags (actions, waitFor, screenshot, mobile, skipTlsVerification, useFastMode, stealthProxy, location...); engine scoring and waterfall live in engines/index.ts; forceEngine and FORCED_ENGINE_DOMAINS are operator-only.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/index.ts:335",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index.ts:107"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon should keep the same separation: callers state needs (actions, screenshot, locale) and Quarry's DriverPlan chooses static, TLS or browser; avoid exposing driver names publicly (Quarry DRIVER_MATRIX hints at driverHints that were never implemented).",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-062",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Proxy tiers: basic, enhanced, auto (stealth accepted)",
+    "what": "proxy:'auto' (default) tries basic and retries with enhanced when blocked; 'enhanced' goes straight to stronger anti-bot proxies; 'basic' never escalates; enhanced carries no credit surcharge in the current billing code; 'stealth' remains accepted by the schema but is absent from the v2 spec.",
+    "how": "scrapeOptionFields proxy enum with prefault auto; stealth/enhanced/auto raise the default timeout to 120 s; proxy stealth|enhanced adds the stealthProxy feature flag; billing has no proxy surcharge (unused unsupportedFeatures parameter explains the history); Safe Mode downgrades all escalated tiers to basic.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:846",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:101",
+      "C:/dev/firecrawl/apps/api/src/lib/safe-mode.ts:132"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry has no residential/geo proxies and only a Chrome TLS profile; the 'auto escalates on block, price stays flat' contract is the user-facing shape to target once a proxy provider is wired.",
+    "notes": "Resolves the scout's open discrepancy (see OpenAPI record). The anti-bot machinery itself lives in the closed fire-engine service."
+  },
+  {
+    "id": "firecrawl-api-surface-063",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Freshness model: index cache with 2-day default, per-domain tuning and variant keys",
+    "what": "Scrapes reuse an indexed copy when it is younger than maxAge (default 2 days); with no maxAge the window is tuned per domain from a database; metadata.cacheState/cachedAt report what was served, maxAge:0 forces a live scrape, storeInCache:false avoids writing.",
+    "how": "scrapeURLWithIndex: explicit maxAge wins; else a domain-level dynamic maxAge from queryMaxAge (cached in Redis, 200 ms race with the default); cache entries are keyed by URL hash plus a variant key (mobile, blockAds, stealth, country, languages); minAge is an internal guard; skill docs tell integrators to treat cacheState absent as 'live'.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index/index.ts:250",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index/index.ts:252",
+      "C:/dev/firecrawl/skills/firecrawl-build-scrape/references/freshness-and-liveness.md:1"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A default-cached scrape surprises callers; Verevon should make freshness explicit (maxAge, cacheState) and keep ZDR orgs on a no-cache path, which Quarry already enforces for artifacts.",
+    "notes": "Quality 5: the cache key discipline (variant key) avoids cross-contamination; the 2-day default is a product choice that favours speed."
+  },
+  {
+    "id": "firecrawl-api-surface-064",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Lockdown: cache-only scraping that never touches the target",
+    "what": "lockdown:true serves a request only from the cache and makes no outbound request to the target URL; a miss returns 404 SCRAPE_LOCKDOWN_CACHE_MISS without logging the URL; it implies zero data retention and costs +4 credits.",
+    "how": "applySafeMode/extractTransform set maxAge to two years when lockdown has no explicit maxAge; engines are pinned to the index engines; map serves index-only; search forces the zdr kind; billing +4 per lockdown scrape (and 1 on a cache miss).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2103",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:519",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:164"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A strong pattern for air-gapped or regulated Verevon orgs: 'answer from what Quarry already holds, leak nothing about what the user asked'; maps onto the Data Plane's retained corpus rather than a separate cache.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-065",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Safe Mode: org-level compliant-browsing profile",
+    "what": "A team flag turns on a bundle that rejects interactive browser sessions and the v0 API, forces robots.txt, domain controls and a non-stealth proxy, forbids credentials (profiles, Authorization/Cookie headers, write/press/executeJavascript actions), disables site-specific handlers, platform and country selection and automatic referrers, exposes the honest webdriver flag and headless user agent, and supports an allowlist; a per-request bypass exists only if the org allows it.",
+    "how": "resolveSafeMode merges safeModeConfig over SAFE_MODE_DEFAULTS; checkPermissions returns SAFE_MODE_BLOCKED 403 for violating requests; applySafeMode downgrades inherited options (crawl children, search sub-scrapes) at the worker; credential headers are stripped again at the worker; rejected scrapes emit SIEM activity events.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/safe-mode.ts:93",
+      "C:/dev/firecrawl/apps/api/src/lib/permissions.ts:141",
+      "C:/dev/firecrawl/apps/api/src/lib/safe-mode.ts:27"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "This is almost a spec for Verevon's governed web access: policy-enforced at request time and again at the worker, per org, with audit events; Quarry's robots handling is not enforced on scrape/crawl today (baseline Known gap 2).",
+    "notes": "Enforcement in two places (request and worker) is the key design decision, because crawl children and sub-scrapes bypass request-time checks."
+  },
+  {
+    "id": "firecrawl-api-surface-066",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Threat protection: domain risk blocking before any fetch",
+    "what": "Enterprise teams can block risky domains via modes off, manual-only (own allow/deny lists and blocked TLDs), normal (Google Web Risk with a risk-score threshold) or zscaler (customer's own Zscaler ZIA categories, synced on an interval); blocked seeds fail with unsafe_domain_blocked, discovered crawl links are silently skipped, map and search drop blocked URLs.",
+    "how": "lib/threat-protection (config schema, verdict, providers google-web-risk and zscaler); per-request override allowed only if the team flag and org config permit; scan fee +2 credits per unique scanned URL (none for zscaler, which uses the customer's quota); team routes GET/PUT /v2/team/threat-protection plus zscaler test-connection, categories and sync.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/threat-protection/config.ts:102",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:33",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:511"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon's Quarry security crate has SSRF and URL-signature analysis but no external reputation or customer-policy integration; an optional domain-risk gate would serve enterprise tenants.",
+    "notes": "Mode zscaler evaluates map results with local rules only to protect a 400/hour lookup budget."
+  },
+  {
+    "id": "firecrawl-api-surface-067",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "robots.txt control is an enterprise-gated override",
+    "what": "Crawls honour robots.txt by default and report blocked URLs; ignoreRobotsTxt and a custom robotsUserAgent require team flags (disabled, allowed or forced) and are impossible under Safe Mode enforceRobots.",
+    "how": "checkPermissions compares request.crawlerOptions to getIgnoreRobots and getCustomRobotsAgent flags with 'enterprise feature' errors; blocked URLs go to a Redis set surfaced in /errors and as a status warning.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/permissions.ts:87",
+      "C:/dev/firecrawl/apps/api/src/lib/zdr-helpers.ts:65"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry does not enforce robots on scrape, crawl or batch (baseline Known gap 2); copying 'on by default, override is a governed entitlement with audit' fixes both compliance and trust.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-068",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "SSRF defences on fetches and customer-supplied webhook URLs",
+    "what": "Outbound fetches use a hardened dispatcher that refuses private and non-unicast addresses; the Playwright microservice re-checks DNS answers; webhook destinations in private ranges are refused unless explicitly allowed for local testing.",
+    "how": "getSecureDispatcher/getSecureDispatcherNoCookies and isIPPrivate in engines/utils/safeFetch; playwright api.ts isInternalHost via ipaddr.js; URL schema also rejects non-http(s) protocols and requires a reachable host or IP literal.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/utils/safeFetch.ts:9",
+      "C:/dev/firecrawl/apps/api/src/services/webhook/delivery.ts:123",
+      "C:/dev/firecrawl/apps/playwright-service-ts/api.ts:47"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry's DNS-pinned fetch is equivalent or stronger (baseline section 3); the portable idea is applying the same guard to tenant webhook URLs once Quarry exposes tenant webhooks.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-069",
+    "category": "Orchestration & scale",
+    "name": "Team concurrency cap with a backlog queue instead of hard rejection",
+    "what": "Jobs beyond the team's concurrent-browser limit wait in a per-team backlog (up to clamp(concurrency x 2000, 50 000, 2 000 000) jobs, at most 48 h); queue wait counts against the request timeout; exceeding the backlog or session limit returns 429; sync responses report concurrencyLimited and the wait.",
+    "how": "teamConcurrencySemaphore for sync scrapes; Redis sorted sets (or FoundationDB slots) track active jobs per team; nuq.queue_scrape_backlog with a pg_cron reaper on times_out_at; QueueFullError(429) names the limit; defaults free 2, hobby 5, standard 25, growth 50, scale 100+ per public docs.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/concurrency-redis.ts:8",
+      "C:/dev/firecrawl/apps/api/src/lib/queue-full-error.ts:4",
+      "C:/dev/firecrawl/apps/nuq-postgres/nuq.sql:103",
+      "https://docs.firecrawl.dev/rate-limits"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry has per-host AIMD and a global autoscale on the fast path but no per-tenant concurrency or backlog; this is the multi-tenant fairness contract Verevon needs before enforcing billing quotas.",
+    "notes": "Public limits table fetched from the docs (DOC) matches code defaults."
+  },
+  {
+    "id": "firecrawl-api-surface-070",
+    "category": "Orchestration & scale",
+    "name": "NuQ job queue: Postgres by default, FoundationDB optional, crawl pinned to one backend",
+    "what": "Self-hosted deployments queue on Postgres tables with LISTEN/NOTIFY, a separate backlog table and group tables for crawls; a FoundationDB backend with shards, time buckets and slots is selectable per deployment or per team, and a crawl stays on the backend it started on.",
+    "how": "NUQ_BACKEND pg|fdb; nuq.queue_scrape, queue_scrape_backlog, queue_crawl_finished, group_crawl; nuq-router resolves new groups and StoredCrawl.queueBackend; worker processes (nuq-worker, fdb worker, prefetch, reconciler); self-host docs say keep Postgres unless you intend to operate FoundationDB.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/config.ts:279",
+      "C:/dev/firecrawl/apps/nuq-postgres/nuq.sql:48",
+      "C:/dev/firecrawl/apps/api/src/services/worker/nuq-router.ts:48"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry already uses a Postgres SKIP LOCKED queue bridge plus Temporal; Firecrawl's choice to build a bespoke queue instead of a workflow engine shows the cost (reconcilers, reapers) Temporal removes for Verevon.",
+    "notes": "Deep queue internals were sampled, not fully read."
+  },
+  {
+    "id": "firecrawl-api-surface-071",
+    "category": "Orchestration & scale",
+    "name": "Plan-aware job priority and rate limits scale by multiplier",
+    "what": "Per-minute API limits are a base value per endpoint class times the plan's rate-limit multiplier, and queue priority is inferred from the same multiplier (free, hobby, standard, growth, scale, enterprise tiers); an org can override any mode's limit.",
+    "how": "BASE_RATE_LIMITS (scrape 10, map 10, crawl 2, search 10, extract 2, browser 2, browserExecute 10, status 500 per minute at x1) with PLAN_PRIORITY_TIERS keyed by minimum multiplier (1, 10, 50, 500, 1000, 2500); getRateLimitOverride reads per-org overrides; limits are per team, not per key; public table: free 10/min scrape up to scale 10 000/min.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/services/rate-limiter.ts:59",
+      "C:/dev/firecrawl/apps/api/src/services/rate-limiter.ts:155",
+      "https://docs.firecrawl.dev/rate-limits"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Control Plane owns quotas and entitlements in Verevon; Quarry only needs to read a multiplier and a mode-specific override from the principal, which matches this structure.",
+    "notes": "Status polling gets a 500/min base so progress checks never starve submissions."
+  },
+  {
+    "id": "firecrawl-api-surface-072",
+    "category": "Orchestration & scale",
+    "name": "Monitor scheduling: plain-English schedules, jitter and overlap/credit guards",
+    "what": "Monitor schedules accept cron or phrases such as 'every 30 minutes', 'hourly', 'daily at 9am'; runs start at a deterministic jitter offset, never overlap, and are skipped with a recorded status when credits are insufficient.",
+    "how": "parseMonitorScheduleText converts phrases to cron (minute/hour intervals must divide 60/24); minimum interval 5 minutes; monitorJitterOffsetMs = sha256(monitorId) mod min(interval/2, 5 min); run statuses queued|running|completed|failed|partial|skipped_overlap|skipped_no_credits; credit reservation states reserved|confirmed|released|failed with estimated vs actual credits per check.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/cron.ts:32",
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/jitter.ts:3",
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/types.ts:285"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry schedule trigger/backfill return 501 and only change_monitor maps to Temporal (baseline Known gap 4); the credit-reservation-per-check idea fits a billing-core-enforced future and the jitter prevents synchronized thundering herds.",
+    "notes": "Search monitors need a goal unless judgeEnabled is false."
+  },
+  {
+    "id": "firecrawl-api-surface-073",
+    "category": "Orchestration & scale",
+    "name": "Crawl guardrails: credit-clamped limits, depth budget and result TTL",
+    "what": "A crawl's limit is clamped to the team's remaining credits at start, discovery depth is capped by maxDiscoveryDepth, deduplicateSimilarURLs defaults on, results expire after crawlTtlHours (default 24), and per-crawl maxConcurrency/delay bound the load placed on a site.",
+    "how": "crawlController clamps finalCrawlerOptions.limit with req.account.remainingCredits (infinite when auth is off), stores StoredCrawl in Redis (24 h TTL) with request-credit shards in Bigtable, and passes delay and maxConcurrency into the crawl logic; team flag crawlTtlHours extends retention for enterprise.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:312",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:206",
+      "C:/dev/firecrawl/apps/api/src/lib/crawl-regex.ts:13"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Budget-bounded crawling matches Verevon's cost-ownership split (Control Plane quotas, Model Plane cost); Quarry's agent max_cost_usd is not enforced on the step path (baseline Known gap 10), the same clamp idea closes it.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-074",
+    "category": "Platform & ecosystem",
+    "name": "Credit price table: one unit, per-feature surcharges, failures free",
+    "what": "Billing is in credits: 1 per scraped page, +4 for json, question, highlights, audio, video, lockdown, checkPromptInjection and redactPII; PDF +1 per extra page (+4 per page with redaction); deterministicJson 10 on generation and 3 on reuse; ZDR adds a per-team zdrCost (default 1); threat scans +2 per URL; search 2 per 10 results (10 under ZDR); map flat 1; research paper endpoints and the gov index free; failed scrapes bill nothing.",
+    "how": "calculateCreditsToBeBilled(options, internalOptions, document, costTracking, flags, error, exchange, threatDecisions) is the single pricing function: failure returns 0 except lockdown cache-miss (1), prompt-injection verdict (5) and already-run threat scans; Exchange scrapes replace the base 1 with the provider price; billing runs through Autumn credit locks and a ledger; cost tracking records LLM calls for margin analysis.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:17",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:90",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/research-proxy.ts:238",
+      "C:/dev/firecrawl/apps/api/src/search/execute.ts:284"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon billing-core meters Quarry usage over NATS but enforces no credits in Quarry (baseline section 6); a single pure pricing function with 'failure is free unless a guard ran' is the model to copy for per-feature usage events.",
+    "notes": "Public pricing page (DOC) states JSON/Question/Highlight +4, search 2 per 10, interact 2 per minute; consistent with code."
+  },
+  {
+    "id": "firecrawl-api-surface-075",
+    "category": "Platform & ecosystem",
+    "name": "Time-based pricing for browser and interact sessions",
+    "what": "Browser sessions bill 120 credits per hour (2 per minute); a session that ran a natural-language prompt is re-rated to 420 per hour (7 per minute); ZDR adds 120 per hour; minimum charge is one minute; the prompt rate is reserved once per session; settlement happens when status is read or the session is stopped.",
+    "how": "calculateBrowserSessionCredits(durationMs, creditsPerHour) with ceil rounding; reserveBrowserPromptCredits checks Autumn for the full TTL at the interact rate before the first prompt (402 if short); stopBrowserSession and browserStatusController call settleBrowserSession.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/browser-billing.ts:1",
+      "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:390",
+      "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:277"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Usage-priced browser time (with a higher tier when an LLM drives it) maps to Verevon's cost split: Model Plane cost for reasoning, billing-core usage for browser minutes; the reserve-at-full-TTL-then-settle pattern avoids overspend.",
+    "notes": "Public pricing says 2 credits per browser minute; the 420/hour interact rate is only in code."
+  },
+  {
+    "id": "firecrawl-api-surface-076",
+    "category": "Platform & ecosystem",
+    "name": "Plans, limits and entitlements as published (DOC)",
+    "what": "Free 1 000 credits and 2 concurrent browsers; Hobby $16/mo (annual) 5 000 credits and 5 browsers; Standard $83 100 000 and 25; Growth $333 500 000 and 50; Scale $599 1 000 000 and 100; Enterprise custom; rate limits scale from 10/min scrape on Free to 10 000/min on Scale; agent includes 5 free runs per day.",
+    "how": "Fetched from the public pricing and rate-limit pages on 2026-10-13; Autumn is the credit and entitlement source of truth in code (plans identified by ids such as free, hobby) and rate_limits is a static per-plan multiplier.",
+    "evidence": [
+      "https://www.firecrawl.dev/pricing",
+      "https://docs.firecrawl.dev/rate-limits",
+      "C:/dev/firecrawl/apps/api/src/services/autumn/autumn.service.ts:76"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Reference points for packaging Quarry usage: pages as the unit, browser minutes as the second unit, and separate submission versus status limits.",
+    "notes": "Marketing pages change; numbers are a snapshot."
+  },
+  {
+    "id": "firecrawl-api-surface-077",
+    "category": "Platform & ecosystem",
+    "name": "Feedback-for-credits loop on search, scrape, parse and map results",
+    "what": "Callers can rate a finished job (good, partial, bad) with sources, missing content and notes within a short window (120 s by default) and receive credit refunds under a versioned policy: search flat 1 credit on any rating, map and basic scrape flat 1 credit on partial/bad, parse and PDF scrapes 25 percent up to 10 credits, json and add-ons 25 percent up to 5 credits; daily caps apply (50 credits by default).",
+    "how": "POST /v2/search/:jobId/feedback (rating, valuableSources<=50, missingContent<=20, querySuggestions) and POST /v2/feedback (endpoint search|scrape|parse|map, jobId, issues, tags, note, url, pageNumbers, metadata<=8 KB); substantive-feedback validation per rating; computeRefundPolicy returns desiredRefund and a policy snapshot (feedback_refund_v1); responses include creditsRefunded, dailyCapReached, creditsRefundedToday.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2853",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2936",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/feedback/refund-policy.ts:55",
+      "C:/dev/firecrawl/apps/api/src/config.ts:215"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A cheap, machine-readable quality signal from agents that Verevon's Model Plane could emit after each web call (was this useful?), feeding Quarry source-quality and search tuning; refunds map to billing-core credits.",
+    "notes": "Refund exposure is bounded by caps; abuse controls (daily and per-website caps) exist in config."
+  },
+  {
+    "id": "firecrawl-api-surface-078",
+    "category": "Platform & ecosystem",
+    "name": "Keyless free tier for agents",
+    "what": "Scrape, search, developer search and interact can be called without any API key from the official CLI, MCP server and SDKs, under per-IP daily request and credit caps; hitting the cap returns 429 with a signup URL carrying an encrypted prompt token.",
+    "how": "isKeylessConfigured requires both KEYLESS_REQUESTS_PER_DAY and KEYLESS_CREDITS_PER_DAY; only valid IPv4 identities are eligible (IPv6 blocks defeat per-IP caps); team id preview_keyless_<ip> skips billing and persistence; credits are reserved from a projection then adjusted to actual; suspicious IPs (Spur) are pointed to Google/GitHub signup; WWW-Authenticate: Bearer resource_metadata=<url> advertises how an agent can obtain credentials.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/keyless.ts:31",
+      "C:/dev/firecrawl/apps/api/src/lib/keyless.ts:137",
+      "C:/dev/firecrawl/apps/api/src/lib/agent-auth-discovery.ts:16",
+      "C:/dev/firecrawl/apps/api/src/lib/keyless-credit-projection.ts:4"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Not needed for Verevon's internal-only Quarry, but the reserve-then-reconcile credit projection and resource-metadata challenge are good patterns for any external-facing web tool.",
+    "notes": "Quarry baseline lists keyless public tier as out of scope; the signup-conversion funnel is Firecrawl-specific."
+  },
+  {
+    "id": "firecrawl-api-surface-079",
+    "category": "Platform & ecosystem",
+    "name": "Agent-led account onboarding: PKCE-style device flow in a skill",
+    "what": "A coding agent can obtain a user's API key without the user copying anything: it generates a session id and PKCE verifier/challenge, asks the human to open a sign-in URL, polls a status endpoint with the verifier, and writes FIRECRAWL_API_KEY to .env; Stripe Projects is an alternative provisioning path.",
+    "how": "skills/firecrawl-build-onboarding/references/auth-flow.md specifies the openssl commands, the cli-auth URL with code_challenge, and POST /api/auth/cli/status returning pending or {status:complete, apiKey, teamName}; separately the API has agent-managed keys with an agent_sponsors table (pending|verified|blocked, verification deadline, sandboxed team) and an AGENT_INDEX_ONLY 403 carrying sponsor_status and login_url until a human verifies.",
+    "evidence": [
+      "C:/dev/firecrawl/skills/firecrawl-build-onboarding/references/auth-flow.md:1",
+      "C:/dev/firecrawl/apps/api/src/services/agent-sponsor.ts:7",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:530"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Relevant to Verevon's MCP/agent surface: credential issuance to a tool-using agent should be a human-approved device flow, not a pasted secret, and unverified agents should get a restricted sandbox (index-only) until sponsored.",
+    "notes": "Website endpoints are outside the repo; flow taken from the skill reference."
+  },
+  {
+    "id": "firecrawl-api-surface-080",
+    "category": "Platform & ecosystem",
+    "name": "Deprecation and sunset protocol using standard headers plus body notices",
+    "what": "Deprecated endpoints keep working but every response carries a Deprecation header (RFC 9745 date), a Sunset header when scheduled, Link headers (rel=deprecation and rel=successor-version), a Warning: 299 header, and warnings[]/replacement fields in the JSON body; breaking changes can be announced weeks ahead for specific request shapes (the research category change on 2026-11-16).",
+    "how": "lib/deprecations.ts holds a typed registry (v0 scrape/crawl/search, v1 extract/deep-research/llmstxt, v2 extract, research GitHub search with sunset 2026-11-03); applyNotice wraps res.json to append warnings; researchCategoryNoticeMiddleware attaches a forward-looking notice only to requests that use the affected category, ahead of auth so rejected requests carry it too.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/deprecations.ts:19",
+      "C:/dev/firecrawl/apps/api/src/lib/deprecations.ts:107",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/search.ts:60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "A ready recipe for evolving Quarry's /v1 contracts while Verevon's gateway and SDKs lag: machine-readable, per-request-shape notices that agents and CI can parse.",
+    "notes": "Quality 5: standards-based and low-risk."
+  },
+  {
+    "id": "firecrawl-api-surface-081",
+    "category": "Platform & ecosystem",
+    "name": "Versioned API generations with adapters, not forks",
+    "what": "v0, v1 and v2 stay mounted; v1 and v0 request shapes are translated into the v2 internal model by adapters (fromV1ScrapeOptions, fromV0ScrapeOptions, toV0CrawlerOptions) so one worker pipeline serves all versions; SDKs expose v2 by default and v1 under .v1.",
+    "how": "controllers/v2/types.ts contains fromV0Combo/fromV1ScrapeOptions/toV2CrawlerOptions with internalOptions carrying v1-only fields (v1Agent, v1JSONSystemPrompt, v1OriginalFormat); Safe Mode rejects v0 outright; the JS and Python SDKs keep v1 clients feature-frozen.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2329",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2183",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/index.ts:27"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry has v1 REST plus a deleted Firecrawl-compat adapter (baseline discrepancy 17); an internal canonical model with per-version adapters is how to add a Firecrawl-compatible facade later without a second pipeline.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-082",
+    "category": "Platform & ecosystem",
+    "name": "Per-API-key restrictions: endpoint groups, formats and IP allow-lists",
+    "what": "Keys can be limited to endpoint groups (scrape, batch-scrape, crawl, map, search, research, browser, agent/extract, monitor) and to allowed formats; teams can also pin keys to an IP allow-list; changes propagate within a minute.",
+    "how": "key_restriction_config (allowedFormats, allowedEndpoints) cached in Redis for 60 s with clearKeyRestrictionCache; checkKeyFormatRestriction receives format and action types of the request; ENDPOINT_GROUPS maps route prefixes (job status shares its job type's group); ip_restriction_config gates by caller IP; separate per-key spend limits exist in Autumn.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/key-restriction.ts:107",
+      "C:/dev/firecrawl/apps/api/src/lib/key-restriction.ts:9",
+      "C:/dev/firecrawl/apps/api/src/lib/ip-restriction.ts:17"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon service tokens are already scoped to a few Quarry routes (baseline section 1); format- and action-level scoping would let the Model Plane's grant say 'screenshots yes, executeJavascript no' for a given run.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-083",
+    "category": "Platform & ecosystem",
+    "name": "Entitlements as tri-state team flags (disabled, allowed, forced)",
+    "what": "Enterprise capabilities are per-team flags rather than separate products: ZDR for scrape and search (disabled|allowed|forced, with search forced-zdr and forced-anon), ignoreRobots, customRobotsAgent, threatProtection, safeMode, siemLogging, ipWhitelist, bypassCreditChecks, maxBrowserSessions, largePdfs, beta flags.",
+    "how": "TeamFlags type and helpers (getScrapeZDR, getSearchZDR, getIgnoreRobots, getThreatProtection) read the flag from the cached account chunk (ACUC); checkPermissions turns a request option into an entitlement check with an 'enterprise feature, contact support' error.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2105",
+      "C:/dev/firecrawl/apps/api/src/lib/zdr-helpers.ts:16",
+      "C:/dev/firecrawl/apps/api/src/lib/permissions.ts:55"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "'Forced' versus 'allowed' is the distinction Verevon's ZDR propagation needs: org policy can force a posture the request cannot weaken; Control Plane would own the flags and Quarry would read them from the principal.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-084",
+    "category": "Platform & ecosystem",
+    "name": "Integration and origin attribution on every request",
+    "what": "Requests carry origin (api, js-sdk@x, mcp..., website) and an optional integration tag from a closed list (n8n, zapier, make, pipedream, dify, flowise, langchain, llamaindex, crewai, raycast, cli, and others) used for analytics, rate decisions and keyless gating.",
+    "how": "integrationSchema enum in utils/integration.ts; SDKs inject origin; keyless soft-gates on origin/integration (spoofable, backed by per-IP caps); MCP action logs and request logs record origin and integration.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/utils/integration.ts:24",
+      "C:/dev/firecrawl/apps/api/src/lib/keyless.ts:26",
+      "C:/dev/firecrawl/apps/api/src/lib/request-origin.ts:12"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Cheap to add to Quarry and Verevon: tag each Quarry call with caller surface (chat, agent, import, monitor) for Control Plane analytics and cost attribution.",
+    "notes": "The closed enum means new partners require an API change."
+  },
+  {
+    "id": "firecrawl-api-surface-085",
+    "category": "Platform & ecosystem",
+    "name": "Agent run exported as a reusable skill and workflow",
+    "what": "GET /v2/agent/:id/skill distils a finished run into skill {name, spec, skillMd, workflow, schema}, a blueprint and generation timestamp: a SKILL.md for a coding agent plus a script that reproduces the run through the API.",
+    "how": "AgentSkillResponse; the upstream shape is passed through verbatim by agentSkillController; paired with the skills catalog CI sync.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1951",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent-skill.ts:6",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:448"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Aligns with Quarry's procedure compile/check work (baseline Known gap 13: procedures have no store or replay): turning a successful web-agent run into a stored, replayable procedure is exactly this loop.",
+    "notes": "Generation logic is in the external agent service."
+  },
+  {
+    "id": "firecrawl-api-surface-086",
+    "category": "Platform & ecosystem",
+    "name": "Build skills and endpoint-selection guidance shipped as product surface",
+    "what": "Five 'build' skills teach coding agents how to integrate Firecrawl: choose /scrape for a known URL, /search for a query, /interact when clicks are needed, and route paper or developer questions to the specialised indexes; freshness (maxAge, cacheState) and liveness are treated separately; skills are mirrored into a public catalog by CI.",
+    "how": "skills/ (firecrawl-build umbrella, onboarding, scrape, search, interact) with references (project-intake, endpoint-selection, integration-patterns, verification); sync-skills-catalog workflow; cross-skill links are sibling-relative so installed skills resolve flat.",
+    "evidence": [
+      "C:/dev/firecrawl/skills/firecrawl-build/references/endpoint-selection.md:1",
+      "C:/dev/firecrawl/skills/firecrawl-build-scrape/references/freshness-and-liveness.md:1",
+      "C:/dev/firecrawl/.github/workflows/sync-skills-catalog.yml"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry's tool descriptions for the Model Plane could be written the same way: narrowest-endpoint-first routing rules, freshness vs liveness distinction, and a verification step.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-087",
+    "category": "Platform & ecosystem",
+    "name": "Exchange publisher side: bounties, supply keys and applications",
+    "what": "Third parties can publish data providers to the Exchange: create bounties for missing data sources, apply, claim and submit, register supply and ingest endpoints, view analytics and rates, manage platform capacity, and accept provider terms.",
+    "how": "routes/exchange.ts mounts /exchange rewritten to /v1 on FIRE_EXCHANGE_URL with x-exchange-team-id set from the authenticated team; most routes require the team flag exchangeRetrieve; a bounty blocklist rejects bounties that target blocked domains.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/routes/exchange.ts:69",
+      "C:/dev/firecrawl/apps/api/src/routes/exchange-blocklist.ts:3",
+      "C:/dev/firecrawl/apps/api/src/lib/exchange.ts:53"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "A two-sided provider marketplace is out of Verevon's near-term scope, but integration-corev2's provider-action catalog could adopt the 'capability + terms + price' record shape.",
+    "notes": "Exchange upstream is external; only the proxy and contracts are visible."
+  },
+  {
+    "id": "firecrawl-api-surface-088",
+    "category": "Platform & ecosystem",
+    "name": "In-product support agent exposed as API",
+    "what": "POST /v2/support/ask and /v2/support/docs-search forward questions to a support agent with their own tight rate limits (3/min).",
+    "how": "supportProxyController forwards to SUPPORT_AGENT_URL under RateLimiterMode.SupportAsk and SupportDocsSearch.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:704",
+      "C:/dev/firecrawl/apps/api/src/services/rate-limiter.ts:36"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Minor; shows docs-search as an API for agents that need to look up product usage.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-089",
+    "category": "Platform & ecosystem",
+    "name": "Open-source core versus hosted cloud split",
+    "what": "The AGPL-3.0 repo contains the API, workers, Playwright service and SDKs (SDKs MIT); the hosted product adds fire-engine browsers and proxies, FirePDF, the agent service, dashboard, Hangar sessions, Exchange and more, none of which are in the repo.",
+    "how": "README 'Open Source vs Cloud' image and text; many controllers proxy to env-configured upstream URLs (FIRE_ENGINE_BETA_URL, FIRE_PDF_BASE_URL, HANGAR_URL, EXTRACT_V3_BETA_URL, FIRE_EXCHANGE_URL, LABS_SEARCH_URL, RESEARCH_PROXY_URL, SEARCH_PLATFORM_URL); SELF_HOST.md warns the default stack is unauthenticated and has no persistent volumes.",
+    "evidence": [
+      "C:/dev/firecrawl/README.md (Open Source vs Cloud)",
+      "C:/dev/firecrawl/SELF_HOST.md:1",
+      "C:/dev/firecrawl/apps/api/src/config.ts:362"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Everything differentiating (anti-bot engine, OCR, agent, browser fleet) is closed; Verevon's Quarry-v2 owns these capabilities itself, so parity should be measured against the hosted product's behaviour, not the OSS repo.",
+    "notes": "Important caveat for any 'feature parity' claim based only on this repo."
+  },
+  {
+    "id": "firecrawl-api-surface-090",
+    "category": "Platform & ecosystem",
+    "name": "Labs search data sources, packs and configs",
+    "what": "A /labs proxy lets teams register search data sources (sites, documents, pages), refresh them, enable provider packs and save named search configurations.",
+    "how": "routes/labs.ts forwards to LABS_SEARCH_URL with LABS_SEARCH_SECRET and a 120 s timeout: POST /labs/search, /labs/search/data/{sites,documents,pages}, refresh, /providers, /packs, /configs.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/routes/labs.ts:150",
+      "C:/dev/firecrawl/apps/api/src/routes/labs.ts:144"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "unique",
+    "verevonRelevance": "Closest Firecrawl analogue to presets and per-tenant search corpora; Quarry's presets are unmounted (baseline section 6) and tenant corpora live in the Data Plane.",
+    "notes": "Experimental; upstream not visible."
+  },
+  {
+    "id": "firecrawl-api-surface-091",
+    "category": "Observability & operations",
+    "name": "Agent run trace: canonical, ordered event stream with artifact snapshots",
+    "what": "GET /v2/agent/:id/trace returns every event of a run (events[], creditsUsed, activeBrowserSessions with liveViewUrl and viewport) and GET /v2/agent/:id/snapshots/:snapshotId returns the content of an artifact version.",
+    "how": "Events share an envelope (schemaVersion, eventId, runId, occurredAt, producerSequence, agent{id, role orchestrator|subagent|system, name, parentId}) and a type: run.started, run.cancel_requested, run.finished, agent.started, agent.finished, browser.session.started/finished, progress.reported, reasoning.summary, tool_call.started/finished, artifact.updated, error.occurred; artifact descriptors give kind (json, markdown, html, screenshot, text), path, snapshotId, change (init|partial|append|modify|update), changedFields; errors are {code cancelled|credit_limit_reached|parent_finished|refused|internal, source agent|tool|billing|system, retryable}.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/elixir-sdk/openapi.json (AgentTraceEvent, AgentTraceArtifact, AgentTraceError)",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent-trace.ts:30",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1929"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "A strong template for Model Plane run events surfaced to the Verevon UI: sequence numbers for ordering, parent-agent identity for sub-agents, artifact versions as snapshots, retryable typed errors.",
+    "notes": "usage.recorded events are internal and never exposed; reasoning is exposed only as summaries."
+  },
+  {
+    "id": "firecrawl-api-surface-092",
+    "category": "Observability & operations",
+    "name": "Request correlation, origin tags and job access TTLs",
+    "what": "Every request logs an id, kind, api_version, origin, integration, target hint, ZDR flag and api key id; callers can pass x-request-id (also forwarded to Exchange and research upstreams and used as the paid-charge idempotency key); job results and access rows expire (crawl 24 h by default).",
+    "how": "logRequest writes a request row (the job log transport is Pub/Sub only since 2026-10-09 per git #5010); externalRequestId reads x-request-id or External-Request-Id; job-access-store and operational-job-access keep per-job team ownership with expiry; ZDR requests skip tracing entirely (traces keyed by id are suppressed).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/external-request-id.ts:9",
+      "C:/dev/firecrawl/apps/api/src/services/logging/log_job.ts:469",
+      "C:/dev/firecrawl/apps/api/src/lib/otel-tracer.ts:87"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry should accept and propagate an x-request-id from the gateway into events/receipts so a user-visible run can be traced across Gateway, Model Plane and Quarry, and ZDR must suppress tracing as here.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-093",
+    "category": "Observability & operations",
+    "name": "SIEM forwarding and per-request audit attribution",
+    "what": "Enterprise teams can stream scrape activity (success, failure, blocked, cancelled, with threat decisions) to Azure Sentinel; callers may pass auditMetadata.username to attribute a request to an end user.",
+    "how": "PUT /v2/team/siem with tenantId, clientId, encrypted clientSecret, dceUrl (must be an Azure Monitor ingestion endpoint), dcrImmutableId and Custom- stream name; batching worker, delivery metrics and a test endpoint; an ARM/DCR deployment template ships in apps/siem/azure-sentinel; encrypted at rest with SIEM_LOGGING_ENCRYPTION_KEY.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/siem-logging/types.ts:13",
+      "C:/dev/firecrawl/apps/api/src/lib/siem-logging/types.ts:7",
+      "C:/dev/firecrawl/apps/siem/azure-sentinel/README.md:1"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon Control Plane owns audit; Quarry should emit per-request audit events with an end-user attribution field into that stream, which is the same shape.",
+    "notes": "Only Azure Sentinel is supported as a destination."
+  },
+  {
+    "id": "firecrawl-api-surface-094",
+    "category": "Observability & operations",
+    "name": "Self-hosting posture and operational warnings",
+    "what": "A Compose stack (API, workers, Playwright, Redis, RabbitMQ, NuQ Postgres, optional FoundationDB) runs the open-source core on port 3002; the guide stresses an unauthenticated default, no persistence and no production architecture, with AI features off until a model provider is configured.",
+    "how": "docker-compose.yaml sets resource limits (api 4 CPU/8 GB, Playwright 2 CPU/4 GB, no-new-privileges, cap_drop ALL, tmpfs); SELF_HOST.md lists 'before production' duties; Kubernetes and Helm examples exist; USE_DB_AUTHENTICATION=false is the first-run default.",
+    "evidence": [
+      "C:/dev/firecrawl/docker-compose.yaml:1",
+      "C:/dev/firecrawl/SELF_HOST.md:1",
+      "C:/dev/firecrawl/examples/kubernetes/firecrawl-helm"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "A useful negative example: Verevon's compose stacks should keep auth, persistence and ZDR on by default and not rely on operators to add them.",
+    "notes": "CORS is the Express default (all origins) at apps/api/src/index.ts line 89 and the JSON body limit is 10 MB."
+  },
+  {
+    "id": "firecrawl-api-surface-095",
+    "category": "Observability & operations",
+    "name": "Quality gates: e2e 'snips', knip, and an on-demand scrape-quality eval",
+    "what": "Contributors are told to write end-to-end tests against a harness-started stack, gate tests by TEST_SUITE_SELF_HOSTED, never bypass the knip dead-code check, and can trigger a scrape-quality evaluation on a PR with a tag.",
+    "how": "CLAUDE.md/AGENTS.md; pnpm harness starts API and workers; vitest e2e under src/__tests__/snips; scrape-evals.yml runs on issue comment or PR text '#scrape-quality-eval' after an org-membership check; eval-prod.yml runs production evals; 373 test files.",
+    "evidence": [
+      "C:/dev/firecrawl/CLAUDE.md:1",
+      "C:/dev/firecrawl/.github/workflows/scrape-evals.yml:1",
+      "C:/dev/firecrawl/.github/workflows/eval-prod.yml:1"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry's SCOREBOARD/benchmarks are not run (baseline Known gap 16); a PR-triggered quality eval with a fixed corpus is the cheap way to keep parity claims honest.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-096",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Live view and interactive takeover URLs on every session",
+    "what": "Each browser or interact session returns a CDP URL for automation, a liveViewUrl (read-only stream) and an interactiveLiveViewUrl (a human can click and type in the same session); the agent trace also lists active sessions with their live view and viewport so a UI can attach to a running agent.",
+    "how": "browserSessionLinks returns cdpUrl, liveViewUrl (cdp_path) and interactiveLiveViewUrl (cdp_interactive_path); streamWebView defaults to true; the README interact example returns liveViewUrl; agent trace supports liveView=true. The repo contains no UI: the dashboard and playground that render these are outside it.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:98",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:44",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent-trace.ts:30",
+      "C:/dev/firecrawl/README.md (Interact output)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's BrowserChrome already has live view, takeover, devtools, timeline and approvals; the API-level lesson is that attach/takeover are just URLs on the session object, with takeover a separate, explicitly named capability.",
+    "notes": "Quarry baseline Known gap 11: takeover is advisory server-side and receipts do not type the initiator; Firecrawl's two-URL split (read-only vs interactive) is cleaner."
+  },
+  {
+    "id": "firecrawl-api-surface-097",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Session recording as HLS replay",
+    "what": "A session created with recordSession:true can be replayed afterwards: GET /v2/browser/:id/replay returns a single page entry with start and end times and GET /v2/browser/:id/replay/0 returns an HLS playlist.",
+    "how": "browserReplayController looks up the recording by context_id, sets Cache-Control no-store, returns pages[{pageId:'0', url, pageUrl:'', startTimeMs, endTimeMs}] (the desktop stream spans tabs, so there is no per-page URL); the page route returns the playlist with Content-Type application/vnd.apple.mpegurl; recordings are refused under ZDR and use a dedicated BrowserReplay rate-limit mode.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:350",
+      "C:/dev/firecrawl/apps/api/src/lib/hangar.ts:200",
+      "C:/dev/firecrawl/apps/api/src/services/rate-limiter.ts:34"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry has a timeline and receipts but no video-style recording (baseline section 8); recording must be ZDR-gated exactly like this if added.",
+    "notes": "The replay API shape (pages[]) anticipates per-tab recordings but currently returns one."
+  },
+  {
+    "id": "firecrawl-api-surface-098",
+    "category": "AI-browser control",
+    "name": "Prompt-driven interact loop: AX-tree snapshots with element refs and a one-tool agent",
+    "what": "Natural-language interact runs a model that drives the browser through an accessibility-tree CLI (agent-browser): it gets an initial interactive snapshot with @e refs, issues click, fill, type, press, select, scroll, wait, find, frame, eval and get commands, re-snapshots after page changes, and returns a human-readable answer.",
+    "how": "executePromptViaBrowserAgent uses the Vercel AI SDK generateText with a single 'browser' tool that runs bash commands inside the Hangar browser; MAX_STEPS 25; snapshots capped at 40 000 chars; each step prepends an ACTION LOG with common-mistake reminders (stale refs, forgot Enter); opening new tabs or URLs is blocked by regex; the agent starts on the scrape's page; model gemini-3.5-flash via Vertex (GenAI fallback), zero-data-retention uses an OpenAI model with store:false; LangSmith tracing is bypassed for ZDR.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:20",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:88",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:407",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:284",
+      "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:364"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Contradicts the scout's negative finding: Firecrawl does use AX snapshots with refs. Verevon forbids an in-process loop in Quarry (Model plans, Quarry executes), but the one-command-per-step tool contract, ref invalidation rule and action-log reflection are directly reusable in the Model Plane's loop calling Quarry /step.",
+    "notes": "Quality 4: pragmatic and bounded; weaknesses are a regex-only tab guard, no per-step approvals and a free-form bash tool (broad capability)."
+  },
+  {
+    "id": "firecrawl-api-surface-099",
+    "category": "AI-browser control",
+    "name": "Code execution inside a live session (node, python, bash)",
+    "what": "Callers can run their own code against a live browser: node code runs with Playwright page and context objects in scope, python and bash run alongside; output returns stdout, stderr, result, exitCode, killed and truncated.",
+    "how": "browserExecuteRequestSchema (language node default, timeout 1-300 s, code <=100 000 bytes) is forwarded to Hangar execute; the interact controller reuses it for the code branch; Safe Mode rejects the whole feature; rate limit BrowserExecute is the most generous browser mode.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:75",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-browser.ts:61",
+      "C:/dev/firecrawl/apps/api/src/lib/safe-mode.ts:22"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry allows evaluate and raw-CSS actions without approval (baseline Known gap 12); arbitrary code execution is the extreme version of that, so Verevon should expose it only behind Model Plane approval classes and sandbox rules.",
+    "notes": "Powerful and risky by design; Firecrawl contains it by tenant isolation and bans it for Safe Mode orgs."
+  },
+  {
+    "id": "firecrawl-api-surface-100",
+    "category": "AI-browser control",
+    "name": "Prompt-injection guard as a scrape option (checkPromptInjection)",
+    "what": "checkPromptInjection:true scans page markdown with a classifier before any LLM-backed format runs and blocks the scrape with 403 SCRAPE_PROMPT_INJECTION_DETECTED when the content tries to steer an AI; the fee is charged only if every chunk got a verdict.",
+    "how": "performPromptInjectionGuard runs first in the transformer chain; checkForPromptInjection chunks content (32 000 chars, 2 000 overlap, concurrency 5) and asks gpt-4o-mini for {isInjection, reason}; the system prompt randomises the delimiter tag so page text cannot spoof it and defines injection by capability (requests an agent could act on) while treating llms.txt-style agent onboarding notes and human-directed CTAs as benign; failing chunks fail open and are unbilled; a deprecated copy on the json format is lifted to the top-level flag.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/promptInjectionGuard.ts:7",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/lib/promptInjectionGuard.ts:14",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/lib/promptInjectionGuard.ts:46",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:924"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Baseline Known gap 12: Quarry has no prompt-injection defences; an opt-in, billed, fail-open scan at the ingestion edge (with Model Plane as classifier host) plus observation labelling would close the largest agent-safety hole.",
+    "notes": "Fail-open is a deliberate trade-off; Verevon may prefer fail-closed for agent-bound content."
+  },
+  {
+    "id": "firecrawl-api-surface-101",
+    "category": "AI-browser control",
+    "name": "Human approval and terms gates for paid agent tool calls",
+    "what": "An agent run can be told to ask before spending: exchange.requireApproval with maxCalls (1-30) pauses at a pendingApproval listing each call (provider, capability, input, estimated credits); the caller approves specific callIds (optionally 'always') or declines; provider data terms are never auto-accepted by the agent.",
+    "how": "agentExchangeSchema {enabled, toolkits, maxCalls, requireApproval, approve{approvalId, callIds, always}, decline{approvalId}, onTermsRequired skip|ask}; status returns pendingApproval of kind calls or terms and an exchange summary (paidCalls, creditsUsed, skippedProviders, requiresAction accept_terms with terms/show and terms/accept capability payloads and confirmed:true); a comment states only a human-authorised terms/accept or the dashboard may accept terms.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1127",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1760",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1800"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Maps onto Verevon's approval model (approvals live in Model Plane/Application, not Quarry): the approvalId + callIds + 'always' shape and the rule 'terms acceptance is never automatic' are reusable for connector and paid-provider actions.",
+    "notes": "New in Oct 2026 (git #4984-#4991)."
+  },
+  {
+    "id": "firecrawl-api-surface-102",
+    "category": "AI-browser control",
+    "name": "Domain scoping for agent runs",
+    "what": "Agent runs can be constrained to the supplied URLs (strictConstrainToURLs), given a one-off allow-list override (overrideWhitelist), and checked against threat-protection policy for start URLs, with the explicit caveat that in-page navigation in the remote browser cannot be intercepted by the API.",
+    "how": "agentController checks urls with checkUrlsAgainstThreatPolicy before handing off (billing scan fees for rejected requests), emits rejected-activity SIEM events, and documents in a comment that agent-interop scrapes are enforced by the scrape pipeline while remote-browser navigation is not.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1180",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1183",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent.ts:77"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's BrowserBroker grants replace client-supplied allowed_domains with grant domains (baseline section 'constraints'), which is stricter than Firecrawl's best-effort scoping; keep that server-side authority.",
+    "notes": "The caveat about unenforceable in-page navigation is a candid statement of the remote-browser limit."
+  },
+  {
+    "id": "firecrawl-api-surface-103",
+    "category": "Integration-plane overlap",
+    "name": "Alexandria: provider tools discovered by search and executed through scrape",
+    "what": "Search with sources:['web','alexandria'] or domainTools:true returns data.tools (provider, capability, description, matchedBy semantic|domain, matchedUrls) for free; executing a tool is a /v2/scrape call carrying alexandria:[{provider, capability, options}] (up to 10 calls, up to 120 s), and 'firecrawl/find-tools' is itself a capability.",
+    "how": "scrapeController diverts bodies with an alexandria key to providerScrapeController; discoverTools queries the Exchange (limit 24, 10 s) and is refused under ZDR; SDK scrapeAlexandria generates a UUID requestId sent as x-request-id; response data.alexandria[] with per-call data or error plus data.creditsCost; tool detail levels compact|summary|full via toolDetail.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:2",
+      "C:/dev/firecrawl/apps/api/src/services/alexandria/README.md:1",
+      "C:/dev/firecrawl/apps/js-sdk/firecrawl/src/v2/methods/tools.ts:16",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1213"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Closest analogue to integration-corev2 provider actions with discovery: 'search discovers tools, a single execution endpoint runs them' lets the Model Plane find a capability by domain or intent without a hard-coded tool list.",
+    "notes": "integration-corev2 has about 142 named operations in one Execute switch (baseline section 10); a discoverable capability catalog (provider, capability, schema, price) would be the missing layer."
+  },
+  {
+    "id": "firecrawl-api-surface-104",
+    "category": "Integration-plane overlap",
+    "name": "Paid provider execution with credit lock, settle and replay-safe idempotency",
+    "what": "Paid provider calls follow authorize, quote, reserve (credit lock), execute, finalize, ledger write and usage report; the charge id is sha256(team, x-request-id) with a seven-day record so completed requests replay without re-execution; a different payload under the same id is 409 duplicate_request, a running one 409 request_in_flight, an uncertain outcome 503 request_unresolved.",
+    "how": "services/alexandria/retrieve.ts per the README: authorize through the Exchange against organizationDataSourceAccess flags, refuse free-plan teams for paidPlanOnlyCapabilities (fail closed with 503 plan_verification_unavailable), Autumn lockCredits/finalizeCreditsLock, billing-queue job alexandria-bill-<chargeId>, forward the caller's Authorization to Exchange on execution only (never stored); mixed batches rejected before billing; settlement covered by mocked tests only.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/services/alexandria/README.md:39",
+      "C:/dev/firecrawl/apps/api/src/services/alexandria/README.md:58",
+      "C:/dev/firecrawl/apps/api/src/services/alexandria/retrieve.ts:285"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Exactly the guarantees integration-corev2 write actions need (signed attestations exist, idempotency semantics are not documented in the baseline); copy the outcome taxonomy (completed, refused-before-execution, uncertain) and the 'uncertain stays pending for manual reconciliation' rule.",
+    "notes": "README states paid settlement has not run against an Autumn sandbox, so treat it as design, not proven."
+  },
+  {
+    "id": "firecrawl-api-surface-105",
+    "category": "Integration-plane overlap",
+    "name": "OAuth bearer tokens introspected with audience binding for hosted MCP",
+    "what": "Besides fc- API keys, the API accepts OAuth access tokens issued for the hosted MCP server: each token is introspected, must be active, unexpired, bound to the expected resource (audience https://api.firecrawl.dev/ or the MCP audience) and carry a recognised credential purpose; inactive results are cached for 60 s and an introspection outage raises a distinct OAuthIntrospectionUnavailableError so it can be told apart from a bad token.",
+    "how": "oauth-token-introspection.ts (OAUTH_INTROSPECT_URL/SECRET) returns {active, api_key, scope, client_id, team_id, exp, aud, credential_purpose general|hosted_mcp_oauth}; the token hash (sha256 prefix) is the cache key; OAuthIntrospectionUnavailableError keeps a cache outage from becoming an auth outage; WWW-Authenticate advertises protected-resource metadata so agents can discover the authorization server.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/services/oauth-token-introspection.ts:8",
+      "C:/dev/firecrawl/apps/api/src/services/oauth-token-introspection.ts:10",
+      "C:/dev/firecrawl/apps/api/src/lib/agent-auth-discovery.ts:16"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "If Verevon exposes Quarry or provider actions to external MCP clients, it needs audience-bound OAuth tokens introspected by Control Plane auth-core; integration-corev2 currently exposes no MCP/tool surface (baseline section 10).",
+    "notes": "Resource-indicator checks prevent a token minted for one resource being replayed at another."
+  },
+  {
+    "id": "firecrawl-api-surface-106",
+    "category": "Integration-plane overlap",
+    "name": "Delegated MCP credential: short-lived HMAC token wrapping an API key",
+    "what": "The hosted MCP service can present a signed fcmcp_ credential instead of a raw key; the API verifies a strict payload (v, aud firecrawl-core, purpose hosted_mcp_oauth, api_key, iat, exp), canonical base64url encoding, clock-skew limits (30 s iat, 120 s exp) and constant-time signature comparison.",
+    "how": "verifyMcpDelegatedCredential(token, secret, now) with PREFIX fcmcp_, MAX_TOKEN_LENGTH 2048, exact key-set check and api_key format validation (fc- plus 32 hex, valid UUID).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/mcp-delegated-credential.ts:5",
+      "C:/dev/firecrawl/apps/api/src/lib/mcp-delegated-credential.ts:30"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A compact pattern for gateway-to-Quarry delegation without forwarding user tokens: short-lived, audience-bound, purpose-tagged; Verevon's cross-plane service tokens already follow a manifest, this adds explicit purpose and skew rules.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-107",
+    "category": "Integration-plane overlap",
+    "name": "MCP action logs: team-visible audit of tool calls without leaking intent",
+    "what": "The hosted MCP server writes one log row per tool call (tool name, client name/version, auth type api-key or oauth, OAuth client id, status, error class, resource, request id) to an internal ingest endpoint; teams can list their own logs through the API; the model's stated objective and API job id are stored but excluded from the team-readable columns, and ZDR teams get an accepted-but-not-stored response.",
+    "how": "POST /v2/mcp/action-logs (shared-secret bearer with constant-time check, 64 KB body limit, in-process rate limit 600 per minute, actor validation against api_keys or user_teams) and GET /v2/mcp/action-logs (cursor pagination, retention window) backed by ClickHouse; ZDR returns 202 disposition zero-data-retention.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/routes/mcp-action-logs.ts:118",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/mcp-action-logs.ts:49",
+      "C:/dev/firecrawl/apps/api/src/services/mcp/action-logs.ts:37"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "If Verevon adds an MCP front for Quarry, per-call action logs with a privacy-minimised team view are the audit contract to meet, with ZDR short-circuiting storage.",
+    "notes": "Query shows objective and api_job_id are deliberately not in the team-readable column list (git #5092)."
+  },
+  {
+    "id": "firecrawl-api-surface-108",
+    "category": "Integration-plane overlap",
+    "name": "Slack app: OAuth install, slash commands and events",
+    "what": "Teams can connect a Slack workspace (OAuth start, callback, status, channel list, disconnect) and use /monitor and /firecrawl slash commands and Slack events; monitor alerts can post to a chosen channel.",
+    "how": "routes under /v2/slack with authMiddleware for start/status/channels/delete and signature verification for commands and events; Slack's 3-second ack deadline is met by acknowledging then handling asynchronously; bot tokens are encrypted at rest (SLACK_TOKEN_ENCRYPTION_KEY) in slack_installations; the monitor stores only the channel id.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:627",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/slack.ts:202",
+      "C:/dev/firecrawl/apps/api/src/services/integrations/slack/commands.ts:177"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's Application Plane owns notifications; a Slack channel destination for Quarry change alerts would route through notification-core rather than Quarry holding tokens (integration-corev2 already has a Slack connector).",
+    "notes": "Do not copy token storage into Quarry; use integration-corev2's vault."
+  },
+  {
+    "id": "firecrawl-api-surface-109",
+    "category": "Integration-plane overlap",
+    "name": "Monitor notification channels with double opt-in email",
+    "what": "Monitor alerts can go to a webhook, Slack, or up to 25 email recipients; recipients added by a monitor owner are pending until they confirm, each has an unsubscribe token, and both confirm and unsubscribe are public endpoints authenticated only by the token.",
+    "how": "monitor_email_recipients table (status pending|confirmed|unsubscribed, source team|opt_in|legacy, 256-bit base64url tokens, confirmation_sent_at, last_notified_at); POST /v2/monitor/email/confirm and /unsubscribe registered before /monitor/:id; in-app notifications and Resend email are separate services; includeDiffs controls whether diffs are embedded.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/email_recipients.ts:11",
+      "C:/dev/firecrawl/apps/api/src/routes/v2.ts:575",
+      "C:/dev/firecrawl/apps/api/src/services/monitoring/types.ts:142"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry change webhooks fan out to notification-core (baseline section 1); the pending/confirmed/unsubscribed recipient model is the compliance detail to add if user-supplied external recipients are ever allowed.",
+    "notes": ""
+  },
+  {
+    "id": "firecrawl-api-surface-110",
+    "category": "Integration-plane overlap",
+    "name": "Partner admin provisioning API",
+    "what": "A path-secret-gated admin surface lets an integration partner create users, validate API keys and rotate keys, proxied to an integrations service; requests are tagged by integration.",
+    "how": "routes/admin.ts under /admin/<BULL_AUTH_KEY>/ (secret in the path) plus POST /admin/integration/create-user, /validate-api-key, /rotate-api-key via lib/admin-integration-integrations-proxy with an S2S secret.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/routes/admin.ts:114",
+      "C:/dev/firecrawl/apps/api/src/routes/admin.ts:118"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A secret-in-URL admin gate is not an acceptable pattern for Verevon (use Control Plane principals); only the capability list (create, validate, rotate) is informative for partner onboarding.",
+    "notes": "Weakness: the BULL_AUTH_KEY path secret protects admin metrics and the queue UI."
+  },
+  {
+    "id": "firecrawl-api-surface-111",
+    "category": "Integration-plane overlap",
+    "name": "Scrape-to-index sinks: shared page index and a sampled search-index feed",
+    "what": "Successful scrapes are written, via a RabbitMQ indexer queue, to an index of cached documents (object in storage plus an index database row) that later serves maxAge cache hits and map discovery; a separate sampled feed (default 10 percent) sends documents to a search service for the search/highlights products.",
+    "how": "transformers/index.ts samples by traffic share when INDEXER_RABBITMQ_URL is set and publishes through services/indexing/indexer-queue (amqplib); sendDocumentToSearchIndex checks ENABLE_SEARCH_INDEX and SEARCH_SERVICE_URL, applies SEARCH_INDEX_SAMPLE_RATE, skips empty or unsuitable documents and passes the GCS path {indexId}.json; the index lives in a separate database (db/schema/index-db.ts) keyed by URL hash with per-domain maxAge metadata.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/index.ts:216",
+      "C:/dev/firecrawl/apps/api/src/services/indexing/indexer-queue.ts:55",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/sendToSearchIndex.ts:90",
+      "C:/dev/firecrawl/apps/api/src/db/schema/index-db.ts:32"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon's equivalent is Quarry ingest into the Data Plane (documents plus source trace); the Firecrawl difference is an implicit cross-tenant shared cache, which Verevon must not copy because of ZDR and owner-plane ACL rules.",
+    "notes": "Cross-tenant shared index is a privacy decision specific to the hosted product (ZDR requests skip it). Corrects the scout, which described a single RabbitMQ index worker."
+  },
+  {
+    "id": "firecrawl-api-surface-112",
+    "category": "Observability & operations",
+    "name": "Zero-data-retention support is uneven across endpoints and explicitly refused where unsafe",
+    "what": "ZDR is honoured on scrape, search, crawl, batch, browser/interact and parse, but explicitly refused or degraded elsewhere: agent and extract (400), monitors (400, needs retained snapshots), change tracking and onlyCleanContent (warning, feature skipped), scrape-status retrieval (400), provider tools/Alexandria (403), recordings and profiles (400), MCP action logs (accepted, not stored).",
+    "how": "Per-request zeroDataRetention plus team flag modes (scrape and search disabled|allowed|forced); ZDR requests suppress OpenTelemetry tracing and the flag is carried through worker job logging and indexing helpers (the retention behaviour of each sink was not traced); the zdrCost surcharge applies; each unsupported combination returns an explicit error or warning rather than silently retaining data.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/agent.ts:49",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/monitor.ts:74",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/diff.ts:85",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-status.ts:30",
+      "C:/dev/firecrawl/apps/api/src/controllers/v2/mcp-action-logs.ts:49"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon's rule 'ZDR must propagate through any content-persisting boundary' needs exactly this per-feature refusal matrix: Quarry already refuses durable crawl/batch under ZDR and returns no text on ZDR scrapes (baseline section 2), so adopt explicit 'unsupported under ZDR' errors instead of empty outputs.",
+    "notes": "Contrast: a Quarry ZDR scrape returns no page text at all because artifacts are not written; Firecrawl returns the document in the response and persists nothing."
+  },
+  {
+    "id": "firecrawl-api-surface-113",
+    "category": "Platform & ecosystem",
+    "name": "Features Firecrawl retired: v1 deep research and llms.txt generation",
+    "what": "v1 deep-research is deprecated in favour of search, and v1 llms.txt generation is deprecated with no replacement; both remain mounted for old clients and the JS SDK marks them deprecated.",
+    "how": "deprecations registry entries v1_deep_research, v1_deep_research_status ('Use /v2/search instead') and v1_llmstxt ('will not be replaced'); lib/deep-research and lib/generate-llmstxt are kept only behind deprecated routes.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/deprecations.ts:52",
+      "C:/dev/firecrawl/apps/api/src/lib/deprecations.ts:63",
+      "C:/dev/firecrawl/apps/api/src/routes/v1.ts:184"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry GAP.md plans a /v1/deep-research (Post-V2) and Features.md claims a research workflow that does not exist (baseline discrepancy 1); Firecrawl's retreat suggests investing in search plus agent threads rather than a bespoke deep-research endpoint.",
+    "notes": "GAP.md section 6 marks /v1/deep-research as present in Firecrawl; it is deprecated there."
+  },
+  {
+    "id": "firecrawl-api-surface-114",
+    "category": "Platform & ecosystem",
+    "name": "Docs written for agents: per-language source-of-truth pages",
+    "what": "Skills instruct coding agents to read language-specific 'agent-source-of-truth' pages (Node, Python, Rust, Java, Elixir, cURL) for exact request schemas, while the skills themselves only say when and why to use each endpoint.",
+    "how": "skills/firecrawl-build/SKILL.md lists docs.firecrawl.dev/agent-source-of-truth/<lang> as canonical; build skills deliberately avoid duplicating parameter docs; a verification reference requires a smoke test that proves a real request succeeds.",
+    "evidence": [
+      "C:/dev/firecrawl/skills/firecrawl-build/SKILL.md:1",
+      "C:/dev/firecrawl/skills/firecrawl-build/references/verification.md:1"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "For Verevon's Quarry tool descriptions and SDK docs: keep routing guidance (when to use which endpoint) separate from machine-generated parameter docs, and make a smoke-test step part of any agent-facing skill.",
+    "notes": "The pages are external and were not fetched."
+  },
+  {
+    "id": "firecrawl-api-surface-115",
+    "category": "Platform & ecosystem",
+    "name": "Workflow skills for repeatable deliverables (external repo)",
+    "what": "A separate firecrawl-workflows repository packages repeatable, Firecrawl-powered deliverables such as competitor analysis and website design-clone briefs as workflow skills.",
+    "how": "Only a README pointer exists in this repo; skills/README.md routes workflow skills to firecrawl/firecrawl-workflows and mirrors the catalog.",
+    "evidence": [
+      "C:/dev/firecrawl/firecrawl-workflows/README.md:1",
+      "C:/dev/firecrawl/skills/README.md:1"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Higher-level, outcome-shaped skills on top of the acquisition API (competitor brief, design clone using the branding format) are the product layer Verevon could ship as Space or Application Plane workflows.",
+    "notes": "Content of the workflows was not available in the repo."
+  },
+  {
+    "id": "firecrawl-api-surface-116",
+    "category": "Rendering & browser engines",
+    "name": "Playwright microservice: the minimal self-hosted browser engine API",
+    "what": "The open-source stack renders JS pages through a small Express service: POST /scrape {url, wait_after_load, timeout (15 s default), headers, check_selector, skip_tls_verification} returns content, final URL, status and headers; GET /health reports active pages.",
+    "how": "apps/playwright-service-ts uses Playwright with a page semaphore (MAX_CONCURRENT_PAGES), optional media blocking (BLOCK_MEDIA), service workers blocked, user-agent randomisation, proxy-chain for authenticated upstream proxies and an SSRF check (isInternalHost); there is no screenshot or PDF endpoint, so self-hosted users lack actions and screenshots (cloud-only fire-engine).",
+    "evidence": [
+      "C:/dev/firecrawl/apps/playwright-service-ts/api.ts:378",
+      "C:/dev/firecrawl/apps/playwright-service-ts/api.ts:47",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index.ts:107"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Shows the gap between the OSS browser engine and the hosted one; Quarry's local chromiumoxide with CDP DevTools collectors and per-session egress proxy is already far ahead of this service.",
+    "notes": "Quality 2 reflects the self-host engine only."
+  },
+  {
+    "id": "firecrawl-api-surface-117",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Learned per-domain engine choice (engine picker)",
+    "what": "A background job compares a domain's output from the cheap TLS-client engine against a real browser (LLM judges equivalence, Rust computes a verdict) and records TlsClientOk, ChromeCdpRequired or Uncertain so later scrapes of that domain can prefer the cheaper engine.",
+    "how": "lib/engpicker.ts evaluates URLs with forceEngine, maxAge 0 and storeInCache false through scrapeURL, asks gpt-4o-mini for success via generateObject, and computeEngpickerVerdict (native) returns the verdict persisted in engpicker_verdicts; the waterfall prioritises tlsclient when the verdict says so and the request opts in through __experimental_engpicker.",
+    "evidence": [
+      "C:/dev/firecrawl/apps/api/src/lib/engpicker.ts:71",
+      "C:/dev/firecrawl/apps/api/native/src/engpicker.rs:37",
+      "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index.ts:747"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry's FallbackDriver escalates per request on block signals; persisting a per-domain 'needs browser' verdict (the sovereign reliability layer's domain intelligence registry) would cut browser cost while keeping the fast path fast.",
+    "notes": "Experimental opt-in; efficacy unproven in this repo."
+  }
+]

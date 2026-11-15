@@ -1,0 +1,1866 @@
+[
+ {
+  "id": "aside-browser-product-001",
+  "category": "Rendering & browser engines",
+  "name": "Chromium 153 fork with native Windows product layer",
+  "what": "Aside is a branded, Windows x64 Chromium 153 build (user agent Chrome/153.0.8010.53) published by At Your Side Inc. The shell mixes upstream Chromium views with Aside-specific C++ views, WinUI 3 backdrops and its own updater.",
+  "how": "Aside.dll (306.7 MB) carries the browser core and the Aside C++ sources (chrome/browser/ui/views/frame/*, chrome/browser/signin/aside_*, component_updater/aside_*). WinUI 3 and Windows App SDK DLLs sit beside it. aside_resources.pak holds the importer WebUI. 55 base locale packs (each also in FEMININE, MASCULINE and NEUTER variants, 220 files) include nb.pak for Norwegian. Aside tokens (kColorAside*, Aside*View) show a themed Views layer on top of upstream.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: Chrome/153.0.8010.53)",
+   "REA ev_36286a939fed86c13c4fb134d403a5eb5a742c6cfa886845dc0f50b59a505276 (inspect_pe_resources on Aside.dll: 105 resources, 25 icon groups, WEVT_TEMPLATE present, sha256 9cdc4b08...)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales (220 .pak files = 55 locales x 4 gender variants)",
+   "C:/Program Files/Aside/Application/1.0.928.2/aside_resources.pak (importer WebUI, verified by scout)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Microsoft.ui.xaml.dll"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon does not need its own browser shell, but everything below is a feature list for what a user-facing browser in Verevon would eventually be compared against.",
+  "notes": "Quality 4: mature fork plumbing (own updater, daemon health gating, per-profile binding). Presence of upstream strings is not proof a feature is enabled; where a claim rests only on pak strings the record says so."
+ },
+ {
+  "id": "aside-browser-product-002",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Vertical tab strip with Aside Chats and Tasks sections",
+  "what": "Tabs can sit in a vertical sidebar that also lists Aside chats (New Chat, pinned and recent chats with status dots and badges), a Tasks section and bookmarks-as-tabs. Chats can be renamed, pinned, archived, marked read or opened in a folder from the sidebar.",
+  "how": "Native Views class VerticalTabStripRegionView (vertical_tab_strip_region_view.cc) adds AsideSectionView, AsideSectionHeaderButton, AsideSectionRowButton, AsideNewChatTabButton, AsideTaskRowButton, AsideTaskThrobberView, AsideTaskStatusDotView and AsideTaskBadgeView. It fetches chats from the daemon at http://127.0.0.1:21420/session/for-chrome/chats (pinned and recents) and shows states such as Awaiting approval and Awaiting answer. Context-menu action ids seen: pin, unpin, mark-read, mark-all-read, archive-all-chats, open-folder, copy session id.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: vertical_tab_strip_region_view.cc, AsideSectionView, AsideNewChatTabButton, AsideTaskRowButton, AsideTaskThrobberView, \"Awaiting approval\", \"Awaiting answer\", \"Chats with Aside\")",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: http://127.0.0.1:21420/session/for-chrome/chats)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11770269 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 11229-11245 vertical tabs, collapse, expand-on-hover strings)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The strongest UX idea for Verevon: running agent work lives in the same sidebar as tabs, with approval badges visible without opening the chat.",
+  "notes": "Upstream Chromium 153 already ships vertical tabs (pak ids 11229-11245). The Chats and Tasks sections, throbbers and badges are Aside additions (token names with Aside prefix). The daemon /session/for-chrome routes are unauthenticated loopback paths (see daemon auth record). Quality 4: native Views code with throbber, badge and popover states and a narrow daemon contract; the Aside-specific parts were not observed running."
+ },
+ {
+  "id": "aside-browser-product-003",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Vertical tabs: collapse, expand on hover, resize, bookmarks section",
+  "what": "The vertical strip can collapse to icons, expand when the pointer hovers (with a velocity check so it does not pop open by accident) and be resized by dragging; a bookmarks section can be shown in the strip.",
+  "how": "Histogram and feature tokens VerticalTabs.ExpandOnHover.*, VerticalTabs_TabStrip_ResizeToCollapsed, ButtonToggleCollapsed, ContextMenuToggleCollapsed, KeyboardShortcutToggleCollapsed, VerticalTabsBookmarksSectionEnabled; functions ExpandOnHoverState, RestartExpandOnHoverTimer, CalculateMouseVelocityForExpandOnHover. User strings: Show tabs vertically, Collapse tabs, Expand collapsed tabs by hovering.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: VerticalTabsExpandOnHoverFeature, CalculateMouseVelocityForExpandOnHover, VerticalTabsBookmarksSectionEnabled)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 11229-11245)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Not applicable to a web app, but the hover-velocity guard is a useful micro-pattern for any auto-expanding side panel.",
+  "notes": "Mostly upstream Chromium vertical-tab code; kept as a record because Aside enables it as its main tab layout. Whether it is the default is unverified (tab-style preference exists, see next record). Quality 5: mature upstream implementation with metrics, keyboard and context-menu paths."
+ },
+ {
+  "id": "aside-browser-product-004",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Tab style preference horizontal or vertical via private API",
+  "what": "Users switch between a classic horizontal strip and the vertical strip; the new-tab page and extension UI adapt (the new-tab sidebar is hidden when tabs are vertical).",
+  "how": "Private extension API chrome.asideBrowserPreferences.getTabStyle (permission at.studio.Aside.ext.private.pref-get-set). The extension mirrors the value into localStorage key aside.browserTabStyle and uses it to decide whether the new-tab page shows its own web sidebar.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/tab-style-DEljEUUn.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/newtab-theme.js:27",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: aside_browser_preferences_api, at.studio.Aside.ext.private.pref-get-set)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Shows how a web-UI layer can query browser-shell state through a narrow private API rather than reading profile files.",
+  "notes": "The pak also carries Tab styling strings Classic and Modern (transparent) (ids 6232-6234), which may be a second axis; not verified. Quality 3: a thin preference bridge with a small surface."
+ },
+ {
+  "id": "aside-browser-product-005",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Split view with side-by-side or stacked layout",
+  "what": "Any two pages can be shown together in one tab, side by side or stacked, with a menu to switch layout, add a tab, separate the pair or pin the split view.",
+  "how": "Upstream Chromium split view strings (Create split view, Choose a tab to add to split view, Try stacked split view, Pin split view, Open link in split view) and the MultiContentsView class. Aside adds ScheduleAutomaticAsideAiTabsTakeOver and AsideAiTabsViewport inside multi_contents_view.cc, which is how agent tabs are shown beside the user tab.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 11202-11224 split view strings, 1937, 2011, 6245, 8873, 9028, 9032)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: multi_contents_view.cc, MultiContentsView, ScheduleAutomaticAsideAiTabsTakeOver, AsideAiTabsViewport)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already has a chat split with a read-only live browser panel; the Aside pattern is to reuse the browser own multi-contents layout for the agent tab so the user can always see and interrupt it.",
+  "notes": "The link between split view and the AI takeover is inferred from the function names sharing multi_contents_view.cc (INF, medium). Exact UX not observed. Quality 4: upstream split view is mature; the Aside takeover hook is inferred."
+ },
+ {
+  "id": "aside-browser-product-006",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Tab groups with icons, colors, saved and shared groups",
+  "what": "Tab groups carry a title, a color and an icon chosen from an Aside icon set; groups can be saved, shared, pinned to the bookmarks bar or opened in a new window.",
+  "how": "Aside theme tokens AsideTabGroupTitle/Icon/Background* for Blue, Red, Yellow, Green, Purple, Magenta, Orange; AsideCreateNewTabGroupIcon and AsideUngroupIcon. The extension calls chrome.tabGroups.update(groupId, {title}) and then {icon} (icon update is wrapped in try/catch, so it is an optional Aside extension of the API). Icon names come from a fixed list of 48 names (sun, moon, rocket, trophy, cursor, console, bubble and others).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10987",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11009",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideTabGroupIcon*, AsideTabGroupBackground*, AsideCreateNewTabGroupIcon)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 679, 1927, 6242-6247, 7675 saved tab groups strings)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Group icons chosen by an AI planner make auto-organised tabs scannable; cheap to copy in a web tab strip.",
+  "notes": "The icon property on tabGroups is not part of upstream chrome.tabGroups; treat as an Aside patch (INF from try/catch usage). Quality 4: complete native colour and icon set plus a working API patch; AI naming is layered on top."
+ },
+ {
+  "id": "aside-browser-product-007",
+  "category": "In-app browser shell (user-facing)",
+  "name": "AI Tab Tidy: dedupe and cluster tabs, name groups with icons",
+  "what": "One click in the vertical strip organises the window: duplicate tabs are closed, related tabs are clustered, each cluster gets a title and an icon, and groups are moved to the front. A status string reads Organizing tabs.",
+  "how": "The native strip sends a browser-generated extension message aside.verticalTabsTidy. The extension (ww) collects non-pinned, ungrouped http(s) tabs in the focused window, dedupes by a normalised URL (lowercased host, default ports and utm/gclid/fbclid style parameters stripped, hash kept only if route-like), picks the survivor by active, highlighted, audible, lastAccessed, then clusters locally by shared host, shared registrable domain plus first path segment, or at least 2 shared title/path tokens, with batches of at most 40. Each batch is POSTed to https://api.aside.com/tabs-tidy/plan with title, URL, hostname, pathname and tokens; the cloud returns groups {title, icon, tabIds}. Applying uses tabs.move, tabs.group, tabGroups.update, then moves the Agent Tabs group to index 0. Timings per phase are recorded and sent as analytics event tabs.tidy.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11584",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11028",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10674",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10723",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10810",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10984",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11009",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: \"Organizing tabs\", aside.verticalTabsTidy, ScheduleDeduplicateTaskTabs)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A concrete, privacy-reviewable pattern for AI tab organisation: local dedupe and clustering first, cloud only names the clusters; Verevon could do the naming with its own gateway.",
+  "notes": "Privacy note: titles and URLs of all unpinned ungrouped tabs go to api.aside.com, not via the local daemon. Failure of the planner degrades to no grouping (catch returns ungrouped). Quality 4: local-first pipeline with phase timings and graceful planner failure; one cloud dependency."
+ },
+ {
+  "id": "aside-browser-product-008",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Tab switcher and unified tab search bubble",
+  "what": "A Ctrl+Tab style switcher and a search bubble find tabs, recently closed tabs, chats, history, bookmarks and extensions from one box.",
+  "how": "Views AsideTabSwitcherView and AsideTabSwitcherItemView; AsideTabSearchBubbleContentsView hosts the extension page tabsearch.html in a WebView (AsideTabSearchWebView). The page placeholder is Search tabs, chats, history, bookmarks or extensions and has a Recently Closed list and a Switch to Tab action.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/tabsearch.html",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/tabsearch-DKzg67l9.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideTabSearchBubbleContentsView, AsideTabSearchWebView, AsideTabSwitcherView)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Putting chats and tabs into one search surface removes the split between browsing and AI history; a Verevon command palette could index sessions, runs and open browser tabs together.",
+  "notes": "Quality 4: dedicated native bubble with a unified search page; recent-closed and chats included."
+ },
+ {
+  "id": "aside-browser-product-009",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Live tab preview via tab-capture stream",
+  "what": "A live video of a tab (rather than a stale screenshot) can be embedded in Aside UI through a web-accessible player page, and falls back gracefully when the tab is hidden or owned by another preview.",
+  "how": "tab-preview-player.html renders a MediaStream; the background service worker answers port aside.tab-preview.stream subscribe, visibility and retry messages, resolves the debugger target to a tab, calls chrome.tabCapture.getMediaStreamId({targetTabId}) and posts stream-id with the tab viewport. One subscriber owns a target at a time; others receive fallback reasons not-visible, owned, no-tab or capture-failed. Re-evaluated on tab activated, removed and updated events.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11079",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11094",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/tab-preview-player.html",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/tab-preview-player.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon streams browser frames over HTTP poll or SSE; a single-owner, visibility-aware subscription model would cut duplicate frame streams when the same session is shown in chat and in the browser panel.",
+  "notes": "Where it is shown is inferred (AsideHoverCardBackground token, player page web-accessible to all URLs); the shipped task-view-* PNGs are static demo screenshots and are not evidence. The player page and stream protocol are read directly. Quality 4: single-owner subscription with explicit fallback reasons and retry."
+ },
+ {
+  "id": "aside-browser-product-010",
+  "category": "In-app browser shell (user-facing)",
+  "name": "New Tab page with unified Search or Ask omnibox",
+  "what": "The new tab page opens instantly with one box that either searches or asks the Aside agent a task (Tab key toggles), with @ scopes for bookmarks, history, tabs and the assistant, a task list, a collapsible sidebar and a dark incognito variant.",
+  "how": "The extension overrides newtab. newtab.html paints a static first-frame omnibox and a permanent vanilla Tiptap editor (newtab-editor) so typing works before React mounts; mode is stored in localStorage aside.new-tab.omnibox-mode.v1 (search or ask) and in the ?mode= query. Ask mode mounts the same session composer as the side panel (source new-tab) and creates a session; search mode hands navigation to chrome.tabs.update. Scopes map keyword to bookmark, gemini, history, tabs icons. Dropping an image offers Google Lens search.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/newtab.html",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/newtab-theme.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/newtab-editor-BYLsIRgs.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/ask-omnibox-panel-DoI1iG5h.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/omnibox-mode-preference-CWzOtieV.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/omnibox-scope-DGFEg60F.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The static first-frame trick (paint markup and a vanilla editor, mount the framework around it) is directly reusable for the SolidJS dashboard Crawl composer to remove input latency.",
+  "notes": "Quality 5 for the engineering care: theme resolved before first paint, sidebar column reserved to avoid layout shift."
+ },
+ {
+  "id": "aside-browser-product-011",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Omnibox private API: real autocomplete engine plus AI-mode context",
+  "what": "The extension page uses the browser own address-bar engine (autocomplete, search engines, Lens) and the AI-mode composer inputs (tab and file context, recent tabs, tab thumbnails, smart tab sharing) instead of re-implementing them.",
+  "how": "Private API chrome.asideOmnibox (permission at.studio.Aside.ext.private.omnibox) exposes createSession, destroySession, queryAutocomplete, stopAutocomplete, openAutocompleteMatch, openPopupSelection, executeAction, deleteAutocompleteMatch, addTabContext, addFileContext, deleteContext, clearFiles, getRecentTabs, getTabPreview, getSearchEngines, getInputState, getPlaceholderConfig, setActiveToolMode, setActiveModelMode, submitQuery, openLensSearch, activateKeyword and about 25 on* events (onAutocompleteResultChanged, onSmartTabSharingActiveChanged, onAimEligibilityChanged and others). The new-tab code runs a one-off session, waits up to 1500 ms for the first match, and opens it in the current tab.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: asideOmnibox.queryAutocomplete, asideOmnibox.addTabContext, asideOmnibox.setActiveToolMode, asideOmnibox.onSmartTabSharingActiveChanged, at.studio.Aside.ext.private.omnibox)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/search-navigation-DuuoGVFz.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/newtab-ZLplOYox.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Shows the cost of a native address bar: Aside re-exposes Chromium composebox (AIM) plumbing through an extension API. Verevon should keep its omnibox as a simple URL-or-ask router and not chase this.",
+  "notes": "The AIM-style names (aim eligibility, composebox tool and model modes) come from upstream Chromium; the extension-API wrapper is Aside. Whether Google AI Mode is reachable in Aside is unverified. Quality 4: broad API (about 50 members) but largely a wrapper over upstream composebox mojo."
+ },
+ {
+  "id": "aside-browser-product-012",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Per-tab side panel agent with session binding",
+  "what": "The Aside assistant opens in the browser side panel for the current tab (Alt+Shift+B). Each tab can have its own chat; a setting decides whether switching tabs starts a new chat or keeps the current one.",
+  "how": "sidepanel.html is registered as the MV3 side panel with action shortcut Alt+Shift+B. The background calls chrome.sidePanel.setOptions({tabId, path: sidepanel.html#/u/{accountId}/sidepanel?sessionId=...}). On tab activation it resolves the tab debugger targetId to a session (sessions.tabs.resolveByTarget) and updates session.activeTabTargetId; closing a tab removes the session tab. Setting sidepanelSessionOnTabChange is new-session (default) or keep-session.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11385",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11518",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11691",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/manifest.json:15",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/use-sidepanel-session-on-tab-change-euJ8CCvD.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1683538 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon chat has no notion of the browser tab a conversation is about; binding a session to a Quarry tab target and switching context on tab change would be a small, high-value change.",
+  "notes": "Quality 4: clean tab-to-session mapping with retry timers and stale-event guards; depends on debugger target mapping."
+ },
+ {
+  "id": "aside-browser-product-013",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Side panel framing prompt: agent is a sidecar to the current tab",
+  "what": "When opened from a tab, the agent is told it is a side panel next to that tab and may edit the page the user is looking at (for example translate text or hide elements) through page.evaluate.",
+  "how": "The attachment builder emits a sidepanel_instructions block for the first tab mention: page is set to that tab, messages appear beside the page, use snapshot to read it, and page.evaluate may modify the live page. Further mentioned tabs are listed with targetId and resolved with getTabByTargetId. Selections are attached as region or text objects.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6367583 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6370597 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Gives Verevon a precedent for letting the assistant manipulate the user own page (rewrite, hide) as well as read it, but note the safety cost.",
+  "notes": "Letting the model run page.evaluate on a user tab is only gated by the permission rules for browser modify actions; see permissions record. Quality 4: concise prompt block; the capability to edit the live page is powerful and only gated by permission rules."
+ },
+ {
+  "id": "aside-browser-product-014",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Mini popup: global shortcut composer",
+  "what": "A small floating composer opens from a shortcut anywhere, lets the user attach files, a folder, choose incognito, project, profile and permission mode, and then continues in the browser.",
+  "how": "Extension pages minipopup.html and minipopup-options.html; Aside.dll token aside_mini_popup_coordinator. UI strings: Chat with Aside anytime, Enable Mini popup, Unavailable in this browser version, Browser profile, Open in browser. The composer exposes Final confirm and Disable memory extraction toggles and a Password access selector.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/minipopup.html",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/mini-popup-CzIFzqv1.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/minipopup-BuZtvwZE.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: aside_mini_popup_coordinator)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A global quick-ask surface is plausible for a Verevon desktop wrapper; for the web app, a keyboard shortcut opening the same composer over any page is the equivalent.",
+  "notes": "The system-wide hotkey part is inferred from the Open Aside from anywhere string and coordinator name; implementation not read. Quality 3: seen only through strings, tokens and a marketing image."
+ },
+ {
+  "id": "aside-browser-product-015",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Native task popover and attention badges in browser chrome",
+  "what": "Running and finished agent tasks appear in the browser toolbar as a popover with throbber, status dot and attention badge; approvals can be resolved from the popover without opening the chat.",
+  "how": "Aside.dll schedules AsideTasksPoll against the daemon, fetches authorization (AsideTasksAuthorizationFetched, AsideTaskCommandAuthorizationFetched), and shows AsideTaskPopover for items whose kind is draft-approval or permission request. POST /session/for-chrome/resolve-popover-action with popoverId, actionId, accountId, sessionId resolves the action. Popover text for permission requests is generated from the request type (Read/Write file, Run tool, Browser read/modify URL, Access URL).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideTaskPopover, AsideTasksPoll, AsideTasksAuthorizationFetched, \"Awaiting approval\")",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11770269 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: http://127.0.0.1:21420/session/for-chrome/, resolve-popover-action)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Approvals that surface outside the chat (toolbar, badge) are the missing half of Verevon approvals list in BrowserChrome; the daemon exposes a tiny resolve endpoint the shell calls, which maps well to a notification-centre component.",
+  "notes": "Quality 4: well-factored (daemon produces popover payloads, shell only renders and posts back)."
+ },
+ {
+  "id": "aside-browser-product-016",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Chats in the sidebar: pin, rename, archive, move to project, search",
+  "what": "Sessions are organised as chats with pinned and recent lists, projects, unread state, archive and search, available both in the web UI and the native sidebar.",
+  "how": "Daemon routes under /session/for-chrome: recents, chats {pinned, recents}, search, projects, {id}/move-to-project, {id}/state, {id}/rename, {id}/archive; recents limit setting sidebarRecentChatLimit is 3, 5 or 10 (default 3). Extension chunks projects, project-list, project-dialog, archived-chats, use-move-session-to-project.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11770269 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1679567 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/tasks-BgHwAMKG.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already has chat history; the notable part is the narrow read-only for-chrome API that lets a native shell render sessions without full tRPC auth.",
+  "notes": "Quality 4: small contract with complete verbs (pin, rename, archive, move, search)."
+ },
+ {
+  "id": "aside-browser-product-017",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Tab mentions, selections and page-region attachments as context",
+  "what": "Users attach tabs, selected text, a selected page region (with a preview image and element list) or earlier chat passages to a message; the agent is told exactly what each attachment is.",
+  "how": "Attachment types file, directory, tab {targetId,url,name}, selection {text or region with elementSummary, previewImage, elements[{selector,tagName,role,text,alt,src,href}]}. Chat-sourced selections become response-annotations with an optional user comment. The page-selection-context channel (messages page-selection-context:get, update, subscribe, event) keeps the current selection per tab in the service worker and clears it on navigation or tab close.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6367583 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10360",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10389",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/browser-binding-CJJD76W-.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Element-level selection with selector, role and href gives the agent a precise grounding that Verevon coordinate clicks lack; the annotation-on-response concept also fills the BrowserChrome comment stub.",
+  "notes": "Quality 4: typed attachments with element-level detail and escaping of text placed in prompts."
+ },
+ {
+  "id": "aside-browser-product-018",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Lasso: text and region selection with configurable shortcuts",
+  "what": "A modifier double-tap (Alt by default) enters a region selection mode; selecting text or an area shows a small tool strip with Summarize, Translate, Copy code and Search image, plus user-defined shortcuts. Results can be applied back into text fields.",
+  "how": "content/content.js runs a selection controller (modifier double-tap arm, text selection handles, pointer regions, handle placement) and shows shadow-DOM overlays (aside-selection-lasso, aside-selection-highlight). Settings (lasso) hold textSelectionEnabled, lassoSelectionEnabled, hotkey Alt|Shift|Control|Meta and shortcuts[{type text-selection|lasso, action prompt|open-url|copy}] with placeholders {text}, {image}, {code}. Execution streams from POST /lasso/transform on the daemon through a runtime port lasso:transform (start, chunk, complete, error, abort). Google Docs uses a MAIN-world bridge for selection and set-selection.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10124",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10315",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/content/content.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/content/google-docs-selection-bridge.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/lasso-CqAMSDCR.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/lasso-shortcuts-DeJha5VQ.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/aside-lasso-BhzH82rC.webp",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11513245 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A small, general text and region action layer (summarise, translate, send selection to chat) that Verevon could add to the Crawl preview and chat without the agent loop.",
+  "notes": "Region selection also yields captured code via react-grab (next record). The shipped marketing image aside-lasso shows a freehand circle drawn around a picture and a menu with Search image and Open Codex and fix this, which suggests open-url shortcuts can hand a selection to a coding agent (INF, medium). Quality 4: wide feature set with streaming and apply-back, but spread across a large content script."
+ },
+ {
+  "id": "aside-browser-product-019",
+  "category": "In-app browser shell (user-facing)",
+  "name": "React component grab: element to source code context",
+  "what": "Selecting a UI region on a React page can copy or extract the component source code for the agent (design-to-code workflows).",
+  "how": "react-grab-bridge.js (444 KB, web-accessible to all URLs) is injected as a module script by the content script with bootstrap and response host elements; the target elements are tagged with data-aside-react-grab-target and the bridge returns codeKind and content. Library strings point to react-grab.com. Lasso action Copy code uses it.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/react-grab-bridge.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/content/content.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10124"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Niche; relevant only if Verevon ever targets developers inspecting their own React pages.",
+  "notes": "Purpose inferred from library name and the copy and extract actions; bridge internals not read. Quality 3: scope and robustness unclear (bridge internals not read)."
+ },
+ {
+  "id": "aside-browser-product-020",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Remix: per-site user scripts that can call the agent",
+  "what": "Users (or the agent) can add small scripts that run on specific sites to change the page, and those scripts can call aside.prompt to start an agent session with the current tab attached. Gmail and Slack ship with built-in remix scripts.",
+  "how": "chrome.userScripts in the USER_SCRIPT world, one script per https host (no wildcards), up to 20 scripts of at most 50,000 bytes (USER_REMIX_SCRIPT_MAX_BYTES 5e4), registered from daemon settings remix.scripts. A shim defines aside.prompt that sends runtime message remix:prompt; the service worker then creates a session with createAndPrompt (trigger source remix, browserBinding, activeTabTargetId), opens the side panel and points it at the session. Built-ins are content scripts remix.js on mail.google.com (all frames) and app.slack.com. Messages remix:get-enabled, remix:prompt, remix:sync.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11184",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11339",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11411",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1686020 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/remix.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon could offer AI-authored per-site overlays on top of the preview browser; the size and count caps and https-only host rule are a sensible safety envelope.",
+  "notes": "Who writes the scripts (agent or user) is not shown in the code read; the prompt API implies both. Quality 4: explicit caps (20 scripts, 50 KB, https and exact host only) and clean registration lifecycle."
+ },
+ {
+  "id": "aside-browser-product-021",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Page capture: viewport, area and full page screenshots",
+  "what": "A Capture context-menu item opens an overlay (toolbar, area handles) that produces a viewport, an area or a full-page PNG for the chat.",
+  "how": "Context menu aside-capture (contexts page, selection, image, link) sends capture:open to the tab; content script draws the mask and toolbar; capture:capture {mode viewport|area|full, rect, viewportWidth} returns a PNG data URL. Viewport and full page go through the daemon capture router over CDP (L.capture.viewport / fullPage); area uses chrome.tabs.captureVisibleTab then crops in an OffscreenCanvas, with one retry after 300 ms when MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND is hit.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:7402",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:7435",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:7469",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:7690"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has a screenshot button; the area-select-and-attach flow is the part worth copying.",
+  "notes": "Capture can be disabled with chrome.storage key aside.capture.enabled (default on). Quality 4: three modes, rate-limit retry, CDP and canvas paths."
+ },
+ {
+  "id": "aside-browser-product-022",
+  "category": "In-app browser shell (user-facing)",
+  "name": "On-device page translation with Chrome Translator API",
+  "what": "Right-click Translate this page or Translate selection; a status bar shows progress and lets the user change language. Translation runs in the browser with no cloud call.",
+  "how": "Context menu ids aside-translate-page and aside-translate-selection. The content script walks text nodes and the attributes placeholder, title, aria-label, alt, groups inline runs under a context root so formatting survives, batches strings and replaces text in place using window.Translator (availability check, create with abort signal) and chrome.i18n.detectLanguage on up to 20,000 characters. Messages translate:page-start, page-status, page-cancel, page-dismiss, selection, toast-change-languages. 39 target languages including nb (mapped to no).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10474",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10515",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/content/content.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:7560",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/translate-status-B-qrJFt6.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "If Verevon adds page translation for scraped Norwegian and English content, the on-device Translator API avoids sending page text to a model.",
+  "notes": "Requires a Chromium build with the Translator API (stable in recent Chrome); in other browsers it throws Chrome Translator is not available. Quality 4: careful DOM handling (inline runs, attributes, batches, abort tokens) but depends on the Translator API being present."
+ },
+ {
+  "id": "aside-browser-product-023",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Reading mode, PDF viewer and Google Docs reading helper",
+  "what": "Reading mode is available from the toolbar and the context menu; PDFs are opened in a built-in viewer with text annotations; a Google Docs helper manifest is shipped for reading mode on Docs.",
+  "how": "Upstream Chromium reading mode and PDF viewer strings (Open in reading mode, Pin reading mode, Open PDFs in Aside, text annotations); resources/accessibility contains reading_mode_gdocs_helper_manifest.json. Aside offers to become the default PDF viewer.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 8856, 11037-11058, 828, 1057)",
+   "C:/Program Files/Aside/Application/1.0.928.2/resources/accessibility/reading_mode_gdocs_helper_manifest.json (secret-bearing key field; file not read in detail)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Quarry already extracts main content; exposing the same readability view as a Reader toggle in the preview would be cheap.",
+  "notes": "Upstream feature; presence in the build, not enablement, is what is evidenced. Secret-bearing file skipped. Quality 4: upstream feature, enabled and re-skinned."
+ },
+ {
+  "id": "aside-browser-product-024",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Downloads, bookmarks, history, reading list, side panels",
+  "what": "Standard Chromium shell features: download bubble and dangerous-download blocking, bookmark bar and manager, history side panel, reading list, Chrome-style settings pages.",
+  "how": "Aside theme tokens (AsideDownloadMenuIcon, AsideDownloadInProgress*, AsideBookmarkShelfIcon, AsideBookmarksSidePanelRefreshIcon, AsideHistoryIcon) restyle upstream components. The agent also reaches bookmarks, downloads and history through whitelisted chrome.* methods (see browser API whitelist record).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideDownloadMenuIcon, AsideBookmarkShelfIcon, AsideBookmarksListsMenuIcon, AsideHistoryIcon)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 1062-1073 download blocking strings)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Gap list for Verevon: bookmarks, downloads UI and history are absent in its browser panel; local web history exists (max 10 entries).",
+  "notes": "Upstream Chromium; no claim of Aside-specific behaviour beyond theming. Quality 5: mature upstream Chromium features."
+ },
+ {
+  "id": "aside-browser-product-025",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Extensions with private Aside APIs and an Aside Web Store label",
+  "what": "Chrome extensions install and run as in Chrome; Aside ships two first-party extensions with eight private permissions, and the UI mentions an Aside Web Store.",
+  "how": "Private permission strings at.studio.Aside.ext.private.account, adblock, browser-import, notification, omnibox, pref-get-set, capture-tab-without-userinteraction, launch-extension; APIs chrome.asideAccount, asideAdblock, asideBrowserImport, asideNotification, asideOmnibox, asideBrowserPreferences. Extensions UI tokens AsideExtensionTabPlacement and AsideExtensionsToolbarButtonElementId; chrome.management is permitted for AM.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/manifest.json:21",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: at.studio.Aside.ext.private.* (8 strings))",
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 377 Discover great apps ... for Aside, Aside Web Store x5)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The pattern (product features implemented as first-party MV3 extensions with a few privileged APIs) keeps the shell thin; useful when deciding what to build in Verevon web app versus gateway.",
+  "notes": "Third-party extensions cannot use the private APIs unless they declare those permissions; whether the browser restricts them to first-party IDs is not verified. Quality 4: eight narrowly scoped private permissions keep the shell thin."
+ },
+ {
+  "id": "aside-browser-product-026",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Importer for Chrome, Edge, Firefox, Safari, Arc, Dia, Comet, Atlas data",
+  "what": "A one-click Aside Importer brings in bookmarks, history and passwords from other browsers; Safari needs an exported archive.",
+  "how": "aside_resources.pak ships the aside_importer WebUI (listeners for import started, succeeded, failed; importFirefoxData; Safari guide with invalid-file path). Private API chrome.asideBrowserImport has getImportSources, startImport, cancelImport, getImportProgress, onImportProgress and a SafariArchive type. Source icons exist for Arc, Atlas, Chrome, Comet, Dia, Edge, Firefox, Safari. A separate password-manager importer covers 1Password, Bitwarden, Dashlane, LastPass, Proton Pass and Apple Passwords (AM chunks import-browser, use-browser-importer, password-import-menu).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: asideBrowserImport.startImport, getImportSources, aside_importer)",
+   "C:/Program Files/Aside/Application/1.0.928.2/aside_resources.pak.info",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/use-browser-importer-Ca04ejpK.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/password-import-menu-BFpAWpWe.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Listing competing AI browsers as import sources is a go-to-market signal; Verevon can ignore it.",
+  "notes": "Quality 4: eight browser sources, progress API and Safari archive handling."
+ },
+ {
+  "id": "aside-browser-product-027",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Built-in ad and tracker blocker with uBlock-style filter lists",
+  "what": "Ads and trackers are blocked by an in-browser engine that subscribes to filter lists, supports custom rules (up to 4 MiB) and offers cosmetic hiding and diagnostics.",
+  "how": "C++ AsideAdBlockService, AsideAdBlockNavigationThrottle, AsideAdBlockCosmetic and a render-frame observer; private API chrome.asideAdblock (about 30 methods and types) with addSubscription, removeSubscription, setSubscriptionEnabled, startSubscriptionUpdate, getSubscriptionUpdateProgress, getCustomRules, saveCustomRules, getDiagnostics, testRequest, clearEngineCache, reloadManualFilters. Page-side hooks __asideAdBlock.addHideSelectors, addProceduralActions, setGenerichide, recollect. Recommended lists named uBlock filters (Ads, Badware risks, Unbreak, Privacy, Cookie Notices) and EasyList Cookie Notices.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: asideAdblock.*, __asideAdBlock.*, AsideAdBlockService)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/recommended-filters-nOPBGgSa.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/privacy-CboPZz0I.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry already needs blocklists for scraping; reusing the same EasyList and uBlock lists for the preview browser reduces noise and bandwidth.",
+  "notes": "Engine kind and parsing library not identified (EngineKind type exists). Quality 4: subscriptions, update jobs, diagnostics, procedural cosmetic filters; engine internals unverified."
+ },
+ {
+  "id": "aside-browser-product-028",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Privacy controls inside the extension settings",
+  "what": "A Privacy settings page toggles ad blocking, third-party cookies, analytics, and deletes browsing data (history, cookies, cache, downloads, autofill, site storage) from the extension UI.",
+  "how": "Extension permissions privacy, browsingData, cookies. Bridge commands Aside.getThirdPartyCookies and setThirdPartyCookies read and write chrome.privacy.websites.thirdPartyCookiesAllowed. Delete browsing data shows items to delete with at least one required.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/privacy-CboPZz0I.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9691"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has a ZDR toggle; a per-session clear of cookies and site data in the preview would mirror this.",
+  "notes": "Quality 3: standard controls delegated to chrome.* APIs."
+ },
+ {
+  "id": "aside-browser-product-029",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Settings hub implemented as web pages in the extension",
+  "what": "Aside settings (AI providers, Agents, Developers, Password manager, Payments, Skills, Channels, MCP, Routines, Privacy, Context Awareness, Billing, Appearance) are React pages served from the extension, with the standard Chromium settings kept for browser basics.",
+  "how": "Extension chunks settings, use-agent-settings, use-update-settings, appearance, ai, agents, developers, password, payment-use, skills, channels, mcps, routines, privacy, context-awareness, billing, subscription-usage. Query data comes from the daemon via tRPC (settings.getAll, models.listAvailable, billing.getSubscription).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/settings-BZMW5EUL.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/use-agent-settings-IADixfBg.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:2951",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11332"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A single typed settings object per account (daemon settings.json validated by one schema) is a clean model for Verevon preferences across planes.",
+  "notes": "Quality 4: one typed settings schema feeds every page."
+ },
+ {
+  "id": "aside-browser-product-030",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Default browser, taskbar pin and update prompts",
+  "what": "Aside nudges users to become the default browser and to pin to the taskbar, shows an update badge and prompt, and relaunches to update.",
+  "how": "Pak strings 811-818, 985, 1024-1055 (set default, pin, secondary installation notice). Update views AsideUpdateBadgeButton and AsideUpdatePromptBackground; updater at Program Files (x86)/Aside; AM chunk nudges (Aside works best as your default browser) and update-banner which fetches a changelog and reads chrome.asideBrowserPreferences.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 811-818, 985, 1024-1055)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/nudges-DNh1UsSV.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/update-banner-CMeEBR55.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideUpdateBadgeButton, aside_update_badge_button)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "None for the web app; useful if a Verevon desktop shell is ever planned.",
+  "notes": "Quality 3: standard Chromium nudges, branded."
+ },
+ {
+  "id": "aside-browser-product-031",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Windows 11 look: Mica and acrylic backdrops, WinUI menus",
+  "what": "The window frame uses Mica or acrylic backdrops (with Windows 10 fallbacks) and some menus and dialogs are WinUI.",
+  "how": "Tokens AsideWindowsBackdrop, AsideWindows10WinUIBackdrop, AsideWindows10AcrylicTint/Fallback, AsideWinUIMenu; source aside_winui_backdrop_win, aside_window_backdrop_win; Microsoft.UI.* DLLs and Windows App SDK 2.0 packages next to Aside.dll.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideWindowsBackdrop, AsideWinUIMenu, aside_winui_backdrop_win)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Microsoft.UI.Xaml.Controls.dll"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Cosmetic; no Verevon impact.",
+  "notes": "Quality 3: cosmetic."
+ },
+ {
+  "id": "aside-browser-product-032",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Profiles, guest mode and profile pager",
+  "what": "Multiple Aside profiles are supported, each bound to an Aside account; the vertical sidebar can page between profiles with a snapshot preview and dots indicator.",
+  "how": "Tokens AsideProfileMenu*, AsideProfileAvatar, aside_icon_picker_view; classes ProfilePager, ProfilePagePreviewPageView, ProfilePageIndicatorDotButton, ProfilePageSnapshot; AsideProfileAttributesUpdater posts the profile binding to the daemon (/accounts/profile-binding and /accounts/profile-binding/delete) and the extension resolves accounts by profile (accounts.resolveProfileAccountByProfile).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: ProfilePager, ProfilePagePreviewPageView, /accounts/profile-binding)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10420",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11518"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon profiles in Quarry (cookie jars) could be surfaced the same way: a profile switcher that swaps tab sets and agent identity together.",
+  "notes": "The profile pager looks like Arc spaces; the code only proves paging between profiles, not named spaces. Quality 4: profile pager with snapshot previews and daemon binding."
+ },
+ {
+  "id": "aside-browser-product-033",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Aside account, sync and daemon-held encryption key",
+  "what": "The browser signs in to an Aside account; sync is routed to Aside servers and encrypted with a passphrase the local daemon holds, and the settings UI shows last sync and diagnostics.",
+  "how": "Aside.dll strings: browser-sync.asidehq.com, aside_sync_auth_manager, aside_sync_encryption_controller (requests the key from the daemon at /auth/sync-passphrase), AsideSyncRefreshWatchdog, AsideCookieSyncService, AsideWebsiteStorageSyncService. Settings WebUI tokens asideAccountEmail, asideLastSyncText, asideSyncDiagnosticText. Daemon setting experimental.sync defaults to false.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: browser-sync.asidehq.com, /auth/sync-passphrase, aside_sync_encryption_controller.cc)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1683800 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Cookie and site-storage sync across devices is how Aside keeps a logged-in agent browser consistent; Verevon cookie profiles are server-side already.",
+  "notes": "Many pak strings still say Google Account (upstream sync text); the Aside sync path is evidenced by tokens and host, enablement unverified (experimental.sync default false in daemon settings). Quality 3: enablement unverified and sync is flagged experimental in daemon settings."
+ },
+ {
+  "id": "aside-browser-product-034",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Notifications: native toasts and web-push inbox",
+  "what": "Agent completions and approvals show Windows notifications with click-through; website web-push notifications can be captured into an Aside inbox.",
+  "how": "Bridge command Aside.showNotification (basic notifications go through an offscreen document and the browser private notification API; richer types use chrome.notifications), optional custom sound, click path routing. Browser-originated messages aside.notificationPermissionChanged and aside.inboxNotification are ingested into the daemon via inbox.syncNotificationPermission and inbox.ingest (source web-push-notification, thread key, sender origin). Permission API chrome.asideNotification.requestPermission and revokePermission.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9714",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11532",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11552",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: asideNotification.requestPermission, AsideInbox, notification_helper.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Treating website push as an event stream for the assistant is novel; Verevon monitoring could subscribe to sites that expose web push rather than polling.",
+  "notes": "See also the event routine record. Quality 4: end-to-end path from site push to daemon inbox with permission sync."
+ },
+ {
+  "id": "aside-browser-product-035",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Aside Vault: native password manager with passkeys, TOTP and card autofill",
+  "what": "A first-party vault stores logins, cards, identities, notes and 20+ item categories in multiple vaults, fills them, generates passwords, shows 2FA codes, handles passkeys and checks for breaches.",
+  "how": "MV3 extension Aside Vault (libsodium-wrappers, kdf, password-generator, offscreen document, wasm CSP). Shortcuts Ctrl+Shift+Y open, Ctrl+Shift+L autofill, Ctrl+Shift+G generate, lock_vault unbound. Item categories include login, credit-card, secure-note, identity, bank-account, passport, ssh-key, api-credential. Breach check uses the pwnedpasswords range API (k-anonymity). Settings UI lists vault creation, sharing with access levels and key fingerprints, export CSV/JSON (including TOTP secrets and notes), import, biometric unlock, recovery key file, verification interval.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/manifest.json",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/background.js:13318",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/password-DTY50TJc.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/password-manager/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Credential handling is the hardest part of a browser; Verevon should integrate an existing vault rather than build one, using the opaque-reference idea (see agent vault record).",
+  "notes": "Item category list taken from the AM background constants (D = {LOGIN: 001 ...}) and the skill API type; sync of the vault is not verified. Quality 4: broad feature set on libsodium with passkeys and sharing; vault sync was not verified."
+ },
+ {
+  "id": "aside-browser-product-036",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Vault autofill engine: inline suggestions, cross-frame cards, OAuth logins, HTTP block",
+  "what": "Autofill shows inline suggestions in fields, fills card numbers inside hosted iframes, launches the matching OAuth login for items saved as sign in with Google, waits for TOTP fields, and blocks autofill on plain HTTP.",
+  "how": "content-runtime.js (all frames, document_start) plus autofill-page-script.js, a page-world bridge that activates submit candidates by bridge id. Log tags BRO AUTOFILL: Cross-frame card fill, Launching OAuth URL, Pending TOTP code found polling for fields, Autofill blocked on HTTP; an iframe.html inline suggestion UI.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/content-runtime.js:4359",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/autofill-page-script.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/iframe.html"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Relevant if the preview browser ever needs to log into sites for authenticated scraping; Verevon handles this with server-side cookie profiles.",
+  "notes": "Quality 4: handles frames, OAuth items and TOTP wait states."
+ },
+ {
+  "id": "aside-browser-product-037",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Passkeys: WebAuthn interception in the page world",
+  "what": "Aside Vault can create and use passkeys for sites, including conditional UI, with a dialog and fallback to the browser native authenticator.",
+  "how": "fido2-page-script.js replaces the WebAuthn entry points in the page world and talks to the content script with messages ASIDE_FIDO2_CREATE_REQUEST/RESPONSE, GET_REQUEST/RESPONSE, DIALOG_CONFIRM, DIALOG_CANCEL, DIALOG_FALLBACK, CONDITIONAL_AVAILABLE/RESOLVE/CLEAR, BROWSER_NATIVE_NEXT_GET and PASSWORD_MANAGER_ENABLED/DISABLED; related origins supported; the file references PublicKeyCredential. About 100 lines of the vault background mention passkeys.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/fido2-page-script.js",
+   "REA ev_93afce80f7090af09da6bebffdcb0c102adaae9da64b6964ff0ecd1eeaef6f34 (analyze_javascript_application on PM page scripts copy; coverage complete, no semantic findings for FIDO2 or autofill seeds)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/background.js:56190"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Passkeys cannot be used by a headless scraper; Verevon should treat passkey-only sites as human takeover points.",
+  "notes": "REA trace of seed ASIDE_FIDO2_CREATE_REQUEST returned no match (string seeds are not indexed for this bundle shape); the message names were read directly. Quality 4: complete page-world bridge including conditional UI and native fallback."
+ },
+ {
+  "id": "aside-browser-product-038",
+  "category": "In-app browser shell (user-facing)",
+  "name": "External password managers and Apple Passwords over native messaging",
+  "what": "Users can connect 1Password, Bitwarden, Dashlane, LastPass, Proton Pass and Apple Passwords; the agent prefers a connected provider and falls back to Aside Vault. Apple Passwords is reached through the OS native helper.",
+  "how": "Daemon routers externalPasswordManagers and passwordManager; one skill per provider. The only chrome.runtime.connectNative use in the extension targets host com.apple.passwordmanager (Apple Passwords), with an SRP-style key exchange (3072-bit group, AES-GCM session) and commands capabilities, requestAuth, verifyAuth(pin), listLogins, getPasswords, saveLogin, getOtps. Saved unlock passwords for external managers can be stored on the device after confirmation.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:8406",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:8618",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:8281",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/1password/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/password-manager/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Provider-agnostic credential access is a clear product edge; Verevon Integration Plane could expose a credential-provider interface with the same fallback order.",
+  "notes": "Correction of the scout inventory: connectNative is for the Apple Passwords helper, not for a daemon handshake. The extension-to-daemon link is a WebSocket (see bridge record). Quality 4: authenticated SRP-style channel with AES-GCM and a provider fallback order."
+ },
+ {
+  "id": "aside-browser-product-039",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Windows Hello biometric unlock and system password prompts",
+  "what": "Vault and password actions ask for biometric or Windows credential verification (show, copy, edit, export, delete, replace).",
+  "how": "aside-native.node (C++/WinRT, N-API addon) references the Windows Hello APIs KeyCredentialManager and UserConsentVerifier; pak strings 1000-1005 ask for the Windows password before showing, copying, editing, exporting or deleting; vault settings allow biometric unlock.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/native/aside-native.node (byte scan this session: UTF-16 KeyCredentialManager, KeyCredentialRetrievalResult x9, UserConsentVerificationResult x9, Hello x41, biometric x27)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 1000-1005, 1019-1020)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/password-DTY50TJc.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Step-up authentication before revealing secrets is a baseline Verevon should match in any secrets UI.",
+  "notes": "Quality 4: relies on platform Windows Hello APIs rather than custom crypto."
+ },
+ {
+  "id": "aside-browser-product-040",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Context Awareness: opt-in capture of browser and app activity",
+  "what": "On the Max plan, Aside can remember what the user does in the browser and in apps so agents can recall it. Settings include pause, never-observe lists per app or website, retention days (1-30, default 14), typed-text capture and screen OCR.",
+  "how": "Daemon runtime tags [ContextAwareness]; ledger at account/context-awareness/ledger.db; event kinds content.snapshot, session.started/ended, window.changed, mouse.click, mouse.context_menu, mouse.drag, keyboard.shortcut, keyboard.text_input (character counts only), keyboard.submit, selection.changed, screen.ocr from sources aside_dom, mac_ax, win_uia; triggers navigation, discovery, sweep, activation, interaction. Windows uses the AsideComputerUse helper for UIA and input capture; the settings page shows Input Monitoring and Screen Recording permission rows (macOS terms) and a Windows error when app or input capture cannot start. Plan gate CONTEXT_AWARENESS_ALLOWED_PLANS is [max]. Agent tools history_search, context_explorer and memory_search read it.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1681542 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6828385 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6602773 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/context-awareness-CFoTjJIJ.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/computer-use/AsideComputerUse.exe"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Directly comparable to a Verevon activity memory; the redaction-first design and per-app and per-domain never-observe rules are what to copy if Verevon records browsing context.",
+  "notes": "Correction of the scout inventory: the mouse.* and keyboard.* strings are Context Awareness event kinds, not agent computer-use actions. On macOS only, runComputerUseCommand drives iMessage send and permission probes. Quality 4: broad event schema, retention and per-app and per-domain controls; gated to the top plan."
+ },
+ {
+  "id": "aside-browser-product-041",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Capture-time redaction of secrets before page context is stored",
+  "what": "Passive page snapshots stored for Context Awareness are scrubbed: password and phone inputs, sensitive autocomplete tokens, secret-labelled fields, and secret-shaped values (JWT, AWS keys, API keys, Slack tokens, private key blocks, OTP digits, payment card numbers that pass Luhn) are replaced by [redacted:capture].",
+  "how": "Injected aria-snapshot code (browser-v3/injected/aria-snapshot/capture-redaction.ts) with SENSITIVE_AUTOCOMPLETE_TOKENS, SENSITIVE_INPUT_TYPES {password, tel}, a field-label regex (cvv, otp, pin, ssn, secret, verification code ...), SECRET_VALUE_PATTERNS rule names jwt, aws-access-key, api-key, slack-token, private-key-block, labeled-secret, otp-numeric, and a Luhn check for 13-19 digit candidates. The interactive agent path separately shows password field values as [redacted].",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2987327 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2992748 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/visual-browse/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon stores scrape evidence and ZDR-aware caches; a shared redaction pass of this shape before any durable storage would harden evidence retention.",
+  "notes": "The source comment cites an internal docs/research/context-awareness/ARCHITECTURE.md (not shipped). Quality 5: separate durable-capture and interactive policies, unit-testable DOM-free rules."
+ },
+ {
+  "id": "aside-browser-product-042",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Tab activity signals sent to the assistant (activation, dwell, audio)",
+  "what": "The extension tells the daemon which tab the user is on (activation, still there after 2 seconds, playing audio) so the assistant can be context aware; incognito tabs and non-http pages are reported only as unobservable.",
+  "how": "chrome.tabs.onActivated/onUpdated/windows.onFocusChanged call contextAwareness.reportTabSignal {targetId, url, kind activation|media|unobservable, dwelled, audible, observedAt, sequence}; a 2000 ms dwell timer; an alarm every 5 minutes reports audible tabs; incognito and non-http(s) are excluded.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11753",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11763",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11798"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Cheap contextual signal for Verevon: which Quarry tab is in focus and for how long, without capturing content.",
+  "notes": "Quality 4: sequence numbers drop stale events and incognito is excluded."
+ },
+ {
+  "id": "aside-browser-product-043",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Agent incognito mode (no memory or history, session stays out of lists)",
+  "what": "A per-task incognito toggle makes the agent run without saved memories or history tools, keeps the session out of the regular task list and expires it after 30 days; it does not hide the user from websites.",
+  "how": "Session fields incognito and ephemeral; composer strings Incognito mode, Task session will be expired after 30 days; new-tab copy that incognito is not a way to hide from visited sites. Browser mode (default or incognito) is part of the bridge route so commands are refused if routed to the wrong mode.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6031779 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/newtab-ZLplOYox.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/session-composer-BbMCYIxX.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9634"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Maps to Verevon ZDR: a visible per-run mode that disables memory and history tools and auto-expires the run is a user-legible way to express ZDR for browsing.",
+  "notes": "Quality 4: enforced in tool composition and session lifecycle, not just in the UI."
+ },
+ {
+  "id": "aside-browser-product-044",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Onboarding that reads 30 days of history to find the user tools",
+  "what": "First-run onboarding detects tools, password managers, browsers and AI subscriptions from history and installed apps, opens with one specific observation, and offers read-only or draft-only first tasks.",
+  "how": "Onboarding skill with an onboarding REPL global (snapshot, detectTools, detectPasswordManagers, detectBrowsers, detectAISubscriptions); ranking by active days over 30 days of history; gated by settings experimental.onboarding (default false); AM chunks onboarding-helper suggested tasks (set up memory, automate routines, customize).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/onboarding/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/onboarding-helper-C5xdJAZI.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1683800 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A history-derived first-run for Verevon workspaces (what systems does this org use) could seed Integration Plane suggestions.",
+  "notes": "Experimental flag default off. Quality 3: experimental flag, default off."
+ },
+ {
+  "id": "aside-browser-product-045",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Developers settings page: CLI, skill and MCP install",
+  "what": "The Developers settings page installs the Aside CLI, installs the browser skill into Codex, Claude Code, Cursor, OpenCode or a custom skills directory, shows MCP configuration and controls Remote Control.",
+  "how": "Chunk developers: checkCliInstallation, installCli, checkAgentInstallations, installAsideBrowserSkill, getAsideBrowserSkill; install command from releases.aside.com/install.sh; the page documents aside exec, aside repl, aside mcp, aside host, aside login and aside skills install.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/developers-DJXFtMQS.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/coding-agent-nudge-HvmgrADK.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11368871 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A Developers page that wires external coding agents to the user own signed-in browser is a distribution channel Verevon could mirror through its MCP exposure.",
+  "notes": "See CLI and Remote Control records in the agent section. A coding-agent-nudge chunk shows a Connect Aside to Codex or Claude Code card on the new tab page and in chat when the session provider is a coding agent, dismissible for one month, linking to this page (go-to-market through coding agents). Quality 4: end-to-end installation flows for several coding agents with update checks."
+ },
+ {
+  "id": "aside-browser-product-046",
+  "category": "AI-browser control",
+  "name": "Three-process topology: browser, local daemon, first-party extensions",
+  "what": "The agent does not live in the browser. A local Node daemon (127.0.0.1:21420) runs the agent loop, tools, memory and routines; the browser exposes tabs through an authenticated CDP endpoint and an extension bridge; two MV3 extensions provide UI and vault.",
+  "how": "Daemon aside-daemon.exe is a Node single-executable app (embedded JS about 14 MB, tRPC router, Hono HTTP, ws). The C++ shell calls it for health, shutdown, tasks, profile binding and sync key. The agent manager extension holds a WebSocket to the daemon, the vault extension is reached only from the agent manager (mutual externally_connectable allowlist). A helper (AsideComputerUse) and a Windows sandbox helper are spawned by the daemon over stdio pipes.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1289867 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: http://127.0.0.1:21420 (9 hits), /health, /shutdown)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/manifest.json:92",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/manifest.json:85",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:2685"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Same plane split Verevon has (Model Plane agent, Quarry executes), but Aside keeps all browsing state in the user browser; Verevon Quarry is server-side and so needs broker grants where Aside uses local loopback trust.",
+  "notes": "Quality 4: clear separation; local trust relies on challenge-response auth (next records)."
+ },
+ {
+  "id": "aside-browser-product-047",
+  "category": "AI-browser control",
+  "name": "Extension bridge: WebSocket command channel from daemon to browser",
+  "what": "The daemon drives the browser through one WebSocket per (account, profile, browser mode). Commands are Aside.* methods; the extension keeps the socket alive, reconnects with backoff and refuses commands routed to the wrong profile or mode.",
+  "how": "Extension connects to ws://127.0.0.1:21420/extension-bridge/extension and sends register {connectionId, route {accountId, profileId, browserMode}}; replies ping with pong, supports cancelCommand and runCommand {id, command, route}; results carry {id, result|error}. Reconnect delays 0, 250, 750, 1500, 3000 ms, an alarm every 30 s reconciles the socket, a newer context replaces the older (close code 1012). Daemon side ExtensionBridgeServer keys connections by account, profile and mode, tracks pending command requests with timeouts and also offers an HTTP fallback POST /extension-bridge/command. Binding errors are explicit: no-profile, multiple-profiles, bridge-unreachable, no-normal-window, tabs-without-normal-window, ambiguous-windows.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9840",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9928",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10015",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9634",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2758200 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2759763 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon Quarry execution is gRPC and HTTP to a headless pool; the explicit (account, profile, mode) routing key and typed failure reasons are worth copying so a Verevon agent can tell the user why a browser is not reachable.",
+  "notes": "Quality 5: idempotent reconnect, stale-context takeover, and precise errors."
+ },
+ {
+  "id": "aside-browser-product-048",
+  "category": "AI-browser control",
+  "name": "Bridge command set: purpose-built tab lifecycle instead of raw chrome.tabs mutation",
+  "what": "Agents can list tabs, open or focus a tab, create agent tabs, close tabs, wait for downloads, show notifications, grant notification permission, set cookies policy and use the vault, but cannot mutate the user own tabs with raw chrome.tabs calls.",
+  "how": "Aside.listTabs (excludes chrome and extension pages and the wrong incognito mode), Aside.ownsTarget, Aside.openProfileUrl, Aside.createAgentTab (inactive tab in the anchor window, added to the Agent Tabs group), Aside.resolveBindingWindow, Aside.searchHistory, Aside.getThirdPartyCookies/setThirdPartyCookies, Aside.ensureTabInAiTabsGroup, Aside.controlTab (open reuses a tab by id or by normalised URL; close supports skipIfActive and returns closed:false if the tab is the one the user is on), Aside.waitForDownload, Aside.showNotification, Aside.playNotificationSound, Aside.grantNotificationPermission, Aside.revokeNotificationPermission, Aside.clearAiTabsGroup, Aside.callExtensionMV3Api, four vault ref commands and Apple Passwords commands. The chrome skill states that raw tab, window and tab-group mutations are unavailable because they could modify the user own browser session.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9637",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9665",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9707",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9712",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9759",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9767",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9795",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:8890",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:8934",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/chrome/tabs.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/chrome/windows.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/chrome/tab-groups.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon browser actions are selector and coordinate based inside one Quarry session; Aside shows a safer model for a shared browser: separate agent tabs, a protected active tab, and dedicated lifecycle commands.",
+  "notes": "Quality 5: guards like skipIfActive and dedupe-by-URL are easy to miss and prevent the classic agent closes my tab failure."
+ },
+ {
+  "id": "aside-browser-product-049",
+  "category": "AI-browser control",
+  "name": "Whitelisted chrome.* passthrough for the agent REPL",
+  "what": "The REPL exposes a chrome global that only calls whitelisted MV3 methods: bookmarks CRUD, downloads, history, topSites, tab, window and tab-group getters and queries; mutating tab, window and tab-group methods are kept out of the bridge.",
+  "how": "callExtensionMV3Api resolves a dotted method name against an allowlist (Cg: 32 methods incl. bookmarks.create/move/remove/removeTree, downloads.download/cancel/erase/pause/resume/search, history.addUrl/deleteRange/deleteUrl/getVisits/search, runtime.getManifest, tabGroups.get/query, tabs.get/query, topSites.get, windows.get/getAll/getCurrent/getLastFocused). A second list (26 methods: tabs.create/remove/update/group/move/reload/captureVisibleTab..., windows.create/remove/update, sessions.restore) is named PRIVILEGED_EXTENSION_MV3_API_METHODS in the daemon and is not part of the whitelist the bridge dispatcher accepts; the daemon exports isPrivilegedExtensionMv3ApiMethod and isAllowedExtensionMv3ApiMethod for the two sets.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:7748",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:7775",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:7809",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9795",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2702100 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/chrome/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A method-name allowlist is a simple, auditable gate for a browser capability surface; Verevon MCP browser tools could adopt the same two-tier split (state reads versus lifecycle commands).",
+  "notes": "Notable: history deletion and bookmark removal are allowed, so destructive profile edits are possible by design; they are subject to the tool permission rules. Quality 4: simple and auditable, though history and bookmark deletion are permitted."
+ },
+ {
+  "id": "aside-browser-product-050",
+  "category": "AI-browser control",
+  "name": "Authenticated local CDP endpoint on the user browser",
+  "what": "Other local processes cannot attach to the Aside browser debugging port without proving possession of the installation key: the daemon requests a challenge, signs it, and receives a short-lived AsideSessionToken for /json/version and the CDP WebSocket.",
+  "how": "Daemon class AsideSecureCdpAuthorizer talks to ASIDE_BROWSER_CDP_HOST (default localhost:45103): GET /json/challenge returns {challengeId, challenge}; signInstallationChallenge signs with the installation key; POST /json/auth/session returns token_type AsideSessionToken with expiresInSeconds; token refresh margin 10 s; retries skip 401 and 403. Aside.dll contains /json/auth/session, /json/list, /json/new, AsideSessionToken and the remote-debugging switches.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2735497 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1289867 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: /json/auth/session, AsideSessionToken, remote-debugging-port)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "The most transferable security idea: if Verevon ever exposes a CDP or browser-control port, bind it with installation-key challenge-response instead of an open port; Quarry broker grants play a similar role server-side.",
+  "notes": "The exact crypto (algorithm, key storage) was not read; getInstallationStatus and initInstallation suggest a per-install key created on first run. Quality 5: closes the main local-attack path of a debugging port with a small, standard challenge-response."
+ },
+ {
+  "id": "aside-browser-product-051",
+  "category": "AI-browser control",
+  "name": "Daemon auth: browser signs challenge for loopback tRPC and WebSocket",
+  "what": "The extensions and the C++ shell authenticate to the local daemon by having the browser sign a daemon challenge (chrome.asideAccount.signDaemonAuthChallenge); the daemon issues a short JWT and rejects calls without it, except a small public path list.",
+  "how": "GET /auth/daemon/challenge?clientKind=... returns {challenge, challengeId}; the client signs bytes prefixed Aside Daemon Auth v1; POST /auth/daemon/session exchanges it for an access token cached 12 h in chrome.storage; the daemon verifies HS256 JWTs with audience aside-daemon-localhost and rejects any request whose Host header is not loopback (DNS-rebinding guard), even on public paths. Public paths include /health, challenge and session endpoints, OAuth callbacks and /session/for-chrome/recents and search; /session/for-chrome/* is allowed without the bearer. CORS is restricted by isAllowedCorsOrigin with Private Network Access headers; remote MCP and OAuth URLs must be HTTPS or loopback and redirects are refused.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:2753",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:2907",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:2916",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2700407 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1352380 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1352984 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A pattern for authenticating a local or edge helper to a platform service with a browser-held key; relevant for any Verevon desktop companion talking to the Control Plane.",
+  "notes": "Public /session/for-chrome paths are a loopback-only convenience; a hostile local process could read recent session titles. Quality 4: challenge-response with short-lived tokens, Host check and CORS rules; public for-chrome paths are a trade-off."
+ },
+ {
+  "id": "aside-browser-product-052",
+  "category": "AI-browser control",
+  "name": "Single persistent REPL tool: Playwright-style JavaScript",
+  "what": "The agent drives the browser by writing JavaScript in one persistent REPL with page, tabs, openTab, closeTab, listBrowserTabs, attachBrowserTab, attachActiveBrowserTab, snapshot, annotatedScreenshot, display, fetch, fs, pwd and site-specific globals; no imports; 120 s timeout; output truncated to 16 KB.",
+  "how": "REPL_TOOL_DESCRIPTION defines the contract: ES2023+, state persists across calls, console.log is the only return channel, listBrowserTabs before touching an existing tab, attach before reading, openTab only when no relevant tab exists. Runtime is a QuickJS WASM sandbox with memory, stack and interrupt limits; REPL_TIMEOUT_MS 120000; REPL_CONTEXT_OUTPUT_MAX_BYTES 16384. CLI REPL sessions are separate sessions bound to a browser profile.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6370597 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@10803338 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@10711212 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11355454 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon Model Plane exposes browser.observe and browser.act as discrete MCP-style tools; a code-first REPL collapses many round trips into one script and is the better fit for multi-step web tasks, at the price of a harder sandbox.",
+  "notes": "The REPL is the dominant interface; a separate set of structured tools (bash, read_file, write_file, edit_file, grep, glob, terminal, skill, websearch, webfetch, memory_search, history_search, history_read, send_message, ask_user_question, request_action_confirmation, write_todos, subagent, routine_update, record_summary, get_time) exists beside it. Quality 4: single code-first tool with state, limits and a sandbox; tool description is precise."
+ },
+ {
+  "id": "aside-browser-product-053",
+  "category": "AI-browser control",
+  "name": "Asidewright: own Playwright-compatible Page and Locator layer over CDP",
+  "what": "The daemon implements its own Playwright-like API (page.goto, goBack, reload, waitForURL, waitForSelector, locator, getByRole, getByLabel, getByText, frameLocator, fill, click, evaluate, screenshot, pdf, video, bringToFront, console, viewportSize) directly on CDP sessions, not through the Playwright library.",
+  "how": "Classes Page, Locator, FrameLocator, ElementHandle, helpers for mouse (move, down, up, click, dblclick, wheel), keyboard and file choosers (setFiles), and AsideVideo (screencast frames, start, stop, path, saveAs, delete) over a CdpConnection with Target auto-attach, per-frame sessions, isolated worlds, networkidle waits via Network events, Page.printToPDF, Browser.setDownloadBehavior. Deprecated Playwright helpers ($, $$) warn that they are deprecated in Asidewright. Locator selectors accept snapshot refs directly.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3161686 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3137632 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3147937 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3168316 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3030540 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry already issues CDP; a thin ref-first locator and a REPL on top would give Verevon agents Playwright ergonomics without importing Playwright into the Rust or Go services.",
+  "notes": "Quality 4: broad surface but ref-first rather than selector-first; no playwright or puppeteer runtime in the bundle (the only hits are tool-description text and devDependency lists of vendored Google SDK packages)."
+ },
+ {
+  "id": "aside-browser-product-054",
+  "category": "AI-browser control",
+  "name": "Ref-based ARIA snapshot with frame-aware refs and text diffs",
+  "what": "The primary way to read a page is snapshot(page): an accessibility tree with short refs per element (for example e12, f1e5 inside frames), iframe origin labels, shadow DOM traversal and optional scoping by selector or interactive-only mode. After an action the returned diff shows only changes.",
+  "how": "Injected world code src/browser-v3/injected/aria-snapshot (generate-accessibility-tree, accname, utils) assigns refs on elements (ASIDE_REF_SYMBOL, per-snapshot signature), computes W3C accessible names (cached, 300 char cap), reads roles, checked, selected, disabled across shadow boundaries and renders password values as [redacted]. The daemon collects descendant frames, inlines child iframe trees with origin labels, queues snapshots per page, and diffs consecutive snapshot texts with a Myers line diff producing unified hunks (No changes detected when equal). Site skills pass snapshot(page, {selector}) to keep output small.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2992420 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3137632 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3172131 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2992748 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/site-specific/amazon/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon Quarry already uses accessibility snapshot refs; adopt the diff-by-default result and the iframe origin labels, and cap snapshots with scoped selectors.",
+  "notes": "Quality 5: mature, with caching, frame handling and diffing; refs are stable only within a snapshot generation."
+ },
+ {
+  "id": "aside-browser-product-055",
+  "category": "AI-browser control",
+  "name": "Annotated screenshots and coordinate fallback (cua)",
+  "what": "When refs fail (canvas apps, sliders, maps) the agent can request a screenshot with ref labels drawn on interactive elements or fall back to coordinate actions: click, doubleClick, drag along a path, move, scroll, type, keypress, with modifier keys.",
+  "how": "annotatedScreenshot(page) returns a PNG with visible ref labels; the visual-browse skill defines the cua global and rules: use it only for pixel-only UI, verify after each action, return to snapshots as soon as possible, switch strategy after 2-3 failures, take a screenshot before acting on unknown coordinates.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6373105 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/visual-browse/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon BrowserChrome already has a coordinate click path; the explicit when-not-to-use guidance is a good prompt addition.",
+  "notes": "Quality 4: clear usage rules and verified fallbacks."
+ },
+ {
+  "id": "aside-browser-product-056",
+  "category": "AI-browser control",
+  "name": "Permission model: read-only, guard and full-access modes plus ordered rules",
+  "what": "Each session has a permission mode (read-only, guard default, full-access) and a rule set. Rules match tools by name or glob with argument matchers, browser actions (read, modify, download) by URL glob, and network by URL or domain glob. Deny wins before Ask, then Allow; unknown actions follow a default.",
+  "how": "Zod schemas: sessionPermissionModeSchema [read-only, guard, full-access]; permissionRulesSchema {allow, approved, deny, ask, default}; toolPermissionRuleMatchSchema {type tool, tool, args{field: eq|regex}}; browserPermissionRuleMatchSchema {type browser, action read|modify|download, url}; networkPermissionRuleMatchSchema; files {readableRoots, writableRoots, outsideRead deny|ask, outsideWrite deny|ask}; sandbox.enabled. Settings default defaultPermissionMode guard. Hooks file.access, browser.access and network.access call checkPermission and throw Permission denied naming the source.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1354046 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1356110 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6602200 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/agents-DbIiE33D.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has allowed_domains plus broker grants; this rule model (read versus modify versus download, URL globs, deny over ask over allow) is a ready-made schema for browser grants and for Model Plane approvals.",
+  "notes": "Quality 5: small, composable, and enforced at hooks rather than in prompts."
+ },
+ {
+  "id": "aside-browser-product-057",
+  "category": "AI-browser control",
+  "name": "Browser action classes enforced at the page API",
+  "what": "Every Page method declares what it does: read (content, screenshot, snapshot), modify (goto, goBack, goForward, reload, openTab, popup, autofill unlock) or download; the permission hook can allow, ask or deny per URL.",
+  "how": "ensureAccess(action, url, toolCallId) triggers browser.access with {toolCallId, action, url}; observed call sites: modify in goto, goBack, goForward, reload, openTab, openPopupTab, autofillUnlockPassword; read in content, screenshot, snapshot (2 sites); download in the download path. Denials surface as Permission denied: browser {action} {url} is blocked by {source}. Tool calls run inside the REPL carry the current tool call id.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3193257 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6602200 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Direct template for Quarry: classify each browser verb and check it against the grant before executing; Quarry rejects off-domain navigation today but has no read versus modify split.",
+  "notes": "Locator click and fill paths were not seen calling ensureAccess in the extracted call sites, so in-page modification may be governed only by the tool-level rules. Quality 4: enforcement is at the API layer, but coverage of click and fill was not observed."
+ },
+ {
+  "id": "aside-browser-product-058",
+  "category": "AI-browser control",
+  "name": "Approvals: Final confirm mode with typed review artifacts",
+  "what": "In Final confirm mode the agent must call request_action_confirmation before any externally visible, destructive, paid or hard-to-reverse action (send, post, buy, delete, security changes, invitations, final form submits) and attach a review card (Gmail, iMessage, LinkedIn, Slack, calendar, X drafts) or a screenshot.",
+  "how": "FINAL_CONFIRM_PROMPT appended to the system prompt when enabled; the confirmation tool call must be the only tool call in the turn, include a short title and message, and a matching draft artifact or screenshot path; after approval only the approved action is performed and a changed recipient, amount or body requires asking again. The draft-preview skill defines fenced JSON blocks (gmail-draft, imessage-draft, linkedin-draft, slack-draft and others) rendered as native cards; mini popup and composer offer Final confirm and note Read only cannot take actions. The native task popover surfaces the review (kind draft-approval).",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6364508 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@2379962 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/draft-preview/SKILL.md:1",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11770269 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon approvals list in BrowserChrome shows approvals; typed, destination-shaped review cards (what the email will look like) would make approvals meaningful and fast.",
+  "notes": "Quality 5. The mode is optional per session; default follow-through policy for some models pushes the opposite direction (see proactive record)."
+ },
+ {
+  "id": "aside-browser-product-059",
+  "category": "AI-browser control",
+  "name": "Payments: opt-in card use with approval thresholds and spending limits",
+  "what": "Users can let the agent complete checkout with chosen cards: ask every time, auto-approve under a USD amount (default 50), or never pay; per-card usage notes; a default card; optional daily or monthly spending cap with ask or block when reached; a recent activity list.",
+  "how": "Settings schema paymentUse {enabled false, beforePaying ask|auto-under|never, autoApproveUnderUsd 50, cards[{brand,last4,label,expires}], cardPrefs{enabled,usageNote<=2000}, defaultCardId, spendingLimit{enabled, period monthly|daily, amountUsd, onReached ask|block}, connectors{stripe,shopify}}. Card data lives in the vault; autofillItem fills card number, name, expiry and CVV including hosted card-number iframes without exposing values to the model. UI chunk payment-use shows spend progress bars.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1684368 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/payment-use-DnQTS48-.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/password-manager/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "If Verevon agents ever buy things, this is the policy surface to copy: default off, thresholded auto-approval, caps, per-card instructions.",
+  "notes": "Enforcement point of the limits (daemon or model prompt) not located in this pass; treat as policy schema with UI evidence. Quality 5: default-off policy with thresholds, caps and per-card instructions; the enforcement point was not located."
+ },
+ {
+  "id": "aside-browser-product-060",
+  "category": "AI-browser control",
+  "name": "Prompt-injection guard: untrusted tool-output envelopes and tag neutralisation",
+  "what": "For models outside a high-capability list, every tool result is wrapped in BEGIN and END UNTRUSTED_TOOL_OUTPUT markers with a warning that the model cannot reliably spot injection, and obvious role or control tags inside the output are neutralised. The system prompt also states that pages and tool outputs are data, not instructions, and that system_message tags are only trusted in the user message.",
+  "how": "neutralizePromptInjectionSyntax rewrites tags such as system, developer, tool, aside, untrusted (including spaced-out spellings) and fake boundaries; guardUntrustedToolResultForLlm adds a PROMPT INJECTION DETECTED note when something was changed; shouldGuardUntrustedToolOutput is false for ids in HIGH_CAPABILITY_UNTRUSTED_OUTPUT_MODEL_IDS (frontier models such as gpt-5.x, gpt-6-astra, claude-opus, claude-sonnet-5, gemini-3.1-pro). System prompt Security section tells the model to stop and ask when a page looks like injection, and never to display passwords or tokens.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6339944 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6340933 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6342642 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6343164 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6360511 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has no equivalent in the browser path today; an envelope-and-neutralise layer in execution-core, conditional on model tier, is cheap and testable.",
+  "notes": "Corrects the scout inventory, which found no dedicated prompt-injection defence. Heuristic only: a determined injection can still pass; no allowlisted action filtering was observed. Quality 4: capability-conditional envelope with tag neutralisation; heuristic by nature."
+ },
+ {
+  "id": "aside-browser-product-061",
+  "category": "AI-browser control",
+  "name": "Credential handling for agents: opaque password references and fill-by-ref",
+  "what": "The agent can log in, sign up and check out without ever seeing a secret: it searches vault items (metadata only), calls autofillItem(page, account, itemId), or generates a GeneratedPasswordRef and fills it into a field by snapshot ref; refs can later be saved into a new vault item.",
+  "how": "Bridge commands createPasswordManagerGeneratedPasswordRef, fillPasswordManagerGeneratedPasswordRef, resolve and clear; the vault background stores generated passwords in memory under random UUID refs, fills through the content script (fillPassword) and returns plaintext only to the trusted agent manager for item creation; vault accepts messages only from the agent manager extension id; commands fail when the vault is disabled; agentSessionId is passed through autofill. listAccounts supports several vault accounts; a locked UI may still allow agent access under user policy.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9797",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/background.js:58331",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsidePasswordManager/background.js:58391",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/password-manager/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Best-in-class for credential safety; Verevon should give Model Plane an opaque secret-ref type so passwords never enter prompts or logs, resolved only inside the credential service.",
+  "notes": "Snapshot code also redacts password input values for the agent. Autofill of cards fills across frames. Quality 5: secrets never enter model context; sender allowlist and in-memory refs."
+ },
+ {
+  "id": "aside-browser-product-062",
+  "category": "AI-browser control",
+  "name": "User takeover and agent tab presentation",
+  "what": "Agent work happens in a dedicated Agent Tabs group; while Aside controls a tab the strip shows Aside is controlling the tab with a Take over button; a second group holds tabs used by external agents; Clear tabs keeps AI tabs; agent tabs auto-close after idle minutes (default 15) and duplicates are merged.",
+  "how": "Pak strings 11225-11228, 11249-11250; Aside.dll AsideAiTabsTakeOver, AsideAiTabsViewport, AsideAgentTabsButton, AsideAgentTabsBubbleView, AsideAgentSessionTabsView (aside_agent_session_tabs_view.cc lists sessions through a tRPC batch to http://127.0.0.1:21420/trpc/ with sessions.list and sessions.tabs.resolveByTarget and groups agent tabs per session), ScheduleDeduplicateTaskTabs, ScheduleAITabsAnchor, BeginNewChatTaskHandoffGrace; extension constant Agent Tabs group title; daemon agentTabs.closeAfterIdleMinutes 5-1440 (default 15), UI Clean up agent tabs.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 11225-11228, 11249-11250)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideAiTabsTakeOver, AsideAgentTabsButton, AsideAgentSessionTabsView, sessions.tabs.resolveByTarget, ScheduleDeduplicateTaskTabs)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9422",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1682308 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/agents-DbIiE33D.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon takeover exists (human action flips mode, agent gets 409); the group-based separation and visible takeover banner in the tab strip are the UX it lacks.",
+  "notes": "Exact takeover input-blocking mechanics are native code and were not read. Distinguishing external agents from the in-app agent is inferred from the pak string. Quality 4: coherent group, banner and cleanup design; native input blocking not read."
+ },
+ {
+  "id": "aside-browser-product-063",
+  "category": "AI-browser control",
+  "name": "Per-session browser binding and multi-tab agents",
+  "what": "A session is bound to a browser profile and window, can own several tabs, and the active tab follows what the user is looking at; a closed tab removes the session tab.",
+  "how": "Sessions are created with browserBinding {profileId, browserMode, windowId, anchorTargetId} and activeTabTargetId; daemon tables session_tabs; extension maps debugger targets to tabs (chrome.debugger.getTargets), calls sessions.tabs.resolveByTarget and sessions.update, and removes session tabs on tab close; createAgentTab opens in the anchor window.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11691",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11518",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9665",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6031779 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Mirrors Verevon Quarry tabs inside one session but adds the mapping to real user tabs and windows; useful if Verevon ever drives user-owned browsers.",
+  "notes": "Quality 4: stable mapping between sessions, windows and tab targets."
+ },
+ {
+  "id": "aside-browser-product-064",
+  "category": "AI-browser control",
+  "name": "Proactive mode and follow-through policy",
+  "what": "A proactive mode tells the agent to find the sites and context the user likely needs (history, vault item titles, cookies, downloads, memory) with breadth-first search and minimal questions; some models receive a follow-through policy that discourages asking for permission on reversible work.",
+  "how": "PROACTIVE_MODE_PROMPT and ASTRA_FOLLOW_THROUGH_PROMPT (applied to gpt-6-astra) appended as system messages; session runtime config proactiveMode; password-manager listItems without text is described as a proven source of sites the user uses; Context Awareness evidence is used first.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6362226 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6364508 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A reminder that autonomy knobs are per-session and per-model; Verevon should keep them explicit in run config, not buried in prompts.",
+  "notes": "The follow-through text conflicts in spirit with Final confirm; the code states Final confirm rules still apply. Quality 3: prompt-only behaviour with model-specific text."
+ },
+ {
+  "id": "aside-browser-product-065",
+  "category": "AI-browser control",
+  "name": "Subagents and side chats",
+  "what": "The main agent can spawn read-only or research subagents (context_explorer for user-context search, code_explorer for codebases) and users can open a side chat that reads but does not drive the main task tabs.",
+  "how": "subagent and subagent_wait tools, SUBAGENT_PROFILES with contextMode fresh, modelCategory fast or inherit, readOnly flags and directives; createSidechatDirectiveMessage tells the side chat it is read-only by default and must not navigate or close the main task tabs.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6420074 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6350101 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6350368 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon sub-runs could use the same profiles; the side-chat guard is a cheap solution for asking questions about a running task.",
+  "notes": "Quality 4: profiles with fresh context, read-only flags and a side-chat guard."
+ },
+ {
+  "id": "aside-browser-product-066",
+  "category": "AI-browser control",
+  "name": "Site-specific playbooks injected by URL or keyword",
+  "what": "Sixteen built-in playbooks (Amazon, Airtable, Asana, ClickUp, Confluence, Discord, GitHub, Google Calendar, Drive, Forms, Slides, Jira, Linear, LinkedIn, Notion, Trello) carry canonical URLs, selector hints and working style, and are injected when the URL or a keyword matches.",
+  "how": "SKILL.md frontmatter name, description, icon, siteSpecific, autoInject {keywords[], url[]}; amazon playbook lists search, cart and order URLs, scoped snapshot selectors, and rules such as verify account and address before orders. User skills can override built-ins (skill-creator with a frontmatter validator).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/site-specific/amazon/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/site-specific/linkedin/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/skill-creator/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/skills-Sqaoyswm.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry already has presets; site playbooks keyed by URL pattern and shipped as markdown are a low-cost reliability layer that agents and humans can both edit.",
+  "notes": "The agent is told to update the playbook when selectors change; versioning of skill edits not observed. Quality 4: concise, URL-triggered and maintainable by the agent."
+ },
+ {
+  "id": "aside-browser-product-067",
+  "category": "AI-browser control",
+  "name": "Site API globals using the logged-in browser session",
+  "what": "For some services the agent calls site APIs directly with the browser cookies (LinkedIn Voyager endpoints, Google Search, Gmail, Docs, Sheets, Notion, X, YouTube transcripts) instead of clicking, with no tab needed.",
+  "how": "Skills expose REPL globals (linkedin, googleSearch, googleDocs and others); fetch(url) in the REPL sends the user cookies; googleSearch parses the SERP DOM with stable attributes and warns not to run queries in parallel because bursts trigger CAPTCHA or blocks.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/site-specific/linkedin/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/google-search/SKILL.md:1",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6370597 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Faster and cheaper than UI automation but ties the agent to private endpoints and ToS risk; Verevon Integration Plane should prefer official OAuth connectors and treat cookie-based APIs as a fallback.",
+  "notes": "Compliance of using undocumented endpoints was not evaluated. Quality 3: efficient but fragile and policy-sensitive."
+ },
+ {
+  "id": "aside-browser-product-068",
+  "category": "Anti-bot, proxies & reliability",
+  "name": "CAPTCHA solving helper in the agent REPL",
+  "what": "A captcha global clicks checkbox widgets, drags sliders and reads text CAPTCHAs by OCR through a vision model; the skill auto-injects on words like captcha, turnstile, hCaptcha or verify you are human.",
+  "how": "captcha.click(page, bounds) clicks then waits 3 s and returns a snapshot tree; captcha.drag(page, from, to, {steps}); captcha.readText(page, bounds) screenshots and OCRs with a vision model; image-grid CAPTCHAs use annotatedScreenshot plus vision.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/captcha-solver/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Described as a capability only. Verevon should not copy this: Quarry policy (compliance, robots) and enterprise buyers favour human takeover for CAPTCHAs.",
+  "notes": "No compliance evaluation made; many sites prohibit automated CAPTCHA solving. Quality 3: works by vision and clicks; compliance risk."
+ },
+ {
+  "id": "aside-browser-product-069",
+  "category": "AI-browser control",
+  "name": "Web notifications granted to the agent and used as triggers",
+  "what": "The agent can grant a site the Allow for AI notification permission silently, opt the user in on the site settings page, and then build routines that wake when the site pushes a notification.",
+  "how": "page.grantNotificationPermission() calls the bridge (Aside.grantNotificationPermission, chrome.asideNotification.requestPermission) and records the grant in the daemon (inbox.getNotificationGrant); notification-activation skill describes the two required steps (browser permission, site opt-in). Routine event filters use source web-push-notification with from set to the site origin.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/notification-activation/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9759",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@10825859 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A cheap event source for Verevon monitoring: sites that send web push can wake a run instead of polling, which complements Quarry change monitoring.",
+  "notes": "Quality 4: silent grant plus recorded state plus routine wiring."
+ },
+ {
+  "id": "aside-browser-product-070",
+  "category": "Orchestration & scale",
+  "name": "Routines: scheduled and event-triggered agent runs",
+  "what": "Routines run on a schedule (once or RRULE recurring) or on events (web push, webhook, email, agent message); the Free plan allows 3 active routines; Aside can scan browsing history and suggest routines from repeated work.",
+  "how": "Routine definitions validated with scheduleKind once|recurring, runAt, rrule, eventFilter {source, from}, expiresAt; routine_update tool; inbox sources web-push-notification, webhook, email, agent-to-agent; routineSuggestionSettings (enabled, interval days); UI strings Scanning browser history and Find routines from repeated work.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@10825859 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6038022 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1686512 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/routines-BnvaPMlJ.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon Ingestions already has schedules and monitoring; suggestions mined from a user own browsing patterns would be a new on-ramp.",
+  "notes": "Quality 4: validated schedule and event schemas with suggestions and plan limits."
+ },
+ {
+  "id": "aside-browser-product-071",
+  "category": "Acquisition API surface",
+  "name": "Aside CLI: exec, repl and mcp against the user signed-in browser",
+  "what": "A CLI lets coding agents and scripts use the Aside browser: aside exec delegates a whole task, aside repl runs Playwright-like JavaScript, aside mcp serves browser tools to an MCP-capable agent over stdio; aside login, aside host list/use and aside skills install support remote and agent setups.",
+  "how": "Developers settings page documents the commands and installs the CLI via releases.aside.com/install.sh; the daemon exposes cli.replStart, replRun, replState, replClose procedures and keeps CLI REPL sessions bound to an account and browser profile with an idle TTL; CLI sessions are ephemeral by default (cli.ephemeral true). The CLI binary itself is not shipped in this Windows install.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/developers-DJXFtMQS.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11370960 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11355454 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1689476 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon could expose Quarry browser tools as an MCP server for external coding agents (credentials stay inside Verevon); Aside shows both the demand and the packaging (skill install per agent).",
+  "notes": "Corrects the scout inventory (none shipped): the CLI is offered by download but not part of this install. Quality 4: three entry points (exec, repl, mcp) and skill install per agent."
+ },
+ {
+  "id": "aside-browser-product-072",
+  "category": "AI-browser control",
+  "name": "Remote Control: run browser tasks on this machine from another device",
+  "what": "On Pro and Max plans the browser machine can act as a host: other devices signed in to the same account (or a Linux box with the CLI) send tasks and stream results while cookies and logins stay on the host; session content passes through Aside relay.",
+  "how": "Daemon enrolls a host (POST /remote/hosts/enroll with device registration, refresh and disable endpoints), keeps a WebSocket to the Aside API host at /remote/hosts/{id}/connect (wss), accepts only an allowlisted set of tRPC procedures (sessions.list/get/messages/create/createAndPrompt/update/archive/abort/interrupt/resolveSuspension/rejectSuspension, projects.list, models.list*, cli.repl*), and WebSocket paths agents/chat/:id, ws/sessions/:id, ws/event-bus (session:* only) and sessions/:id/files; envelopes over 100 KB are segmented with a 32 MB reassembly cap; relay must be HTTPS outside loopback; state file remote-control.json.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11368115 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11368871 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11370960 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/developers-DJXFtMQS.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Shows a secure way to reach a user-owned browser remotely with a deny-by-default procedure allowlist; Verevon remote support (RustDesk) is a different, desktop-level answer.",
+  "notes": "The relay is a cloud hop for content while attached; plan gating is REMOTE_CONTROL_ALLOWED_PLANS [pro, max]. Quality 4: enrollment, token refresh, allowlist and segmentation; relay is a cloud hop."
+ },
+ {
+  "id": "aside-browser-product-073",
+  "category": "AI-browser control",
+  "name": "Agent chat streaming protocol: stream, steer, continue, abort",
+  "what": "The sidepanel and new tab talk to agent runs over HTTP and WebSocket endpoints that support streaming output, steering a running turn, continuing and aborting; follow-up messages can be queued or steer the current run.",
+  "how": "Routes /agents/chat/{id}/stream, steer, continue, abort and /ws/sessions/{id}; setting followUpBehavior queue (default) or steer; AM client builders agents.chat.*; remote allowlist includes the same paths.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10280",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11370960 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1683473 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon gateway already streams runs over SSE; a first-class steer verb (inject guidance into a running turn) is a small API addition.",
+  "notes": "Quality 4: small verbs, queue versus steer, shared with remote control."
+ },
+ {
+  "id": "aside-browser-product-074",
+  "category": "AI-browser control",
+  "name": "Task completion UX: sounds, attention notifications, background tasks",
+  "what": "Agents run in the background with a task list; users get notifications for needs-attention, task completion and routine completion, optional completion sounds (custom file up to 512 KB), and approvals appear as popovers.",
+  "how": "agents settings: needsAttention, taskCompletions, routineCompletions, completionSound {enabled, customFileName}; background task fields (task_card, task_title); notification.html with an offscreen audio document; native AsideTaskCompletedIndicator and AsideTaskAttentionBadge views.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/agents-DbIiE33D.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1682852 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideTaskCompletedIndicator, AsideTaskAttentionBadgeBackground)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon run completion and approval notifications belong in the Application Plane notification pipeline; keep the three-way split (attention, task, routine).",
+  "notes": "Quality 3: conventional notification options with a three-way split."
+ },
+ {
+  "id": "aside-browser-product-075",
+  "category": "Observability & operations",
+  "name": "Daemon lifecycle gating: browser updates only when the daemon is healthy",
+  "what": "The browser component updater checks the daemon health endpoint before running, can ask the daemon to shut down for updates, and logs component update results to a file.",
+  "how": "Aside.dll: aside_component_update_service, aside_daemon_shutdown_request (POST http://127.0.0.1:21420/shutdown), AsideDaemonHealthLoader (GET /health), AsideDaemonProcessesForInstallDir, aside_component_update.log; AsideStartupReadinessGate holds startup until readiness.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: http://127.0.0.1:21420/health, /shutdown, aside_component_update.log, AsideStartupReadinessGate)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Relevant for any Verevon desktop wrapper that ships a local service next to a web UI.",
+  "notes": "Quality 3: simple health gating."
+ },
+ {
+  "id": "aside-browser-product-076",
+  "category": "Observability & operations",
+  "name": "Sandboxed execution: QuickJS REPL, AppContainer helper, file roots",
+  "what": "Code the agent writes runs inside a QuickJS WebAssembly sandbox; shell commands run through a Windows AppContainer helper limited to allowed folders; file roots, outside read and outside write policies apply.",
+  "how": "quickjs-emscripten runtime with setMemoryLimit, setMaxStackSize and interrupt handler; AsideWindowsSandboxHelper.exe (Sandbox for Aside Browser) with SandboxBackend appcontainer and SANDBOX_HELPER constants; settings Enable sandbox with copy that commands are limited to allowed files and folders; projects can add read and write roots.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@10711212 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6570419 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6568503 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/agents-DbIiE33D.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/sandbox/AsideWindowsSandboxHelper.exe"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Matches Verevon sandboxes in the Model Plane; the two-layer split (script sandbox plus process sandbox) is worth keeping.",
+  "notes": "Quality 4: two independent sandbox layers and explicit file roots."
+ },
+ {
+  "id": "aside-browser-product-077",
+  "category": "Observability & operations",
+  "name": "Telemetry and replay: PostHog analytics, exception capture, session replay hooks",
+  "what": "Product analytics and exceptions are sent through the daemon to PostHog; events include tabs.tidy and extension.history.cleanup; users can opt out (analytics.enabled); session replay events exist in the daemon.",
+  "how": "Extension calls analytics.capture and analytics.captureException (accountId, properties); PostHog host us.i.posthog.com in the daemon; session_replay events; daily alarm that deletes the extension own history entries when visit rates are high (extension.history.cleanup); Help improve Aside toggle in Privacy settings.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:10053",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11805",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11810",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1253884 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1094320 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/privacy-CboPZz0I.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Aside deletes its own extension pages from browser history so UI navigation does not pollute history; a small detail for any UI hosted inside a browsing context.",
+  "notes": "Quality 3: conventional analytics with opt-out."
+ },
+ {
+  "id": "aside-browser-product-078",
+  "category": "Platform & ecosystem",
+  "name": "Plan gating of browser features",
+  "what": "Free, Pro and Max plans gate Remote Control and Channels (Pro, Max), Context Awareness (Max), routines (3 on Free), with credits, add-ons and Stripe checkout in settings.",
+  "how": "Constants CHANNELS_ALLOWED_PLANS [pro, max], REMOTE_CONTROL_ALLOWED_PLANS [pro, max], CONTEXT_AWARENESS_ALLOWED_PLANS [max]; AM chunks billing, subscription-usage, add-on-credits-dialog, pricing-table-shared; embedded Stripe checkout.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6602773 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/billing-tfFcqtdp.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/routines-BnvaPMlJ.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Informs packaging of Verevon browser capabilities (remote, context capture, scheduled runs) as plan features.",
+  "notes": "Quality 3: straightforward constants and UI."
+ },
+ {
+  "id": "aside-browser-product-079",
+  "category": "Platform & ecosystem",
+  "name": "Skills system with user and built-in skills and import",
+  "what": "Skills are markdown packages (frontmatter name, description, icon, autoInject keywords or URL patterns) that load on demand; users can create, import a folder, enable, delete and override built-ins; built-ins cover browser, vault, CAPTCHA, Google, Slack, Notion, documents.",
+  "how": "32 built-in skills in static/skills/builtin; settings page lists and creates skills with keywords and URL patterns; import skill folder; override-built-in warning on create; skill-creator validates frontmatter.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/skill-creator/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/skills-Sqaoyswm.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@5993679 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A shared skill format would let Verevon reuse playbooks across Quarry agents and external coding agents.",
+  "notes": "Quality 4: complete lifecycle (create, import, override, validate)."
+ },
+ {
+  "id": "aside-browser-product-080",
+  "category": "Integration-plane overlap",
+  "name": "Chat channels and MCP as additional entry points",
+  "what": "Tasks can be started from Slack, Telegram and Discord (Pro and Max; KakaoTalk is behind an experimental flag), and the agent consumes MCP servers over HTTPS with OAuth.",
+  "how": "Channel skill and AM chunk channels; MCP client with tool-list paging caps, OAuth provider and secureMcpFetch that refuses HTTP outside loopback and redirects; webhook secrets and bot tokens configured per connection.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/channel/SKILL.md:1",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/channels-CBnNxJQG.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/mcps-OHhb7zM2.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@5758887 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1352984 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Integration Plane overlap: connectors that start browser tasks from chat; HTTPS-only MCP with redirect refusal is a sound default.",
+  "notes": "Quality 3: standard channel and MCP integration with sound HTTPS rules."
+ },
+ {
+  "id": "aside-browser-product-081",
+  "category": "Output formats & content processing",
+  "name": "Rich artifact rendering in chat: Mermaid, Shiki, KaTeX, file previews, citations",
+  "what": "Agent output renders diagrams (about 28 Mermaid diagram families), syntax-highlighted code (about 200 languages and themes), math, CSV and file previews and inline citations.",
+  "how": "AM assets include mermaid chunks and diagram files (flow, sequence, gantt, class, state, ER, sankey, wardley, railroad and others), Shiki grammars and themes, KaTeX fonts, markdown-preview, files-artifact, and citation parsing in the session composer.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/mermaid-CV36wiKB.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/markdown-preview-D_c1nw7x.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/files-artifact-9hvu9q3L.js",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/session-composer-BbMCYIxX.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon chat likely renders markdown; adding diagram and artifact preview components is routine front-end work.",
+  "notes": "Quality 4: broad renderer set shipped as lazy chunks."
+ },
+ {
+  "id": "aside-browser-product-082",
+  "category": "AI-browser control",
+  "name": "Computer-use helper scope on Windows: capture, not agent desktop actions",
+  "what": "The AsideComputerUse helper on Windows supports Context Awareness capture (UIA events, input monitoring, OCR); desktop click-and-type agent actions were not found in this build, and the mac-only path handles iMessage send and permission probes.",
+  "how": "MSIX app AtYourSide.AsideComputerUse (runFullTrust) spawned with --runtime-root and --parent-pid under a ContextAwareness runtime class with health and restart logic; runComputerUseCommand throws Computer Use Helper is only available on macOS; computerUse strings in the bundle come from the vendored Google GenAI SDK schemas.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@10385760 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@10402147 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/computer-use/AsideComputerUse.exe"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Do not equate Aside desktop control with Codex or Claude desktop computer use; Aside agent control is browser-centric, which is the relevant bar for Verevon.",
+  "notes": "Corrects the scout inventory entry on desktop computer-use actions. The on-device Windows AI and ONNX stack in the same folder remains unexplained (INF: local OCR or vision). Quality 3: a clarification record; the helper itself is a capture component."
+ },
+ {
+  "id": "aside-browser-product-083",
+  "category": "Output formats & content processing",
+  "name": "webfetch: local HTTP fetch to readable Markdown with browser fallback",
+  "what": "The agent webfetch tool downloads a URL and returns clean Markdown with a citation id. Non-HTML responses are saved to the session folder; Cloudflare challenges trigger a retry through the real browser; cookies from the user browser can be attached on request.",
+  "how": "Node HTTP fetch with Accept and a Chrome 143 user agent; optional useCookies pulls cookies for the URL from the browser; Reddit hosts are rewritten to old.reddit.com; redirects are re-checked through the network.access permission hook; limits 5 MB response, 30 s default and 120 s max; attachment or non-text MIME types are streamed to the session tmp dir with a sanitised filename; HTML goes through an htmlToReadableMarkdown step built on the Defuddle readability library (links made relative when same-origin, images dropped unless requested); isCloudflareChallenge detects cf-mitigated headers and just-a-moment pages and then fetchHTMLWithBrowser loads the page in a browser tab.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11193540 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11191500 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@10880017 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Directly comparable to Quarry scrape: same shape (static fetch, challenge detection, browser fallback, readability to Markdown). Verevon already does render fallback; the cookie-from-browser and per-redirect permission check are the additions.",
+  "notes": "No robots.txt handling and a fixed desktop Chrome UA: it is a user agent acting for the user, not a polite crawler. Quality 4: layered fetch with fallbacks, limits and permission hooks."
+ },
+ {
+  "id": "aside-browser-product-084",
+  "category": "Acquisition API surface",
+  "name": "websearch: cloud search API with fixed three-query contract",
+  "what": "The websearch tool asks Aside servers for results using exactly three diverse keyword queries and a basic or advanced mode, returning titles, URLs, dates and excerpts with source ids for citation.",
+  "how": "Tool schema {objective, search_queries[3], mode basic|advanced}; the daemon POSTs to the Aside API /search with max_chars_total 25000, session id and client model; results are turned into citation sources. The prompt forbids site: operators and sentences. A separate googleSearch global scrapes Google SERP with the user cookies.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11197216 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/static/skills/builtin/google-search/SKILL.md:1"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon /v1/search is richer (images, videos, answers); the three-query diversity contract is a simple prompt-level trick to improve recall.",
+  "notes": "The backing search provider is not visible from the client. Quality 3: thin client over a cloud API."
+ },
+ {
+  "id": "aside-browser-product-085",
+  "category": "Rendering & browser engines",
+  "name": "Agent tab stability: focus emulation, active lifecycle and fixed viewport",
+  "what": "Agent tabs keep behaving like a visible foreground tab even when the user is elsewhere: timers and animations continue, JS dialogs can be auto-accepted, and pages render at a stable 1440 by 900 viewport.",
+  "how": "On attach the daemon sends Page.setWebLifecycleState active, Emulation.setFocusEmulationEnabled true, Target.setAutoAttach (flatten) and Network.enable; AI_TAB_STABLE_VIEWPORT is 1440x900 and viewport size is cached and refreshed; cdp.setDialogAutoAccept is available.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3035728 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3043153 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry pooled Chromium needs the same background-tab hygiene; the stable viewport constant keeps screenshots and coordinates deterministic across runs.",
+  "notes": "Quality 4: handles background-tab throttling and viewport determinism."
+ },
+ {
+  "id": "aside-browser-product-086",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Page video recording through screencast and ffmpeg",
+  "what": "A script can record the tab to a video file (start, stop, saveAs, path) for evidence or demos.",
+  "how": "page.video() returns AsideVideo: Page.startScreencast (jpeg frames, quality, size) feeds an FfmpegVideoRecorder writing mp4 or webm inferred from the file name; frames are acknowledged with Page.screencastFrameAck; output paths go through the file-write permission check (page.video.start, stop, saveAs); a final screenshot closes the file.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3146764 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3147937 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon timeline and evidence drawer could include a replay video; Quarry already streams frames, so recording them with ffmpeg would be incremental.",
+  "notes": "The ffmpeg binary source (bundled agent runtime or system) was not determined. Quality 4: complete lifecycle with permission checks; ffmpeg source unknown."
+ },
+ {
+  "id": "aside-browser-product-087",
+  "category": "AI-browser control",
+  "name": "Pseudo-CDP methods: browser-level commands share the CDP transport",
+  "what": "The page layer calls non-standard methods such as Aside.waitForDownload through the same send() used for CDP, and the transport routes them over the extension bridge route of the session; downloaded files then become readable by the file tools.",
+  "how": "cdp.send(Aside.waitForDownload, {startedAfterMs, expectedFilename, referrerUrl}, undefined, {extensionBridge: route}) resolves an absolutePath; the browser object registers it as a readable download path so later read_file calls pass the file permission hook. This unifies DOM-level control (CDP) and shell-level control (extension commands).",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@3042768 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9712"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A clean abstraction for a platform with two control channels: callers use one send(); the transport decides which channel. Worth mirroring in Quarry for browser versus platform actions.",
+  "notes": "Quality 4: neat transport abstraction."
+ },
+ {
+  "id": "aside-browser-product-088",
+  "category": "AI-browser control",
+  "name": "Tool availability depends on session kind and mode",
+  "what": "The agent gets different tools depending on whether it is a main task, a read-only subagent, a side chat, a headless routine or an incognito session; for example headless runs cannot ask questions, incognito drops history and memory tools, read-only subagents get no write tools, Final confirm adds the confirmation tool only when a user can answer.",
+  "how": "createAgentToolset builds the list: repl, todos, read_file, terminal, webfetch, websearch, get_time always; write_file and edit_file unless read-only subagent; memory, history and context tools unless incognito or onboarding; subagent, subagent_wait, routine_update, notification for root sessions; ask_user_question unless headless; action confirmation only when finalConfirm is on and the session is neither read-only nor headless; side chats get a reduced set.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11198718 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Maps to Verevon Model Plane agent profiles: derive the tool list from run kind and policy instead of one static list.",
+  "notes": "Quality 4: derives tools from session kind and policy."
+ },
+ {
+  "id": "aside-browser-product-089",
+  "category": "AI-browser control",
+  "name": "Crash-safe tool execution: rerun-safe tool allowlist",
+  "what": "If the daemon restarts mid-run, interrupted tool calls that are safe to repeat (read_file, get_time, websearch, webfetch, memory and history reads, subagent_wait, todos, questions, confirmations) are re-run; others return a result saying their state is unknown and must be checked before retry.",
+  "how": "CRASH_RERUN_SAFE_TOOLS set and CRASH_UNSETTLED_TOOL_RESULT message in the agent session code; sessions persist runs and turns in SQLite state.db.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11208609 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon execution-core durable runs need an explicit idempotency class per tool; this is a compact way to express it.",
+  "notes": "Quality 4: explicit idempotency classes."
+ },
+ {
+  "id": "aside-browser-product-090",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Pinned entries and bookmarks represented as tabs",
+  "what": "Pinned entries sit at the top of the vertical strip and bookmarks can be dragged onto them; bookmarks can appear as tab-like rows, with Add to bookmarks and Remove from pin actions.",
+  "how": "Aside.dll strings and symbols: bookmark_tab_representation_node_id, bookmark_tab_representation_host, RefreshTabsRepresentedByBookmarks, OnBookmarkDroppedOnPinnedEntries, BookmarkDragPreview, Remove from pin, Add to bookmarks, AsidePinnedTab* colors, AsideHorizontalPinnedTabGroupBackground.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: bookmark_tab_representation_node_id, OnBookmarkDroppedOnPinnedEntries, AsidePinnedTabInactiveBackground)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "An Arc-like pinned area is a navigation pattern a Verevon workspace browser could use for saved sources.",
+  "notes": "Exact behaviour inferred from names; not observed running. Quality 3: inferred from names only."
+ },
+ {
+  "id": "aside-browser-product-091",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Instant new tab: prerendered NTP with animated transition",
+  "what": "The new tab page is prerendered so it appears with no blank frame, and a transition hides the swap.",
+  "how": "Aside.dll AsideNtpPrerender, aside_ntp_prerender_service, aside-ntp-prerender-handle, PrepareAsideNtpTransition in contents_web_view.cc; the extension page also paints a static omnibox first.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideNtpPrerender, aside_ntp_prerender_service, PrepareAsideNtpTransition)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Perceived speed trick; the Verevon composer can emulate it by keeping the dashboard Crawl composer mounted and hidden.",
+  "notes": "Quality 4: prerender plus transition addresses a real latency issue; inferred from names."
+ },
+ {
+  "id": "aside-browser-product-092",
+  "category": "AI-browser control",
+  "name": "Upstream Chromium auto-browse UI present in the base (Gemini Spark and Glic)",
+  "what": "The Chromium 153 base ships Google auto-browse UI strings: Gemini works in the user tabs, shows steps, asks before sensitive steps, lets the user stop or take over, keeps a list of sites it may sign in to, and warns it may share info or make purchases.",
+  "how": "Pak strings 1820-1834, 2088, 2139-2170, 2184-2186 and routes chrome://glic, chrome://settings/ai, chrome://contextual-tasks; Gemini Spark can browse on this device only when the device is awake and Aside is running, with warnings that anybody with access to the agent could control the browser. Enablement in Aside is not verified; Aside own agent uses a separate side panel and extension.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 1820, 1822, 1834, 2088, 2139-2170)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: chrome://glic (resources.pak, scout verified))"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A useful reference for approval copy and the sign-in permission list: per-site, user-revocable permission for the agent to use the user logins.",
+  "notes": "Presence of strings only; the sign in permission list (strings 2162-2173) is a pattern Verevon should consider for authenticated scraping profiles. Quality 4: upstream design with explicit risk copy; enablement unverified."
+ },
+ {
+  "id": "aside-browser-product-093",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Selection and page actions inherited from Chromium",
+  "what": "Right-click actions Ask Aside, Tell me about this, Explain this selection, Summarize this page, Search with Google Lens, and a text-selection Preview with definitions are available through upstream Chromium UI, branded Aside.",
+  "how": "Pak strings 2080-2083 (Preview, Explain), 2191-2200 (Ask Aside, Tell me about this selection, Summarize this page), Lens strings; the extension adds its own context menus (Capture, Translate) and the Lasso layer.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 2080-2083, 2191-2200, 11195-11196)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Low differentiation; useful as a checklist for page-action parity.",
+  "notes": "Whether the upstream AI entries route to Aside agent or to Google Gemini is not verified (strings show Gemini in several of them). Quality 3: upstream entries, partially Gemini-bound."
+ },
+ {
+  "id": "aside-browser-product-094",
+  "category": "In-app browser shell (user-facing)",
+  "name": "DevTools, permissions, print, flags and other upstream shell basics",
+  "what": "DevTools, site permission prompts (camera, microphone, location, USB, HID, Bluetooth, screen share), Picture-in-Picture, print preview, task manager, chrome://flags and policy pages come from Chromium and are re-skinned.",
+  "how": "resources.pak contains the WebUI routes (settings, extensions, flags, downloads, history, password-manager, print, net-export, policy); Aside tokens AsideDeveloperToolsIcon, AsidePrinterStrokeIcon, AsideControl* and permission strings 829-834 direct users to Windows privacy settings.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (string id 829-834)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (string or symbol: AsideDeveloperToolsIcon, AsidePrinterStrokeIcon, picture_in_picture_browser_frame_view.cc)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has a DevTools drawer (console, DOM, network, vision) in BrowserChrome; the gap versus a real browser is permission prompts and Picture-in-Picture style controls.",
+  "notes": "Quality 5: mature upstream functionality."
+ },
+ {
+  "id": "aside-browser-product-095",
+  "category": "Platform & ecosystem",
+  "name": "Memory with extraction and background consolidation",
+  "what": "The agent keeps a stable user profile, operating defaults, episodic notes and consolidated memories; a background job consolidates (dreams) after enough time and sessions; memory extraction can be disabled per task.",
+  "how": "memory settings {enabled, episodicRetentionDays 0, dreamingMinHours 24, dreamingMinSessions 5}; context files AGENTS.md, SOUL.md, memory/USER.md, memory/MEMORY.md loaded into the prompt; tools memory_search, memory_read, history_search, history_read; moss-core.node (Rust, embeddings and vector index) supports search; composer toggle Disable memory extraction.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1681018 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6360511 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideDaemon/win-x64/native/moss-core.node (scout verified Rust crates)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Maps to Verevon Data Plane memory; the per-task off switch and the incognito pairing are the privacy-relevant UX.",
+  "notes": "Quality 4: extraction, retrieval and consolidation with thresholds and a per-task off switch."
+ },
+ {
+  "id": "aside-browser-product-096",
+  "category": "Platform & ecosystem",
+  "name": "Share a task session as a published link",
+  "what": "A task transcript can be published as a shared session with tool outputs and up to 20 images per tool result, within size caps.",
+  "how": "Schemas publishSharedSession and sharedSessionLink with MAX_SHARED_SESSION_TEXT_LENGTH 50,000,000, tool text 100,000, image data 2,000,000 per image and message text 100,000; tRPC sessions.shareStatus; AM chunks remote-sessions and session-host.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11676800 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/remote-sessions-JggilyDT.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Replayable shared runs are a product feature Verevon could add on top of its run timeline and evidence drawer.",
+  "notes": "Hosting endpoint and access control were not read. Quality 3: schema read, hosting not read."
+ },
+ {
+  "id": "aside-browser-product-097",
+  "category": "In-app browser shell (user-facing)",
+  "name": "Attention-aware notifications: UI reports focus, visibility and engagement",
+  "what": "The agent UI tells the daemon whether a given session is focused, visible or engaged so completion and approval notifications are suppressed while the user is already looking at that session.",
+  "how": "AM chunk attention-reporter calls uiAttention.reportAgentManagerSessionAttention {surfaceId, focused, visible, engaged, sessionId, sequence} on focus, blur, visibility change and a heartbeat; the daemon keeps per-account entries with TTLs of 30 s (inactive) and 60 s (active).",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/attention-reporter-DJCPQGyM.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6400494 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon Application Plane notifications should consume a presence signal like this to avoid alerting users who are watching the run; the sequence number and TTL make it robust to lost events.",
+  "notes": "Quality 4: sequence numbers and TTLs make it robust to lost events."
+ },
+ {
+  "id": "aside-browser-product-098",
+  "category": "Observability & operations",
+  "name": "Agent runtime package: Node, Python and file search downloaded for local tools",
+  "what": "Aside downloads a package of tools (Node.js, Python, fast file search) so the agent can run terminal commands and built-in skills locally; the settings page installs, reinstalls and checks for updates.",
+  "how": "Agents settings strings: Agent runtime, Install agent runtime, Reinstall agent runtime, current version and update check; daemon directory constants for runtime dirs; the daemon bash and terminal tools use it.",
+  "evidence": [
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/agents-DbIiE33D.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@6375329 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Same problem Verevon sandboxes solve server-side; the idea of a versioned, user-visible tool runtime is useful for a desktop companion.",
+  "notes": "Quality 3: conventional runtime installer."
+ },
+ {
+  "id": "aside-browser-product-099",
+  "category": "Platform & ecosystem",
+  "name": "Agent file sync across devices with explicit conflict resolution",
+  "what": "Agent files (instructions, memory) can sync between devices; conflicts are listed and resolved by choosing local, remote or an edited version. The feature is experimental and off by default.",
+  "how": "tRPC sync router: status {enabled, etag, conflictCount, conflicts} and resolveConflict {path, choice local|remote|edited, content}; experimental.sync default false; AgentFileSync metadata and db paths in the account root.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11715648 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@1683800 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already has org-level storage; the three-way conflict choice is a compact UX for any shared agent configuration.",
+  "notes": "Quality 3: experimental and off by default."
+ },
+ {
+  "id": "aside-browser-product-100",
+  "category": "Platform & ecosystem",
+  "name": "Daemon module map: tRPC routers that mirror the product surface",
+  "what": "The local daemon exposes one tRPC router with modules that map one to one to product features: agentRuntime, accounts, projects, analytics, billing, capture, channels, cli, contextAwareness, developers, inbox, lasso, sessions, settings, suggestedItems, sync, uiAttention, memory, mcp, models, onboarding, fullDiskAccess, passwordManager, externalPasswordManagers, referrals, remoteControl, routines, meta.",
+  "how": "asideRouter assembled from 28 routers using a Hono HTTP server plus ws; the extension and shell call it as tRPC (HTTP batch and WebSocket subscriptions); a subset is allowlisted for Remote Control.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11718664 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11715648 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A useful decomposition reference when Verevon splits Control, Data, Ingestion and Model plane APIs: note how browser capture, lasso and context awareness are first-class routers, not tools.",
+  "notes": "Names read from the router assembly; per-router procedures were sampled, not enumerated. Quality 4: clear module decomposition."
+ },
+ {
+  "id": "aside-browser-product-101",
+  "category": "AI-browser control",
+  "name": "Suggested tasks from draft routines shown in onboarding and new tab",
+  "what": "The assistant proposes up to 20 suggested tasks (default 3) taken from draft routines created by its own suggestion scan; the onboarding helper shows them as Suggested tasks with a Use this prompt action.",
+  "how": "suggestedItems.list returns routines with state draft and source suggestion (title, description from suggestionReason or schedule, prompt, model, permission mode, runtime config); AM chunk onboarding-helper folds or expands the list and stores the choice locally.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Temp/claude/C--Users-ImaFernandesDaCosta-AppData-Roaming-Claude-scratch-workspaces-5e23d905-dd91-4518-8ff4-252efcbe0520-b5ff8b3a-437c-4499-9a7f-469de994f319-scratch-2026-10-12-69a4ee/1e4c8548-5aa8-429f-9d17-693211694c40/scratchpad/tmp/aside/daemon_sea_blob.bin@11715648 (byte offset in scratch copy of the NODE_SEA_BLOB resource of aside-daemon.exe)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/onboarding-helper-C5xdJAZI.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Connects history-derived routine suggestions to a visible, dismissible UI; Verevon Ingestions schedules could be seeded from monitored sites the same way.",
+  "notes": "Quality 3: small feature built on the routine store."
+ }
+]

@@ -1,0 +1,2717 @@
+[
+ {
+  "id": "slack-product-surface-001",
+  "category": "Messaging core",
+  "name": "Channels, DMs and group DMs as the room primitive",
+  "what": "Work happens in public or private channels, one-to-one DMs and group DMs; channels are named, topical, searchable spaces that anyone with access can join or be added to.",
+  "how": "Conversation types share one message model: channel IDs, DM and MPDM IDs all hash to the same real-time Channel Servers (user, team, file, huddle and channel IDs are all hashed), and the same Web API (conversations.*, chat.postMessage) and event types (message.channels, message.groups, message.im, message.mpim) cover all of them.",
+  "evidence": [
+   "https://slack.com/features",
+   "https://slack.com/help/articles/115004151203-A-guide-to-Slack-Connect",
+   "https://slack.engineering/real-time-messaging/",
+   "https://docs.slack.dev/apis/events-api/",
+   "https://docs.slack.dev/ai/slack-mcp-server"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon Space has only personal and room kinds, no DMs or group DMs and no human-only message path (v-space baseline), so the conversation primitive itself is the largest messaging gap.",
+  "notes": "Group DMs between members of different orgs require everyone to share at least one Slack Connect channel (DOC Connect guide). Same primitive for humans and bots/apps (message.im is also the agent entry point). Quality 5: category-defining: one primitive spans humans, bots and agents, and it scales to millions of channels."
+ },
+ {
+  "id": "slack-product-surface-002",
+  "category": "Messaging core",
+  "name": "Threads with reply broadcast and a Threads view",
+  "what": "Any message can start a thread; replies can optionally also be posted to the channel; a Threads view lists followed threads with unread replies on top; threads can be popped into their own window.",
+  "how": "Thread identity is the parent message timestamp (thread_ts); notification rules differ by conversation type (all replies in 1:1 DMs, only started/replied/mentioned in channels and group DMs, per-thread override, per-channel 'all replies' option); AI thread summaries layer on top.",
+  "evidence": [
+   "https://slack.com/help/articles/115000769927-Use-threads-to-organize-discussions-",
+   "https://docs.slack.dev/ai/developing-ai-apps"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon threads are model-turn containers; non-owner replies are refused and there is no thread side panel, so Slack's reply-in-thread + follow model is the reference for a shared-room thread UX.",
+  "notes": "Slack's thread_ts keying is reused by agents: assistant threads are keyed by thread_ts too, so a human thread and an agent thread share one data model. Quality 5: reference implementation of threading (follow rules, broadcast, dedicated view, pop-out)."
+ },
+ {
+  "id": "slack-product-surface-003",
+  "category": "Messaging core",
+  "name": "Formatting toolbar, markup shortcuts and composer keys",
+  "what": "The composer shows a formatting toolbar (bold, italic, underline, strike, code, quote, code block, ordered and bulleted lists), supports markup typing as an alternative, and has list and newline shortcuts.",
+  "how": "WYSIWYG toolbar can be hidden in favour of typed markup; Shift+Enter newline (Enter preference configurable); '1.' + space and '*' + space start lists; shortcuts for bold, italic, strike and hyperlink exist in the shortcut list.",
+  "evidence": [
+   "https://slack.com/help/articles/202288908-Format-your-messages",
+   "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's room composer reuses ChatMarkdown for rendering but is a prompt box; human-grade rich composition (toolbar plus markup) is table stakes for a Teams/Slack-class Space.",
+  "notes": "The article does not cover mentions, emoji or link handling; those are known from other pages. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-004",
+  "category": "Messaging core",
+  "name": "Mentions with permission-gated broadcast scopes and user groups",
+  "what": "People are mentioned with @name; @channel and @here notify a conversation's members, @everyone is restricted, and user groups act as mentionable handles synced from the IdP.",
+  "how": "Role permissions decide who may use @everyone; @channel and @here are open to all roles including guests; SCIM syncs user groups (workspace-level on Business+, org-level on Enterprise) with live Active Directory group sync; mention routing feeds Activity.",
+  "evidence": [
+   "https://slack.com/help/articles/201314026-Permissions-by-role-in-Slack",
+   "https://slack.com/help/articles/212572638",
+   "https://slack.com/help/articles/201355156"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon @person is inserted as plain text with no mention record or notification, while @agent works; adding server-side mention records plus group handles (for example @team, @agents) would close the gap.",
+  "notes": "Group handles that map to IdP groups are a strong enterprise pattern; Verevon could map org-core roles to mentionable groups. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-005",
+  "category": "Messaging core",
+  "name": "Emoji reactions and custom emoji",
+  "what": "Members react to messages with emoji, including workspace custom emoji; custom emoji can be shared across Slack Connect partners.",
+  "how": "Reactions are first-class events (reaction_added, delivered through the same Channel Server path as messages), are readable and writable through the Slack MCP server, appear in Activity, are captured by the Discovery API, and emoji add/remove are audit-log actions. Agents use reactions as lightweight feedback signals.",
+  "evidence": [
+   "https://slack.engineering/real-time-messaging/",
+   "https://docs.slack.dev/ai/slack-mcp-server",
+   "https://docs.slack.dev/ai/developing-ai-apps",
+   "https://slack.com/help/articles/360002079527",
+   "https://docs.slack.dev/admins/audit-logs-api/",
+   "https://slack.com/help/articles/115004151203-A-guide-to-Slack-Connect"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no reactions or emoji in rooms; reactions are cheap, social and double as human-to-agent feedback (thumbs on an agent turn) so they matter beyond chat.",
+  "notes": "Reactions double as workflow triggers (emoji-reaction trigger in Workflow Builder). Quality 5: reactions are first-class events, auditable, shareable across orgs and usable as agent feedback."
+ },
+ {
+  "id": "slack-product-surface-006",
+  "category": "Messaging core",
+  "name": "Edit, delete and edit-history semantics",
+  "what": "Authors can edit or delete messages subject to permissions; whether edits and deletions are kept is a retention decision (admin-visible edit and delete logs on paid plans).",
+  "how": "Retention settings with 'save edits' keep an edit/deletion log that the Discovery API and exports can read; 'don't save edits' removes it. Clips and files follow the same delete-permission model.",
+  "evidence": [
+   "https://slack.com/help/articles/203457187-Customize-message-and-file-retention-in-Slack",
+   "https://slack.com/help/articles/4406235165587",
+   "https://slack.com/help/articles/360002079527"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no per-message edit or delete (whole-thread delete only for the owner); a ZDR-aware edit/delete with an optional audit log fits the Control/Model Plane retention story.",
+  "notes": "Retention and edit logs are coupled: an architectural lesson for Verevon's ZDR propagation (edit history must be an explicit, policy-controlled store). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-007",
+  "category": "Messaging core",
+  "name": "Link unfurling, file previews and Work Objects",
+  "what": "Shared links and remote files render as previews; apps can enrich links through unfurl events, and Work Objects provide richer interactive unfurls.",
+  "how": "link_shared event plus chat.unfurl; file objects carry preview and preview_highlight fields; remote files have files.remote.add/share/remove and show a tombstone after removal; 'file' block with hide_color controls styling.",
+  "evidence": [
+   "https://docs.slack.dev/messaging/working-with-files"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon rooms have no link previews or attachments; an unfurl contract (event + render API) would let integration-corev2 providers present records inline.",
+  "notes": "Work Objects detail not fetched; marked medium. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-008",
+  "category": "Messaging core",
+  "name": "File upload pipeline with external upload URL and malware scan",
+  "what": "Files are uploaded in three steps (get upload URL, post bytes, complete and share), scanned for malware before becoming available, and can stay private or be shared to one or many channels.",
+  "how": "files.getUploadURLExternal returns upload_url and file_id; files.completeUploadExternal takes files[], channel_id(s) and initial_comment; SDK uploadV2 wraps the steps; public URLs can be created and revoked (files.sharedPublicURL / revokePublicURL).",
+  "evidence": [
+   "https://docs.slack.dev/messaging/working-with-files"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's room composer has no upload path even though Chat has /api/v1/chat/documents; the two-step external-URL pattern keeps large bytes off the BFF and fits the Data Plane.",
+  "notes": "No size limits stated in the guide; scan latency grows with size. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-009",
+  "category": "Messaging core",
+  "name": "Audio and video clips (asynchronous voice and screen messages)",
+  "what": "Members record audio or video clips of up to five minutes (camera, screen with optional camera, background blur) and post them to a channel or DM; others reply in thread with a clip; transcripts and captions are available.",
+  "how": "Recorder embedded in the composer (microphone and camera icons); 'Generate transcript' action on video clips; closed captions for all video clips; clips follow file retention and delete permissions; transcripts are later searchable by Slack AI.",
+  "evidence": [
+   "https://slack.com/help/articles/4406235165587",
+   "https://slack.com/blog/news/ai-innovations-in-slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Async voice/screen clips with auto-transcripts are a natural fit for a human+agent room (an agent can summarise a clip); Verevon has no voice-clip path.",
+  "notes": "Feature is available on all plans; AI summaries of clips are not stated in the help article, only transcripts feeding search. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-010",
+  "category": "Messaging core",
+  "name": "Scheduled send, drafts and sent items",
+  "what": "Messages can be scheduled for later (reported up to about 120 days ahead), edited or cancelled from a Scheduled view; drafts are kept per conversation.",
+  "how": "chat.scheduleMessage on the API side; the real-time architecture note says scheduled messages and reminders fire at the top of each hour and cause traffic spikes; the Slack MCP server exposes 'send, schedule and draft messages'.",
+  "evidence": [
+   "https://slack.engineering/real-time-messaging/",
+   "https://docs.slack.dev/ai/slack-mcp-server",
+   "https://www.cnbc.com/2021/06/16/how-to-schedule-slack-messages.html (search-result summary only, page not read in full)"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no human scheduled send; only agent cron schedules exist, so 'schedule this post' as a first-class human action is missing.",
+  "notes": "120-day horizon comes from a secondary source (low weight). Scheduled and reminder load is an explicit scaling input in Slack's design. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-011",
+  "category": "Messaging core",
+  "name": "Reminders and Later (saved items)",
+  "what": "Messages and files can be saved for later with due dates, and /remind plus 'remind me about this message' create reminders that surface in Later and Activity.",
+  "how": "Built-in slash command /remind (usable in threads); Activity can show to-do reminders and Later due-date reminders; search supports is:saved; overdue reminders raise badges.",
+  "evidence": [
+   "https://docs.slack.dev/interactivity/implementing-slash-commands",
+   "https://slack.com/help/articles/201355156",
+   "https://slack.com/help/articles/202528808-Search-in-Slack",
+   "https://slack.engineering/real-time-messaging/"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no saved items or reminders in Space; a personal 'later' list bound to the person's personal Space is an obvious carry-over.",
+  "notes": "The dedicated help article for Later returned 404; claims rest on four other pages (medium). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-012",
+  "category": "Messaging core",
+  "name": "Pins and bookmark folders in the conversation header",
+  "what": "Important messages are pinned into a Pins tab, and links are kept as bookmarks, optionally grouped in folders, in the conversation header; removing someone else's pin notifies them via Slackbot.",
+  "how": "Header holds tabs (Pins, canvases, lists) and bookmark folders; drag and drop re-orders; search supports has:pin.",
+  "evidence": [
+   "https://slack.com/help/articles/205239997-Pin-messages-and-bookmark-links (search-result summary only, page not read in full)",
+   "https://slack.com/help/articles/202528808-Search-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon pins a thread (owner-only, sorts first) but has no bookmarks or header shelf; a per-room 'shelf' of links, files and agent outputs would help.",
+  "notes": "Two versions of the help text disagree on menu labels; semantics are consistent. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-013",
+  "category": "Messaging core",
+  "name": "Custom status, availability, scheduled status and automatic statuses",
+  "what": "A status (emoji and text with optional expiry), an active/away dot, up to five scheduled statuses, and automatic statuses for huddles, focus mode and outside working hours; setting a status can also pause notifications.",
+  "how": "Auto-away after 10 minutes of inactivity on desktop (mobile: when the app is left); status visibility to external orgs depends on Grid and Connect settings; Preferences > Automatic statuses toggles the automatic ones.",
+  "evidence": [
+   "https://slack.com/help/articles/201864558-Set-your-Slack-status-and-availability"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon presence has online/typing/offline with a 30 s TTL but no custom status, away state or calendar/focus coupling; status-as-notification-policy is a useful pairing.",
+  "notes": "Calendar-synced status not mentioned in the article. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-014",
+  "category": "Messaging core",
+  "name": "Presence driven by OS idle time, not just app focus",
+  "what": "While the user is active at the computer (even with Slack in the background) the desktop shell keeps presence 'active'; when idle or locked it stops.",
+  "how": "Main process polls powerMonitor.getSystemIdleTime every 10 s; a value of 20 s or less counts as ACTIVE, otherwise IDLE; when ACTIVE and not locked it dispatches TICKLE_MESSAGE_SERVER, which is forwarded to every loaded web-app window so the web client pings the message server. Lock and suspend states feed the same store.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1326611 (gX systemIdleStatusEpic) and @1326957 (g$ tickleMessageServerEpic)",
+   "extract/slack/dist/main.bundle.cjs@798271 (SET_SYSTEM_IDLE, SET_SYSTEM_LOCKED, SET_SUSPEND_STATUS actions)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A desktop Verevon client (or the Rust gateway) could derive 'agent-visible human presence' from OS idle state, which lets agents defer interrupts when the owner is away.",
+  "notes": "Semantics of the web client's response to the tickle are INF; the shell side is read directly. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-015",
+  "category": "Messaging core",
+  "name": "Typing indicators as transient events",
+  "what": "Typing indicators and similar signals are shown live without being stored.",
+  "how": "Transient events bypass the database and go client -> Gateway Server -> Channel Server -> Gateway Servers -> clients; presence is on separate Presence Servers queried by Gateway Server only for users visible on screen.",
+  "evidence": [
+   "https://slack.engineering/real-time-messaging/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already stores presence/typing in Convex with TTLs; Slack's separation of durable events from transient ones is the pattern to keep when moving off 6 s polling.",
+  "notes": "Source is the 2023 engineering post; internals may have moved since. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-016",
+  "category": "Messaging core",
+  "name": "File-share confirmation before posting to others",
+  "what": "The desktop shell can ask for confirmation before sharing a file into a channel.",
+  "how": "Localised message box text: about to share file {fileName} with others in channel {channelId}, proceed? The call site was not located; this looks like a guard for drag-drop or recent-file upload.",
+  "evidence": [
+   "extract/slack/dist/resources/locales/en/desktop_messagebox_en_GB.json (key 46843414)",
+   "extract/slack/dist/main.bundle.cjs@998859 (UPLOAD_RECENT_FILE, GET_RECENT_FILES, SEARCH_LOCAL_FILES IPC schemas)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A share-with-others confirmation for files (and for agent-produced artifacts) is cheap protection against accidental disclosure in shared rooms.",
+  "notes": "Trigger path inferred (INF) from the upload IPC set; string is certain. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-017",
+  "category": "Messaging core",
+  "name": "Per-user message and file translation",
+  "what": "Users can translate messages or file summaries into their default language; the translation is visible only to them.",
+  "how": "Business+ and Enterprise+ AI feature; 'Translations are only visible to you' is stated explicitly; file summaries can also be translated.",
+  "evidence": [
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Multilingual rooms (Nordic customers, global teams) benefit from viewer-local translation that never mutates the shared transcript; Verevon can implement it as a per-viewer render step.",
+  "notes": "Model/provider handling of translated text is not described. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-018",
+  "category": "Org & membership",
+  "name": "Workspace and Enterprise Grid organization hierarchy",
+  "what": "A company can run one workspace or, on Enterprise Grid, an organization containing many workspaces with org-level owners and admins, org-wide policies and cross-workspace channels.",
+  "how": "Org Owners and Admins manage workspaces (create, move in, move channels between workspaces with admin rights on both); permissions flow from org owner down to workspace admin; retention, apps and Connect approvals have org-level policy options; Vitess sharding moved from workspace-keyed to channel-keyed because Grid and Connect broke the one-workspace-per-shard assumption.",
+  "evidence": [
+   "https://slack.com/help/articles/115005225987 (search-result summary only, page not read in full)",
+   "https://slack.engineering/scaling-datastores-at-slack-with-vitess/",
+   "https://slack.com/help/articles/203457187-Customize-message-and-file-retention-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has org-core and Spaces under an org, but no team/sub-group layer; Grid's lesson is to model 'workspace' as an optional grouping inside one tenant rather than a data boundary.",
+  "notes": "Grid org details (org-wide channels, shared channels across workspaces) partly come from a third-party blog and are low confidence. Quality 5: the most developed multi-workspace org model among the references, with org-level policy and admin APIs."
+ },
+ {
+  "id": "slack-product-surface-019",
+  "category": "Org & membership",
+  "name": "Role model: primary owner, owner, admin, member, multi-channel guest, single-channel guest",
+  "what": "A graded role set controls who can create channels, set posting rules, invite, install apps, build workflows and administer the workspace.",
+  "how": "Primary Owner alone can transfer ownership or delete the workspace; Owners/Admins manage settings and members; Members create channels and invite; guests are limited to one channel (single) or a set of channels (multi), with different private-channel rights; workflows can be built by owners/admins/members and used by all roles on paid plans.",
+  "evidence": [
+   "https://slack.com/help/articles/201314026-Permissions-by-role-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon Space roles are viewer, editor, manager, owner on Control side, and 'Change a member's room role' is absent in the product; a guest tier with a hard guard around agent features is also missing.",
+  "notes": "Slack's agent-design rules explicitly keep guests out of agent features: a precedent for a guest-safe agent boundary. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-020",
+  "category": "Org & membership",
+  "name": "Guests (single-channel and multi-channel)",
+  "what": "Outsiders can be invited as guests into specific channels without seeing the rest of the workspace.",
+  "how": "Guest roles are billed accounts inside the workspace; SCIM can create multi-channel guests (Enterprise) while single-channel guests are made by role change; guests can use huddles and clips on all plans but are blocked from the Real-time Search API and from agent features per agent-design guidance.",
+  "evidence": [
+   "https://slack.com/help/articles/201314026-Permissions-by-role-in-Slack",
+   "https://slack.com/help/articles/212572638",
+   "https://docs.slack.dev/apis/web-api/real-time-search-api",
+   "https://docs.slack.dev/ai/agent-design",
+   "https://slack.com/help/articles/4402059015315-Use-huddles-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no external or guest identity (only an ADR S5.1); a guest tier would be needed for customers and partners to share a Space with agents.",
+  "notes": "Guest vs Connect-external distinction is the key product choice: guest = inside your tenant, external = their own tenant. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-021",
+  "category": "Org & membership",
+  "name": "Slack Connect shared channels between organizations",
+  "what": "Up to 250 organizations can work in one channel; each org keeps its own workspace and identity; the channel-owning org controls invitations, removals and posting permissions.",
+  "how": "Invitations are managed under Home > Directories > External; only the owning org can add orgs or remove apps it added; custom apps run only for the owning org but their posts are visible to all; each org chooses what profile detail others see; external channels are grouped in an 'External Connections' sidebar section; admin approval settings (bulk approve up to 25 requests, specific-workspace allow on Enterprise, approval APIs) sit in org settings.",
+  "evidence": [
+   "https://slack.com/help/articles/115004151203-A-guide-to-Slack-Connect",
+   "https://slack.com/help/articles/115005912706 (search-result summary only, page not read in full)",
+   "https://docs.slack.dev/tools/deno-slack-sdk/tutorials/governing-slack-connect-invites (search-result summary only, page not read in full)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "This is the best-in-class answer to 'cooperate with another company in one room'; Verevon's S5.1 external identity ADR should copy: owner-org control, per-org data custody, per-org profile exposure and a labelled sidebar group.",
+  "notes": "Teams offers federation and shared channels; Slack Connect is the more mature and widely used implementation (INF from market position, not measured here). Each org's data and keys stay its own (see EKM and residency records). Quality 5: best-in-class cross-org rooms: owner-org control, per-org keys and profiles, approvals, 250-org channels."
+ },
+ {
+  "id": "slack-product-surface-022",
+  "category": "Org & membership",
+  "name": "Slack Connect DMs and per-org profile visibility",
+  "what": "Direct messages can be started with people in other organizations on any plan, and every org controls how much of its members' profile (status, timezone) partners see.",
+  "how": "DM invitations are sent and accepted like channel invites; group DMs across orgs require shared channel membership; the sidebar labels external conversations.",
+  "evidence": [
+   "https://slack.com/help/articles/115004151203-A-guide-to-Slack-Connect",
+   "https://slack.com/help/articles/201864558-Set-your-Slack-status-and-availability"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A free-tier cross-org DM is a growth loop; for Verevon it implies an invitation handshake object separate from room membership.",
+  "notes": "Group DMs only with a shared channel is a deliberate anti-spam rule. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-023",
+  "category": "Org & membership",
+  "name": "Custom sidebar sections with per-section filter and sort",
+  "what": "Each user groups channels, DMs and apps into private sections; every section can override filter (default hides conversations with no activity in 30 days) and sort (A-Z, recency, priority); bulk manage and emoji per section.",
+  "how": "Sections are per-user, never affect coworkers' view, and are covered by Enterprise Key Management ('sidebar custom sections' are encrypted data); available to members and guests on paid plans.",
+  "evidence": [
+   "https://slack.com/help/articles/360043207674-Organize-your-sidebar-with-custom-sections",
+   "https://slack.com/help/articles/360019110974-Slack-Enterprise-Key-Management"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Core Sidebar lists Channels, Personal Space and 'All conversations' with working/unread/pinned dots; per-user sections and per-section sort/filter would scale it past a handful of rooms.",
+  "notes": "Sidebar organisation is treated as user data worth encrypting and retaining: it is personalisation, not UI chrome. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-024",
+  "category": "Org & membership",
+  "name": "SCIM provisioning and IdP-synced user groups",
+  "what": "Members and guests are created, updated and deactivated from the identity provider; IdP groups sync to Slack user groups.",
+  "how": "SCIM through connector apps for Google Workspace, Entra, Okta, OneLogin, PingFederate and PingOne using an OAuth-created API token; workspace-level groups on Business+, org-level on Enterprise; seats become billable at first sign-in.",
+  "evidence": [
+   "https://slack.com/help/articles/212572638"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has SSO behind a flag and no SCIM code in auth/user/org-core (baseline); SCIM plus group-to-role mapping is a gating enterprise feature.",
+  "notes": "Rate limits not covered in the article. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-025",
+  "category": "Org & membership",
+  "name": "Native sign-in modes, direct SAML and magic-link in the desktop shell",
+  "what": "The desktop app can sign users in through the browser, a platform-native flow, or a direct-SAML flow that jumps straight to the IdP; a magic login link signs the app in from a web flow.",
+  "how": "SignInMethod setting has three values (browser, platform-native, platform-native-direct-saml); when native, sign-in URLs (/ssb/signin, /ssb/signin_redirect, /ssb/add) get aswebauth=1 and, for direct SAML, are rewritten to /sso/saml/start?redir=...; a magic-login preload returns page text over IPC (SLACK_MAGIC_LOGIN_RESPONSE). SignInMethod is a managed, darwin-only preference gated on AuthRequest availability.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@789602 (sign-in method enum)",
+   "extract/slack/dist/main.bundle.cjs@1092542 (sign-in URL rewriting)",
+   "extract/slack/dist/main.bundle.cjs@831218 (SignInMethod managed preference)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A Verevon desktop/PWA shell with an IdP-first deep sign-in (and managed preference to force it) removes one login hop for enterprise tenants.",
+  "notes": "The scout's offset for direct SAML is confirmed; the magic-login behaviour beyond the preload is INF. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-026",
+  "category": "Org & membership",
+  "name": "Multi-workspace rail, jump list and keyboard switching",
+  "what": "Users sign into many workspaces at once and switch with a rail, Ctrl/Cmd+1..9, next/previous workspace shortcuts, the tray menu or the Windows jump list (up to 10 workspaces).",
+  "how": "Workspaces list is synced from the web app (SYNC_WORKSPACES, STORE_USER_WORKSPACES, ADD_NEW_TEAMS/REMOVE_TEAMS, SELECTED_WORKSPACE_CHANGED); jump list items launch slack://open?team=<id>; selecting a team by user id exists (SELECT_TEAM_BY_USER_ID); a team-list separator token orders the rail.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1209064 (jump list builder)",
+   "extract/slack/dist/main.bundle.cjs@995451 (IPC schema table su: SYNC_WORKSPACES, SELECT_NEXT_WORKSPACE, STORE_USER_WORKSPACES)",
+   "extract/slack/dist/main.bundle.cjs@787028 (team-list-end-separator, from scout)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has org-level scoping with a single Space shell; a workspace/org switcher is only needed if one identity spans tenants, but the deep link pattern (open?team=) is reusable.",
+  "notes": "Teams uses a similar account switcher; Slack's is lighter because each workspace is a separate web session. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-027",
+  "category": "Org & membership",
+  "name": "Managed client configuration with policy and default scopes",
+  "what": "IT can pre-set or force client settings (default sign-in team, hardware acceleration, download path, web switches, auto-update, client environment, release channel, sign-in method) through OS-managed preferences.",
+  "how": "Settings are declared with name, external name, schema, platforms and scope (policy or default); macOS reads forced preferences through cf-prefs (isPreferenceForced, getPreferenceValue and a 'Defaults' dictionary); Linux reads /etc/slack-desktop.conf JSON with policy and defaults sections; Windows entries are marked win32-capable.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@830467 (settings catalogue)",
+   "extract/slack/dist/main.bundle.cjs@838114 (/etc/slack-desktop.conf reader)",
+   "extract/slack/dist/main.bundle.cjs@838867 (cf-prefs reader)",
+   "extract/slack/package.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A Verevon desktop shell would need the same split between locked policy and user-overridable defaults to be deployable by IT; the pattern is directly reusable.",
+  "notes": "registry-js appears in dependencies and Windows is declared in platforms; the Windows registry read path was not located (INF). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-028",
+  "category": "Org & membership",
+  "name": "Release channels and early-access cohorts",
+  "what": "Users or admins can be moved to beta (or dogfood) release channels and are told when they join one.",
+  "how": "releaseChannelOverride setting with values dogfood, beta, prod; SWITCH_UPDATE_CHANNELS epic; renderer string says the user was added to a release channel and will receive its updates.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@799894 (channel selector)",
+   "extract/slack/dist/main.bundle.cjs@831218 (ReleaseChannel managed pref)",
+   "extract/slack/dist/resources/locales/en/desktop_renderer_en_GB.json (key 4279321952)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon will want per-tenant staged rollouts (dogfood to beta to prod) for the Space client given the many unreleased gates.",
+  "notes": "Rollout assignment logic is server-side (not in the shell). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-029",
+  "category": "Org & membership",
+  "name": "Admin approval of apps and workflow capabilities",
+  "what": "Admins decide which apps, agents, workflow connectors and custom steps are allowed; on Enterprise, org owners approve or restrict apps and MCP clients centrally.",
+  "how": "Owners control app management; Enterprise org admins approve or restrict apps; the Slack MCP server uses the standard app approval process; Workflow Builder admins can restrict connector steps, custom steps and external orgs in Connect conversations.",
+  "evidence": [
+   "https://slack.com/help/articles/201314026-Permissions-by-role-in-Slack",
+   "https://docs.slack.dev/ai/slack-mcp-server",
+   "https://slack.com/help/articles/360035692513-Guide-to-Slack-Workflow-Builder",
+   "https://slack.com/blog/news/ai-innovations-in-slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon Control already issues signed per-effect decisions; an org-level 'agent and integration allowlist' that the Control plane checks at bind time would match Slack's admin gate.",
+  "notes": "Slack ties app approval to a registered app identity (fixed app ID), which is what makes MCP auditing possible. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-030",
+  "category": "Org & membership",
+  "name": "Admin-approved invitations and invitation requests",
+  "what": "Workspaces can require admin approval for invitations; in Slack Connect, approvers handle open requests (bulk up to 25) and rules can allow channels only in specific workspaces on Enterprise.",
+  "how": "Per-org rules under Organization settings > Slack Connect > Connections > Invitations; approval APIs allow automating decisions; developers publish tutorials for domain-based allow/deny logic.",
+  "evidence": [
+   "https://slack.com/help/articles/115005912706 (search-result summary only, page not read in full)",
+   "https://slack.com/help/articles/115004854783 (search-result summary only, page not read in full)",
+   "https://docs.slack.dev/tools/deno-slack-sdk/tutorials/governing-slack-connect-invites (search-result summary only, page not read in full)"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's add-person flow is owner/manager-only with no request/approve queue; an invitation-request inbox for managers is a small, high-value addition.",
+  "notes": "Details come from search summaries of help articles (medium). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-031",
+  "category": "Calls & meetings",
+  "name": "Huddles: lightweight audio/video attached to a channel or DM",
+  "what": "A headphones icon in any channel or DM starts or joins a huddle; participants can add video, share screens, react, draw on a shared screen and use a built-in notes thread and canvas; the huddle ends when the last person leaves.",
+  "how": "Free plan: 2 participants; paid: up to 50 with 25 on video; up to 2 simultaneous screen sharers with system-audio sharing; drawing on shared screen on Mac/Windows desktop only; temporary emoji/effects/GIFs and persistent stickers; each huddle has a thread and a canvas that stay reachable afterwards; live English captions (not saved); invitees from outside the channel cannot see its messages; available to members and guests on all plans.",
+  "evidence": [
+   "https://slack.com/help/articles/4402059015315-Use-huddles-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon Space has no calls at all (Channel Plane is docs-only); Slack's 'huddle is a lightweight attachment of a room with its own thread and canvas' is the minimal viable shape, and it maps onto a Space plus a transcript/notes artifact.",
+  "notes": "Held at 4 rather than 5: 2-person free cap, 25-person video cap and no recording statement in the help article. Shortcut Ctrl/Cmd+Shift+H toggles a huddle (DOC keyboard shortcuts). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-032",
+  "category": "Calls & meetings",
+  "name": "AI huddle notes, summaries and transcript into a canvas",
+  "what": "Slack AI listens to a huddle and writes highlights and action items into a canvas with shared files, plus a transcript.",
+  "how": "Output format is a canvas (so it is searchable and editable); AI search then indexes the result; huddle notes are in the Pro, Business+ and Enterprise+ AI feature matrix.",
+  "evidence": [
+   "https://slack.com/blog/news/ai-innovations-in-slack",
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI",
+   "https://slack.com/help/articles/4402059015315-Use-huddles-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Meeting minutes as a first-class editable artifact (canvas) that agents can later retrieve is the pattern Verevon's meeting-intelligence docs already target (WhisperX plus wiki minutes).",
+  "notes": "The huddle help article itself does not mention transcripts, only the blog does (consistency risk). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-033",
+  "category": "Calls & meetings",
+  "name": "Native screen-share indicator border window",
+  "what": "While sharing a screen or window, the shell draws a coloured border around what is being shared so the sharer always sees what is exposed.",
+  "how": "A dedicated overlay window is controlled through seven validated IPC channels: create border window (window or screen id and number), show/hide, set window or screen id, set border width, set RGBA colour, set refresh timer interval, and query window position and dimensions.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@996890 (CALLS_SCREEN_SHARE_* IPC schemas)",
+   "extract/slack/dist/main.bundle.cjs@962863 (channel enum i5)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "If Verevon agents ever share a sandbox desktop or browser view, an always-visible 'this is being shared/controlled' frame is the right trust cue.",
+  "notes": "The same pattern (visible border while remote-controlled) is used by remote-support tools; useful for the agent-PC view. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-034",
+  "category": "Calls & meetings",
+  "name": "Screen and window source picker with thumbnails",
+  "what": "Before sharing, users choose a screen or window from a preview grid.",
+  "how": "GET_SCREEN_PREVIEW_THUMBNAILS takes a size and a list of source types (screen, window); desktopCapturer.getSources is used in the main process (scout count 1); no setDisplayMediaRequestHandler was found, so the picker UI is in the web client.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@996890 (IPC schema table around GET_SCREEN_PREVIEW_THUMBNAILS)",
+   "findings/t1/slack.inventory.md section 3.3 (scout: desktopCapturer.getSources count 1)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Only relevant if Verevon adds human screen share; the thumbnail-by-source-type API is a clean main-process contract.",
+  "notes": "The renderer side was not inspected. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-035",
+  "category": "Calls & meetings",
+  "name": "Device enumeration: virtual cameras, audio devices and microphone mode",
+  "what": "The client can list virtual cameras and audio devices, probe whether an audio device initialises, and read the OS microphone mode.",
+  "how": "IPC channels GET_VIRTUAL_CAMERAS, ENUMERATE_AUDIO_DEVICES, GET_AUDIO_DEVICE_DETAILS (index, id), CAN_INIT_AUDIO_DEVICE, GET_MICROPHONE_MODE; slack-desktop-utils native addon (node-pre-gyp) backs them; telemetry traces desktop_can_init_audio_device and desktop_get_audio_device_details.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@997536 (IPC schema entries)",
+   "extract/slack/dist/main.bundle.cjs@998065 (audio device schemas)",
+   "extract/slack/package.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Reference for what a native call client needs from the OS before the first call; useful only if Verevon ships calls.",
+  "notes": "Native addon was not opened; behaviour of each call is INF from names. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-036",
+  "category": "Calls & meetings",
+  "name": "Camera and microphone permission service",
+  "what": "The app checks and requests camera and microphone access without blocking the UI.",
+  "how": "A utilityProcess named slack-media-access-check runs call-get-media-access-status-entry-point; GET_MEDIA_ACCESS_STATUS accepts a forceRefresh flag and results are cached; ASK_FOR_MEDIA_ACCESS requests permission; desktop_media_access traces record cached/fresh/force_refresh.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1398139 (getMediaAccessStatus) and @1398716 (slack-media-access-check)",
+   "extract/slack/dist/main.bundle.cjs@997536 (GET_MEDIA_ACCESS_STATUS schema)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Same separation (permission probe in a utility process with cache) applies to Verevon's browser-grant and sandbox permission prompts.",
+  "notes": "Windows and macOS branches exist; Linux behaviour is INF. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-037",
+  "category": "Calls & meetings",
+  "name": "Update restart deferred while in a huddle or upload",
+  "what": "Auto-update will not restart the app mid-huddle or mid-upload.",
+  "how": "Main process queries the web app with QUERY_STEALTH_RESTART_SAFE; the renderer answers STEALTH_RESTART_SAFE_RESPONSE with requestId, safe boolean and an optional reason of huddle, upload or guard; telemetry has stealth-restart deferred/triggered events.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@996535 (STEALTH_RESTART_SAFE_RESPONSE schema)",
+   "extract/slack/dist/main.bundle.cjs@961880 (QUERY_STEALTH_RESTART_SAFE channel)",
+   "tmp/slack_event_codes.txt (DESKTOP_UPDATER_STEALTH_RESTART_DEFERRED/TRIGGERED)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "A Verevon shell should let long-running agent runs and approvals veto an update restart the same way (reason: run, approval, upload).",
+  "notes": "Elegant handshake: the shell asks, the app vetoes with a typed reason. No equivalent term appears in the Teams, Grok Bot, buzz or qm inventories (grep only; those inventories are incomplete). Quality 5: small but rare: typed veto handshake between shell and app; not seen in peer inventories."
+ },
+ {
+  "id": "slack-product-surface-038",
+  "category": "Calls & meetings",
+  "name": "Sleep prevention while media is active",
+  "what": "The OS is kept awake during calls and similar sessions.",
+  "how": "powerSaveBlocker usage (11 mentions) with POWER_SAVE_BLOCKER_START and POWER_SAVE_BLOCKER_IS_STARTED IPC; call window teardown via CLOSE_CALL and CLOSING_CHILD_WINDOWS.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1418004 (powerSaveBlocker)",
+   "extract/slack/dist/main.bundle.cjs@961376 (CLOSE_CALL)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Agent runs on a user's machine (browser/PC agents) need the same keep-awake lease; link to Verevon sandbox leases.",
+  "notes": "Call-time purpose is INF; the API surface is certain. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-039",
+  "category": "Calls & meetings",
+  "name": "Meeting-aware Slackbot (live context during meetings)",
+  "what": "Slack describes a Slackbot that follows what happens in a meeting and surfaces live suggestions such as pulling a CRM record when a customer name comes up.",
+  "how": "Reported as an expansion of the personal-agent Slackbot toward 'ultimate teammate'; no API or help article was found for it.",
+  "evidence": [
+   "https://www.nojitter.com/digital-workplace/slack-turns-slackbot-into-the-ultimate-ai-teammate (search summary only)"
+  ],
+  "provenance": "DOC",
+  "confidence": "low",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "An in-meeting agent that retrieves context is the endpoint of Verevon's meeting-intelligence plan; treat Slack's version as a marketing signal until documented.",
+  "notes": "Single trade-press source; not verified against slack.com. Date and availability unknown. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-040",
+  "category": "Calls & meetings",
+  "name": "Calendar and whiteboard are not native to Slack",
+  "what": "Slack relies on calendar apps (Google Calendar, Outlook) for event notifications and has no built-in whiteboard; collaborative surfaces are canvases and screen-share drawing.",
+  "how": "Notification article references calendar notifications coming from the Google Calendar and Outlook apps; huddle drawing is limited to a pencil tool on shared screens in desktop apps.",
+  "evidence": [
+   "https://slack.com/help/articles/201355156",
+   "https://slack.com/help/articles/4402059015315-Use-huddles-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon does not need a native calendar or whiteboard to be competitive; Slack treats them as integration surfaces.",
+  "notes": "Absence claim: not exhaustively verified; marked medium. Quality 2: limited, absent or single-source evidence."
+ },
+ {
+  "id": "slack-product-surface-041",
+  "category": "Search & discovery",
+  "name": "Modifier-based search syntax",
+  "what": "Search supports from:, in:, with:, creator:, has: (reactions), has:pin, is:saved, is:thread, before:, after:, on:, during:, quoted phrases, minus-exclusion and a trailing asterisk for prefix match; modifiers combine.",
+  "how": "Typed modifiers parsed by the client and applied server-side; shortcuts Ctrl/Cmd+G (global) and Ctrl/Cmd+F (current conversation).",
+  "evidence": [
+   "https://slack.com/help/articles/202528808-Search-in-Slack",
+   "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no message or thread search in Spaces (only web/image/video search); a modifier grammar (from:, in:agent, has:approval) is the fast path to power-user search.",
+  "notes": "Doc does not mention Lists as a result type; mobile also exposes Workflows as a type. Quality 5: rich documented grammar that power users rely on."
+ },
+ {
+  "id": "slack-product-surface-042",
+  "category": "Search & discovery",
+  "name": "Typed result filters and search history",
+  "what": "Results are filtered into Messages, Files, People, Channels and Canvases; a clock icon shows previous searches.",
+  "how": "Filters are tabs over the same query; mobile adds sort drop-downs and a Workflows type.",
+  "evidence": [
+   "https://slack.com/help/articles/202528808-Search-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Space-scoped result types (messages, threads, agents, runs, documents) would make Verevon's knowledge and activity tabs searchable in one place.",
+  "notes": "Saved searches are not covered by the article. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-043",
+  "category": "Search & discovery",
+  "name": "AI search answers and automatic filters",
+  "what": "Users can ask natural-language questions and receive an answer drawn from Slack content; AI also adds filters to ordinary searches.",
+  "how": "Search answers are Business+/Enterprise+ features; automatic search filters are on all plans; answers are limited to content the asker can access; the AI feature set covers channels, files, canvases, clip transcripts and connected Google/Microsoft documents.",
+  "evidence": [
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI",
+   "https://slack.com/help/articles/202528808-Search-in-Slack",
+   "https://slack.com/blog/news/ai-innovations-in-slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's grounded room turns (policy-gated retrieval) already answer from Space sources; extending to Space messages and connected-provider docs, still under the caller's ACL, would match Slack.",
+  "notes": "Slack's guarantee 'only what you can access' is the same invariant as Verevon's 'Space access never widens an owner-plane ACL'. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-044",
+  "category": "Search & discovery",
+  "name": "Enterprise search across third-party apps",
+  "what": "A single search box that spans Slack and connected systems (Google, Microsoft, Salesforce and others) for Enterprise+ customers.",
+  "how": "Listed in the AI feature matrix as Enterprise+ only; backed by connectors and the Real-time Search API; responses can include data from connected sources such as Salesforce.",
+  "evidence": [
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI",
+   "https://slack.com/features"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's integration-corev2 provider actions and Data Plane v2 retrieval are the natural backbone for a cross-system 'ask the room' search.",
+  "notes": "Connector list and permission model not detailed in fetched pages. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-045",
+  "category": "Search & discovery",
+  "name": "Real-time Search API (assistant.search.context) with semantic and keyword modes",
+  "what": "Apps and agents can search messages, files, channels and users as the requesting person without copying Slack data; natural-language questions trigger semantic retrieval.",
+  "how": "Semantic mode is triggered by question-shaped queries with the default score sort and needs a plan with Slack AI Search (check assistant.search.info); keyword mode supports stemming but not synonyms; sort=timestamp forces keyword; user token (xoxp) or an action token (from message.im/mpim/groups/channels with mention/app_mention events) for bot-token calls; scopes search:read.public plus optional .private/.mpim/.im/.files/.users; results scoped to channels the user can access; Connect channels return only the invoking channel; guests cannot use it; apps must not store, copy or train on results; formerly called Data Access API.",
+  "evidence": [
+   "https://docs.slack.dev/apis/web-api/real-time-search-api",
+   "https://docs.slack.dev/ai/agent-context-management"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "This is the cleanest model for 'agent reads the room as the requesting user': per-request token bound to an event, scope per content type, no-retention contract; Verevon's Control decisions (thread-read, retrieval-read) are the equivalent and could adopt the action-token idea for bot-initiated reads.",
+  "notes": "Includes an explicit data-egress rule (no storage or training) that Verevon's ZDR work should mirror in provider contracts. Quality 5: clean, documented, permission-bounded agent read path with explicit data-egress rules."
+ },
+ {
+  "id": "slack-product-surface-046",
+  "category": "Search & discovery",
+  "name": "Cross-content AI indexing: files, canvases, clip transcripts, connected docs",
+  "what": "Slack AI search answers can cite files in channels and DMs, canvases, clip transcripts and connected Google or Microsoft documents.",
+  "how": "Search index spans native objects plus connected sources; file summaries are auto-generated for pdf, docx, pptx and xlsx files visible to everyone; summaries are translatable.",
+  "evidence": [
+   "https://slack.com/blog/news/ai-innovations-in-slack",
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon Space knowledge tab reads documents/wiki bound to a Space (currently empty in practice); indexing room messages and agent outputs alongside is the missing half.",
+  "notes": "File summaries only for files accessible to everyone: a conservative rule worth copying. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-047",
+  "category": "Search & discovery",
+  "name": "People, channel and external directories",
+  "what": "Home exposes directories of people, channels and external connections; Connect invitations live under Directories > External.",
+  "how": "Directories are navigation destinations, not search results; external directory lists pending and active Slack Connect relationships.",
+  "evidence": [
+   "https://slack.com/help/articles/115004151203-A-guide-to-Slack-Connect"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no room discovery or browse/join route; a directory (public rooms, people, agents) gives users a way to find and join rooms.",
+  "notes": "Only the External directory is evidenced here; People and Channels directories are INF from standard Slack UI. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-048",
+  "category": "Search & discovery",
+  "name": "OS-level search index and local file search",
+  "what": "The desktop client can add and remove items in the operating system's search index and search local files to attach.",
+  "how": "IPC channels IS_SEARCH_INDEXING_AVAILABLE, ADD_TO_SEARCH_INDEX (array of items), REMOVE_FROM_SEARCH_INDEX and REMOVE_ALL_FROM_SEARCH_INDEX (alphanumeric ids); SEARCH_LOCAL_FILES (query plus options), SEARCH_LOCAL_FILES_SUPPORT, GET_RECENT_FILES, UPLOAD_RECENT_FILE; local-file search sits behind the desktop_local_file_search feature flag; spotlightHandoff epic name exists.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@998028 (search index IPC schemas)",
+   "extract/slack/dist/main.bundle.cjs@998859 (recent file and local search schemas)",
+   "extract/slack/dist/main.bundle.cjs@796166 (feature flag enum incl. desktop_local_file_search)",
+   "extract/slack/dist/main.bundle.cjs@945562 (spotlightHandoff epic name)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Indexing room titles and recent threads into Spotlight/Windows Search would make a Verevon desktop shell reachable from OS search; it is cheap and rare.",
+  "notes": "Which objects are indexed is not visible in the shell (web app decides). Handler bodies for spotlightHandoff/canvasHandoff were only seen as names. No equivalent appears in the other reference inventories (grep only). Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-049",
+  "category": "Notifications & attention",
+  "name": "Per-conversation notification levels and exceptions",
+  "what": "Users choose Everything or Mentions and direct messages for banners, with per-channel or per-DM exceptions; desktop and mobile can be set separately.",
+  "how": "Preferences > Notifications; defaults on; separate toggles for desktop and mobile; mobile overrides for thread replies, VIP messages and huddles; keywords add alerts for chosen words.",
+  "evidence": [
+   "https://slack.com/help/articles/201355156"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon notification-core has per-event and per-channel preferences but nothing produced by Space events (mentions, replies, approvals); a mention/reply/approval event taxonomy with per-room levels is needed.",
+  "notes": "Quality 5: mature layered preferences across desktop and mobile."
+ },
+ {
+  "id": "slack-product-surface-050",
+  "category": "Notifications & attention",
+  "name": "Keyword alerts",
+  "what": "Words or phrases of interest trigger alerts in joined channels and are highlighted in yellow; matching ignores case but needs exact words.",
+  "how": "Keyword alerts skip threads the user does not follow; they count towards badges.",
+  "evidence": [
+   "https://slack.com/help/articles/201355156"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "'Alert me when anyone mentions customer X or when an agent proposes spending' is a natural Space rule; keyword subscriptions are a lightweight precursor to agent watches.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-051",
+  "category": "Notifications & attention",
+  "name": "Notification schedule, pause and VIP overrides",
+  "what": "A schedule limits alerts to chosen days and hours; pausing silences notifications except VIP people (paid plans) and configured mobile overrides; statuses can pause notifications until they clear.",
+  "how": "Focus mode and notification schedule interact with automatic statuses; the desktop shell reads the OS Do Not Disturb or Focus Assist state (see Focus and DND records).",
+  "evidence": [
+   "https://slack.com/help/articles/201355156",
+   "https://slack.com/help/articles/201864558-Set-your-Slack-status-and-availability"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon lists mute, DND, quiet hours and digest as absent (planned S4.4); VIP-overrides and status-linked pause are details worth copying into S4.4.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-052",
+  "category": "Notifications & attention",
+  "name": "Cross-device notification routing (desktop first, mobile after inactivity)",
+  "what": "Mobile pushes are held back while the user is active on desktop and released after one minute of locked desktop or ten minutes of no cursor activity; users can choose immediate, inactive or delayed.",
+  "how": "'Immediately, even if I'm active' sends to both devices at once; desktop and mobile banners are independently toggled.",
+  "evidence": [
+   "https://slack.com/help/articles/201355156"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Duplicate-free multi-device delivery based on desktop activity is directly applicable to Verevon notification-core when Novu push is enabled.",
+  "notes": "Needs a server-side presence signal per device; the desktop shell's idle polling (Messaging core) provides it. Quality 5: duplicate-free multi-device delivery with user-tunable timing."
+ },
+ {
+  "id": "slack-product-surface-053",
+  "category": "Notifications & attention",
+  "name": "Activity view with fixed and optional sources",
+  "what": "An Activity inbox always shows mentions, reactions and thread replies and can optionally add DMs, channels set to all new posts, to-do reminders and suggested important unreads; canvas comments and list item threads also land here.",
+  "how": "Sidebar badge counts Activity; Activity is separate from channel unread state; Ctrl/Cmd+Shift+M opens it.",
+  "evidence": [
+   "https://slack.com/help/articles/201355156",
+   "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts",
+   "https://slack.com/intl/en-us/help/articles/203950418",
+   "https://slack.com/help/articles/27452748828179-Use-lists-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has a Space Activity feed (runs, approvals, receipts) but no personal cross-room inbox; a user-level Activity that merges mentions, approvals-needed and agent-finished events is the highest-leverage attention surface.",
+  "notes": "Slack treats the inbox as configurable (what to show), not fixed. Quality 5: a configurable inbox that also absorbs canvas and list comments."
+ },
+ {
+  "id": "slack-product-surface-054",
+  "category": "Notifications & attention",
+  "name": "Badge semantics",
+  "what": "Unread badges are raised by DMs, keywords, mentions, app notifications, thread replies, Slack Connect invitations and overdue reminders; non-mention thread replies can be excluded.",
+  "how": "Badge toggle per workspace; Windows taskbar flashing options and 'keep running in notification area' are separate settings; the desktop shell sets dock/taskbar badges and overlay icons.",
+  "evidence": [
+   "https://slack.com/help/articles/201355156",
+   "extract/slack/dist/main.bundle.cjs@851253 (windowFlashBehavior setting)",
+   "extract/slack/dist/resources/locales/en/desktop_browser_en_GB.json (unread strings)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon unread is room-level only; defining which event kinds can badge (and which cannot) keeps agent chatter from creating unread noise.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-055",
+  "category": "Notifications & attention",
+  "name": "Notification delivery methods with failover and enforced native mode",
+  "what": "The shell delivers notifications natively by default (Windows toasts, macOS native) and can fall back to its own HTML popup or a plain window; a recorded failover to HTML is cleared at the next start so native delivery is retried, and policy can force native delivery.",
+  "how": "notificationMethod accepts html, winrt, window or null (null means default native; the warnings engine also tolerates mac); notificationPlayback is web or system; related settings are notificationMaxItems (1-50), notificationTimeout (250 ms-60 s), notificationAfterHoverTimeout, notificationPresentationCheck, notifyPosition, notificationFailoverEnabled and a notificationFailover timestamp; initial-settings code resets method to null and the failover timestamp to 0 when the method is html and a failover time was stored; FORCE_NATIVE_NOTIFICATIONS flag and desktop_enforced_native_notifications trace; telemetry events for received, success, error, click, reply, dismissed and failover.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@850496 (settings schema)",
+   "extract/slack/dist/main.bundle.cjs@1108892 (validated settings object dl, f7 key list)",
+   "extract/slack/dist/main.bundle.cjs@1320560 (failover reset in initial settings)",
+   "extract/slack/dist/main.bundle.cjs@865202 (notification telemetry enum)",
+   "extract/slack/dist/main.bundle.cjs@990159 (desktop_enforced_native_notifications)",
+   "extract/slack/dist/notifications.html + notifications.bundle.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Failover between delivery channels with a recorded failure timestamp is the missing reliability layer behind Verevon's 'delivery ledger not built' gap (S4.4).",
+  "notes": "Telemetry events let Slack measure end-to-end delivery (received to click/reply). The code that sets the failover timestamp on a native-toast failure was not located; only the settings, the startup reset and the warnings that read it were seen (so the trigger is INF). Quality 5: multiple delivery paths, validated limits, failover state and delivery telemetry."
+ },
+ {
+  "id": "slack-product-surface-056",
+  "category": "Notifications & attention",
+  "name": "Notification health warnings engine",
+  "what": "The shell diagnoses why notifications may not appear and reports a list of reasons to the web app: quiet hours, Windows notifier state (focus assist and policy states), GPU composition unavailable, zero max items, zero timeout, unknown method, recent failover, failover disabled, macOS notifications disabled.",
+  "how": "getNotificationWarnings caches results (30 s when warnings exist, 60 min when clean); Windows state comes from a utilityProcess (slack-notifier-state-check) returning AC_ENABLED, AC_DISABLED_BY_MANIFEST, _BY_GROUP_POLICY, _FOR_USER, _FOR_APPLICATION, AC_NOTIFICATION_PLATFORM_UNAVAILABLE; macOS reports NOT_DETERMINED/DENIED/AUTHORIZED/PROVISIONAL and can re-request authorisation at most 3 times per session and not within 10 minutes; a diagnostic export bundles warnings, cache age and the notification settings.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1040390 (uq warning enum)",
+   "extract/slack/dist/main.bundle.cjs@1044800-1048200 (u4/u7 warning computation and export)",
+   "extract/slack/dist/main.bundle.cjs@972829 (slack-focus-assist-check) "
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "'Why am I not getting notified?' as a computed, user-visible diagnosis is a support-cost saver; Verevon could expose a similar health panel for notification-core, push tokens and quiet hours.",
+  "notes": "Exported diagnostics contain settings, not message content. Strong example of operability built into the client; not seen in the other reference inventories (grep only). Quality 5: computed, cached, exportable diagnosis of why alerts may not show; not seen in peers."
+ },
+ {
+  "id": "slack-product-surface-057",
+  "category": "Notifications & attention",
+  "name": "Windows toast notifications with inline reply, actions and workspace grouping",
+  "what": "Windows notifications show a circular avatar, optionally the channel name as title, a reply box and action buttons, and are grouped by workspace in the Action Center.",
+  "how": "Toast XML is generated in the main process: header id and title from team id and workspace name (launch slack://channel?team=...), appLogoOverride with circle crop, <input id=replyBox> plus a reply action (foreground activation), actions as foreground JSON args or protocol URIs, grouping per channel when groupWindowsNotifications is set, COM activation optional; images are downloaded and cached by md5 hash and accepted only from allow-listed domains; click, reply, action and failed events are re-emitted.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1346463-1349800 (toast XML builder, NativeWindowsNotification)",
+   "extract/slack/dist/main.bundle.cjs@1349119 (verifyImageSources)",
+   "extract/slack/dist/main.bundle.cjs@964441 (NEW_NOTIFICATION, CLICK_NOTIFICATION, REPLY_TO_NOTIFICATION actions and log redaction lists)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Reply-from-toast plus per-channel/workspace grouping is the reference for Verevon desktop approvals ('Approve / Deny / Reply' from the toast).",
+  "notes": "Image domain allow-listing in the notification path is a small but real prompt-injection/tracking defence. Quality 5: full-featured native toast construction with safe image sourcing."
+ },
+ {
+  "id": "slack-product-surface-058",
+  "category": "Notifications & attention",
+  "name": "Notification payload addressing: team, channel, message and thread",
+  "what": "Every native notification carries identifiers so a click opens the exact conversation and thread.",
+  "how": "Validated payload fields include notificationId, channel, teamId, messageId, userId, threadTimestamp and traceId; toast launch arguments encode type, teamId, channel, messageId, notificationId, traceId and optional thread_ts; log redaction hides content, body, title, subtitle, authorName, channelName, avatarImage, imageUri and launchUri.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@850496 (payload schema X)",
+   "extract/slack/dist/main.bundle.cjs@1346463 (toast launch args)",
+   "extract/slack/dist/main.bundle.cjs@964441 (log redaction list)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon notifications need a stable deep-link addressing triple (space, thread, run) plus a trace id; redacting content fields from logs by name is also a ZDR-friendly pattern.",
+  "notes": "traceId in the payload lets Slack correlate delivery with server-side send. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-059",
+  "category": "Notifications & attention",
+  "name": "OS Do Not Disturb, Focus Assist and focus-session awareness",
+  "what": "The client respects the operating system's quiet states: macOS Do Not Disturb, Windows Focus Assist and quiet hours, and treats being in a focus session as a state that the web app can use.",
+  "how": "On browser-window-focus an async DND check updates app.isInFocusSession (feature flag focus_sessions); Windows uses windows-focus-assist with per-app priority by AUMID through a utility process; macOS uses macos-notification-state (the helper looks stubbed in this build); quietHours flag also feeds notification warnings.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@989499 (aX focus session check)",
+   "extract/slack/dist/main.bundle.cjs@990159 (monitorFocusSession epic)",
+   "extract/slack/dist/call-get-windows-focus-assist-entry-point.bundle.cjs",
+   "extract/slack/dist/call-get-macos-notification-state-entry-point.bundle.cjs"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Agents that interrupt humans should consult the same OS state (a 'do not interrupt' flag on the Space presence payload).",
+  "notes": "macOS helper always posts false in this build per the scout (stub). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-060",
+  "category": "Notifications & attention",
+  "name": "Notification sounds and per-type sound settings",
+  "what": "Distinct sounds exist per event type and can be set for new messages, VIPs, huddles, sending and receiving a DM in an open conversation; all Slack sounds can be muted.",
+  "how": "14 bundled notification sounds (flitterbug, hummus, boop, short_boop, b2, been_tree, animal_stick, here_you_go_lighter, hi_flowers_hit, item_pickup, knock_brush, confirm_delivery, save_and_checkout, complete_quest_requirement) plus nine call sounds (incoming and outgoing ring, alert, confirmation, pop, they joined, they left, you joined, you left); playback is decided by the web app, the shell ships the files and answers SHOULD_PLAY_SOUND.",
+  "evidence": [
+   "https://slack.com/help/articles/201355156",
+   "extract/slack/dist/flitterbug.mp3 (and 13 siblings)",
+   "extract/slack/dist/calls_incoming_ring_v2.mp3 (and 8 siblings)",
+   "extract/slack/dist/main.bundle.cjs@998859 (SHOULD_PLAY_SOUND)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Per-event sound identity (message vs approval vs agent-done) is a useful attention cue for an agent room; low cost.",
+  "notes": "The name complete_quest_requirement hints at an onboarding/quest feature (INF, low). Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-061",
+  "category": "Notifications & attention",
+  "name": "Tray, taskbar, dock and overlay attention cues",
+  "what": "Unread and highlight states show on the dock/taskbar icon and tray, with flashing and progress behaviour for the window.",
+  "how": "slack-taskbar-rest/unread/highlight icons; macOS template menu-bar icons; setBadge, setOverlayIcon, flashFrame, setProgressBar; tooltip strings 'You have {n} notification(s)', 'You have unread messages', 'No unread messages'; first-run balloon explains 'Slack's set to stay running in the notification area'.",
+  "evidence": [
+   "extract/slack/dist/resources/slack-taskbar-unread.ico",
+   "extract/slack/dist/resources/locales/en/desktop_browser_en_GB.json (keys 850658910, 1449357124, 2691950950, 1809627791, 2817997211)",
+   "extract/slack/dist/main.bundle.cjs@1213288 (tray icon states)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A three-state tray (rest/unread/needs-attention) would give Verevon a minimal ambient indicator for 'agent finished' and 'approval needed'.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-062",
+  "category": "Notifications & attention",
+  "name": "Slackbot as the voice of system messages",
+  "what": "Admin and system events (retention policy change requests, pin removed by someone else, reminders) are delivered as direct messages from Slackbot.",
+  "how": "Policy changes at org level need Primary Owner approval requested through Slackbot; removal of another user's pin notifies the pinner via a Slackbot message.",
+  "evidence": [
+   "https://slack.com/help/articles/203457187-Customize-message-and-file-retention-in-Slack",
+   "https://slack.com/help/articles/205239997-Pin-messages-and-bookmark-links (search-result summary only, page not read in full)"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "One consistent in-app voice for system notices and approvals (instead of email) keeps approvals in the same inbox as work; Verevon's agent could be that voice.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-063",
+  "category": "Notifications & attention",
+  "name": "Custom HTML notification window with placement, count and timeout controls",
+  "what": "When native toasts are not used, notifications render in a Slack-drawn popup window that can be anchored to a screen corner on a chosen display, capped to a number of items and timed out.",
+  "how": "notifications.html plus a 325 KB notifications bundle; settings notifyPosition (corner and display), notificationMaxItems, notificationTimeout, notificationZoomLevel; IPC SET_NOTIFICATIONS_WINDOW_SHAPE, REMOVE_NOTIFICATION, CLICK_NOTIFICATION, NEW_NOTIFICATION, CLEAR_NOTIFICATIONS; HTML window epics for creation, display changes and show/hide.",
+  "evidence": [
+   "extract/slack/dist/notifications.html",
+   "extract/slack/dist/notifications.bundle.js",
+   "extract/slack/dist/main.bundle.cjs@850496 (settings schema)",
+   "extract/slack/dist/main.bundle.cjs@784266 (notification action enum)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A self-drawn popup is how a cross-platform client guarantees reply buttons and consistent grouping when native toasts fail; fallback layer for Verevon approvals on Linux.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-064",
+  "category": "Notifications & attention",
+  "name": "Conversation summaries, daily recaps and catch-up",
+  "what": "Slack AI summarises a channel, DM or thread (unread only, last seven days or a custom range on desktop) and offers recaps; users can also have recurring channel summaries posted by a workflow step.",
+  "how": "Conversation summaries are on Pro, Business+ and Enterprise+; recaps on Business+ and Enterprise+; AI answers only use content the user can access; the summarise-channel workflow step publishes on a schedule.",
+  "evidence": [
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI",
+   "https://slack.com/blog/news/ai-innovations-in-slack",
+   "https://slack.com/features"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "'Catch me up' per room and per thread (and a morning digest) is the highest-value use of Verevon's model plane for returning users; it also feeds Space Activity.",
+  "notes": "Summaries are a read surface only; Slack does not store them as shared artifacts by default (INF). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-065",
+  "category": "Apps & extensibility",
+  "name": "Marketplace of apps and agents with admin approval",
+  "what": "Slack advertises more than 2,600 pre-configured apps and agents in a Marketplace; admins approve which are installed; some platform capabilities (MCP, Real-time Search) are restricted to directory-published or internal apps.",
+  "how": "App identity is a registered Slack app with a fixed app ID; install and approval flow is the standard app approval process; Marketplace approval also changes API limits (non-Marketplace commercial apps get stricter conversations.history and conversations.replies limits from 29 May 2025).",
+  "evidence": [
+   "https://slack.com/features",
+   "https://slack.com/blog/news/agent-first-workspace-slack",
+   "https://docs.slack.dev/apis/web-api/rate-limits",
+   "https://docs.slack.dev/ai/slack-mcp-server",
+   "https://docs.slack.dev/apis/web-api/real-time-search-api"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "A curated directory that gates the most powerful read surfaces (MCP, RTS) is a governance lever Verevon lacks (no app marketplace; legacy webhooks table not Space-scoped).",
+  "notes": "The distribution model (directory = trust) is itself the feature; Teams has an app store too, but the gating of data APIs by directory status is Slack-specific (INF). Quality 5: largest curated directory and it gates the strongest data APIs."
+ },
+ {
+  "id": "slack-product-surface-066",
+  "category": "Apps & extensibility",
+  "name": "Events API with retries, envelopes and delivery ceilings",
+  "what": "Apps subscribe to events and receive HTTP POSTs they must acknowledge within 3 seconds; failures retry three times (immediately, 1 minute, 5 minutes) and heavy failure disables the subscription.",
+  "how": "Envelope fields: type, team_id, api_app_id, event, event_id, event_context, event_time, authorizations, is_ext_shared_channel, context_enterprise_id; headers x-slack-retry-num, x-slack-retry-reason, x-slack-no-retry; optional Delayed Events add hourly retries for 24 hours; ceiling 30,000 deliveries per workspace per app per 60 minutes (app_rate_limited event beyond); subscription auto-disabled if more than 95% of attempts fail within an hour; signed secrets replace the deprecated token.",
+  "evidence": [
+   "https://docs.slack.dev/apis/events-api/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's cross-plane events are best-effort NATS; the envelope with event_id, authorizations and retry headers is a template for a Space event feed to external apps.",
+  "notes": "'authorizations' lists installations that can see the event: a built-in per-recipient scoping hint. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-067",
+  "category": "Apps & extensibility",
+  "name": "Socket Mode (apps connect out over WebSocket)",
+  "what": "Apps behind firewalls receive events and interactions over a WebSocket they open, with acknowledgements per envelope.",
+  "how": "apps.connections.open with an app-level token (xapp) returns a WebSocket URL; hello message includes approximate connection time; each envelope has envelope_id, type and accepts_response_payload and must be acked with the same envelope_id; connections refresh every few hours with disconnect reasons warning (about 10 s notice), refresh_requested, link_disabled; up to 10 concurrent connections per app; not allowed for Marketplace-listed apps.",
+  "evidence": [
+   "https://docs.slack.dev/apis/events-api/using-socket-mode/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A pull/outbound-WebSocket mode is how self-hosted or on-prem agents can join a Verevon Space without public endpoints; copy the ack envelope and graceful reconnect semantics.",
+  "notes": "Fits Verevon's rule that Quarry/Model Plane execute while the BFF only proposes: outbound-only connectors never expose inbound ports. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-068",
+  "category": "Apps & extensibility",
+  "name": "Slash commands with ephemeral/in-channel responses",
+  "what": "Users trigger apps from the composer with /command; the app gets a payload with trigger_id and response_url and answers privately (ephemeral) or to the channel.",
+  "how": "HTTP POST form payload with command, text, user_id, channel_id, team/enterprise ids, response_url, trigger_id, api_app_id; must ack with 200 within 3000 ms else operation_timeout; response_type ephemeral (default) or in_channel; replace_original and delete_original work on app messages only; commands are not namespaced (latest install wins) and do not work in threads or the split-view container; built-ins such as /topic and /remind remain usable in threads.",
+  "evidence": [
+   "https://docs.slack.dev/interactivity/implementing-slash-commands"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's '/' skill picker is the equivalent; adding an ephemeral-vs-shared response mode and a trigger_id-to-modal pattern would give agents a private-reply channel inside shared rooms.",
+  "notes": "Not namespaced is a known weakness (collision by install order); Verevon should namespace skills by owner. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-069",
+  "category": "Apps & extensibility",
+  "name": "Block Kit: structured, interactive message UI",
+  "what": "Apps compose messages, modals and Home tabs from JSON blocks (section, header, button, menus, inputs) with up to 50 blocks per message and 100 per modal or Home tab, designed in Block Kit Builder.",
+  "how": "Composition objects (plain_text, mrkdwn, options), blocks, block elements; interactive elements send payloads identified by action_id and value; screen readers read the top-level text field by default so it must carry the content; blocks are allowed on chat.stopStream for agent streams.",
+  "evidence": [
+   "https://docs.slack.dev/block-kit/",
+   "https://docs.slack.dev/ai/developing-ai-apps"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has AG-UI streaming and tool-call cards but no stable declarative component schema that third-party agents can emit; a Block Kit-like contract keeps agent output safe, accessible and renderable on any surface.",
+  "notes": "Accessibility rule (text fallback required) is worth copying verbatim. Quality 5: stable declarative UI contract with accessibility rule and builder tool."
+ },
+ {
+  "id": "slack-product-surface-070",
+  "category": "Apps & extensibility",
+  "name": "App Home: private per-user home, messages and about tabs",
+  "what": "Each app has a private space per user with a Home tab (Block Kit), a Messages tab (DM) and an About tab; agents use it as a review surface to show running or blocked work with pause, resume, stop or retry controls.",
+  "how": "views.publish publishes a home view (up to 100 blocks) for a user_id; app_home_opened event carries user, channel, event_ts and tab; use cases include onboarding, dashboards, settings, auth to third parties.",
+  "evidence": [
+   "https://docs.slack.dev/surfaces/app-home"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's Space Agent tab already lists agents with pause/resume/remove; a per-user 'what the agent did on my behalf' home would address visibility of agent work.",
+  "notes": "Not available to Deno SDK apps or workflows (granular-permission apps only). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-071",
+  "category": "Apps & extensibility",
+  "name": "Workflow Builder (no-code automation)",
+  "what": "Members build workflows with triggers (link, schedule, emoji reaction, joining or creating a channel) and steps (connector steps, conditional branches, custom steps, forms); run history shows in-progress, completed and errored runs.",
+  "how": "By default all members can create workflows; members and guests can run them; requires a paid plan; workflow managers can be added; admins manage access, restrict connector/custom steps, allow or block external organisations in Connect conversations and view published workflows in a dashboard; form responses are downloadable; canvases and lists can be targets.",
+  "evidence": [
+   "https://slack.com/help/articles/360035692513-Guide-to-Slack-Workflow-Builder",
+   "https://slack.com/help/articles/27452748828179-Use-lists-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has agent cron schedules and an action registry but no end-user visual automation; a trigger/step model with form steps and admin restrictions is the no-code layer over those actions.",
+  "notes": "Fetched page omitted some trigger types (webhook, app event) so those are not claimed. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-072",
+  "category": "Apps & extensibility",
+  "name": "AI-generated workflows and summarise-channel step",
+  "what": "Users describe a routine in plain language and Slack drafts an editable workflow; a summarise-channel step can post recurring channel summaries.",
+  "how": "Announced as AI Workflow Builder; the output is an ordinary editable workflow, not an opaque agent.",
+  "evidence": [
+   "https://slack.com/blog/news/ai-innovations-in-slack",
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "'Describe it, get an editable, inspectable automation' is the safest agent-as-automation pattern; Verevon's agent schedules could be authored the same way and shown as editable steps.",
+  "notes": "Plan: Business+/Enterprise+ per AI guide. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-073",
+  "category": "Apps & extensibility",
+  "name": "Custom workflow steps, Slack CLI and hosting choices",
+  "what": "Developers extend Workflow Builder with custom steps written with the Deno Slack SDK (Slack-hosted) or Bolt for Python, JavaScript or Java (self-hosted), developed with the Slack CLI.",
+  "how": "Workflows are a subset of Slack apps with their own restrictions; Slack-hosted Deno apps run on Slack infrastructure; Bolt apps are self-hosted; a free Developer Program sandbox supports building and testing agents.",
+  "evidence": [
+   "https://docs.slack.dev/workflows/",
+   "https://docs.slack.dev/ai/developing-ai-apps"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A hosted function runtime plus self-hosted option mirrors Verevon's sandbox-manager and execution-core; the CLI plus free sandbox lowers partner onboarding cost.",
+  "notes": "Slack-hosted runtime means Slack carries compute and data custody for developer secrets (covered by EKM and residency). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-074",
+  "category": "Apps & extensibility",
+  "name": "Web API rate-limit tiers and chat.postMessage pacing",
+  "what": "Methods are limited per workspace per app per minute in tiers (about 1, 20, 50, 100 per minute plus special tiers); messages post at roughly one per second per channel; 429 responses carry Retry-After.",
+  "how": "Tier assignment is the same on every Slack plan; cursor pagination is assumed (unpaginated bulk calls get stricter limits); Slack suggests designing for about one request per second per method; profile updates have a separate token-level limit.",
+  "evidence": [
+   "https://docs.slack.dev/apis/web-api/rate-limits"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon will need explicit per-agent, per-room posting limits to stop agent floods in shared rooms; tiering by method class is simple and documented.",
+  "notes": "Burst limits are not published (deliberate). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-075",
+  "category": "Apps & extensibility",
+  "name": "Desktop menu extension from the web app",
+  "what": "The web client can add custom items to the native application menu and receive clicks.",
+  "how": "EXTEND_MENU and SET_CUSTOM_MENU_ITEMS inputs validated in main; CUSTOM_MENU_ITEM_CLICKED, POPUP_APP_MENU and CLOSE_APP_MENU events; feature flag feature_desktop_extend_app_menu; context menus can be created and removed from the web app (CREATE_CONTEXT_MENU, REMOVE_CONTEXT_MENU, SET_CONTEXT_MENU_ITEM).",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@995451 (EXTEND_MENU, CREATE_CONTEXT_MENU schemas)",
+   "extract/slack/dist/main.bundle.cjs@957664 (channel enum)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A thin shell that lets the web app extend native menus and context menus keeps UI logic in one place; relevant for a Verevon desktop wrapper.",
+  "notes": "Which web features use it is unknown. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-076",
+  "category": "Apps & extensibility",
+  "name": "Salesforce-native channels and CRM surfaces",
+  "what": "Slack presents Salesforce records, Sales Home and a native CRM inside Slack channels, and lets Slackbot combine Slack conversations with customer data.",
+  "how": "Marketed integrations: Salesforce channels, Slack Sales Elevate, native CRM and Agentforce actions; Slackbot briefings combine Slack and Salesforce data under the user's permissions.",
+  "evidence": [
+   "https://slack.com/features",
+   "https://www.salesforce.com/news/press-releases/2026/01/13/slackbot-announcement/"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "System-of-record data surfaced in the room (records as live cards) is what Verevon's integration-corev2 provider actions could power for customer-facing Spaces.",
+  "notes": "Owner-company advantage (Salesforce); not reproducible directly, but the pattern is. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-077",
+  "category": "Agents in the room",
+  "name": "Slackbot as a personal AI agent (GA January 2026)",
+  "what": "Each user gets a private Slackbot that finds answers and files, catches up on channels and threads, drafts notes and briefs, creates shared canvases, finds calendar time, schedules meetings, sets reminders and prepares customer briefings using Slack plus Salesforce data.",
+  "how": "Built on Agentforce 360; works from the user's existing Slack context with no setup; interactions are private to the individual; access is limited to what the user is authorised to see; rolled out from 13 January 2026 to Business+ and Enterprise+ plans; Enterprise org owners and admins could configure access or turn it off during the rollout window.",
+  "evidence": [
+   "https://www.salesforce.com/news/press-releases/2026/01/13/slackbot-announcement/",
+   "https://slack.com/features"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "This is Slack's answer to the Grok-Bot-style personal agent and it is not a separate app but the always-present system member; Verevon cannot hold an agent in a personal Space today, so a 'personal agent as default room member' is the headline gap.",
+  "notes": "Marketing source (press release): capability claims are vendor claims; permission-bounded and private-by-default are stated policy, not independently verified. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-078",
+  "category": "Agents in the room",
+  "name": "Slackbot as orchestrator of third-party and Agentforce agents (AgentExchange)",
+  "what": "Slackbot is positioned as a single front door that routes requests to specialised agents (Claude, Cursor, Linear, Vercel v0, DocuSign, Perplexity, Wordsmith, Adobe, Workday), manages multi-step workflows and returns the result; an AgentExchange collection groups Agentforce and third-party agents.",
+  "how": "Context for agents comes through the Real-time Search API and MCP; a Slackbot MCP client (announced as upcoming) lets users connect any MCP server; example: finalising a contract by coordinating DocuSign and a legal agent; Slack reports over 300% growth in new custom agents since January 2026.",
+  "evidence": [
+   "https://slack.com/blog/news/agent-first-workspace-slack",
+   "https://docs.slack.dev/ai/"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "An orchestrator member that delegates to named agents (with the user seeing who did what) is the multi-agent pattern Verevon lacks (one agent per message, no agent-to-agent delegation).",
+  "notes": "Vendor announcement with no mechanism detail; the MCP client is labelled upcoming, so treat orchestration as direction, not shipped behaviour. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-079",
+  "category": "Agents in the room",
+  "name": "Third-party agents working inside channels",
+  "what": "Teams can add agents to a channel for focused tasks: customer insights (Agentforce Analytics), asset generation (Adobe Express), HR requests (Workday), contract handling (DocuSign), ticket creation (Linear), coding context (Cursor).",
+  "how": "Agents act as apps with their own identity; channel membership and scopes bound what they see; admins control which agents are installed.",
+  "evidence": [
+   "https://slack.com/blog/news/agent-first-workspace-slack",
+   "https://slack.com/blog/news/ai-innovations-in-slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon already treats agents as governed room members (Control service subjects plus Convex bindings), which is stronger on authority than Slack's app model; the UX of many specialised agents in one channel is the thing to catch up on.",
+  "notes": "Quality depends on the apps; Slack provides the container. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-080",
+  "category": "Agents in the room",
+  "name": "Agent surfaces: split view, top-nav entry, app threads",
+  "what": "Agents appear in a split-view container beside the conversation, via a top navigation entry and in DMs or app threads, with suggested prompts and streaming text; channel @-mentions are optional.",
+  "how": "Entry points are message.im (typed or clicked prompts) and app_home_opened with tab=messages; the Agents setting must be enabled on the app; developer slash commands do not run in the split view; threads are keyed by thread_ts.",
+  "evidence": [
+   "https://docs.slack.dev/ai/",
+   "https://docs.slack.dev/ai/developing-ai-apps",
+   "https://docs.slack.dev/interactivity/implementing-slash-commands"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A dedicated agent side panel that stays open while the human reads the channel (and receives app context) is a UX Verevon's six-tab cockpit does not provide.",
+  "notes": "The split view is a first-party container, so agent UX is consistent across vendors. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-081",
+  "category": "Agents in the room",
+  "name": "Agent session lifecycle and status API",
+  "what": "A session shows a processing indicator as soon as the user sends a message and must be explicitly set back to active; titles can be renamed by the agent or the user.",
+  "how": "agents.sessions.setStatus with status processing then active (otherwise it stays processing for one hour); no custom loading messages on the new API (legacy assistant.threads.setStatus supports loading_messages); agents.sessions.rename and the agent_session_title_changed and agent_session_stopped events; scope assistant:write enables status, suggested prompts and thread titles; assistant.threads.setSuggestedPrompts for starters.",
+  "evidence": [
+   "https://docs.slack.dev/ai/developing-ai-apps"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "An explicit processing/active session state with a one-hour stuck timeout, a user 'stop' event and a title is the contract Verevon's run/thread status lacks at the room level (it infers status from a 6 s poll).",
+  "notes": "The page names assistant_thread_started in a sample but does not document it as an event; treat that name as uncertain. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-082",
+  "category": "Agents in the room",
+  "name": "Streaming agent output with plan and task cards",
+  "what": "Agent responses stream into the thread and can show short tasks (task_update) or multi-step plans (plan) with pending, in_progress, completed and error states; final blocks are allowed only on stop.",
+  "how": "chat.startStream, chat.appendStream, chat.stopStream; blocks only in stopStream; unfurling disabled in streams; Bolt say_stream helper; feedback_buttons and icon_button in context_actions with block_actions callbacks.",
+  "evidence": [
+   "https://docs.slack.dev/ai/developing-ai-apps",
+   "https://docs.slack.dev/ai/agent-design"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "This is a first-party, vendor-neutral 'tool-call card' contract (task_update, plan) with a terminal recap; Verevon's AG-UI stream could adopt equivalent task and plan states so any agent renders uniformly in a room.",
+  "notes": "Plan states are limited to four; no per-step tool payload is exposed, so deep tool visibility (arguments, browser views) is not covered. Quality 5: first-party vendor-neutral streaming and plan/task states with recap and feedback hooks."
+ },
+ {
+  "id": "slack-product-surface-083",
+  "category": "Agents in the room",
+  "name": "Agent awareness of what the user is looking at (app context)",
+  "what": "An agent can learn which channel, DM or canvas the user has open and receives that context with each message.",
+  "how": "app_context_changed event with an ordered entities array (needs the agent_view feature); message.im and app_home_opened carry app_context once subscribed; agent_session_stopped signals user cancel.",
+  "evidence": [
+   "https://docs.slack.dev/ai/developing-ai-apps",
+   "https://docs.slack.dev/ai/agent-context-management"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Passing 'current room/thread/canvas' as structured context on each turn is cheap and makes agents feel situated; Verevon's server-composed context already carries room state and could expose it as a typed entity list.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-084",
+  "category": "Agents in the room",
+  "name": "Agent identity and disclosure rules",
+  "what": "Slack's design guidance says it must be obvious a user is talking to automation: name agents by function, use a non-human avatar, label actions taken on a user's behalf and mark AI content that has not been reviewed.",
+  "how": "Footer disclaimer that responses are AI-generated; sources cited; explicit statement when context is missing.",
+  "evidence": [
+   "https://docs.slack.dev/ai/agent-design"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon shows an Agent chip and author attribution but has no 'on behalf of' label or unreviewed-AI marker; codifying these rules into the room timeline would harden trust.",
+  "notes": "Slack enforces little of this technically (INF); it is developer guidance. Quality 5: precise, actionable rules on identity, labelling and sourcing."
+ },
+ {
+  "id": "slack-product-surface-085",
+  "category": "Agents in the room",
+  "name": "Agent data reach equals the requesting user's reach",
+  "what": "An agent can only access what the invoking user could open; it respects DMs, private channels, huddle transcripts and notes; private information stays in DMs, private channels or ephemeral messages; guests are excluded; Slack data is fetched at call time rather than copied.",
+  "how": "Real-time Search and conversation methods use user tokens or action tokens; metadata is stored instead of content; the RTS terms forbid storing, copying or training on retrieved data.",
+  "evidence": [
+   "https://docs.slack.dev/ai/agent-design",
+   "https://docs.slack.dev/apis/web-api/real-time-search-api",
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "This is exactly Verevon's invariant (Space access never widens an owner-plane ACL); Slack's extra rules (ephemeral for private info, metadata-only storage, guests excluded) are worth adding.",
+  "notes": "Verevon's signed, effect-bound Control decisions enforce this more strongly than Slack's token scoping (INF from baseline). Quality 5: explicit invariant plus egress limits, aligned across docs and API terms."
+ },
+ {
+  "id": "slack-product-surface-086",
+  "category": "Agents in the room",
+  "name": "Progress, partial-failure and recap UX rules for agents",
+  "what": "Show status immediately, keep updates brief, use collapsible plan steps, keep partial progress on failure and offer two or three next steps, state the specific limit when blocked, end with a recap that links to changes, and batch notifications by replying in threads.",
+  "how": "Guidance pages for status and progress, feedback and notification hygiene.",
+  "evidence": [
+   "https://docs.slack.dev/ai/agent-design"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A recap-with-links at the end of every agent run and 'keep partial progress' rules would improve Verevon's Activity tab, which currently reports events rather than outcomes.",
+  "notes": "Guidance, not enforced. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-087",
+  "category": "Agents in the room",
+  "name": "Human-in-the-loop approvals and graduated autonomy",
+  "what": "Present options when a request is ambiguous; require explicit approval with a preview before irreversible actions; avoid over-confirming; start with restrictive defaults and widen autonomy as trust builds; give a review surface (App Home) of what the agent did on the user's behalf.",
+  "how": "Guidance; the review surface is App Home with controls for running and blocked workflows.",
+  "evidence": [
+   "https://docs.slack.dev/ai/agent-design",
+   "https://docs.slack.dev/surfaces/app-home"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has approvals (owner-bound; a granted approval does not resume the paused run on this path) and deny-by-default effect policies; adopting 'preview plus explicit approve' and a per-user review surface would complete the loop.",
+  "notes": "Slack does not specify an approval protocol in the platform (INF): it is design guidance, which is a weakness relative to Verevon's receipts. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-088",
+  "category": "Agents in the room",
+  "name": "Slack MCP server: Slack as a tool surface for any agent",
+  "what": "MCP-compatible clients can search messages, files, users, channels and custom emoji, send, schedule and draft messages, read channels and threads, create conversations, add and read reactions, create, update and read canvases and lists, fetch profiles, list channel members and upload files.",
+  "how": "Streamable HTTP JSON-RPC 2.0 at mcp.slack.com/mcp; confidential OAuth with the app's client id and secret, user tokens per tool scope (search:read.*, chat:write, *:history, canvases:*, lists:*, files:*, reactions:*, users:read); PKCE available for desktop clients; two-step file upload; rate limits per tool tiers 20+ to 100+ per minute.",
+  "evidence": [
+   "https://docs.slack.dev/ai/slack-mcp-server"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "An MCP server per Space (search, post, read thread, canvas, list) would let Claude Code, Cursor and Verevon's own agents act in a Space through one governed surface.",
+  "notes": "No SSE and no Dynamic Client Registration: clients must be pre-registered apps. Works with Claude.ai, Claude Code, Perplexity and Cursor per the docs. Quality 5: broad tool set with OAuth, per-tool scopes and rate limits."
+ },
+ {
+  "id": "slack-product-surface-089",
+  "category": "Agents in the room",
+  "name": "MCP governance: directory-only apps, admin approval, audit logs",
+  "what": "Only apps published in the Slack Marketplace or internal to the workspace may use MCP; workspace admins approve and manage all MCP client integrations; activity appears in audit logs; an app's IP allowlist applies.",
+  "how": "Registered app with fixed app ID; users complete OAuth consent; scopes limit tools; missing tools usually mean missing scopes or admin restriction.",
+  "evidence": [
+   "https://docs.slack.dev/ai/slack-mcp-server",
+   "https://docs.slack.dev/ai/slack-mcp-server/connect-to-harnesses"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's MCP registry is not Space-scoped; requiring a registered, admin-approved client identity per MCP connection and logging each call gives the missing control.",
+  "notes": "Strong governance but also a barrier: unlisted custom agents cannot use the MCP server. Quality 5: strong admin and audit controls on agent access to workspace data."
+ },
+ {
+  "id": "slack-product-surface-090",
+  "category": "Agents in the room",
+  "name": "Connecting agent harnesses (Claude Code, Codex, Pi) and a Slack skills plugin",
+  "what": "Slack documents setup for coding-agent harnesses and ships a Slack skills plugin (installable in Claude Code) that configures the MCP server and walks through OAuth.",
+  "how": "Claude Code: /plugin install slack@claude-plugins-official or claude mcp add --transport http slack https://mcp.slack.com/mcp with an oauth block (client id, callback port 3118); Codex: codex mcp add and login; Pi: adapter plus /mcp setup.",
+  "evidence": [
+   "https://docs.slack.dev/ai/slack-mcp-server/connect-to-harnesses",
+   "https://docs.slack.dev/ai/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Treating the room as something external coding agents join (and ship an official skills plugin for) is a distribution strategy Verevon could copy for developer-led adoption.",
+  "notes": "A Slack skill plugin for Claude Code is explicitly named in the AI overview page. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-091",
+  "category": "Agents in the room",
+  "name": "Agent context management guidance (state object, token budgets, no memory feature)",
+  "what": "Slack recommends carrying a small structured state (goal, constraints, decisions, artifacts, sources as text-link pairs) between turns, enforcing per-request token budgets, preferring RTS first and conversation history sparingly, and compressing older turns progressively; it documents no built-in memory feature.",
+  "how": "conversations.replies for thread drill-down, conversations.history with cursor pagination, Real-time Search for cross-workspace context.",
+  "evidence": [
+   "https://docs.slack.dev/ai/agent-context-management"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Slack leaves memory to the app; Verevon's Model Plane memory scopes (run, thread, workspace, session, user) have no 'space' scope, so a Space-scoped memory with the same state-object shape would be a differentiator.",
+  "notes": "Absence of a platform memory feature is the explicit finding (the page says so). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-092",
+  "category": "Agents in the room",
+  "name": "Personal assistant that learns the user's style",
+  "what": "Slack describes Slackbot as a personal assistant that learns the user's style and helps find information.",
+  "how": "Features page summary: 'learns your style'; press release: works from existing Slack context with no setup or training and keeps interactions private.",
+  "evidence": [
+   "https://slack.com/features",
+   "https://www.salesforce.com/news/press-releases/2026/01/13/slackbot-announcement/"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Per-person memory and style adaptation scoped to the person (not the room) belongs in Verevon's personal Space once a personal agent can live there.",
+  "notes": "No technical detail on how personalisation is stored or controlled. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-093",
+  "category": "Agents in the room",
+  "name": "Tray and global-hotkey summon of the assistant (command center)",
+  "what": "On desktop, a tray click (when the desktop_command_center flag is on) and the global shortcut Ctrl/Cmd+Shift+K bring up a quick window for the assistant without opening the main app.",
+  "how": "TrayHandler binds tray click to handleSlackbotMiniClick (200 ms debounce, log text says 'Slackbot Mini window'), which focuses the main window and sends NOTIFY_GLOBAL_SHORTCUTS_TRIGGER with desktop_command_center to the web contents; right-click opens the tray menu; without the flag, tray click just foregrounds the app. The name 'Slackbot Mini' appears in no public documentation found by search.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1210075 (handleSlackbotMiniClick, createTrayIcon)",
+   "extract/slack/dist/main.bundle.cjs@995140 (shortcut map sr)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A system-wide summon (hotkey plus tray) into a lightweight agent window is the Grok-Bot-style entry point; Verevon's desktop client needs the same global command center.",
+  "notes": "Window UI lives in the remote web app, not in the shell. Flag-gated; GA status unknown. Naming comes from a log string (SRC). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-094",
+  "category": "Agents in the room",
+  "name": "Agentforce for Slack (CRM agent in a dedicated Slack interface)",
+  "what": "Salesforce's CRM agent gets a Slack interface to query customer records, get account summaries with suggested next steps and draft outreach.",
+  "how": "Announced as early 2025 availability for customers with Agentforce and a Slack licence; later surfaced as the Slackbot plus Agentforce combination.",
+  "evidence": [
+   "https://slack.com/blog/news/ai-innovations-in-slack",
+   "https://slack.com/features"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Vertical, system-of-record agents inside the room (finance, support, CRM) are where Verevon's provider actions can differentiate.",
+  "notes": "Vendor-owned integration; not available as a pattern without the owner's CRM. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-095",
+  "category": "Agents in the room",
+  "name": "Agent feedback loop (buttons and reactions)",
+  "what": "Users can rate or react to agent output with feedback buttons or emoji; admins may need to allow member feedback on AI responses.",
+  "how": "context_actions with feedback_buttons or icon_button (for example delete); clicks arrive as block_actions; reaction_added events are also usable; member feedback on AI is blocked by default in some workspaces until owners or admins allow it.",
+  "evidence": [
+   "https://docs.slack.dev/ai/developing-ai-apps",
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has no feedback path on agent turns; thumbs plus reaction events would feed evaluation without a new UI.",
+  "notes": "Default-off feedback is a privacy stance worth noting. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-096",
+  "category": "Agents in the room",
+  "name": "Scheduled and recurring AI work",
+  "what": "Slack supports scheduled workflows and recurring channel summaries; Slackbot sets reminders and schedules meetings.",
+  "how": "Workflow Builder schedule trigger plus the summarise-channel step; the engineering note says reminders and scheduled messages create hourly load spikes.",
+  "evidence": [
+   "https://slack.com/blog/news/ai-innovations-in-slack",
+   "https://slack.com/help/articles/360035692513-Guide-to-Slack-Workflow-Builder",
+   "https://slack.engineering/real-time-messaging/"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Space-scoped cron schedules (Control fire decision at each tick) are more governed than Slack's; the gap is authoring (creation only in Settings) and visibility inside the room.",
+  "notes": "Slack exposes no agent cron primitive; recurring AI work is workflow-based. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-097",
+  "category": "Agents in the room",
+  "name": "Plan-tiered AI entitlements and admin kill switches",
+  "what": "AI features are gated by plan (Pro, Business+, Enterprise+) and can be restricted by admins; Slackbot is in Business+ and Enterprise+, with a limited preview on lower plans.",
+  "how": "Matrix: conversation summaries and huddle notes on Pro, Business+, Enterprise+; search answers, recaps, file summaries, translations, canvas generation, workflow automation and Slackbot on Business+ and Enterprise+; enterprise search on Enterprise+ only; automatic search filters on all plans; legacy plans without the AI add-on only get Pro-level features; Slackbot reported as included without separate inference charges (secondary source).",
+  "evidence": [
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI",
+   "https://www.salesforce.com/news/press-releases/2026/01/13/slackbot-announcement/"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no cost per Space and only an org budget hard stop; per-plan AI entitlements plus admin disable per feature is how Slack packages and de-risks AI.",
+  "notes": "The 'no extra inference cost' claim is from a secondary source (low weight); the matrix is from the help article. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-098",
+  "category": "Agents in the room",
+  "name": "First-party agent compute, browser and PC sessions are absent",
+  "what": "Slack provides UI, identity, data access and orchestration for agents but not a user-visible agent computer, browser or sandbox; agents bring their own runtime (or use Slack-hosted Deno functions for workflows).",
+  "how": "Docs describe agents as apps that call external systems; the only Slack-hosted compute documented is custom workflow steps; no browser-grant, sandbox-lease or desktop-session concept appears in the AI docs or in the desktop shell.",
+  "evidence": [
+   "https://docs.slack.dev/ai/",
+   "https://docs.slack.dev/workflows/",
+   "https://docs.slack.dev/ai/agent-design",
+   "findings/t1/slack.inventory.md section 3.7 (sandbox absence in shell)"
+  ],
+  "provenance": "INF",
+  "confidence": "medium",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "This is Verevon's differentiator: governed sandbox leases, Quarry browser grants and approval-gated browser actions inside a room, which Slack leaves to third parties.",
+  "notes": "Inference from documentation scope (absence is hard to prove); marked medium. Quality 2: limited, absent or single-source evidence."
+ },
+ {
+  "id": "slack-product-surface-099",
+  "category": "Agents in the room",
+  "name": "Slack Code: building with people and agents in code-focused channels",
+  "what": "The features page lists 'Slack Code' for building with people and agents in code-focused channels.",
+  "how": "No documentation was found beyond the one-line description.",
+  "evidence": [
+   "https://slack.com/features"
+  ],
+  "provenance": "DOC",
+  "confidence": "low",
+  "quality": 2,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A code-centric Space type (repo, PRs, agents) is a plausible Verevon 'project' Space direction; Slack's offering is unverified here.",
+  "notes": "One-line source only; do not rely on it. Quality 2: limited, absent or single-source evidence."
+ },
+ {
+  "id": "slack-product-surface-100",
+  "category": "Collaborative artifacts",
+  "name": "Canvas: rich documents as conversation tabs and standalone files",
+  "what": "A canvas is a formatted document (headers, quotes, lists, checklists, tables, columns, callouts, cover images, inline audio/video, file previews) that lives as a tab in a channel or DM or as a standalone canvas; people can comment, resolve and mention.",
+  "how": "Channel and DM canvases were retired in favour of adding a canvas as a conversation tab (conversion began 9 April 2025); free plan allows one canvas per conversation; standalone canvases need a paid plan; slash menu and block drag handle in the editor; embeds media, files, other canvases and Salesforce data; comments behave like thread replies and appear in Threads and Activity with Most recent, Unread and Resolved filters; deletion restorable for 24 hours; Slack AI can start or edit content; canvases are covered by retention, EKM, Discovery and MCP read/write.",
+  "evidence": [
+   "https://slack.com/intl/en-us/help/articles/203950418",
+   "https://slack.com/help/articles/21290478840979 (search-result summary only, page not read in full)",
+   "https://slack.com/help/articles/203457187-Customize-message-and-file-retention-in-Slack",
+   "https://docs.slack.dev/ai/slack-mcp-server"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no Space canvas (wiki reachable only through retrieval bindings); a shared, agent-readable and agent-writable document surface per Space is the biggest artifact gap.",
+  "notes": "Product churn is visible (channel canvases retired) so the right abstraction is 'document attached to a conversation as a tab'. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-101",
+  "category": "Collaborative artifacts",
+  "name": "Canvas sharing, permissions and Slack Connect access",
+  "what": "Canvas access is View or Edit per person or channel; owners and editors can revoke; converted conversation canvases default to owner-controlled sharing; canvases shared through Slack Connect carry explicit view or edit rights.",
+  "how": "Editors can format, mention and comment; view-only users can request edit access on desktop; mentions notify only people who have access; the permissions table lists which roles can view, edit and grant.",
+  "evidence": [
+   "https://slack.com/help/articles/15678967614611 (search-result summary only, page not read in full)",
+   "https://slack.com/intl/en-us/help/articles/203950418"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Document-level grants (view, edit) that are independent of conversation membership mirror Verevon's resource_grants model; keep it explicit.",
+  "notes": "Permission table content partly garbled in the retrieved summary; check live page before relying on role detail. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-102",
+  "category": "Collaborative artifacts",
+  "name": "Lists: structured task and item tracking",
+  "what": "Lists hold items with fields (completion, name, assignee, due date by default; text, select, checkbox, people and more), in table or board layout, with saved views, subtasks, CSV import/export and templates.",
+  "how": "Views save filter, sort, hide and group preferences and can be set as default; items appear under 'Assigned to you'; item threads notify mentioned people in Activity; any Slack message can be added to a list; workflows can create forms that submit items; general access 'anyone in the org can view/edit' (desktop); deleted lists restorable within 24 hours; limits: 1,000 items per list on Pro/Business+, 5,000 on Enterprise Grid with the oldest archived automatically at the limit; paid plans only; read/write through the Slack MCP server.",
+  "evidence": [
+   "https://slack.com/help/articles/27452748828179-Use-lists-in-Slack",
+   "https://docs.slack.dev/ai/slack-mcp-server"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has no Space tasks or boards (only per-thread todos); a list type with agent-assignable items and Activity integration would give rooms a shared work register.",
+  "notes": "The article does not cover AI or automation rules; those were not claimed. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-103",
+  "category": "Collaborative artifacts",
+  "name": "Templates (channel templates with lists and canvases)",
+  "what": "Slack offers a template gallery; most channel templates include lists.",
+  "how": "Features page lists Templates as prebuilt starting points; Lists article says most channel templates include lists and list templates are desktop-only.",
+  "evidence": [
+   "https://slack.com/features",
+   "https://slack.com/help/articles/27452748828179-Use-lists-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's agent-creation dialog has three templates; room templates (agents, instructions, schedule, knowledge sources) would speed up onboarding of new Spaces.",
+  "notes": "Gallery contents not inspected. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-104",
+  "category": "Collaborative artifacts",
+  "name": "Files as shared knowledge with auto summaries and retention",
+  "what": "Shared files are previewed, searchable, summarised automatically (pdf, docx, pptx, xlsx visible to everyone) and follow retention and deletion rules; third-party files stay in their source system.",
+  "how": "File retention (keep all, N days, include deleted in exports and Discovery API); no per-conversation file retention; files from Dropbox or Drive remain in the source service; remote files tombstoned on removal.",
+  "evidence": [
+   "https://slack.com/help/articles/203457187-Customize-message-and-file-retention-in-Slack",
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI",
+   "https://docs.slack.dev/messaging/working-with-files"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon documents in the Data Plane and Space-bound retrieval sources are the equivalent; auto-summary on upload and 'source stays in provider' semantics are worth copying.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-105",
+  "category": "Collaborative artifacts",
+  "name": "Desktop download manager with verified downloads",
+  "what": "The desktop client manages file downloads with progress, cancel, open-in-folder, and verifies downloads before opening them.",
+  "how": "Epics startFileDownloadEpic, updateDownloadEpic, cancelInProgressDownloadsEpic, setWindowProgressEpic, openDownloadEpic, cleanupVerifiedDownloadsEpic and hydrateVerifiedDownloadsEpic; IPC START_DOWNLOAD, UPDATE_DOWNLOAD, REMOVE_DOWNLOADS; user-chosen download folder (SHOW_DOWNLOAD_FOLDER_CHOOSER, RESET_DOWNLOAD_FOLDER); allowlist of file extensions and an 'always open {ext} files' choice with trust warning dialogs.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@950760 (download epics)",
+   "extract/slack/dist/main.bundle.cjs@960398 (START_DOWNLOAD channel)",
+   "extract/slack/dist/main.bundle.cjs@784629 (ALLOWLIST_FILE_EXT)",
+   "extract/slack/dist/resources/locales/en/desktop_messagebox_en_GB.json (open-file warnings)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Agent-produced files (exports, reports) opened on a user's machine should pass through the same trust-and-verify path with per-extension consent.",
+  "notes": "Verification mechanism (hash vs size vs origin) not read. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-106",
+  "category": "Collaborative artifacts",
+  "name": "Open-in-external-app and file watching",
+  "what": "Files can be opened in their native application and the shell can watch a file for changes.",
+  "how": "Messages warn that a file of type {fileExt} will open in {appName} and ask the user to trust it; NOTIFY_WATCHED_FILE_CHANGED exists as a main-to-renderer notification; windowType file_view hosts an in-app viewer.",
+  "evidence": [
+   "extract/slack/dist/resources/locales/en/desktop_messagebox_en_GB.json",
+   "extract/slack/dist/main.bundle.cjs@957664 (NOTIFY_WATCHED_FILE_CHANGED in channel enum)"
+  ],
+  "provenance": "SRC",
+  "confidence": "low",
+  "quality": 2,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A watch-and-resync loop for files edited externally would help artifacts that agents and humans co-edit.",
+  "notes": "Purpose of NOTIFY_WATCHED_FILE_CHANGED is INF (name only). Quality 2: limited, absent or single-source evidence."
+ },
+ {
+  "id": "slack-product-surface-107",
+  "category": "Realtime & sync architecture",
+  "name": "WebSocket messaging fabric with Channel Servers and Gateway Servers",
+  "what": "Clients keep one persistent WebSocket to the nearest edge; messages route through an in-memory channel layer and fan out to every subscribed gateway, with global delivery of about half a second.",
+  "how": "Channel Servers (stateful, in-memory, hashed subset of channel ids, recent history) and Gateway Servers (stateful, connected users and subscriptions, multi-region), stateless Admin Servers between the web app backend and CS; consistent hash ring managers (CHARMs) with Consul publishing config; Envoy terminates TLS and load-balances; a message goes client -> web API -> Admin Server -> owning CS -> all GS subscribed -> clients; new CS ready in under 20 s; failed regions are drained to the nearest healthy region.",
+  "evidence": [
+   "https://slack.engineering/real-time-messaging/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon polls every 6 s; the principle to copy is a thin push fabric keyed by conversation id (consistent hashing) with an HTTP/Convex write path, rather than per-request SSE only for the author.",
+  "notes": "Source dated 2023; numbers (about 16M channels per host at peak) vary in the text. Gold standard for the 'many people in one room' scale. Quality 5: published, proven design at very large scale with a failure-recovery story."
+ },
+ {
+  "id": "slack-product-surface-108",
+  "category": "Realtime & sync architecture",
+  "name": "Presence service separate from message path",
+  "what": "Presence is tracked by hash-partitioned Presence Servers and clients only receive updates for users currently visible on screen.",
+  "how": "Users hashed to PS hosts; clients query through their Gateway Server; visible-user subscription limits fan-out.",
+  "evidence": [
+   "https://slack.engineering/real-time-messaging/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon presence is a Convex row with a 30 s TTL; scoping presence subscription to visible members is the scalability trick for big rooms.",
+  "notes": "Quality 5: scales presence by subscribing only to visible users."
+ },
+ {
+  "id": "slack-product-surface-109",
+  "category": "Realtime & sync architecture",
+  "name": "Sharded MySQL via Vitess (workspace to channel sharding)",
+  "what": "Message data lives in MySQL managed by Vitess; sharding moved from workspace-keyed to channel-keyed to spread load for very large teams and support Grid and Connect.",
+  "how": "Pre-Vitess: workspace shards plus a metadata cluster mapping workspace to shard plus a 'kitchen sink' cluster; Vitess keyspaces per domain across clusters and regions; about 2.3M queries/s at peak (about 2M reads, 300K writes), median 2 ms and p99 11 ms; migration began 2017 with about 99% of load on Vitess at time of the post; Debezium Vitess connector to Kafka for change data capture.",
+  "evidence": [
+   "https://slack.engineering/scaling-datastores-at-slack-with-vitess/",
+   "https://current.confluent.io/2024-sessions/change-data-capture-kafka-how-slack-transitioned-to-cdc-with-debezium-kafka-connect (search summary)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Shows why 'tenant = shard' breaks with shared channels: Verevon's Space is a cross-user, potentially cross-org object, so key sharding by Space id (not org id) from the start.",
+  "notes": "Source predates the later cell migration; figures are a snapshot. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-110",
+  "category": "Realtime & sync architecture",
+  "name": "Cell-based architecture and availability-zone drain",
+  "what": "Slack silos each availability zone's backend and can drain an AZ gracefully in about five minutes in steps as small as 1%.",
+  "how": "After a 2021-06-30 gray-failure outage, critical services moved to cells over about 1.5 years; edge load balancers moved from HAProxy to Envoy with the in-house Rotor xDS control plane; drains use weighted clusters and RTDS weight updates; requests only call same-AZ services.",
+  "evidence": [
+   "https://slack.engineering/slacks-migration-to-a-cellular-architecture/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Useful reference for Verevon planes: independent cells per region/tenant tier with an operator drain switch is how to keep a hybrid of many planes resilient.",
+  "notes": "Manual drain (not automatic remediation) is a deliberate choice. Quality 5: documented AZ siloing with 1 percent drain steps."
+ },
+ {
+  "id": "slack-product-surface-111",
+  "category": "Realtime & sync architecture",
+  "name": "Top-of-hour load shaping for reminders and scheduled messages",
+  "what": "Reminders, scheduled messages and calendar events cluster at the top of the hour and create predictable traffic spikes.",
+  "how": "Engineering note calls out that these events share the real-time path with messages and reactions.",
+  "evidence": [
+   "https://slack.engineering/real-time-messaging/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Agent schedules (cron) in Spaces will cluster the same way; jitter scheduled fires and size the notification path for them.",
+  "notes": "Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-112",
+  "category": "Realtime & sync architecture",
+  "name": "Desktop shell state store shared with the renderer over one IPC channel",
+  "what": "The shell keeps a Redux store in the main process and mirrors actions to and from preload and renderer over a single named channel, with redux-observable epics driving desktop features.",
+  "how": "IPC channel 'redux-action' appears in main (M@222740), preload (P@451557) and component preload (C@440620); GET_REDUX_STATE and REDUX_UPDATE_FROM_WEBAPP are validated channels; redux-persist with a root-state.json file under the slack-persistor name persists desktop state; REA recovered only dynamic channel expressions (0 literal channels) for this build.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@222740 (redux-action)",
+   "extract/slack/dist/preload.bundle.js@451557",
+   "extract/slack/dist/component-preload-entry-point.bundle.js@440620",
+   "extract/slack/dist/main.bundle.cjs@832096 (slack-persistor, root-state.json)",
+   "REA ev_05c9f0e1dfaf0c7a27858a5136a7f42bd98da55e8da0938a470ad14b7bfe2552 (electron block: ipc operations 3, all dynamic channel expressions)"
+  ],
+  "provenance": "REA",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A single typed action channel between a shell and its web app is simple and testable; Verevon's Rust gateway plus Solid UI can use one action channel for desktop features.",
+  "notes": "REA could not name the channel; the literal was recovered by direct bundle search (SRC). Combined tag kept as REA for the structure facts. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-113",
+  "category": "Realtime & sync architecture",
+  "name": "Remote web app inside a thin shell with injected window chrome",
+  "what": "The entire chat UI is the remote Slack web client; the shell injects a window-chrome script into the page and exposes a small native bridge, so UI changes ship without app releases.",
+  "how": "Preload evaluates an inlined windowchrome bundle with webFrame.executeJavaScript, exposes window.slackPlatform (isWayland) and, for component windows, window.desktop (store dispatch, diagnostics, intl); the sandboxed renderer runs a second Redux store synced with main; UPDATE_DESKTOP_FEATURES and CHECK_DESKTOP_FEATURES let the web app query shell capabilities.",
+  "evidence": [
+   "extract/slack/dist/preload.bundle.js@762108 (windowchrome inline, executeJavaScript)",
+   "extract/slack/dist/preload.bundle.js@762422 (slackPlatform)",
+   "extract/slack/dist/component-preload-entry-point.bundle.js@618065 (window.desktop)",
+   "extract/slack/dist/main.bundle.cjs@1010294 (executeJavaScript in main)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's SolidJS/Vite UI plus Rust gateway already separates UI from backend; a desktop shell should likewise stay thin with capability negotiation rather than duplicating UI.",
+  "notes": "Remote-first means offline use is weak (see offline record). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-114",
+  "category": "Realtime & sync architecture",
+  "name": "Three-state network status: online, offline, Slack down",
+  "what": "The client distinguishes 'you are offline' from 'Slack is down' with an API probe, not just browser online state.",
+  "how": "Preload fetches /api/api.test on the workspace host (no credentials, no-store, optional proxy basic auth) with a 30 s timeout; status 0 or 4xx means OFFLINE, status above 499 or ok=false means SLACK_DOWN, ok=true means ONLINE; navigator.onLine and navigator.connection.type are recorded as diagnostics; telemetry traces desktop_api_test_error, desktop_api_test_offline and desktop_navigator_online_bogus; SET_NETWORK_STATUS, GET_NETWORK_INFO and TICKLE_MESSAGE_SERVER keep main and renderer aligned.",
+  "evidence": [
+   "extract/slack/dist/preload.bundle.js@654500-656200 (network status probe)",
+   "extract/slack/dist/main.bundle.cjs@781033 (SET_NETWORK_STATUS)",
+   "extract/slack/dist/main.bundle.cjs@867083 (trace codes DESKTOP_NAVIGATOR_ONLINE_BOGUS, DESKTOP_API_TEST_*)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A 'platform health' probe distinct from browser connectivity lets Verevon show 'Verevon is degraded' versus 'you are offline' honestly, and supports reconnect banners.",
+  "notes": "Offline message queue behaviour is in the web client and was not observed. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-115",
+  "category": "Realtime & sync architecture",
+  "name": "Service-worker, cache and local-state management",
+  "what": "The shell can clear service workers, caches and site data and restart cleanly; persisted state lives in a named store.",
+  "how": "CLEAR_SERVICE_WORKER epic runs when the client environment changes; clearDataOptions list backgroundFetch, cache, downloads, fileSystems, indexedDB, serviceWorkers, webSQL; menu items Clear Cache and Restart, Clear cache and exit; a Chromium service worker manager has RESTART_SELF.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@946780 (CLEAR_SERVICE_WORKER)",
+   "extract/slack/dist/main.bundle.cjs@832075 (data type list)",
+   "extract/slack/dist/resources/locales/en/desktop_menu_en_GB.json (Clear Cache items)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Environment (tenant tier) changes must purge local state; plan the same for Verevon tier or org switches (no cross-tenant residue).",
+  "notes": "Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-116",
+  "category": "Realtime & sync architecture",
+  "name": "Cookie rewriting and encryption at the network layer",
+  "what": "Set-Cookie headers for selected Slack hosts are intercepted; cookies lacking an explicit lax-or-stricter policy are re-issued as SameSite=None with the value encrypted via the OS-backed safeStorage.",
+  "how": "webRequest.onHeadersReceived handler for a host list (extended in military mode) parses Set-Cookie, rewrites SameSite and replaces the value with a prefix plus safeStorage.encryptString(...) hex; matching decryption is expected on request (not read).",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@863689 (onHeadersReceived cookie rewrite)",
+   "extract/slack/dist/main.bundle.cjs@864113 (safeStorage.encryptString)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Shows one way to keep session cookies unreadable at rest for a remote-UI shell; relevant if Verevon wraps its web UI in a desktop shell.",
+  "notes": "Purpose is INF; only the write path was read. No cookie store was opened. Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-117",
+  "category": "Realtime & sync architecture",
+  "name": "Sleep, wake, lock and thermal awareness",
+  "what": "The shell reports sleep, resume, screen lock, battery and thermal state so the web client can pause or recover.",
+  "how": "SLEEP_AND_WAKE, POWER_RESUMED, SET_SYSTEM_LOCKED, SET_SUSPEND_STATUS actions; powerMonitor events (11 uses); getCurrentThermalState and onBatteryPower; request-emulation-throttle IPC.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@798271 (system state actions)",
+   "extract/slack/dist/main.bundle.cjs@998065 (REQUEST_EMULATION_THROTTLE schema)",
+   "findings/t1/slack.inventory.md section 3.9"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Reconnect-on-resume plus load shedding on battery/thermal pressure matters for agent streams that run for minutes.",
+  "notes": "Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-118",
+  "category": "Realtime & sync architecture",
+  "name": "No end-to-end encryption; customer-held keys instead",
+  "what": "Slack does not offer end-to-end encryption; message and file confidentiality rests on TLS, at-rest encryption and optional customer-managed keys.",
+  "how": "No E2EE code in the shell; Enterprise Key Management lets customers hold keys in AWS KMS and revoke access; messages, search index and files are covered.",
+  "evidence": [
+   "https://slack.com/help/articles/360019110974-Slack-Enterprise-Key-Management",
+   "findings/t1/slack.inventory.md section 3.9 (no E2EE code in shell)"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Because Verevon agents must read content server-side, E2EE is out of reach; customer-managed keys (EKM-style) are the realistic confidentiality tier.",
+  "notes": "Absence of E2EE is inferred from docs and shell code (medium). Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-119",
+  "category": "Governance, security & compliance",
+  "name": "Retention controls at org, workspace, channel and DM level",
+  "what": "Admins set how long messages, files, canvases and lists are kept; members can override retention for private channels and DMs on paid plans; deleting a channel permanently removes its messages.",
+  "how": "Free plan 90 days or one year; paid plans keep all or custom; org-level policy (Enterprise) can lock workspaces; org policy changes need Primary Owner approval requested via Slackbot; deletions run daily; 'save edits' options keep edit/delete logs; Business+ can delete from the workspace while keeping data in exports; no per-conversation file retention.",
+  "evidence": [
+   "https://slack.com/help/articles/203457187-Customize-message-and-file-retention-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon retention exists only via ZDR and personal-Space deletion; a layered retention policy (org, Space, thread) with an audit of changes is the enterprise baseline.",
+  "notes": "Two-person approval for org-wide retention change is a governance pattern worth copying. Quality 5: layered policy with approvals, edit logs and clear semantics per object type."
+ },
+ {
+  "id": "slack-product-surface-120",
+  "category": "Governance, security & compliance",
+  "name": "Audit Logs API",
+  "what": "Enterprise orgs can stream who did what (actor, action, entity, context, details, app) to a SIEM; logs record user actions, not message content.",
+  "how": "Read-only API with auditlogs:read user token from an org-level install by the Org Owner; actions include user_login, file_downloaded and emoji_removed (list grows over time); events can come from apps; pagination and retention not documented in the overview.",
+  "evidence": [
+   "https://docs.slack.dev/admins/audit-logs-api/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has tool-action audit via audit-core and Space Activity receipts but no Space-scoped audit stream; adopt actor/action/entity/context/details schema and an 'app' field for agent-initiated actions.",
+  "notes": "No automated intrusion detection: Slack provides data, not judgement. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-121",
+  "category": "Governance, security & compliance",
+  "name": "Discovery API for eDiscovery and DLP partners",
+  "what": "Enterprise orgs can enable approved partner apps that export messages and files (eDiscovery, read-only) or act on them (DLP, read and write) for compliance, with edits and deletions retrievable when retained.",
+  "how": "Primary Org Owner or an Org Owner enables it; JSON default format; data covered: messages, files, canvases, lists, reactions and Slackbot conversations including edits and deletions; use limited to security and compliance; legal holds for specific members preserve content per vendor summaries.",
+  "evidence": [
+   "https://slack.com/help/articles/360002079527",
+   "https://onna.com/blog/slack-apis-for-compliance-and-ediscovery (search-result summary only, page not read in full)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no Space DLP, eDiscovery or export; a partner-gated read (and quarantine) API keyed by Space and agent would be required for regulated customers.",
+  "notes": "Legal-hold behaviour comes from vendor material (medium); including Slackbot conversations means AI chats are in scope of discovery. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-122",
+  "category": "Governance, security & compliance",
+  "name": "Enterprise Key Management (customer-held keys)",
+  "what": "Customers encrypt messages, canvases, files and the search index with their own keys in AWS KMS and can revoke access granularly while members keep working.",
+  "how": "Covers messages (including Slackbot conversations), canvases, snippets, uploads, search index, app-generated data, sidebar custom sections and developer secrets/logs on Slack-managed infrastructure; excludes profiles, channel names/topics, file names, membership data and usage data; Slack Connect partners each use their own keys with the search index duplicated per org; new customers can place keys in their data-residency region; add-on for Enterprise Grid and Enterprise+, included in GovSlack.",
+  "evidence": [
+   "https://slack.com/help/articles/360019110974-Slack-Enterprise-Key-Management"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A per-tenant key with revoke is the answer to 'we don't trust a multi-tenant AI plane'; Verevon's ZDR plus tenant keys on the Data Plane would be the strongest enterprise story.",
+  "notes": "Metadata (names, membership) deliberately stays under provider keys: note the trade-off. Quality 5: customer-managed keys covering messages, files, search index and AI chats with per-org keys in Connect."
+ },
+ {
+  "id": "slack-product-surface-123",
+  "category": "Governance, security & compliance",
+  "name": "Data residency in 12 regions with per-org custody in Connect",
+  "what": "Business+ and Enterprise customers choose one region for messages, canvases, files, search index and app data; Connect partners keep their own data in their own region.",
+  "how": "Regions: Frankfurt, Paris, Stockholm, Zurich, Tokyo, Mumbai, Singapore, Seoul, Sydney, London, Montreal, Sao Paulo with named backup regions; profiles, membership, usage and analytics may be stored elsewhere; flagged content for Acceptable Use enforcement may be in the US; existing data stays in the US unless migrated via Sales; only the Primary Owner can enable; the AI treatment is not stated on the page.",
+  "evidence": [
+   "https://slack.com/help/articles/360035633934"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon should model region as a Space/tenant attribute early (Model Plane inference location, Data Plane storage), including what metadata is exempt.",
+  "notes": "Single region per org (no per-channel residency) keeps things simple. Quality 5: explicit region list, backups and Connect cross-region handling."
+ },
+ {
+  "id": "slack-product-surface-124",
+  "category": "Governance, security & compliance",
+  "name": "Compliance attestations and regulated tiers",
+  "what": "Slack lists ISO 27001/27017/27018/27701/42001, SOC 2 Type II and SOC 3, HIPAA and FINRA 17a-4 configurability, FedRAMP Moderate, GovSlack FedRAMP High (IL4 pursued), and regional attestations (IRAP, ISMAP, C5, ENS High, TISAX, South Korea CSP).",
+  "how": "Published on the trust and compliance page; FedRAMP Moderate requires Enterprise or Enterprise+ and the Secure Configuration Guide; GovSlack has its own SOC reports; AI-specific ISO 42001.",
+  "evidence": [
+   "https://slack.com/trust/compliance"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's roadmap should name the target attestations (SOC 2, ISO 27001/42001) because AI-agent rooms will be asked for 42001-class assurances first.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-125",
+  "category": "Governance, security & compliance",
+  "name": "Separate GovSlack and military client environments (hosts, logs, features, mode switching)",
+  "what": "The desktop client runs in NORMAL (commercial), RESTRICTED (GovSlack) or MILITARY mode with distinct host families, log folders, telemetry proxy and feature availability; the app tells the user when GovSlack mode is activated or deactivated.",
+  "how": "clientEnvironment enum NORMAL/RESTRICTED/MILITARY; on sign-out the mode is recomputed from the remaining workspaces (stays MILITARY or RESTRICTED while a matching gov workspace remains, otherwise falls back MILITARY to RESTRICTED to NORMAL; switchClientFeatureViaSignOut); per-mode log directories (logs/default, logs/govslack, logs/milslack); host allowlists for slack.com, slack.eu, slack-gov.com, slack.mil and dev variants with separate Sentry proxy and spellcheck hosts; commercial cookies are blocked from gov origins (BlockCommercialCookiesGovOrigin); a feature handler table where RESTRICTED and MILITARY fall back to default no-op handlers for unsupported features (diagnostics trace, crash reporter, net log); service workers are cleared when the environment changes.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1326100-1326611 (switchClientFeatureViaSignOut epic, mode flip)",
+   "extract/slack/dist/main.bundle.cjs@834036 (milslack/govslack/default log dirs)",
+   "extract/slack/dist/main.bundle.cjs@791677 (host families, BlockCommercialCookiesGovOrigin)",
+   "extract/slack/dist/main.bundle.cjs@1071229 (per-mode feature table fh)",
+   "extract/slack/dist/main.bundle.cjs@988680 (notifyGovSlackMode epic)",
+   "extract/slack/dist/resources/locales/en/desktop_renderer_en_GB.json (GovSlack activated/deactivated strings)",
+   "https://slack.com/trust/compliance"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's ZDR and plane-isolation rules map onto the same idea: a sovereign or ZDR tenant should get a different client profile (separate endpoints, no shared cookies, telemetry off by default, separate logs), not just a server flag.",
+  "notes": "One client mode at a time, so commercial and gov sessions are not mixed in one client (INF from the single clientEnvironment value). Mode-specific disabling of telemetry is INF (the default handler is a no-op). Microsoft Teams has comparable government clouds (INF; peer inventory mentions GCC/DoD). Quality 5: hard tier separation in the client code (hosts, logs, cookies, features)."
+ },
+ {
+  "id": "slack-product-surface-126",
+  "category": "Governance, security & compliance",
+  "name": "AI data boundaries and disclosure rules",
+  "what": "Slack states AI responses include only data the user can access, file summaries cover only files visible to everyone, translations are private to the viewer, member feedback on AI is off by default in some workspaces, and the company holds ISO 42001.",
+  "how": "Guide to AI features plus the compliance page; guest exclusion for agent features appears in the design guidance.",
+  "evidence": [
+   "https://slack.com/help/articles/25076892548883-Guide-to-Slack-AI",
+   "https://slack.com/trust/compliance",
+   "https://docs.slack.dev/ai/agent-design"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Publishing a one-page AI data-boundary statement per feature (what the model sees, who sees outputs, retention) would make Verevon's ZDR claims concrete.",
+  "notes": "Page does not detail model-provider retention; compare with Verevon ZDR propagation. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-127",
+  "category": "Governance, security & compliance",
+  "name": "Electron hardening with enforced frozen web preferences",
+  "what": "All shell windows run with node integration off (including workers and subframes), context isolation on, sandbox on and webview disabled, and attempts to override these keys are rejected and logged.",
+  "how": "A frozen webPreferences object (nodeIntegration, nodeIntegrationInWorker, nodeIntegrationInSubFrames false; contextIsolation true; sandbox true; webviewTag false; autoplayPolicy no-user-gesture-required) is merged into every window and conflicting overrides raise an error log; @electron/fuses is a build dependency (fuse hardening at packaging is INF); REA recorded 1 contextBridge API, 4 sender-validation observations and 0 main-process ipcMain.handle handlers.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@969388 (frozen webPreferences o2, override guard at @969582)",
+   "REA ev_05c9f0e1dfaf0c7a27858a5136a7f42bd98da55e8da0938a470ad14b7bfe2552 (electron block: context_bridge_apis 1, sender_validation_observations 4)",
+   "extract/slack/package.json (@electron/fuses)"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A Verevon desktop wrapper must start from the same frozen-preferences baseline; the override-guard pattern prevents feature code from weakening it.",
+  "notes": "REA contributed the counts; the preference object was read from the bundle (SRC). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-128",
+  "category": "Governance, security & compliance",
+  "name": "Launch integrity check on process crashes",
+  "what": "When a renderer or child process dies, the client compares the app bundle's modification time to the value at launch to detect that files changed underneath it.",
+  "how": "Debounced handler (60 s) on child-process-gone and render-process-gone reads a modified date and compares to modifiedDateAtLaunch; on mismatch it logs, traces desktop_integrity_check_failed, sets an integrity.failed flag and, if crash_integrity_check is enabled, escalates (restart or crash).",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1175562 (integrity check)",
+   "extract/slack/dist/main.bundle.cjs@796166 (crash_integrity_check flag)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Useful for self-updating agents' hosts: detect that the running binary changed (partial update) before it corrupts state.",
+  "notes": "What happens on escalate (rX) was not traced. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-129",
+  "category": "Governance, security & compliance",
+  "name": "Secrets at rest and consent-based diagnostics",
+  "what": "Secrets are encrypted with the OS keychain via safeStorage; net logs and verbose debug logs require an explicit restart with consent and are included in exported logs.",
+  "how": "safeStorage.encryptString/decryptString/isEncryptionAvailable (many uses), getSelectedStorageBackend; dialogs 'Restart and collect net log?' and 'This will save a log file to Slack's download location. Continue?'; Sentry crash reporting with sentry.io hosts and a gov proxy; log payload redaction by field name.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@858539 (safeStorage availability)",
+   "extract/slack/dist/main.bundle.cjs@1177061 (storage backend)",
+   "extract/slack/dist/resources/locales/en/desktop_messagebox_en_GB.json",
+   "extract/slack/dist/main.bundle.cjs@964441 (logPayload redaction lists)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon diagnostics should be opt-in and redacted by field allowlist, matching its ZDR posture.",
+  "notes": "No secret values were read; only code. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-130",
+  "category": "Governance, security & compliance",
+  "name": "Link, protocol and file-type trust warnings",
+  "what": "External link or protocol launches show a warning naming the protocol and host, with an option to always allow for that host; opening unknown file types warns that the file will open in a named app.",
+  "how": "WHITELIST_PROTOCOL and ALLOWLIST_FILE_EXT actions; renderer strings 'This is an {protocol} link to {hostname}...' and 'Always open {protocol} links to {hostname}'; message box 'This is a {fileExt} file and will open in {appName}'.",
+  "evidence": [
+   "extract/slack/dist/resources/locales/en/desktop_renderer_en_GB.json (keys 184693378, 2805203296, 3671115087)",
+   "extract/slack/dist/resources/locales/en/desktop_messagebox_en_GB.json",
+   "extract/slack/dist/main.bundle.cjs@784587 (WHITELIST_PROTOCOL)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Agent-opened links (browser actions, tool results) should go through the same interstitial with per-host remember.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-131",
+  "category": "Governance, security & compliance",
+  "name": "Multi-tenant isolation inside Grid and Connect",
+  "what": "Enterprise Grid and Connect keep each org's data, keys, retention and search index separate while sharing channels.",
+  "how": "Per-org EKM keys with duplicated search index, per-org retention and per-org profile visibility in Connect; channel-keyed sharding; org-level audit and policy.",
+  "evidence": [
+   "https://slack.com/help/articles/360019110974-Slack-Enterprise-Key-Management",
+   "https://slack.com/help/articles/115004151203-A-guide-to-Slack-Connect",
+   "https://slack.engineering/scaling-datastores-at-slack-with-vitess/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Cross-tenant rooms with per-tenant custody is exactly the Verevon S5.1 challenge; the 'duplicate the index per org' choice trades storage for isolation.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-132",
+  "category": "Governance, security & compliance",
+  "name": "Posting permissions and channel moderation controls",
+  "what": "Owners and admins (and members where allowed) can restrict who may post in a channel, who may use @everyone, and who may create or manage channels; the channel-owning org controls posting in Slack Connect channels.",
+  "how": "Posting permissions and channel management are role-gated; Slack Connect channel owners manage posting permissions for partner orgs; admins can use channel management tools to edit retention.",
+  "evidence": [
+   "https://slack.com/help/articles/201314026-Permissions-by-role-in-Slack",
+   "https://slack.com/help/articles/115004151203-A-guide-to-Slack-Connect",
+   "https://slack.com/help/articles/203457187-Customize-message-and-file-retention-in-Slack"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Read-only or announcement-only rooms and 'agents may post but not start threads' rules are moderation primitives Verevon needs once rooms host many agents.",
+  "notes": "Moderation of content (reporting, automated filters) is not covered by these pages. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-133",
+  "category": "Client shell",
+  "name": "Electron shell around the remote web client",
+  "what": "Slack Desktop is a thin Electron application (version 4.52.178 here) that loads the slack.com web client and adds native integration.",
+  "how": "package.json: slack-desktop, main dist/boot.bundle.cjs, Node 24, Electron 44 (devDependency), rspack/swc build, Electron Forge makers for DMG, ZIP, Squirrel, MSIX and WiX MSI, @electron/fuses, osx-sign and notarize; main bundle 1.7 MB with Redux/redux-observable epics, preload bundles for web, components and child windows.",
+  "evidence": [
+   "extract/slack/package.json",
+   "findings/t1/slack.inventory.md sections 1-2",
+   "extract/slack/dist/main.bundle.cjs"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A thin shell over the existing Solid web UI is the lowest-cost path to a Verevon desktop client; the packaging matrix (MSIX, Squirrel, DMG, Linux repo) is the checklist.",
+  "notes": "Minified JS only, no source maps shipped. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-134",
+  "category": "Client shell",
+  "name": "Deep links with the slack:// scheme and single-instance forwarding",
+  "what": "slack://channel?team=..., slack://open?team=... (and a dev environment variant), slack://app/?action=reset-window and slack://noop route into the right workspace or conversation; a second launch forwards its link to the running instance.",
+  "how": "setAsDefaultProtocolClient, requestSingleInstanceLock and a second-instance handler; HANDLE_DEEP_LINK and FORWARD_DEEP_LINK (to the web app) channels; transform and update-settings-via-deep-link epics; feature flag appActionsViaDeepLinks; deep links also drive the jump list and Windows toast activation.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1426975 (setAsDefaultProtocolClient)",
+   "extract/slack/dist/main.bundle.cjs@1437294 (single instance)",
+   "extract/slack/dist/main.bundle.cjs@986435 (second-instance)",
+   "extract/slack/dist/main.bundle.cjs@961456 (FORWARD_DEEP_LINK)",
+   "extract/slack/dist/main.bundle.cjs@964015 (parse deep link)",
+   "extract/slack/dist/main.bundle.cjs@1344032 (slack://noop)",
+   "extract/slack/dist/main.bundle.cjs@1209561 (reset-window)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A verevon:// scheme with room, thread and run addressing and forwarding-to-running-instance is a prerequisite for notifications that open the exact thing.",
+  "notes": "'appActionsViaDeepLinks' suggests apps can trigger actions through links (flag gated). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-135",
+  "category": "Client shell",
+  "name": "Global shortcuts, double-press and combo registration API",
+  "what": "The shell registers two global shortcuts (mute a huddle from any app with Ctrl/Cmd+Shift+Space, and a command center) and exposes validated registration for modifier double-presses and arbitrary key combos with key-down and key-up events, which is what push-to-talk needs.",
+  "how": "toggle_mute CommandOrControl+Shift+Space; desktop_command_center CommandOrControl+Shift+K; ACCELERATOR_REGISTER_DOUBLE_PRESS (command/cmd/option/alt/control/ctrl/shift/win, optional integer threshold), ACCELERATOR_REGISTER_COMBO (1 to 8 integer key codes), unregister variants, accessibility permission check; slack-desktop-utils native addon supplies low-level keys; GET_GLOBAL_SHORTCUTS_REGISTERED and TOGGLE_GLOBAL_SHORTCUTS_HANDLER.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@995140 (shortcut map)",
+   "extract/slack/dist/main.bundle.cjs@995451 (ACCELERATOR_* schema)",
+   "extract/slack/package.json",
+   "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts",
+   "https://slack.com/help/articles/4402059015315-Use-huddles-in-Slack"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A generic key-capture API is the base for push-to-talk and summon features in a Verevon desktop client.",
+  "notes": "In-app Ctrl+K quick switcher and Ctrl+Shift+K compose-new-message are documented (DOC shortcuts page lists Ctrl+K as quick switcher); the global Ctrl+Shift+K here is a different, flag-gated 'command center'. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-136",
+  "category": "Client shell",
+  "name": "Tray, dock, taskbar jump list and menu bar",
+  "what": "The app lives in the system tray or menu bar, shows state icons, builds a Windows jump list (Tasks, Workspaces) and offers Show main window, Launch on login, Keep in background and Show Slack immediately options.",
+  "how": "Tray with rest/unread/highlight icons and a context menu listing workspaces; macOS template menu-bar icon (1x/2x/3x); jump list tasks (Move Slack to Current Display) and up to 10 workspace items; setLoginItemSettings/getLoginItemSettings; hideOnStartup and runFromTray settings; launchEnforced tray state.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1209064 (jump list)",
+   "extract/slack/dist/main.bundle.cjs@1210075 (TrayHandler)",
+   "extract/slack/dist/main.bundle.cjs@1433708 (setLoginItemSettings)",
+   "extract/slack/dist/resources/macos-menubar-icon-Template.png"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon desktop needs a tray with live agent-work state ('Verevon is working') and a jump list of recent rooms.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-137",
+  "category": "Client shell",
+  "name": "Auto-update across Squirrel, MSIX, macOS and Linux with update channels",
+  "what": "The app checks for updates, downloads in the background, shows 'An update is available' and 'Restart to Apply Update', handles admin-privilege requests and avoids restarting during a huddle or upload.",
+  "how": "autoUpdater with checkForUpdates, setFeedURL and quitAndInstall; updater_variant query value msix or squirrel plus arm64; the Windows Squirrel updater reads a RELEASES manifest at the update URL, then calls setFeedURL and stages the version; stealth restart safe check; strings for Keep Slack up to date, Couldn't update Slack and 'needs administrator privileges to install an update'; desktop_updater_* telemetry; manual Check for Updates and Release notes/What's New entries.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@947509 (autoUpdater epics)",
+   "extract/slack/dist/main.bundle.cjs@984667 (quitAndInstall)",
+   "extract/slack/dist/main.bundle.cjs@1441477 (updater_variant)",
+   "extract/slack/dist/main.bundle.cjs@1446144 (WindowsSquirrelUpdater: RELEASES check, setFeedURL)",
+   "extract/slack/dist/resources/locales/en/desktop_menu_en_GB.json",
+   "extract/slack/dist/resources/locales/en/desktop_external_en_GB.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A silent stealth restart that waits for a safe point is the model for updating a desktop shell that hosts long agent runs.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-138",
+  "category": "Client shell",
+  "name": "Settings editor and diagnostics toolkit",
+  "what": "A built-in settings editor shows the effective value and source of every setting, and the Help/Developer menus provide net-log capture, verbose logs, tracing UI, performance metrics, crash dump folder, report-issue, copy installation id and log upload.",
+  "how": "settings-editor.html (table of settings rows with computed values), net-log-window.html, IPC PERFORMANCE_ENABLE/DISABLE/GET_METRICS, GET_APP_METRICS, GET_DOM_COUNTERS, START/STOP_DIAGNOSTICS_TRACE, UPLOAD_APP_LOGS_ARCHIVE, PREPARE_AND_REVEAL_LOGS; menu items Restart and collect net logs, Restart and collect verbose debug logs, Open crash dumps directory, Trigger crash, Use local assets, Authenticate TSAuth session (internal).",
+  "evidence": [
+   "extract/slack/dist/settings-editor.bundle.js",
+   "extract/slack/dist/net-log-window.bundle.js",
+   "extract/slack/dist/resources/locales/en/desktop_menu_en_GB.json",
+   "extract/slack/dist/main.bundle.cjs@995451 (diagnostics IPC schemas)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A 'show me the effective configuration and its source (policy, default, user)' window is a strong supportability feature for a governed product like Verevon.",
+  "notes": "Internal developer items (TSAuth, local assets) ship in production builds behind menus. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-139",
+  "category": "Client shell",
+  "name": "Window management, multi-display healing and zoom",
+  "what": "The shell remembers and heals window placement across displays, offers 'Move Slack to current display', zoom controls and full-screen, and supports hidden/frameless title bars with custom chrome.",
+  "how": "screen.getAllDisplays, getDisplayMatching, getDisplayNearestPoint, healDisplayScaleEpic, display added/removed/metrics-changed epics; setZoomLevel with notification zoom level; titleBarStyle hidden with trafficLightPosition on macOS, backgroundMaterial on Windows, vibrancy; custom window-chrome and window-chrome-app-menu identifiers; BROWSER_WINDOW_SET_TITLE_BAR_OVERLAY and window-button position IPC.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@948205 (setZoomLevel)",
+   "extract/slack/dist/main.bundle.cjs@1017846 (titleBarStyle)",
+   "extract/slack/dist/main.bundle.cjs@969764 (backgroundMaterial and vibrancy)",
+   "extract/slack/dist/main.bundle.cjs@851174 (trafficLightPosition setting)",
+   "extract/slack/dist/main.bundle.cjs@988689 (display epics)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Detail-level polish (display healing, zoom, title bar overlay) is what makes a wrapped web app feel native; schedule it for a Verevon desktop beta.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-140",
+  "category": "Client shell",
+  "name": "Localisation with message-format IDs across nine languages",
+  "what": "The shell ships six string namespaces in nine languages with hashed message ids and ICU-style plurals, and the web app can set or query the locale.",
+  "how": "Locales de, en (en_GB base), es, fr, it, ja, ko, pt, zh under resources/locales; namespaces browser, external, general, menu, messagebox, renderer; plural syntax like {unreadHighlights,plural,=1{# notification}other{# notifications}}; IPC LOAD_LOCALE, GET_LOCALE_RESOURCE, GET_AVAILABLE_LANGUAGES, GET_CURRENT_LANGUAGES, SET_CURRENT_LANGUAGES; build uses @tinyspeck/i18n-translation-tools and message-format.",
+  "evidence": [
+   "extract/slack/dist/resources/locales/",
+   "extract/slack/dist/resources/locales/en/desktop_browser_en_GB.json (key 1449357124)",
+   "extract/slack/package.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Space UI already uses Norwegian tab slugs (arbeid, kunnskap, aktivitet, medlemmer per the UI baseline), so catalogue-based i18n with plural rules (message-format, namespaced catalogues) is the pattern to keep when adding languages.",
+  "notes": "Server-side web client locale coverage is much broader (INF). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-141",
+  "category": "Client shell",
+  "name": "Accessibility and keyboard navigation support",
+  "what": "The shell detects assistive technology, follows high-contrast and text preference changes, offers keyboard navigation between sections (F6 and Shift+F6) and a Speech submenu.",
+  "how": "app accessibility-support-changed epic with telemetry (desktop_client_accessibility_support), nativeTheme.shouldUseHighContrastColors, READ_SYSTEM_TEXT_PREFERENCES and TEXT_PREFERENCES_CHANGED, menu items Keyboard navigation, Next section, Previous section, Start speaking, Stop speaking.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@988737 (accessibility epics)",
+   "extract/slack/dist/main.bundle.cjs@1016521 (nativeTheme)",
+   "extract/slack/dist/resources/locales/en/desktop_menu_en_GB.json",
+   "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's cockpit already supports roving arrow-key focus; adding a documented F6 landmark cycle and AT detection telemetry would complete it.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-142",
+  "category": "Client shell",
+  "name": "Theme and appearance settings",
+  "what": "The shell syncs with the system theme or applies a user theme and respects high-contrast settings.",
+  "how": "settings systemThemeSyncEnabled and userTheme, nativeTheme usage, OBSERVE_THEME_USER_SETTING and OBSERVE_TEXT_PREFERENCES epics.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@850496 (settings schema: systemThemeSyncEnabled, userTheme)",
+   "extract/slack/dist/main.bundle.cjs@1016521 (nativeTheme)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Table stakes; Verevon already has dark-mode rules in its Space CSS.",
+  "notes": "Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-143",
+  "category": "Client shell",
+  "name": "Spellcheck with downloadable dictionaries and editing context menu",
+  "what": "Spellcheck languages are selectable and dictionaries are downloaded from Slack's CDN per region; the context menu offers Add to Dictionary, Look Up, Search with Google, Paste and Match Style, Copy Link/Image/Image URL/Email Address.",
+  "how": "setSpellCheckerLanguages, dictionaryEventsEpic, dictionary hosts spellcheck.slack-edge.com, .mil and gov variants; context menu epics and CONTEXT_MENU_CLICKED.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@791742 (dictionary hosts)",
+   "extract/slack/dist/main.bundle.cjs@1140144 (setSpellCheckerLanguages)",
+   "extract/slack/dist/resources/locales/en/desktop_menu_en_GB.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Norwegian dictionary support (bokmal and nynorsk) should be explicit in a Verevon client.",
+  "notes": "Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-144",
+  "category": "Client shell",
+  "name": "Crash, hang and slow-network recovery dialogs",
+  "what": "When the page hangs or fails to load the shell offers Wait, Reload, Restart or 'Clear cache and reload', with a crash dialog and report-issue path.",
+  "how": "webContentsTimeoutDialogEpic with extended_unresponsive_timeout, strings 'Slack stopped responding', 'Slack is having trouble loading', 'Keep waiting', 'Restart && report issue'; reload epics for crashed, unresponsive, empty and timed-out contents; beacon on load failures.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@945784 (webContentsTimeoutDialogEpic name)",
+   "extract/slack/dist/resources/locales/en/desktop_messagebox_en_GB.json",
+   "extract/slack/dist/main.bundle.cjs@994739 (beacon queue for validation and load failures)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Graceful 'wait or reload' on a stuck room stream matters when agent turns are long.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-145",
+  "category": "Client shell",
+  "name": "Proxy, basic-auth and corporate network handling",
+  "what": "The client prompts for proxy or server credentials in its own window, records proxy info for diagnostics and offers log download when it cannot connect.",
+  "how": "basic-auth-view.html window, showAuthDialogEpic, desktop_proxy_info trace, renderer strings for connection troubleshooting, GET_NETWORK_INFO.",
+  "evidence": [
+   "extract/slack/dist/basic-auth-view.bundle.js",
+   "extract/slack/dist/resources/locales/en/desktop_renderer_en_GB.json (keys 1232096808, 2875270439, 3731817853)",
+   "extract/slack/dist/main.bundle.cjs@957664 (GET_NETWORK_INFO)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Enterprise Verevon tenants behind proxies need the same credentialed-proxy path for agent streams.",
+  "notes": "Quality 3: functional but narrow or thinly evidenced."
+ },
+ {
+  "id": "slack-product-surface-146",
+  "category": "Client shell",
+  "name": "Schema-validated native bridge with validation-failure beacons",
+  "what": "Every call the web app makes to the shell goes through a schema table (122 channels in this build); malformed calls are rejected and reported to Slack so contract drift is visible.",
+  "how": "A Joi schema per IPC channel (argument types, string patterns, integer ranges, enums such as double-press modifier names and stealth-restart reasons); a beacon client posts validation failures to the workspace's /beacon/ssbipc endpoint with the instance uid and app version; REA counted 4 sender-validation observations and only dynamic channel expressions.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@995451 (IPC schema table su, 122 channels)",
+   "extract/slack/dist/main.bundle.cjs@994739 (beacon endpoint and trackValidationFailure)",
+   "REA ev_05c9f0e1dfaf0c7a27858a5136a7f42bd98da55e8da0938a470ad14b7bfe2552"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A Verevon desktop bridge should publish a typed, schema-checked capability list and beacon contract violations; it doubles as the action-registry drift guard Verevon already uses for spaces.* actions.",
+  "notes": "Channel list was extracted by script from the bundle (SRC); REA supplied the sender-validation count only. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-147",
+  "category": "Client shell",
+  "name": "Preferences owned by the web UI and pushed to the shell (32 validated settings)",
+  "what": "Desktop preferences (notifications, tray, theme, zoom, clipboard-read policy, spellcheck, update channel, sign-in method and more) are edited in the web app's Preferences UI and sent to the shell, which validates every value.",
+  "how": "UPDATE_SETTINGS carries a Joi-validated object with 32 allowed keys: signInMethod, suppressPermissionDialog, suppressMoveFromDmgDialog, debugFeatures, shouldRevertMacUpdaterLogic, useHwAcceleration, notificationAfterHoverTimeout, notificationFailoverEnabled, notificationMaxItems, notificationMethod, notificationPlayback, notificationPresentationCheck, notificationTimeout, notificationZoomLevel, notifyPosition, trafficLightPosition, isClipboardReadDisabled, autoHideMenuBar, launchOnStartup, hideOnStartup, locale, releaseChannelOverride, runFromTray, startNetLogAtLaunch, zoomLevel, userTheme, systemThemeSyncEnabled, spellcheckerLanguage, shouldUseHighContrastColors, showScrollBars, windowFlashBehavior, clientEnvironment; ranges are enforced (for example notification timeout 250 ms to 60 s, max items 1 to 50, zoom 0.5 to 5); settings are layered (user choices over defaults, with policy on top).",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@1108892 (f7 key list and validated object dl)",
+   "extract/slack/dist/main.bundle.cjs@830467 (policy/default layering)",
+   "extract/slack/dist/main.bundle.cjs@850496 (persisted settings schema)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "One web Preferences surface that drives a thin native shell through a validated settings contract keeps UI work in a single codebase; Verevon can reuse the same layered (policy over user over default) model.",
+  "notes": "'isClipboardReadDisabled' is an example of a privacy toggle pushed down to the shell (policy or user, unknown). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-148",
+  "category": "UX patterns & layout",
+  "name": "Left-rail navigation: Home, DMs, Activity, Later, Files and More",
+  "what": "The client is organised around a left tab rail and a sidebar: Home (channels, Threads, Directories), DMs, Activity, Later, and a More area for Files, Canvases, Lists and Apps, with a workspace switcher.",
+  "how": "Evidence from help text: 'Open Threads from Home', 'Home > Directories > External', 'Home > Files', 'hover over More, choose Lists', Activity as a separate view with badge; sidebar sections per user.",
+  "evidence": [
+   "https://slack.com/help/articles/115000769927-Use-threads-to-organize-discussions-",
+   "https://slack.com/help/articles/115004151203-A-guide-to-Slack-Connect",
+   "https://slack.com/intl/en-us/help/articles/203950418",
+   "https://slack.com/help/articles/27452748828179-Use-lists-in-Slack",
+   "https://slack.com/help/articles/201355156"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Space is a single page with six tabs; a cross-room rail (Home/Rooms, DMs, Activity, Later, Files, Agents) is the IA expansion needed once rooms multiply.",
+  "notes": "Assembled from several help pages; the exact current labels may differ (medium). Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-149",
+  "category": "UX patterns & layout",
+  "name": "Conversation header as a shelf: tabs, pins, bookmarks, canvas and lists",
+  "what": "Each conversation header hosts tabs (Messages, Canvas, Pins, Lists) and a bookmark bar so key artifacts live next to the chat.",
+  "how": "Canvases attach as tabs with 'Show canvas by default'; Pins tab auto-created on first pin; bookmark folders and drag-and-drop ordering.",
+  "evidence": [
+   "https://slack.com/intl/en-us/help/articles/203950418",
+   "https://slack.com/help/articles/205239997-Pin-messages-and-bookmark-links (search-result summary only, page not read in full)"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's cockpit tabs (Chat, Work, Knowledge, Activity, Agent, Members) are a similar idea but fixed; user-added artifact tabs (canvas, list) would make Spaces personal to the work.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-150",
+  "category": "UX patterns & layout",
+  "name": "Thread side panel and pop-out thread window",
+  "what": "Threads open in a side panel next to the channel and can be detached into their own window; Threads view lists all followed threads.",
+  "how": "Window icon in the thread header opens a separate window; thread view has reply, react, save and open-in-channel actions.",
+  "evidence": [
+   "https://slack.com/help/articles/115000769927-Use-threads-to-organize-discussions-"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no thread panel (posts show up to 30 inline turns); a side panel keeps room scroll position while following a long agent run.",
+  "notes": "Quality 5: mature panel plus pop-out."
+ },
+ {
+  "id": "slack-product-surface-151",
+  "category": "UX patterns & layout",
+  "name": "Split-view assistant container",
+  "what": "A persistent panel beside the main conversation hosts the assistant or agent while the user keeps reading the channel.",
+  "how": "Documented as the agent surface with a top navigation entry; developer slash commands are not supported inside it.",
+  "evidence": [
+   "https://docs.slack.dev/ai/",
+   "https://docs.slack.dev/interactivity/implementing-slash-commands"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The right-rail 'room pulse' in Verevon could become an interactive agent panel with context awareness instead of a status list.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-152",
+  "category": "UX patterns & layout",
+  "name": "Composer features: slash menu, formatting toolbar, clip recorder, scheduling",
+  "what": "The message box combines a formatting toolbar, slash commands, emoji, attachments, audio/video clip buttons and a send-later dropdown.",
+  "how": "Toolbar visibility toggle, Shift+Enter, list auto-formatting, microphone and camera icons for clips, dropdown next to send for scheduling; keyboard shortcuts for bold, italic, strike and links.",
+  "evidence": [
+   "https://slack.com/help/articles/202288908-Format-your-messages",
+   "https://slack.com/help/articles/4406235165587",
+   "https://www.cnbc.com/2021/06/16/how-to-schedule-slack-messages.html (search-result summary only, page not read in full)",
+   "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's composer (skills picker, mention, stop button) should absorb: send-later, clip, attach, formatting toolbar.",
+  "notes": "Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-153",
+  "category": "UX patterns & layout",
+  "name": "Quick switcher and keyboard-first navigation",
+  "what": "Ctrl/Cmd+K jumps to any conversation, Ctrl/Cmd+Shift+T opens Threads, Ctrl/Cmd+Shift+M opens Activity, Esc marks the conversation read and Shift+Esc marks all read, Ctrl/Cmd+J jumps to the latest unread on desktop.",
+  "how": "Documented shortcut list; the shell adds F6 section cycling and global shortcuts.",
+  "evidence": [
+   "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A command palette (rooms, threads, agents, skills) is table stakes for power users and is missing in the Space UI.",
+  "notes": "Mac equivalent for the quick switcher is not listed in the fetched article. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-154",
+  "category": "UX patterns & layout",
+  "name": "Unread and attention triage (suggested important unreads, VIPs, sort by priority)",
+  "what": "Slack surfaces 'suggested important unreads', lets users mark VIPs whose messages break through pause, and sorts sidebar sections by recency or priority.",
+  "how": "Activity can optionally include suggested important unreads; VIP overrides during pause (paid plans); sidebar section sort options A-Z, Recency, Priority.",
+  "evidence": [
+   "https://slack.com/help/articles/201355156",
+   "https://slack.com/help/articles/360043207674-Organize-your-sidebar-with-custom-sections"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "With many agents posting, a priority/importance model (what needs a human) becomes the core UX; Verevon's 'Needs attention' lens is the seed.",
+  "notes": "How importance is computed is not documented. Quality 4: solid and complete in the evidenced scope; no major gap seen."
+ },
+ {
+  "id": "slack-product-surface-155",
+  "category": "UX patterns & layout",
+  "name": "Loading, error and release-notes surfaces",
+  "what": "The client has a loading screen, an offline/trouble-loading dialog with recovery choices, About and What's New windows and an internal error page.",
+  "how": "desktop_loading_screen flag, showReleaseNotesEpic, about-box.html, app://error page, strings for slow network; Settings editor and net-log windows as utility surfaces.",
+  "evidence": [
+   "extract/slack/dist/main.bundle.cjs@796166 (desktop_loading_screen flag)",
+   "extract/slack/dist/main.bundle.cjs@945644 (showReleaseNotesEpic name, from scout)",
+   "extract/slack/dist/about-box.bundle.js"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Honest loading/degraded states (Verevon's 'gap, not empty' rendering) should extend to the desktop shell too.",
+  "notes": "Quality 3: functional but narrow or thinly evidenced."
+ }
+]

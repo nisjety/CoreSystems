@@ -1,0 +1,211 @@
+[
+  {
+    "finalId": "F-t1-070",
+    "title": "Room header and pulse rail extras: live counts, pinned posts first, user-pinned resource tabs and a budget meter; PWA share target and MCP apps later",
+    "searches": [
+      "Grep pinned|isPinned|pinned_at|pinPost|pin_message in verevonv3 apps/gateway/src, src/features/spaces, src/shared/actions",
+      "Grep sort|orderBy|pinned in SpaceRoomTimeline.tsx and SpacePage.tsx (pinned-first ordering check)",
+      "Grep SPACE_TABS|SpaceTab|customTab|extraTab|cockpitTab in src/features/spaces",
+      "Grep openApproval|pendingCount|runningCount|badge|count in src/features/spaces/components (header counts)",
+      "Grep budget|usageMeter|budget_exceeded|spend|tokenUsage in src/features/spaces; per-Space cost grep across apps and cost-core space_id",
+      "Grep share_target|webmanifest|serviceWorker|workbox|registerSW|protocol_handlers in verevonv3 (excluding node_modules)",
+      "Grep sandbox=|iframe in verevonv3/src (sandboxed frame building block)",
+      "Grep ui://|mcp-ui|MCP Apps|ui/resource|text/html;profile across apps; mcp in model-gateway tool_loop.rs"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 137, "why": "Room threads sorted by updated_at only; pinned posts are not moved first", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 243, "why": "Pin toggle calls updateSpaceThreadPresentation with pinned flag, then server re-read", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 402, "why": "Pin/Unpin control in post meta row with aria-pressed state", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.test.tsx", "line": 102, "why": "Tests pinned rendering and unpin request; no test asserts pinned-first order", "kind": "test"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts", "line": 2057, "why": "spaces.update_thread_presentation: retitle or pin a post, author only", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs", "line": 38, "why": "Session Core owns thread pin state; gateway passes pinned flag through", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go", "line": 3754, "why": "ThreadSummary.Pinned protobuf field for cross-device pin state", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx", "line": 61, "why": "Six fixed Space tabs (chat, work, knowledge, activity, agent, members); no custom tabs", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx", "line": 189, "why": "Tab bar maps fixed SPACE_TABS only; tab labels carry no counts or badges", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx", "line": 168, "why": "Sidebar unread badges per room post, not header counts of approvals or work", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx", "line": 546, "why": "budget_exceeded shown as refusal banner linking to spend ceiling, not a meter", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/cost/components/CostDashboardPage.tsx", "line": 61, "why": "Org-level metered spend summary exists; no per-Space attribution or room meter", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx", "line": 516, "why": "Untrusted artifact HTML in srcdoc iframe, sandbox allow-scripts, no same-origin", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAttachmentCanvas.tsx", "line": 183, "why": "Attachment preview iframe with sandbox allow-scripts; reusable sandbox pattern", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs", "line": 641, "why": "MCP tools (mcp__ prefix) denied inline; only governed execution may run them", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs", "line": 3686, "why": "MCP tool dispatch refused unless governed agentic execution with approval", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs", "line": 1, "why": "MCP Streamable HTTP client transport; no ui:// resource rendering found", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs", "line": 1, "why": "MCP JSON-RPC framing for client transports; no UI resource handling", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md", "line": 2165, "why": "Mentions MCP Apps (server-rendered UI) as an unbuilt future item", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md", "line": 192, "why": "Audit states no PWA web app manifest and no packaged desktop app", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-073",
+    "title": "Tauri desktop shell around the gateway origin: narrow bridge, system-browser sign-in, protocol links, signed updater",
+    "searches": [
+      "Grep word-match tauri across CoresSystem (code, config, docs); find tauri.conf.json or src-tauri under verevonv3 (none)",
+      "Grep electron|appxmanifest|MSIX|nw.js|wails in verevonv3 excluding node_modules, docs and plans (lockfiles only)",
+      "Grep verevon://|protocol_handler|registerProtocolHandler|single-instance|deep-link in verevonv3 source and config",
+      "Grep code_challenge|code_verifier|PKCE across apps (code) for a desktop sign-in handoff",
+      "Grep updater|update_manifest|release_channel|update_required|minimum_version across apps (code)",
+      "Grep new Notification(|requestPermission|pushManager|tray|globalShortcut in verevonv3/src (none)"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs", "line": 25, "why": "In-app notifications and unread-count routes only; no OS notification bridge", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-deep-link.ts", "line": 1, "why": "In-app chat thread deep-link parser; web routing, not an OS protocol handler", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.test.tsx", "line": 119, "why": "Test for a deep-linked Space tab via URL hash; web-only deep linking", "kind": "test"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/oauth/provider_client.go", "line": 108, "why": "PKCE S256 for provider OAuth; unrelated to a desktop sign-in handoff", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md", "line": 271, "why": "Describes a Tauri plus React desktop client of a reference product", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md", "line": 224, "why": "Reference table notes block/buzz uses Tauri; no Verevon Tauri code", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md", "line": 101, "why": "Audit marks Windows presence missing: no packaged app or PWA manifest", "kind": "doc"}
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-076",
+    "title": "Public developer API with scoped tokens and rate limits (events, external bots and a curated catalogue later)",
+    "searches": [
+      "Grep openapi|OpenAPI|utoipa|swagger across apps (code, specs, configs)",
+      "Grep apikey|api_key|api-key|personal access|scopes in Control Plane auth-core, user-core and org-core",
+      "Grep Retry-After|token_bucket|TokenBucket|RateLimiter in verevonv3 apps/gateway/src",
+      "Grep outbox|webhook|bot_identity|external_bot|binding_kind across Application Plane convex and Control auth-core",
+      "Grep x-api-key in verevonv3 gateway, model-gateway and auth-core (gateway does not accept API keys)",
+      "Grep pin|plugin in gateway agent_actions.rs and action-registry (plugin registry precursor to catalogue)"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts", "line": 1112, "why": "better-auth apiKey plugin for user and org keys, gated by API_KEY_ENABLED", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts", "line": 1126, "why": "Per-key rate limit window and max from env; defaults 24 h and 1000", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/handlers.go", "line": 699, "why": "CreateAPIKeyRequest with name, scopes and expires_at; POST /api/v1/api-keys", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/orpc/openapi.controller.ts", "line": 3, "why": "oRPC OpenAPI generator and Swagger UI for auth contracts", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/docs/docs.controller.ts", "line": 160, "why": "Docs hub and better-auth openapi.json route; no Verevon Space actions", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/api/openapi.yaml", "line": 1, "why": "Model Plane OpenAPI description with generator script for SDKs", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/api/sdk/typescript/src/models/Plan.ts", "line": 1, "why": "Generated TypeScript SDK models; python SDK present, no Rust client found", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs", "line": 1, "why": "Per-key token-bucket limiter with RPM, keyed by session org or user", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs", "line": 377, "why": "Returns 429 TOO_MANY_REQUESTS with Retry-After header", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs", "line": 393, "why": "Second limiter returns Retry-After on mail task bursts", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs", "line": 339, "why": "Admin plugin update with enable, pin and rollout state; catalogue precursor", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts", "line": 257, "why": "webhooks table (url, events, secret, stats); no delivery functions found", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts", "line": 678, "why": "Transactional outbox for Space lifecycle events, at-least-once to Control only", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts", "line": 1991, "why": "Fourteen typed spaces.* actions with schemas; no OpenAPI export from registry", "kind": "code"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-081",
+    "title": "Long-tail polish: role-aware agent templates and persona library, owner-reviewed config proposals, catch-up summaries, external MCP surface",
+    "searches": [
+      "Grep template|AGENT_TEMPLATES|label in src/features/spaces/components/SpaceCreateAgentDialog.tsx",
+      "Grep persona across verevonv3 gateway domains and Model Plane (persona library, teams, export)",
+      "Grep catch-up|summari[sz]e|rewrite|suggested actions|proposal in spaces feature, gateway spaces and chat components",
+      "Grep proposal|review_proposal in verevonv3 gateway/src and Application Plane convex",
+      "Grep /mcp, mcp_server, tools/list, tools/call, JSON-RPC across Model Plane rust and gateway (inbound server check)",
+      "Grep export_definition|agent_team|persona_library across gateway, convex and agents feature (no hits)"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx", "line": 43, "why": "Three static agent templates (referent, status, kunnskap) with name and instructions", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx", "line": 49, "why": "Meeting-scribe template summarises conversations into minutes; static text only", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx", "line": 201, "why": "Template suggestion chips in agent dialog; no role or tool tags", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs", "line": 1, "why": "Self-service user persona instructions only; no persona library, teams or export", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs", "line": 1, "why": "Management proxy for the MCP server registry; SPA consumes servers, does not host one", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs", "line": 330, "why": "MCP server registry routes (list, register, share, OAuth connect); no inbound MCP endpoint", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/capability_consumer.rs", "line": 6, "why": "Gateway registers MCP servers with capability-core; client-side consumer role", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs", "line": 755, "why": "operating_map.review_proposal accept or reject; human-review proposal pattern for wiki", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs", "line": 34, "why": "Imports inbox create_ai_text_proposal and support AI review; not agent config", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx", "line": 58, "why": "Model Plane summarises a thread's first exchange into a title; auto-title only", "kind": "code"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-083",
+    "title": "Federated search across connected providers under the asker's authority",
+    "searches": [
+      "Grep federat|fan-out|fanout across verevonv3 apps/gateway/src and src",
+      "Grep search|query|retriev in src/features/spaces and gateway spaces domain",
+      "Grep search parameter in Ingestion Plane integration-corev2 internal actions and README (provider-level search)",
+      "Grep spaces search action ids in action-registry (none found)",
+      "Read gateway search.rs header and route list (unified search domain)"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs", "line": 1, "why": "Unified web search proxy to quarry-edge; not Space-scoped and not provider-connected", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs", "line": 39, "why": "Routes for web, images, videos, answer stream and suggestions; no Space or provider route", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/workspace.rs", "line": 1, "why": "Org-scoped cross-plane fan-out for Knowledge view: documents, integrations, graph", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs", "line": 12, "why": "Cross-plane fan-out assembling source cards incl. integration-core connections; no search", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/drive_read.go", "line": 255, "why": "SharePoint drive read passes a Graph search parameter; provider-level primitive", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/service.go", "line": 612, "why": "LinkedIn ads campaigns read maps a search parameter to provider search; provider-level primitive", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 231, "why": "Control-issued retrieval-decision token per Space turn; grounding, not a search UI", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx", "line": 23, "why": "Knowledge panel reads retrieval bindings; sources fail independently with stated gaps", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx", "line": 49, "why": "Home dashboard search panel with its own session; not Space-scoped", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/README.md", "line": 279, "why": "Documents per-provider query semantics for list and search; no federated surface", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-089",
+    "title": "Multi-window coordination: pop-out run console, cross-org unread counts, idle presence signal",
+    "searches": [
+      "Grep popout|pop-out|window.open|PopOut|compact=1 in verevonv3/src",
+      "Grep BroadcastChannel|SharedWorker|navigator.locks|new Worker( in verevonv3/src (none)",
+      "Grep IdleDetector|visibilitychange|isIdle|away|document.hidden in verevonv3/src",
+      "Grep unread_count|unreadCount|unread_by_org|org_unread in verevonv3 and Application Plane convex (no cross-org hit)",
+      "Grep heartbeat|presence in spaces-client.ts and SpacePage.tsx"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/integrations/provider-auth-window.ts", "line": 37, "why": "window.open used for provider auth popups only; no pop-out run console", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts", "line": 516, "why": "Per-thread surface tab kept in localStorage; no cross-tab messaging", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx", "line": 71, "why": "Navbar refresh cadence keyed to document.hidden (60 s visible, 180 s hidden)", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx", "line": 206, "why": "Presence beat sends online, typing or offline status for the room", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts", "line": 221, "why": "Presence heartbeat TTL for reader presence; not derived from idle time", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs", "line": 111, "why": "Unread-count endpoint for the current org only; no cross-org unread", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs", "line": 193, "why": "Navbar payload carries unreadCount for the active org only", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx", "line": 86, "why": "Unread badges computed from active-org navbar data", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts", "line": 672, "why": "SSE client supports lastEventId resume; each window would open its own stream", "kind": "code"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-091",
+    "title": "Realtime and media operability after push ships: shared connection per browser, drain on deploy, capability discovery, stream-stall self-test, perf marks, media cache policy",
+    "searches": [
+      "Grep BroadcastChannel|SharedWorker|navigator.locks in verevonv3/src (none outside demo)",
+      "Grep heartbeat|stall|watchdog|keepalive|Last-Event-ID|lastEventId in verevonv3/src/shared/api",
+      "Grep shutdown|SIGTERM|with_graceful_shutdown|drain in gateway/src (only a test comment found)",
+      "Grep Accept-Ranges|ETag|no-store|Cache-Control in gateway/src",
+      "Grep performance.mark|PerformanceObserver|web-vitals in verevonv3/src (none)",
+      "Grep connected event in model-gateway sse.rs; proxy_buffering in nginx.conf; poll constants in SpacePage.tsx",
+      "Grep replicas|autoscal in verevonv3 compose files (none)"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts", "line": 672, "why": "Stream client takes lastEventId and resumes via Last-Event-ID", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts", "line": 689, "why": "Chat stream replays by sequence after Last-Event-ID; overlap risk documented", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/run-console-client.ts", "line": 383, "why": "Run console resume token replays only events after the given id", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs", "line": 2165, "why": "Connected frame carries ok, request_id, run_id, thread_id, model; no capabilities or limits", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs", "line": 29, "why": "Sets Cache-Control no-store on a document response; no Range or ETag handling", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs", "line": 1715, "why": "Sets private, no-store Cache-Control in browser domain; no media cache policy", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/nginx.conf", "line": 84, "why": "Edge tier disables proxy buffering, stream-friendly for SSE", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/nginx.conf", "line": 86, "why": "Proxy read timeout 3600 s on the API path", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx", "line": 87, "why": "Space timeline polls every 6 s; rooms have no push stream", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx", "line": 78, "why": "Space context recheck every 30 s as hard-coded constant; no config registry", "kind": "code"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-095",
+    "title": "Long-tail Space UX, build on demand: multiview tiling, agent-led first-run welcome, What's New and admin notices, non-web link interstitial",
+    "searches": [
+      "Grep multiview|multi-view|dockview|split view|AuxPane in verevonv3/src (chat split view only)",
+      "Grep welcome|firstRun|first_run|onboard|SpaceRoomIntro in src/features/spaces",
+      "Grep whats-new|WhatsNew|changelog|release notes|admin notice in verevonv3 (none)",
+      "Grep isSafeHref|sanitizeUrl|allowedProtocols|javascript:|protocol checks in verevonv3/src",
+      "Grep interstitial|external link confirm in verevonv3 (none)"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx", "line": 2, "why": "Chat split view with live agent panel; one thread, not multi-room tiling", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts", "line": 342, "why": "Split-view live panel fold state; no multi-room layout model", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx", "line": 1, "why": "Reusable run console component; candidate building block for multiview tiles", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 152, "why": "Room intro shown only when a Space has no conversations yet", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 433, "why": "Static room intro with start conversation and create agent actions; no welcome post", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacesIndexPage.tsx", "line": 21, "why": "Self-healing org room provisioning; onboarding infrastructure, not a Space first run", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardUpdatesCard.tsx", "line": 1, "why": "Home updates card shows news and traffic feeds; not a product What's New panel", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/EmailBody.tsx", "line": 41, "why": "Strips javascript: from email HTML; sanitisation exists only in inbox", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/demo/allowlist.ts", "line": 9, "why": "Demo allowlist refuses javascript, data and tel links; demo code, not the room link path", "kind": "code"}
+    ],
+    "impression": "partial"
+  }
+]

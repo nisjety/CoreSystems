@@ -1,0 +1,2932 @@
+{
+ "category": "Computer & environment control",
+ "excluded": [
+  {
+   "id": "claude-runtime-architecture-040",
+   "reason": "VM service RPC framing (length-prefixed JSON, request ids): implementation trivia of Claude's local VM transport, no product relevance beyond C02."
+  },
+  {
+   "id": "deepseek-harness-architecture-139",
+   "reason": "fd-7 control channel between host and child: internal IPC trivia of DeepSeek's subprocess layer."
+  },
+  {
+   "id": "deepseek-transparency-and-customization-156",
+   "reason": "Opt-in tmux pane-location context plugin (DOC): terminal-multiplexer trivia with no relevance to a hosted product."
+  },
+  {
+   "id": "t3code-ui-and-multimodel-092",
+   "reason": "Open project in a locally installed editor: IDE launcher trivia; Verevon is not an IDE."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t3-06-001",
+   "name": "Per-task cloud sandbox computer (isolated VM/microVM with shell, files, browser)",
+   "description": "Every task or session gets its own isolated Linux machine (Firecracker microVM, VM or container-in-microVM) with root, filesystem, network policy, browser and tools; it sleeps when idle, wakes on demand and is recycled after a retention window.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "manus",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "cursor-harness-architecture-083",
+    "manus-computer-control-architecture-058",
+    "web-claudeai-web-product-056",
+    "web-claudeai-web-product-062",
+    "web-manus-web-product-056",
+    "web-perplexity-web-product-071"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity / web-manus (product) + cursor (mechanism)",
+    "recordIds": [
+     "web-perplexity-web-product-071",
+     "web-manus-web-product-056",
+     "cursor-harness-architecture-083"
+    ],
+    "why": "Perplexity SPACE (q5, DOC) combines per-task Firecracker microVMs with just-in-time credential injection, node-level egress control and snapshots for rollback; Manus (q4, DOC) defines the user-visible lifecycle (sleep/wake, 7/21-day recycling); Cursor (q4, SRC) is the only source with a code-verified mechanism (Docker inside Firecracker plus a shared tmux setup session the user can watch)."
+   },
+   "mechanism": "Control plane allocates a microVM per task from a warm pool built from a prebuilt image (see C04); a guest agent exposes exec/PTY/file RPCs over vsock; all egress leaves through a node-level proxy with a domain allowlist; credentials are injected by the proxy only for approved hosts; idle VMs are snapshotted (memory+disk) and resumed on the next turn; a retention reaper deletes snapshots after N days. The task record stores vm_id, snapshot_id and lifecycle state for the UI (C03).",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-099",
+     "v-modelplane-098",
+     "v-planned-decisions-085",
+     "v-chat-agents-ui-092"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:1-20",
+     "apps/Model Plane/docs/decisions/ledger.md:1358"
+    ],
+    "gap": "sandbox-manager is lease/bookkeeping only; execution happens inside the shared execution-core container under bwrap with a ~30 s networkless code_interpreter. There is no per-session VM or container, no installed-tools persistence, no long-lived machine, no browser or desktop inside the sandbox; the SandboxBackend seam was rejected for now.",
+    "strengths": "Leases, Space-scoped durable CAS workspace, snapshots and promotion into Data Plane documents already exist and are the right control-plane half."
+   },
+   "benefit": "This is the Manus 'agent has a computer' foundation: long-running code, package installs, building and testing apps, file-heavy research and later in-sandbox computer use all need it. It keeps execution inside Model Plane (sandbox-manager owns leases) and lets ZDR be enforced by ephemeral disks and no snapshot retention for ZDR orgs.",
+   "approach": "Add a SandboxBackend trait in execution-core (see C15) with a Firecracker (or Kata/gVisor as a first step) backend driven by sandbox-manager in Go: lease -> provision VM from warm pool -> guest agent (Rust, vsock RPC: exec, pty, fs, snapshot) -> attach Space workspace via CAS hydrate/promote. Keep bwrap as the in-guest second layer. Route guest egress through the existing fail-closed AllowDomains proxy. Lifecycle states published on NATS for the computer panel. ZDR orgs: no snapshot, wipe on lease release.",
+   "effort": "XL",
+   "dependencies": [
+    "C15 SandboxBackend seam",
+    "C04 environment images",
+    "C08 egress proxy",
+    "Control Plane space:sandbox decisions",
+    "cost-core metering per VM-minute"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Host isolation and noisy-neighbour risk, cost of idle VMs, KVM availability on the chosen cloud (nested virt), snapshot data retention conflicting with ZDR, abuse (crypto-mining, scraping) needing quotas.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Blocks the stated product vision (Manus-like computer, code, research); every other sandbox-dependent cluster (C22, C35, C36, C47) waits on it.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-002",
+   "name": "Local hypervisor VM sandbox on the user's machine",
+   "description": "The desktop app runs agent code inside a Linux VM on the user's own computer (Hyper-V, Apple Virtualization, KVM) with per-process mounts, egress allowlists and a privileged helper service.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-claudeai"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-037",
+    "claude-runtime-architecture-039",
+    "claude-runtime-architecture-041",
+    "web-claudeai-web-product-057"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-037",
+     "claude-runtime-architecture-041",
+     "claude-runtime-architecture-039"
+    ],
+    "why": "Only Claude ships it with code-verified depth (q5): one TypeScript VM interface over three hypervisors, per-process mounts with hidden sub-paths and per-process allowedDomains, and a Go Windows service with userspace gVisor networking so the app never needs admin rights."
+   },
+   "mechanism": "App -> privileged VM service (named pipe, length-prefixed JSON RPC) -> hypervisor; guest processes spawned with {cwd:/sessions/<id>, mounts[ro|rw, hide[]], allowedDomains, oneShot}; guest network through gVisor netstack and a host proxy.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Verevon is a hosted web product; there is no desktop app and no local execution.",
+    "strengths": ""
+   },
+   "benefit": "Little for Verevon: agent execution is server-side by design, and a local VM would duplicate C01 on hardware Verevon does not control.",
+   "approach": "Do not build. Reuse the ideas (per-process mounts with hidden paths, per-process egress lists, typed startup failure causes) in the server-side guest agent of C01.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Would require a native desktop client and endpoint privileges.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Does not fit a web-first product; the server-side VM (C01) gives the same isolation.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-003",
+   "name": "Sandbox lifecycle, health and state visibility",
+   "description": "Sandboxes have explicit, user-visible states (creating, running, pausing, paused, resuming, resetting, failed), typed startup failure causes, heartbeats with auto-restart, and idle reaping.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "hermes",
+     "manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-042",
+    "claude-runtime-architecture-063",
+    "hermes-architecture-and-surfaces-079",
+    "manus-product-ux-081"
+   ],
+   "bestInClass": {
+    "source": "claude + manus",
+    "recordIds": [
+     "claude-runtime-architecture-042",
+     "claude-runtime-architecture-063",
+     "manus-product-ux-081"
+    ],
+    "why": "Claude's VM startup state machine with typed failure causes and a bounded auto-reinstall policy (q5) plus a 30 s heartbeat with five-strike restart (q4); Manus exposes the same states to users with recovery prompts (q3). Hermes adds a per-task cache and idle reaper (q4)."
+   },
+   "mechanism": "State machine per sandbox {not_created, creating, running, pausing, paused, resuming, resetting, reset_failed, deleting}; each transition emitted as an event with timing and a typed cause on failure; a heartbeat loop pings the guest agent every 30 s and restarts after N misses; an idle reaper pauses/snapshots after T idle and deletes after the retention window.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-098",
+     "v-planned-decisions-088"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:1-20",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-12"
+    ],
+    "gap": "Leases have TTLs and background processes report every transition, but there is no VM to heartbeat, no user-visible sandbox state in chat, and no typed startup-failure taxonomy for a machine.",
+    "strengths": "Process registry already reports transitions and enforces TTL; lease bookkeeping is durable in Postgres."
+   },
+   "benefit": "Users trust a computer panel only if it tells them truthfully whether the machine is booting, paused or broken; operators need typed causes to debug.",
+   "approach": "Extend sandbox-manager lease rows with a lifecycle enum and typed failure cause; publish transitions on NATS; Frontend computer panel (C35) renders them with resume/reset actions. Ship together with C01.",
+   "effort": "M",
+   "dependencies": [
+    "C01"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "State drift between sandbox-manager and the backend if transitions are not idempotent.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap once C01 exists and directly visible to users.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-004",
+   "name": "Prebuilt environment images and declarative setup scripts",
+   "description": "Environments are defined declaratively (setup script, cleanup, env vars, network policy, named actions) and prebuilt into images that are rebuilt on schedule or on config change, so agents start quickly on a healthy base.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-143",
+    "claude-runtime-architecture-038",
+    "codexagent-plugins-and-extensibility-105",
+    "cursor-ai-features-126",
+    "deepseek-harness-architecture-077"
+   ],
+   "bestInClass": {
+    "source": "claude + cursor",
+    "recordIds": [
+     "claude-product-ux-143",
+     "cursor-ai-features-126"
+    ],
+    "why": "Claude's cloud environments (q5, SRC) carry setup script, env vars and a network policy and can be vendor- or self-hosted; Cursor (q4, SRC) prebuilds them into images with recurring rebuilds, logs and build-health tracking."
+   },
+   "mechanism": "Environment spec {base_image, setup_script, env (secret refs), network_policy, actions[]} stored per org/Space; a builder runs the setup in a fresh VM, snapshots it as an image with a content hash, records logs/health; sandboxes boot from the latest healthy image; rebuild on spec change or cron.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-099"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs"
+    ],
+    "gap": "code_interpreter runs in a fixed image with a fixed package set; there is no per-org or per-Space environment definition, no setup script and no image build pipeline.",
+    "strengths": ""
+   },
+   "benefit": "Lets enterprise customers (and Spaces) preinstall their tools and data connectors so agent runs are fast and reproducible.",
+   "approach": "Model Plane: environment spec owned by sandbox-manager (Go) per Space; image builds as Temporal workflows; secrets referenced by id and resolved through the egress proxy (C09), never baked into images.",
+   "effort": "L",
+   "dependencies": [
+    "C01",
+    "C09"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Supply-chain risk in setup scripts; image storage cost; secrets leaking into images.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Second step after C01; without it every run pays install time.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-005",
+   "name": "Login-shell environment hydration for GUI-launched agents",
+   "description": "Desktop apps recover the user's login-shell PATH and environment so agent CLIs and tools resolve as in a terminal.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-architecture-063",
+    "t3code-architecture-021"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-architecture-021"
+    ],
+    "why": "T3 handles both POSIX login shells and PowerShell (q4, SRC)."
+   },
+   "mechanism": "Spawn the user's login shell once, print env with a sentinel, parse and merge into the agent process env.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable: no local agent host.",
+    "strengths": ""
+   },
+   "benefit": "None for a hosted product.",
+   "approach": "Do not build; image-defined env (C04) replaces it.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Desktop-only concern.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-006",
+   "name": "OS-level sandbox for agent commands (filesystem + network policy)",
+   "description": "Shell and tool processes run under kernel-enforced confinement (Seatbelt, Landlock/seccomp/bwrap, Windows restricted tokens/AppContainer) with read-only / workspace-write / full-access policies and network off unless allowed.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-065",
+    "antigravity-architecture-059",
+    "claude-extensibility-and-safety-088",
+    "codexagent-agent-runtime-and-models-048",
+    "codexagent-agent-runtime-and-models-049",
+    "codexagent-agent-runtime-and-models-050",
+    "cursor-harness-architecture-082",
+    "deepseek-harness-architecture-067",
+    "deepseek-harness-architecture-068",
+    "deepseek-harness-architecture-073"
+   ],
+   "bestInClass": {
+    "source": "codexagent + claude",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-048",
+     "claude-extensibility-and-safety-088"
+    ],
+    "why": "Codex (q4, SRC) enforces one policy type through four native backends; Claude (q5, SRC) has the richest policy engine (domain allow/deny with wildcards, strict allowlist mode, TLS termination, fail-if-unavailable). DeepSeek's 460-line static Landlock launcher is the smallest correct Linux implementation."
+   },
+   "mechanism": "Policy {fs: read_only|workspace_write|full, writable_roots[], network: off|allowlist} -> per-OS launcher: Linux bwrap + Landlock ruleset + seccomp filter with no_new_privs; macOS sandbox-exec profile; Windows restricted token + job object. The launcher fails closed when the mechanism is unavailable.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-096",
+     "v-planned-decisions-084"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:256",
+     "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:402",
+     "apps/Model Plane/rust/services/execution-core/src/executor.rs:156"
+    ],
+    "gap": "Linux only (fine for a server product).",
+    "strengths": "bwrap + Landlock + seccomp with ReadOnly/WorkspaceWrite policies, probed at boot, and AllowDomains that fail closed when no egress proxy is configured. Keep it as the in-guest second layer once C01 adds VMs."
+   },
+   "benefit": "Already delivers the core isolation guarantee for server-side tools.",
+   "approach": "Keep; reuse inside VMs for defense in depth.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Kernel-feature drift on hosts; keep the boot probe.",
+   "tier": "n/a",
+   "significance": 4,
+   "rationale": "Verevon is at parity for its server-only scope.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 7,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-007",
+   "name": "Per-call sandbox enforcement report (full / partial / denied)",
+   "description": "Every confined command result states how strongly the policy was enforced and whether a denial happened, so the orchestrator and the user know what protection actually applied.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "deepseek-harness-architecture-066"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-066"
+    ],
+    "why": "Only DeepSeek reports enforcement level per call (q4, SRC)."
+   },
+   "mechanism": "The launcher returns {enforcement: full|partial|none, mechanisms[], denied: bool, denial_detail}; the result card shows a badge; the orchestrator can refuse to continue a high-risk plan on partial enforcement.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-086"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/executor.rs:149"
+    ],
+    "gap": "execution-core already returns a per-call sandboxed bool and capability_profile over HTTP, but no Go/orchestration consumer reads it and the UI does not show it.",
+    "strengths": "The probe and the data already exist."
+   },
+   "benefit": "Transparency (DeepSeek-style) and a policy hook: ZDR or high-risk runs can require full enforcement.",
+   "approach": "Consume the existing field in the Do-mode loop and in the tool card; add a policy rule 'require full enforcement for cap.process.* in ZDR orgs'.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Small change on top of shipped code; fits the transparency goal.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-008",
+   "name": "Host-mediated egress proxy with per-process domain allowlists and compliance gating",
+   "description": "All sandbox traffic flows through a host proxy that enforces per-process allowed domains, strips the wildcard under compliance modes (HIPAA), can host EDR, and receives API tokens out of band.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-051",
+    "claude-runtime-architecture-043",
+    "claude-runtime-architecture-064"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-043",
+     "claude-extensibility-and-safety-051",
+     "claude-runtime-architecture-064"
+    ],
+    "why": "Claude (q5, SRC) has per-process allowlists plus a compliance gate that removes the all-domains wildcard and logs the block; antigravity has a simpler sandbox network proxy."
+   },
+   "mechanism": "Guest -> proxy (CONNECT) -> allowlist check per process id -> DNS resolve once and connect to vetted IP; compliance flag rewrites the allowlist to a mandatory set; tokens handed to the proxy, not the agent env.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-084"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/executor.rs:156",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:1-8"
+    ],
+    "gap": "Code sandbox has no network at all by default; AllowDomains exist but there is no compliance-driven rewrite tied to ZDR/privacy tier, and no per-process allowlist yet (processes are new).",
+    "strengths": "Fail-closed AllowDomains in execution-core and, in Quarry, a DNS-pinned CONNECT proxy that resolves once through the SSRF guard and connects to the vetted IP (comparator SRC read). This is stricter than most references."
+   },
+   "benefit": "Already strong; tying the allowlist to privacy tier/ZDR would make compliance provable.",
+   "approach": "Keep; add an org-policy hook so ZDR/sovereign orgs get a mandatory allowlist with no wildcard, logged as an audit event.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is equal or ahead on egress; only the compliance rewrite is a small add.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-009",
+   "name": "Credential masking with host-side secret injection",
+   "description": "Sandboxed commands only see sentinel values for secrets in files and env vars; the host proxy swaps in the real credential (or re-signs requests, e.g. AWS SigV4) only for approved hosts.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-087"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-087"
+    ],
+    "why": "Claude (q5, SRC) supports file and env secrets, regex extraction, JWT claim masking, per-host injection and SigV4 re-signing."
+   },
+   "mechanism": "Secret spec {source, mode deny|mask, inject_hosts[]}; sandbox env gets SENTINEL_<id>; proxy terminates TLS for injectable hosts, replaces sentinel in headers/body with the real value (or re-signs), and never returns it to the guest.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/scrub.rs:1-8"
+    ],
+    "gap": "No injection proxy found (comparator grep in execution-core). Verevon scrubs secrets from sandbox output and mints audience-bound delegated bearers in the BFF, but a sandbox that needs an API key would have to receive the real value.",
+    "strengths": "Output scrubbing and per-audience delegated bearers are shipped."
+   },
+   "benefit": "Required before sandboxes get network (C01/C04): agents can call customer APIs without the model or its code ever holding the secret, which matches the authority model and limits prompt-injection exfiltration.",
+   "approach": "Extend the execution-core egress proxy: secret refs resolved from Control Plane vault at request time, TLS termination only for inject_hosts, sentinel replacement; audit each injection.",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "C08",
+    "Control Plane secret store"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "TLS interception complexity; certificate pinning in client libraries; must never log the swapped body.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Not visible to users but a prerequisite for safe networked sandboxes.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-010",
+   "name": "Command approval with shell-grammar allow/deny parsing and bypass requests",
+   "description": "Commands are parsed with a real shell grammar to match allow/deny lists and auto-run rules; the model must explicitly request a sandbox bypass for network or outside access, which the user approves.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-064",
+    "antigravity-architecture-058"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-architecture-058",
+     "antigravity-agent-ux-and-gemini-064"
+    ],
+    "why": "Antigravity (q5, SRC) parses commands with a shell grammar, flags dangerous binaries and suggests 'allow always' patterns."
+   },
+   "mechanism": "Parse command into AST -> extract each simple command -> match against allow/deny/ask globs -> dangerous-binary list -> if not allowed, emit an approval request with a suggested reusable pattern.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-097",
+     "v-chat-agents-ui-093"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:766-780"
+    ],
+    "gap": "shell is read-only host commands and human-gated per call through capability policy; there is no shell-grammar parser, no reusable allow patterns, no explicit bypass request.",
+    "strengths": "Capability-level risk classes and durable approvals exist."
+   },
+   "benefit": "Reduces approval fatigue once shell becomes useful in VMs.",
+   "approach": "Add a shell parser (e.g. a Rust bash grammar crate) to capability_policy for cap.shell; store per-Space allow patterns.",
+   "effort": "M",
+   "dependencies": [
+    "C01"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Parser bypasses via obscure shell syntax; keep the OS sandbox as the real boundary.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Inside an isolated VM the sandbox is the boundary; pattern approval is polish.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-011",
+   "name": "Model-facing PTY shell sessions with yield/poll and background processes",
+   "description": "Commands run in a pseudo-terminal; long-running ones return a session id and the model polls or writes stdin with bounded waits and output caps; shells can persist cwd/env across calls.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "deepseek"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-062",
+    "codexagent-agent-runtime-and-models-096",
+    "cursor-harness-architecture-087",
+    "deepseek-harness-architecture-074",
+    "deepseek-harness-architecture-146"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-062"
+    ],
+    "why": "Codex unified exec (q5, SRC): exec_command with tty, yield_time_ms, max_output_tokens and write_stdin/poll on the same session; DeepSeek adds tiered readiness detection for persistent shells."
+   },
+   "mechanism": "exec_command{cmd, tty, yield_ms, max_output_tokens} -> spawn in PTY -> wait up to yield_ms -> return output or {session_id, partial_output}; write_stdin{session_id, chars, yield_ms}; output token-capped with head/tail truncation.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-088",
+     "v-modelplane-097",
+     "v-chat-agents-ui-093"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/process_tools.rs",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4089"
+    ],
+    "gap": "process_start/read/stdin/signal/list exist under bwrap but only for Space-scoped leases with space:processes; no PTY (pipes only), no persistent interactive shell, not available in plain chat, and processes die with the worker by design.",
+    "strengths": "Durable process registry in sandbox-manager with redacted batched output, TTL and signal delivery."
+   },
+   "benefit": "Needed for any real 'agent has a computer' work: dev servers, installs, REPLs, test runs.",
+   "approach": "Add a PTY mode to process_host (portable-pty) and a yield/poll contract like Codex; once C01 lands, run it in the guest agent so processes survive worker restarts.",
+   "effort": "M",
+   "dependencies": [
+    "C01 for persistence"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Output floods; interactive prompts hanging runs.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Good base exists; PTY and yield semantics are the missing pieces.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-012",
+   "name": "Process-tree containment and teardown, subprocess hygiene",
+   "description": "Killing a command reliably kills all descendants (systemd scopes, job objects, parent-first teardown), and spawned children get a scrubbed environment and bounded output collection.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-069",
+    "deepseek-harness-architecture-138",
+    "hermes-architecture-and-surfaces-080"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-069",
+     "deepseek-harness-architecture-138"
+    ],
+    "why": "DeepSeek (q4, SRC) uses OS-owned process ranges and a subprocess seam with no implicit defaults and scrubbed env."
+   },
+   "mechanism": "Spawn each command in its own PID namespace / cgroup / job object; terminate = SIGTERM, grace, SIGKILL to the whole group; env built from an explicit allowlist.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-088"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-12",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:59",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:377",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:448"
+    ],
+    "gap": "No baseline record covers teardown directly; verified by comparator read: bwrap --die-with-parent, kill_on_drop, SIGTERM grace then kill, kill_for_lease on lease release.",
+    "strengths": "Fail-safe teardown tied to lease release; keep."
+   },
+   "benefit": "Prevents leaked sandboxes and runaway cost.",
+   "approach": "Keep; add cgroup limits when C01 lands.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is at parity.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-013",
+   "name": "Terminal output offload to files (scrollback flight recorder)",
+   "description": "Terminal state and large tool outputs are written to size-bounded, redacted files the agent can grep or page through, instead of being pasted into context.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-053",
+    "cursor-harness-architecture-084"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-084"
+    ],
+    "why": "Cursor (q5, SRC) stores each terminal as a file with header/footer metadata and offloads big outputs to disk for grep; Claude adds redaction and size bounds (q5)."
+   },
+   "mechanism": "Each process writes to terminals/<id>.txt with {pid, running_for_ms, exit_code}; results over N tokens are spilled to a file and the model receives a path plus head/tail; a grep/read tool pages through it.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-088"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-12"
+    ],
+    "gap": "Output is capped (8/16 MiB) and redacted into the registry; there is no spill-to-workspace file with a pointer returned to the model, so large outputs are truncated rather than searchable.",
+    "strengths": "Redaction already applied before storage."
+   },
+   "benefit": "Context efficiency on long agent runs; matches DeepSeek-style transparency (full logs available).",
+   "approach": "Write process output into the Space workspace (CAS) as logs/<process>.txt and return a path + summary; reuse read tools to grep. ZDR: logs are ephemeral and never promoted.",
+   "effort": "S",
+   "dependencies": [
+    "C11"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Retention of logs under ZDR.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Small effort, measurable token savings.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-014",
+   "name": "User-facing terminal panes (live output, tabs, add-to-chat)",
+   "description": "Users see real terminal tabs for the task (live output, rename, survive reloads, flood protection) and can send a selection to the agent.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "deepseek",
+     "manus",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-141",
+    "deepseek-transparency-and-customization-146",
+    "manus-computer-control-architecture-052",
+    "manus-product-ux-082",
+    "t3code-architecture-055",
+    "t3code-ui-and-multimodel-066"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-066",
+     "t3code-architecture-055"
+    ],
+    "why": "T3 (q4, SRC): canvas terminal on Ghostty VT WASM with IME, links and 'Add to chat', backed by thread-scoped PTYs with on-disk scrollback."
+   },
+   "mechanism": "PTY output streamed with sequence numbers (resume on reconnect); browser renders with xterm.js or Ghostty-WASM; selection -> chat context chip.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-093"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts:38"
+    ],
+    "gap": "Shell/process tools render as generic tool cards with a terminal intent; there is no terminal viewer, no live stream, no user shell.",
+    "strengths": ""
+   },
+   "benefit": "Transparency: users see exactly what the agent ran (DeepSeek goal) and can copy errors into chat.",
+   "approach": "Frontend: a read-only xterm.js viewer inside the computer panel (C35) fed by process output SSE with sequence numbers from session-core events; user typing only in an explicitly taken-over sandbox.",
+   "effort": "M",
+   "dependencies": [
+    "C11",
+    "C35"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Rendering secrets; must stream redacted output only.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Visible improvement; a read-only viewer is enough, an interactive user shell is not needed for a non-IDE product.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-015",
+   "name": "Pluggable execution backends behind one host interface",
+   "description": "The same shell/file/code tools run on local, Docker, SSH, Modal, Daytona, Vercel Sandbox, WSL or remote hosts by switching a backend that implements one spawn/file contract with declared capabilities.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-064",
+    "deepseek-harness-architecture-070",
+    "deepseek-harness-architecture-075",
+    "hermes-architecture-and-surfaces-075",
+    "hermes-architecture-and-surfaces-076",
+    "hermes-architecture-and-surfaces-077"
+   ],
+   "bestInClass": {
+    "source": "hermes + deepseek",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-075",
+     "deepseek-harness-architecture-070"
+    ],
+    "why": "Hermes (q5, SRC) ships seven backends behind one spawn-per-call contract with provider plugins declaring capability flags; DeepSeek's execution-world principle (q5) shows that moving fs+subprocess moves PTY and LSP with them."
+   },
+   "mechanism": "trait ExecutionHost { spawn(spec)->Handle; pty(spec); read/write/stat/list; snapshot(); capabilities() } ; tools call only the trait; backends register with capability flags (persistent fs, network, gpu); sessions pick a backend from policy.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-085"
+    ],
+    "evidence": [
+     "apps/Model Plane/docs/decisions/ledger.md:1358"
+    ],
+    "gap": "Rejected for now on 2026-08-22 because only one backend exists; execution-core calls bwrap directly.",
+    "strengths": ""
+   },
+   "benefit": "Unlocks C01 and enterprise self-hosted compute (customer VPC) without forking tools; lets Verevon trial E2B/Daytona/Modal before building Firecracker.",
+   "approach": "Introduce the trait in execution-core now with the bwrap backend as impl #1 and one managed provider (e.g. E2B/Daytona) as #2; sandbox-manager selects by Space policy.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Third-party sandbox vendors break ZDR/residency unless attested; keep vendor use behind privacy tier.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "The ledger's revisit condition ('when a second backend exists') is met the moment C01 starts.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-016",
+   "name": "Remote environments over SSH, WSL and tunnels",
+   "description": "Agents run on user-provided remote hosts via SSH (with host-key trust, remediation, reconnect), WSL or tunnels, often by installing a small helper server remotely.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "deepseek",
+     "t3code",
+     "web-chatgpt"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-068",
+    "claude-product-ux-099",
+    "cursor-ai-features-113",
+    "deepseek-harness-architecture-071",
+    "deepseek-harness-architecture-159",
+    "t3code-architecture-053",
+    "t3code-architecture-054",
+    "web-chatgpt-web-product-083"
+   ],
+   "bestInClass": {
+    "source": "t3code + deepseek",
+    "recordIds": [
+     "t3code-architecture-054",
+     "deepseek-harness-architecture-159"
+    ],
+    "why": "T3 (q4) installs/reuses a server on the host, forwards a port and pairs automatically; DeepSeek's SSH helper (q4) has a versioned RPC with reserved management budgets and per-stream TLS-PSK."
+   },
+   "mechanism": "SSH alias -> upload verified helper binary -> run helper -> multiplexed RPC over the SSH channel for exec/pty/fs.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No SSH/BYO-host execution.",
+    "strengths": ""
+   },
+   "benefit": "Low for a hosted product; enterprise BYO compute is better served by a self-hosted backend in C15.",
+   "approach": "Do not build as a user feature; if enterprises need it, offer a self-hosted ExecutionHost backend.",
+   "effort": "L",
+   "dependencies": [
+    "C15"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Credential handling for SSH keys.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "IDE/desktop pattern; Verevon is not an IDE.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-017",
+   "name": "Remote access to the agent from phone or any browser",
+   "description": "Desktop-hosted agents are reachable from a phone or the web via a relay/tunnel, QR pairing, LAN or Tailscale exposure, to watch runs and approve actions.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "t3code",
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-067",
+    "t3code-architecture-022",
+    "t3code-architecture-026",
+    "web-chatgpt-web-product-081",
+    "web-manus-web-product-059"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-architecture-022"
+    ],
+    "why": "T3 Connect (q4, SRC): pinned cloudflared tunnel, environment-signed proofs and scoped links."
+   },
+   "mechanism": "Local server registers with a relay, receives an endpoint; clients authenticate with scoped signed links.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-099"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWorkspaceCanvas.tsx:1-60"
+    ],
+    "gap": "No native mobile app (responsive web only); push notifications for approvals belong to Application Plane notifications.",
+    "strengths": "By architecture: agents run server-side, so every run and approval is already reachable from any browser or phone without a relay."
+   },
+   "benefit": "Already satisfied by being web-native.",
+   "approach": "Keep; ensure approval cards work well on mobile web.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Structural strength of a hosted product.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-018",
+   "name": "Git worktrees for parallel agents",
+   "description": "Each parallel agent thread works in its own git worktree with setup scripts, retention limits, handoff between local and worktree, and cleanup.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "manus",
+     "t3code",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 10,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-066",
+    "antigravity-architecture-060",
+    "claude-runtime-architecture-055",
+    "codexagent-agent-runtime-and-models-073",
+    "codexagent-agent-runtime-and-models-100",
+    "codexagent-plugins-and-extensibility-123",
+    "cursor-ai-features-112",
+    "cursor-harness-architecture-133",
+    "deepseek-harness-architecture-076",
+    "hermes-architecture-and-surfaces-090",
+    "manus-product-ux-079",
+    "t3code-architecture-044",
+    "web-chatgpt-web-product-082",
+    "web-claudeai-web-product-063"
+   ],
+   "bestInClass": {
+    "source": "t3code + codexagent",
+    "recordIds": [
+     "t3code-architecture-044",
+     "codexagent-plugins-and-extensibility-123"
+    ],
+    "why": "T3 (q4) self-heals missing worktrees and manages base-branch metadata; Codex (q4) supports local-to-worktree handoff with step-by-step rollback."
+   },
+   "mechanism": "git worktree add under app dir per thread; branch naming policy; setup script; reaper by count/age.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-106"
+    ],
+    "evidence": [
+     "apps/Model Plane/docs/decisions/ledger.md:1821"
+    ],
+    "gap": "Not a coding product; ledger rejects worktree isolation for subagents.",
+    "strengths": ""
+   },
+   "benefit": "None for Verevon's core; per-run isolated workspaces come from C01 + Space CAS snapshots instead.",
+   "approach": "Do not build.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "IDE pattern; isolation is achieved by per-task sandboxes and CAS workspace snapshots.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-019",
+   "name": "VCS panel, git safety harness and git-aware context",
+   "description": "Git status/diff panels, LLM commit messages, context-aware commit/push/PR actions, a git safety layer that allow-lists subcommands and neutralises repo-controlled code, VCS driver SPI, IDE reverse-RPC bridge.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-070",
+    "antigravity-architecture-062",
+    "claude-runtime-architecture-054",
+    "cursor-harness-architecture-088",
+    "t3code-architecture-060",
+    "t3code-ui-and-multimodel-070"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-054"
+    ],
+    "why": "Claude's git safety harness (q5, SRC): allow-listed subcommands/flags, hardened config, private index files."
+   },
+   "mechanism": "All git calls go through a policy layer setting GIT_DIR/GIT_INDEX_FILE, disabling hooks/fsmonitor/filters, and allow-listing subcommands.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-106"
+    ],
+    "evidence": [],
+    "gap": "No git features.",
+    "strengths": ""
+   },
+   "benefit": "Low; only relevant if Verevon agents operate on customer repos via a connector.",
+   "approach": "If ever needed, treat git as an integration-corev2 provider action, and apply Claude's hardened-config rules in the sandbox.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Repo-controlled code execution (hooks, filters).",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Not an IDE.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-020",
+   "name": "Execution target selection and device switching",
+   "description": "Each task runs on an 'active device' (per-task sandbox, persistent cloud computer, or a local computer); users pick it at session start and can move a task mid-flight, with file handoff and local-files-stay-local rules.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-098",
+    "manus-computer-control-architecture-023",
+    "manus-computer-control-architecture-077",
+    "manus-product-ux-083",
+    "manus-product-ux-124"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-077",
+     "manus-computer-control-architecture-023"
+    ],
+    "why": "Manus defines one device taxonomy behind an 'active device' concept and supports re-execution on a new device (DOC, q4/q3)."
+   },
+   "mechanism": "Task.device_ref {kind: sandbox|cloud_computer|local, id}; tools resolve the host through C15; switching re-hydrates the workspace and re-runs from the last checkpoint.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-094"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:205-247"
+    ],
+    "gap": "Only one implicit target (execution-core) and a Space-scoped workspace lease; no user-visible device choice.",
+    "strengths": "Space-scoped workspace lease is the natural unit to move between devices."
+   },
+   "benefit": "Becomes relevant once there are at least two backends (ephemeral sandbox vs persistent computer).",
+   "approach": "Add device_ref on runs in session-core once C15/C22 exist; UI picker in the composer.",
+   "effort": "M",
+   "dependencies": [
+    "C15",
+    "C22"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Partial-state confusion when switching.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Only meaningful after multiple backends exist.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-021",
+   "name": "Persistent cloud computers (always-on agent machines)",
+   "description": "Users or teams rent always-on Linux/Windows/macOS machines that keep files, installed tools and databases, can be reset, backed up and accessed by SSH or web.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "manus-computer-control-architecture-075",
+    "manus-product-ux-076",
+    "web-manus-web-product-060"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-076",
+     "web-manus-web-product-060"
+    ],
+    "why": "Manus offers Ubuntu, Windows Server and macOS cloud computers with chosen compute/region (q4, SRC + DOC with pricing)."
+   },
+   "mechanism": "Long-lived VM with a persistent disk and a guest agent; billing per month; backups as disk snapshots; the agent attaches to it as a device (C21).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-098",
+     "v-planned-decisions-087"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs"
+    ],
+    "gap": "Files persist per Space through the CAS workspace, but there is no persistent machine (installed tools, running services, databases).",
+    "strengths": "Durable Space workspace with snapshots covers the most common persistence need (files) without paying for idle machines."
+   },
+   "benefit": "Useful for teams that automate recurring work needing installed software; also a revenue line.",
+   "approach": "Later: a 'persistent' flag on a C01 lease that keeps the VM disk; bill through cost-core.",
+   "effort": "L",
+   "dependencies": [
+    "C01",
+    "C21"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cost, abuse, residency.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Space workspaces already give file persistence; machine persistence can wait.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-022",
+   "name": "Workspace persistence across sessions (snapshots, sync, dated workspaces)",
+   "description": "Agent workspaces persist across sessions: changed files are synced transactionally to remote sandboxes and state persists via snapshots; tasks without a chosen folder get an automatic workspace bound to the session.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes",
+     "manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-078",
+    "manus-computer-control-architecture-050"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-078"
+    ],
+    "why": "Hermes (q4, SRC) mirrors changed files to SSH/Modal/Daytona/Vercel backends transactionally and persists state via snapshots or stop/resume."
+   },
+   "mechanism": "Content-addressed manifest of the workspace; sync diffs to the sandbox before a command; snapshot after; restore on resume.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-098",
+     "v-planned-decisions-087"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2554"
+    ],
+    "gap": "Only for Space-scoped turns; plain chat has no persistent workspace (CPA:62).",
+    "strengths": "Space-scoped CAS workspace with lease, hydrate, snapshot, overlay-merge promote and promotion into Data Plane documents: ahead of most references because it respects plane ownership and Space ACLs."
+   },
+   "benefit": "Keep and extend to a per-thread ephemeral workspace for plain chat.",
+   "approach": "Allow a thread-scoped (non-Space) workspace lease with short TTL; ZDR: no promote.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Strength.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-023",
+   "name": "Agent browser automation toolset (accessibility snapshots, element refs, DOM/pixel actions, console/network)",
+   "description": "The agent drives a browser with a tool vocabulary: open/list tabs, navigate, accessibility snapshot with opaque element refs, click/type/fill/scroll/drag by ref or pixel, console and network capture, JS eval, screenshots, dialogs and cross-origin iframes, with compact per-action state diffs.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "hermes",
+     "manus",
+     "t3code"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-060",
+    "antigravity-agent-ux-and-gemini-063",
+    "antigravity-architecture-053",
+    "antigravity-architecture-054",
+    "antigravity-architecture-055",
+    "cursor-ai-features-110",
+    "cursor-harness-architecture-085",
+    "hermes-architecture-and-surfaces-083",
+    "hermes-architecture-and-surfaces-084",
+    "manus-computer-control-architecture-026",
+    "t3code-architecture-056",
+    "t3code-ui-and-multimodel-102"
+   ],
+   "bestInClass": {
+    "source": "antigravity + manus",
+    "recordIds": [
+     "antigravity-architecture-055",
+     "antigravity-agent-ux-and-gemini-060",
+     "manus-computer-control-architecture-026"
+    ],
+    "why": "Antigravity (q5, SRC) has the widest vocabulary and three toolset modes (DOM, pixel-only, DOM-in/pixel-out) with per-action state diffs; Manus (q4, REA) builds a hybrid accessibility+DOM snapshot with logical targets; Hermes adds a CDP supervisor for dialogs and OOPIFs."
+   },
+   "mechanism": "CDP session per tab -> snapshot = accessibility tree merged with DOM, each interactable node gets a short ref -> actions accept {ref} or {x,y bound to a capture id} -> after each action compute a diff of URL, title, focused element and changed nodes -> return diff instead of full snapshot; dialogs and downloads tracked via CDP events.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-100",
+     "v-planned-decisions-090",
+     "v-modelplane-101",
+     "v-modelplane-102",
+     "v-chat-agents-ui-097"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:1-8",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3099",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1030"
+    ],
+    "gap": "The executor side is rich (Quarry observation protocol with snapshot/ref ids, dialogs, downloads as artifacts, multiple drivers), but agent runs fail closed because the gateway sends grant_id 'session:{id}' that browser-broker never minted; browser_agent is excluded from chat (inline_tool_allowed) and model-initiated browsing in Do runs is deferred to Wave 6 (E12). No pixel-only mode, no per-action state diff.",
+    "strengths": "Correct architecture (Model proposes, Quarry executes), multi-driver Quarry (chromiumoxide, Browserless, Browserbase, Kernel), SSRF + DNS-pinned egress, risk classes and step receipts."
+   },
+   "benefit": "Browser use is the most used 'computer' capability in every reference; fixing reachability turns already-built Quarry power into a user-visible feature in chat.",
+   "approach": "1) Mint a real broker grant in the BFF (browser-broker AcquireGrant) for the run and pass its id; 2) allow browser_agent in chat and Do mode behind the web toggle; 3) add per-action state diffs to BrowserObservation to cut tokens; 4) optional pixel mode for canvas-heavy pages.",
+   "effort": "M",
+   "dependencies": [
+    "browser-broker grant minting",
+    "C29 approvals",
+    "C34 takeover"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Prompt injection from pages; cost of long runs; must keep Quarry as the only executor.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Users notice immediately; most of the code exists and the blocker is a grant-id wiring bug plus a policy flag.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 2,
+    "SRC": 10,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-024",
+   "name": "WebMCP: calling tools that web pages expose, and agent-managed browser extensions",
+   "description": "The browser tool server discovers and calls tools a page exposes through WebMCP and can install/reload Chrome extensions during a session.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "antigravity-architecture-056"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-architecture-056"
+    ],
+    "why": "Only Antigravity (q3, SRC)."
+   },
+   "mechanism": "Page registers tools via navigator.modelContext; the CDP server enumerates and invokes them as MCP tools.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not present (no baseline; Quarry actions are DOM-level).",
+    "strengths": ""
+   },
+   "benefit": "Future-proofing: structured page tools are safer than DOM clicks and fit 'typed actions first'.",
+   "approach": "Quarry: detect WebMCP tools in observation and expose them as typed actions proposed by Model Plane, executed by Quarry.",
+   "effort": "M",
+   "dependencies": [
+    "C24"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Standard is immature; page-provided tool descriptions are untrusted input.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Emerging standard, low adoption today.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-025",
+   "name": "Versioned browser tool contract with snapshot/ref/revision binding and stale-target rejection",
+   "description": "Every browser action targets (snapshotId, ref) or a capture-bound coordinate; stale pages, refs or captures are rejected; the contract is schema-first and versioned with an error catalogue stating retryable/requiresSnapshot, plus an action ledger.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "manus-computer-control-architecture-016",
+    "manus-computer-control-architecture-027",
+    "manus-computer-control-architecture-028",
+    "manus-product-ux-067"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-028",
+     "manus-computer-control-architecture-027",
+     "manus-product-ux-067",
+     "manus-computer-control-architecture-016"
+    ],
+    "why": "Manus (q5, SRC) is the only reference with a golden-tested 22-tool contract, revision tokens and retry semantics per error code."
+   },
+   "mechanism": "snapshot() returns {snapshot_id, doc_revision, refs}; actions carry snapshot_id + ref; executor checks the ref belongs to the current revision else returns STALE_REF {retryable, requiresSnapshot}; coordinate actions carry capture_id + displayed size for reprojection.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-100"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1030",
+     "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:278",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/target_repair.rs:1-5"
+    ],
+    "gap": "No baseline record covers this; verified by comparator read: Quarry actions carry (snapshot_id, generation, ref_id), the planner schema carries generation, and target repair only ranks read-only candidates and never rewrites an effectful action. A published error catalogue with retryable flags and a golden contract test were not checked.",
+    "strengths": "Revision-bound refs and 'no silent retargeting of effectful actions' match the best reference. Keep, and add a golden contract test shared by Model Plane and Quarry."
+   },
+   "benefit": "Prevents clicking the wrong element after a page change, a top cause of harmful agent actions.",
+   "approach": "Keep; publish the error catalogue in the proto and add a cross-plane golden test.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is at parity with the best reference (code-verified by comparator, medium confidence).",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-026",
+   "name": "Browser subagent delegation (own model, budget and context)",
+   "description": "The main agent delegates a web task to a dedicated browser subagent with its own model, context policy and tool budget, which returns a result and a recording; it can be reused or skipped.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-059",
+    "antigravity-architecture-052"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-059",
+     "antigravity-architecture-052"
+    ],
+    "why": "Antigravity (q5, SRC) records the subagent run and keeps the main agent working in parallel."
+   },
+   "mechanism": "Tool browser_task{task, budget} -> spawn subagent with browser toolset only -> returns {result, recording_ref, steps}; main context receives only the summary.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-100",
+     "v-planned-decisions-090"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3099",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:1-8"
+    ],
+    "gap": "browser_agent is a separate execution-core loop (effectively a subagent) but it is not offered in chat and fails closed on the grant; no separate model choice per subagent is exposed.",
+    "strengths": "subagent.task and research_fan_out exist; browser_agent already isolates browser context from the main loop."
+   },
+   "benefit": "Keeps the main conversation context small and lets a cheaper/faster model do browsing.",
+   "approach": "Expose browser_agent as a subagent tool with its own model profile once C24 is unblocked.",
+   "effort": "S",
+   "dependencies": [
+    "C24"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Subagent hallucinated results; require step receipts in the summary.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small once C24 is fixed.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-027",
+   "name": "Browser session recording / replay as a reviewable artifact",
+   "description": "Browser tasks produce a video (or frame) recording stored as an artifact and shown under the step, so users can review what the agent did.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-062",
+    "t3code-architecture-058"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-062"
+    ],
+    "why": "Antigravity (q4, SRC) stores the recording as an artifact and embeds it in walkthroughs; T3 records via CDP screencast to MP4/WebM."
+   },
+   "mechanism": "CDP Page.startScreencast -> frames -> encode (WebCodecs or ffmpeg) -> artifact; or provider replay URLs (Kernel/Browserbase).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-095"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:86",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:741"
+    ],
+    "gap": "BrowserChrome keeps up to 96 replay events (an event timeline, not video) and Quarry passes through provider live_view_url/recording_id, but there is no recording artifact attached to the chat answer or run.",
+    "strengths": "Step receipts and an event timeline already give an auditable trail."
+   },
+   "benefit": "Trust and auditability for agent browsing; matches DeepSeek-style transparency.",
+   "approach": "Quarry: optional screencast-to-artifact per run (off under ZDR); Frontend: play it in the run panel next to step receipts.",
+   "effort": "M",
+   "dependencies": [
+    "C24"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Recordings capture personal data; must respect ZDR and retention.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Strong trust signal; moderate cost.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-028",
+   "name": "Browser access control: site allow/deny lists and risky-action approvals",
+   "description": "Pages must pass a server denylist and a user allowlist; reading and acting are separate permissions; each batch of actions asks approval naming the sites; in-app pages run with no permissions and origin prompts; spoofable local hosts get warning copy.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-061",
+    "claude-product-ux-125",
+    "claude-runtime-architecture-052",
+    "claude-runtime-architecture-058"
+   ],
+   "bestInClass": {
+    "source": "antigravity + claude",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-061",
+     "claude-product-ux-125"
+    ],
+    "why": "Antigravity (q5) separates read_url and execute_url permissions with a fail-closed server denylist; Claude (q4) batches approvals by site with an explicit 'allow all' switch."
+   },
+   "mechanism": "Navigation guard -> denylist (fail closed) -> allowlist or prompt -> action risk class -> approval card listing sites and actions -> remember per-site choice.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-096",
+     "v-planned-decisions-090"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:7-25",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1349",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:186-191"
+    ],
+    "gap": "Risk-classified durable approvals (login, checkout, form post, destructive, cross-domain, cookies) and Quarry allowed_domains + SSRF guard exist, but because agent runs fail closed they are not exercised end-to-end; no user-managed per-site allowlist with read vs act distinction.",
+    "strengths": "Risk classes are richer than most references; SSRF/DNS pinning is stronger."
+   },
+   "benefit": "Required for safe browser agents in enterprises.",
+   "approach": "Add per-Space site policy (read/act) in Control Plane, enforced by Quarry; surface approvals in chat.",
+   "effort": "M",
+   "dependencies": [
+    "C24"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Approval fatigue.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Mostly built; needs the end-to-end path and a site policy UI.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-029",
+   "name": "Drive the user's own signed-in browser (extension / native messaging / real profile)",
+   "description": "The agent acts in the user's real Chrome/Edge/Brave via an extension or native-messaging host so existing logins work; per-browser authorization, tab mentions, workflow recording.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "hermes",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-runtime-architecture-051",
+    "hermes-architecture-and-surfaces-085",
+    "hermes-architecture-and-surfaces-086",
+    "manus-computer-control-architecture-025",
+    "manus-product-ux-065",
+    "web-chatgpt-web-product-079",
+    "web-claudeai-web-product-060",
+    "web-perplexity-web-product-073"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-051",
+     "web-claudeai-web-product-060"
+    ],
+    "why": "Claude in Chrome (q5, SRC) has a native-messaging host, three transports, org gating, side panel, tab groups and workflow recording; Hermes and Manus offer similar extension controllers."
+   },
+   "mechanism": "Extension with debugger/tabs permissions <-> native host or cloud relay <-> agent tool calls; approvals per site batch.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-092",
+     "v-chat-agents-ui-098"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "gap": "Parked by owner ruling 2026-09-28: 'Chrome control means the hosted governed browser'.",
+    "strengths": "Hosted browser with persistent profiles (C33) and human takeover for login (C34) covers the login use case without touching the user's machine."
+   },
+   "benefit": "High user value (logged-in sites), but it would let actions bypass Quarry's executor and egress controls and puts ZDR and audit outside Verevon's control.",
+   "approach": "Keep parked. If revisited, the extension must be a thin Quarry executor (Model proposes, extension executes only Quarry-validated actions with grants and receipts).",
+   "effort": "L",
+   "dependencies": [
+    "C24",
+    "C29"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Security (extension permissions), audit gaps, cross-plane rule violation.",
+   "tier": "skip",
+   "significance": 3,
+   "rationale": "Conflicts with the owner ruling and the Model-proposes/Quarry-executes rule; the hosted browser plus takeover is the chosen path.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-030",
+   "name": "Hosted or in-app browser surface shared by user and agent",
+   "description": "A full browser surface (tabs, downloads, PDF viewer, dialogs, certificate interstitials, annotations) lives inside the product, where the user watches and can act on the same pages; some run in the cloud for background work on signed-in sites.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "deepseek-transparency-and-customization-147",
+    "manus-computer-control-architecture-037",
+    "web-chatgpt-web-product-077",
+    "web-chatgpt-web-product-078",
+    "web-claudeai-web-product-059",
+    "web-perplexity-web-product-072"
+   ],
+   "bestInClass": {
+    "source": "manus + web-chatgpt",
+    "recordIds": [
+     "manus-computer-control-architecture-037",
+     "web-chatgpt-web-product-078"
+    ],
+    "why": "Manus (q3, SRC) treats the in-app browser as a full browser with downloads, PDF, PiP, dialogs; ChatGPT's desktop browser (q5, DOC) adds annotation mode where the user marks a region for the agent."
+   },
+   "mechanism": "Browser surface backed by a remote Chromium session streamed as frames (or an embedded webContents), shared between human and agent input with control arbitration.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-095",
+     "v-planned-decisions-089",
+     "v-planned-decisions-091"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1-25",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:1-15"
+    ],
+    "gap": "Lives in Knowledge/Dashboard, not openable from a chat message ('Open in browser', /browse planned E9/E10); no annotation mode.",
+    "strengths": "Hosted governed browser with frames over HTTP/SSE/WebSocket, tabs, DevTools, timeline, profiles, and screenshots relayed with a renderable-type allowlist; it is cloud-hosted like ChatGPT's Work browser, which suits a web product."
+   },
+   "benefit": "Keep; wiring it into chat closes the visible gap.",
+   "approach": "Add 'Open in browser' and /browse in chat (E9/E10) and an annotation overlay that sends a region + note as context.",
+   "effort": "S",
+   "dependencies": [
+    "C24"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Strength; only chat entry points are missing.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 5,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-031",
+   "name": "Browser profile, login and data persistence controls",
+   "description": "Browser data (cookies, storage, logins) can persist per project or per session, or not at all; per-task tab workspaces are retained, restored and transferable; users import cookies/passwords and choose 'persist logins' vs 'ask each time'.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-126",
+    "manus-computer-control-architecture-035",
+    "manus-product-ux-084"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-084",
+     "manus-computer-control-architecture-035"
+    ],
+    "why": "Manus (q4, SRC) gives users explicit login-persistence and import controls plus per-task tab workspaces with LRU/TTL eviction and restore."
+   },
+   "mechanism": "Profile = {cookies, localStorage, IndexedDB, viewport, UA} snapshot stored per scope; restore on session start; policy per scope.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-095"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/session.rs:1-7",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/cached_profile_store.rs:1-10"
+    ],
+    "gap": "Engine verified by comparator read (SessionSnapshot with cookies, web storage and IndexedDB; Postgres/S3 stores with a Redis hot cache). Not verified: user-facing import of cookies from the user's browser and a 'persist vs ask' setting.",
+    "strengths": "Org-scoped profile store with IndexedDB capture is ahead of most references."
+   },
+   "benefit": "Keep; add simple user controls.",
+   "approach": "Frontend settings: per-Space persistence mode; ZDR orgs default to no persistence.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Stored session cookies are high-value secrets; encrypt at rest and scope by org.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Strength (engine); small UI follow-up.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-032",
+   "name": "Human takeover and hand-back of the agent's browser or computer",
+   "description": "When the agent hits a login, 2FA or CAPTCHA it suggests takeover; the user takes control in a full-screen viewer (WebRTC with noVNC fallback), and hands back with a message; the app distinguishes human from agent input and shows who controls.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "hermes",
+     "manus",
+     "t3code",
+     "web-manus"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-075",
+    "hermes-architecture-and-surfaces-088",
+    "manus-product-ux-064",
+    "t3code-architecture-072",
+    "web-manus-web-product-057"
+   ],
+   "bestInClass": {
+    "source": "manus + t3code",
+    "recordIds": [
+     "manus-product-ux-064",
+     "t3code-architecture-072"
+    ],
+    "why": "Manus (q5, SRC) has agent-suggested takeover cards and a hand-back message; T3 (q5, SRC) does real arbitration by recording expected synthetic input and treating any other input as human."
+   },
+   "mechanism": "Agent emits suggest_takeover{surface, reason}; UI card -> lease control to human (agent actions blocked) -> human input over WebRTC/WS -> hand back with note -> agent re-snapshots before continuing.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-089",
+     "v-planned-decisions-095",
+     "v-modelplane-103"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497",
+     "apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:428"
+    ],
+    "gap": "Manual takeover exists in the hosted browser (controlMode human_takeover blocks model actions), but there is no Model Plane path: the agent cannot request takeover, there is no hand-back message into the run, and the secrets/2FA/CAPTCHA flow is planned only.",
+    "strengths": "Control-mode arbitration and blocking of model actions during takeover already exist in the UI."
+   },
+   "benefit": "Without it browser agents stall at every login; with it Verevon keeps the user (not the model) as the only holder of credentials, matching the authority model.",
+   "approach": "Model Plane: a request_human_takeover tool that pauses the run (existing pause/resume) and emits an event; Quarry/BFF: switch control mode and stream; on hand-back, resume with the user's note and force a fresh snapshot.",
+   "effort": "M",
+   "dependencies": [
+    "C24"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Run timeouts while waiting; must not record typed secrets in replays.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Essential companion to C24; most parts exist.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-033",
+   "name": "Live computer panel: typed viewer per tool, PiP preview, agent cursor and controller badge",
+   "description": "A side panel shows 'the agent's computer' live, with a dedicated viewer per tool kind (browser, terminal, editor, search), a picture-in-picture mini view, a synthetic cursor and an 'agent controlling' indicator; agents can even open and arrange panes.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "hermes",
+     "manus",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-runtime-architecture-050",
+    "hermes-architecture-and-surfaces-089",
+    "manus-product-ux-062",
+    "manus-product-ux-066",
+    "t3code-ui-and-multimodel-043"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-062",
+     "manus-product-ux-066"
+    ],
+    "why": "Manus's computer panel (q5, SRC) renders each timeline point with a viewer per tool kind and a PiP that follows the user; T3 adds a synthetic cursor and controller badge."
+   },
+   "mechanism": "Run events carry tool_kind + payload refs; panel switches viewer by kind; scrubbing the timeline replays past states; PiP mirrors the active surface.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-097",
+     "v-chat-agents-ui-095"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:1-15"
+    ],
+    "gap": "ChatLiveRunPanel shows browser evidence and screenshots of a watched run and the Agent Run Console has a live timeline, but there is no per-tool viewer (terminal/editor/files), no timeline scrubbing of the computer state, no PiP or agent cursor.",
+    "strengths": "Live run panel and a typed run timeline already exist."
+   },
+   "benefit": "The signature Manus/Claude-Cowork UX; makes agent work legible and builds trust.",
+   "approach": "Frontend: a ComputerPanel with viewers keyed by tool kind (browser frames, xterm for processes, file diff, search results), driven by existing session-core events; PiP via a floating component.",
+   "effort": "M",
+   "dependencies": [
+    "C14",
+    "C24"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Event volume; keep frames on demand.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "High visibility; builds on shipped pieces.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-034",
+   "name": "Desktop computer use (screenshots + accessibility tree, mouse/keyboard on any app)",
+   "description": "The agent operates desktop applications through screenshots, accessibility/UI-automation trees and input actions, on the user's machine or on its own desktop, using provider-native or any-model tools.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "hermes",
+     "manus",
+     "web-manus",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 8,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-071",
+    "antigravity-architecture-065",
+    "claude-runtime-architecture-044",
+    "cursor-ai-features-111",
+    "cursor-harness-architecture-086",
+    "hermes-architecture-and-surfaces-087",
+    "manus-computer-control-architecture-011",
+    "manus-computer-control-architecture-015",
+    "manus-computer-control-architecture-017",
+    "manus-computer-control-architecture-019",
+    "manus-computer-control-architecture-043",
+    "manus-computer-control-architecture-082",
+    "manus-product-ux-080",
+    "web-chatgpt-web-product-080",
+    "web-manus-web-product-058",
+    "web-perplexity-web-product-074"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-011",
+     "manus-computer-control-architecture-015",
+     "manus-computer-control-architecture-017"
+    ],
+    "why": "Manus (q4, SRC) is accessibility-first (UI Automation tree with short handles, element-targeted actions, SendInput only as fallback), with a strict window-identity ladder and an honest statement of which actions steal focus. Hermes (q4) shows any-model computer use via a cua-driver MCP with numbered elements. Antigravity records only note its absence."
+   },
+   "mechanism": "get_app_state -> {a11y tree with handles, optional screenshot with capture id}; act{handle|coords+capture_id}; targets resolved by HWND/PID/AUMID/path/title ladder; ambiguous targets refused; provider-native CU tool schemas mapped onto the same engine.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-104",
+     "v-planned-decisions-093",
+     "v-chat-agents-ui-098"
+    ],
+    "evidence": [
+     "apps/Endpoint Plane/docs/architecture.md:1-30"
+    ],
+    "gap": "No computer-use tool anywhere in Model Plane (parked by the owner). The Endpoint Plane (native RustDesk-protocol host with real screen capture and input injection, consent prompt) exists but no agent tool targets it.",
+    "strengths": "Endpoint Plane already solves capture, encode and input injection natively in Rust."
+   },
+   "benefit": "Part of the product vision ('controls a computer, acts like a PC'). The safe Verevon form is computer use inside the agent's own sandbox desktop (C01), which avoids the owner's concern about controlling users' machines.",
+   "approach": "Phase 1: Xfce/Wayland desktop inside the C01 VM; execution-core exposes a computer tool (screenshot + a11y via AT-SPI, input via xdotool/ydotool) where the Model proposes actions and the guest agent executes and returns receipts (C38). Phase 2 (only if unparked): Endpoint Plane agent as executor on user machines with per-app consent (C39).",
+   "effort": "XL",
+   "dependencies": [
+    "C01",
+    "C35",
+    "C38",
+    "C39"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Reliability of pixel agents, prompt injection from screen content, cost of vision tokens.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Blocks the Manus-parity vision; scope it to the sandbox desktop first to respect the owner's parking of user-desktop control.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 5,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t3-06-035",
+   "name": "Code-mode control: model writes scripts against a tool SDK (programmatic tool calling)",
+   "description": "Instead of one tool call per action, the model writes a short JavaScript/TypeScript/Python cell that awaits SDK calls (computer, browser, host tools) in a confined runtime, batching steps and branching locally.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-122",
+    "deepseek-harness-architecture-140",
+    "deepseek-harness-architecture-141",
+    "manus-computer-control-architecture-012"
+   ],
+   "bestInClass": {
+    "source": "manus + deepseek",
+    "recordIds": [
+     "manus-computer-control-architecture-012",
+     "deepseek-harness-architecture-140"
+    ],
+    "why": "Manus (q5, SRC) exposes a single computer-use/js tool running in QuickJS-WASM with no fs/network; DeepSeek (q5, SRC) has a host-child protocol with declared bindings, resource ceilings and an eight-way typed failure taxonomy."
+   },
+   "mechanism": "Tool run_cell{code} -> fresh confined runtime (QuickJS-WASM or Deno with no permissions) -> only bindings declared by the host are callable -> each binding call goes back through the normal policy/approval path -> result + logs + typed failure.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:14-16",
+     "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md:172-176"
+    ],
+    "gap": "No baseline record in this category; Model Plane baseline lists code mode as absent (greenfield; code_interpreter has no tool-RPC bridge and no network).",
+    "strengths": ""
+   },
+   "benefit": "Fewer round trips and tokens for multi-step browser/computer work; still governed if every binding call passes capability policy.",
+   "approach": "execution-core: a run_cell tool in a WASM runtime (wasmtime + QuickJS) whose bindings proxy to existing tools via the capability client.",
+   "effort": "L",
+   "dependencies": [
+    "C24 or C36"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Approval semantics for batched effectful calls; must surface each effect as its own receipt.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Efficiency gain, not a user-visible capability; do after reachability gaps.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-036",
+   "name": "Structured action receipts with tri-state verification",
+   "description": "Every action returns a receipt separating 'dispatched' from 'effect verified', with unknown verification reported as null rather than assumed.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "manus-computer-control-architecture-018"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-018"
+    ],
+    "why": "Manus (q5, SRC) cu.app receipts on macOS."
+   },
+   "mechanism": "Receipt {action, target, dispatched_at, verified: true|false|null, evidence}; verification by re-reading state after the action.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-100"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:1-18",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:237"
+    ],
+    "gap": "No baseline record covers receipts directly; verified by comparator read: append-only step receipts (corrections append, never mutate) and ActionOutcome::verified per action, plus Model Plane postcondition verifiers (MP baseline).",
+    "strengths": "Append-only receipts plus deterministic post-condition verifiers are at least equal to the reference; keep and reuse for C36."
+   },
+   "benefit": "Keep.",
+   "approach": "Reuse the receipt shape for computer use.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Strength.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-037",
+   "name": "Computer-use consent and safety model (per-app tiers, deny lists, machine lock, restoration)",
+   "description": "Computer use is granted per app at tiers (view-only browsers, click-only terminals, full for others), with deny lists (finance apps), background vs full-control modes, a machine-wide lock, restoration of windows and clipboard at turn end, injection-hardened app lists, gesture gating and elevation/remote-session awareness.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-claudeai"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-095",
+    "claude-runtime-architecture-045",
+    "claude-runtime-architecture-046",
+    "claude-runtime-architecture-047",
+    "claude-runtime-architecture-048",
+    "claude-runtime-architecture-057",
+    "claude-runtime-architecture-061",
+    "claude-runtime-architecture-062",
+    "web-claudeai-web-product-061"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-045",
+     "claude-product-ux-095",
+     "claude-runtime-architecture-047"
+    ],
+    "why": "Claude (q5, SRC) has the most complete consent model; claude.ai documents the tool hierarchy (connectors, then browser, then screen)."
+   },
+   "mechanism": "request_access{app} -> tier from category -> enforce tier on each action against the frontmost app -> deny list auto-refuses -> global lock -> on turn end restore.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-093"
+    ],
+    "evidence": [],
+    "gap": "No computer use; Endpoint Plane has a native consent prompt for human remote control only.",
+    "strengths": "Typed-actions-first policy already matches Claude's tool hierarchy (connectors before browser before screen)."
+   },
+   "benefit": "Only needed if computer use reaches user machines; inside the agent's own VM most of it is moot.",
+   "approach": "Adopt the tool-hierarchy rule now in prompts/policy; build per-app tiers only with phase 2 of C36.",
+   "effort": "M",
+   "dependencies": [
+    "C36"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Depends on unparking user-desktop control.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-038",
+   "name": "Teach mode and learning from user demonstrations / activity memory",
+   "description": "The user demonstrates a workflow (screen frames, narration, or recorded browser steps) and the agent learns a reusable routine; opt-in local activity history lets the agent continue work without re-explaining.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-049",
+    "web-chatgpt-web-product-084"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-049"
+    ],
+    "why": "Claude (q4, SRC) has teach mode with guided overlay plus watch-and-record with voiceover; ChatGPT's Computer History is an opt-in event memory (DOC)."
+   },
+   "mechanism": "Record steps (events + frames + narration) -> model summarises into a parameterised routine/skill -> replay with confirmation.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [
+     "v-planned-decisions-094"
+    ],
+    "evidence": [
+     "apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:449"
+    ],
+    "gap": "Teach-by-demonstration browser routines are shortlisted (#3, L) but not built.",
+    "strengths": "Plan requires the same evidence trail as agent runs."
+   },
+   "benefit": "Fits Hermes-style 'learns its user'; a hosted-browser recording of the user's own steps can become a skill.",
+   "approach": "Record human-takeover sessions in the hosted browser as Quarry step receipts, then let Model Plane distil them into a skill (existing skill registry).",
+   "effort": "L",
+   "dependencies": [
+    "C34",
+    "C28"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Capturing personal data; ZDR.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Valuable but after the browser path works.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-039",
+   "name": "Live desktop streaming and remote input transport (WebRTC/RFB/VNC, clipboard, audio, cursor)",
+   "description": "A real or virtual desktop is published as video tracks (LiveKit/WebRTC, RFB/VNC) so a human or the agent can watch and take over; normalized, strictly validated input events; clipboard, file paste and audio; separate cursor channel; users can also share their own screen to the agent.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-065",
+    "manus-computer-control-architecture-040",
+    "manus-computer-control-architecture-042",
+    "manus-computer-control-architecture-044",
+    "manus-computer-control-architecture-045",
+    "manus-product-ux-078"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-040",
+     "manus-computer-control-architecture-042"
+    ],
+    "why": "Manus (q5, SRC) runs a Rust publisher into LiveKit with one track per screen and a strictly validated [0,1]-coordinate input protocol with epoch+sequence; Codex tunnels VNC over a MASQUE/QUIC portal."
+   },
+   "mechanism": "Capture (OS API) -> encode (AV1/VP9/H.264) -> WebRTC track; input topic with normalized coords bound to a track, bounds-checked fields, sequence numbers; data topics for clipboard/files with size limits.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Endpoint Plane/docs/architecture.md:1-30",
+     "apps/Endpoint Plane/src/consent.rs:1-6",
+     "apps/Frontend Plane/verevonv3/src/features/support/components/RemoteSupportPage.tsx"
+    ],
+    "gap": "No baseline record covers it; found by comparator: the Endpoint Plane is a clean-room native RustDesk-protocol host (screen capture, AV1 encoding, input injection, consent prompt, multi-monitor; live-verified per its own doc) with a web controller (remote-core) on the Support page. It is a human remote-support tool, not connected to agents or sandboxes. Live status rests on the plane's own DOC.",
+    "strengths": "Verevon owns a native capture/encode/input stack, which few references have."
+   },
+   "benefit": "The same transport can stream the agent's sandbox desktop (C36) and support takeover (C34) without a third-party VNC stack.",
+   "approach": "Run the Endpoint agent (or a headless variant) inside the C01 VM desktop and point the Frontend remote-core viewer at it from the computer panel.",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "C36"
+   ],
+   "planeOwner": "Support Plane",
+   "risks": "AGPL boundary must stay clean-room; relay cost.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Reuses an existing asset to cut the cost of C34/C36.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-040",
+   "name": "Keep-awake and lock-screen-aware capture while agents run",
+   "description": "The host keeps the machine awake during runs, wakes displays before capture and handles locked screens.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-066",
+    "manus-computer-control-architecture-024"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-024"
+    ],
+    "why": "Manus (q4, SRC) handles wake and lock per OS."
+   },
+   "mechanism": "OS power assertions tied to active threads.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable: runs are server-side.",
+    "strengths": ""
+   },
+   "benefit": "None.",
+   "approach": "Do not build.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Desktop-host concern.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-041",
+   "name": "Local device as a tool host for cloud sessions (bridges, device grants)",
+   "description": "A desktop app registers as a device whose tools (files, browser, computer use, shell) are advertised to cloud sessions over a brokered connection, with device authorization codes, revocable grants and leased local services.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "manus",
+     "t3code",
+     "web-claudeai"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-runtime-architecture-065",
+    "manus-computer-control-architecture-049",
+    "manus-computer-control-architecture-054",
+    "manus-product-ux-077",
+    "t3code-architecture-057",
+    "web-claudeai-web-product-058"
+   ],
+   "bestInClass": {
+    "source": "claude + t3code",
+    "recordIds": [
+     "claude-runtime-architecture-065",
+     "t3code-architecture-057"
+    ],
+    "why": "Claude (q5, SRC) announces device tools to cloud sessions and checks each call against membership; T3 (q5, SRC) brokers browser tool calls from a remote server to the user's desktop with session-to-host leases."
+   },
+   "mechanism": "Device registers with broker -> publishes tool announcement -> cloud session calls tool -> broker routes to device over reverse RPC -> device checks grant -> result.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-093",
+     "v-planned-decisions-092"
+    ],
+    "evidence": [
+     "apps/Endpoint Plane/docs/architecture.md:1-30"
+    ],
+    "gap": "No device-tool bridge; Endpoint Plane exists only for human remote control; local files and own-Chrome are parked.",
+    "strengths": "Endpoint Plane device registration/consent could be the base."
+   },
+   "benefit": "Would let Verevon reach on-premise files and apps for enterprises, but it is the parked direction.",
+   "approach": "Keep parked; if unparked, device tools must be proposals executed by a Verevon-owned executor with grants and receipts.",
+   "effort": "XL",
+   "dependencies": [
+    "C36",
+    "C39"
+   ],
+   "planeOwner": "Support Plane",
+   "risks": "Large attack surface on user machines.",
+   "tier": "skip",
+   "significance": 2,
+   "rationale": "Owner parked local computer control; revisit with C36 phase 2.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-042",
+   "name": "Local folder access grants with trust and protected-path rules",
+   "description": "Agents only access folders the user trusted; pickers refuse home, disk roots, network shares and credential-bearing folders (.ssh, .aws, browser profiles); ignore rules and explicit opt-in for files outside the workspace.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "web-claudeai"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-architecture-061",
+    "claude-product-ux-100",
+    "claude-runtime-architecture-056",
+    "web-claudeai-web-product-064"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-056",
+     "claude-product-ux-100"
+    ],
+    "why": "Claude (q5, SRC) normalises paths against NTFS streams, 8.3 names and credential stores before granting mounts."
+   },
+   "mechanism": "Normalise path -> reject protected classes -> grant -> mount with hidden sub-paths.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable: no local file access. The analogue (Space ACL never widening owner-plane ACLs) is enforced by Control Plane.",
+    "strengths": "Space authority model is the server-side equivalent."
+   },
+   "benefit": "None directly; the credential-path classifier idea is worth reusing when hydrating uploads into sandboxes.",
+   "approach": "Do not build.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Desktop concern.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-043",
+   "name": "Fully on-device agent (local orchestrator and models)",
+   "description": "The whole agent stack (planner, tool router, scheduler, task queue, search index, sandbox) runs locally on NVIDIA/AMD hardware with explicit approval for cloud steps.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-perplexity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "web-perplexity-web-product-075"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-075"
+    ],
+    "why": "Only Perplexity Portable Computer (q4, DOC)."
+   },
+   "mechanism": "Local runtime with open-weight models and a hybrid cloud escalation gate.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Verevon is cloud-hosted.",
+    "strengths": "Privacy goals are met through ZDR, privacy tiers and residency routing instead."
+   },
+   "benefit": "Low.",
+   "approach": "Do not build.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Contrary to the hosted architecture; ZDR covers the privacy need.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-044",
+   "name": "File-tool write safety (read-before-edit, version tokens, guards, TOCTOU-safe IO, LSP delta)",
+   "description": "Edits require a prior read and fail if the file changed; sensitive paths are hard-denied and agent-instruction files require approval; a fuzzy matcher tolerates whitespace; file IO refuses symlinks/reparse points; edit results include only new diagnostics.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-060",
+    "deepseek-harness-architecture-072",
+    "hermes-architecture-and-surfaces-081",
+    "hermes-architecture-and-surfaces-082"
+   ],
+   "bestInClass": {
+    "source": "hermes + deepseek",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-081",
+     "deepseek-harness-architecture-072"
+    ],
+    "why": "Hermes (q5, SRC) stacks sensitive-path, protected-instruction and stale-overwrite guards with a fuzzy matcher; DeepSeek (q4, SRC) uses version tokens and guarded atomic writes."
+   },
+   "mechanism": "read_file returns {content, version}; edit_file{path, old, new, version} -> reject if version changed -> atomic write via temp+rename with O_NOFOLLOW.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs:1-8"
+    ],
+    "gap": "No baseline record; comparator grep found no read_file/write_file agent tool in execution-core (file changes happen through code_interpreter and artifact updates). Check whether the CAS workspace exposes compare-and-swap writes to the agent and whether update_artifact rejects stale versions.",
+    "strengths": "CAS workspace promotion is already conflict-aware (overlay merge)."
+   },
+   "benefit": "Relevant once agents edit workspace documents directly (Spaces).",
+   "approach": "If file tools are added, require version tokens from the CAS manifest.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Mostly coding-agent territory.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-045",
+   "name": "Dev-server preview panes with auto-verify and port discovery",
+   "description": "The agent starts dev servers and the app shows them in a preview pane (with discovered local servers and recent URLs), auto-verifies changes, routes tool-opened URLs into the pane and forwards ports from cloud VMs as shareable previews.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-057",
+    "claude-product-ux-096",
+    "claude-product-ux-124",
+    "claude-runtime-architecture-060",
+    "cursor-ai-features-127",
+    "t3code-architecture-059",
+    "t3code-ui-and-multimodel-074"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-096",
+     "claude-product-ux-124"
+    ],
+    "why": "Claude (q5, SRC) combines preview auto-verify, element selection, viewport/colour-scheme control and a $BROWSER shim; Cursor forwards ports from cloud VMs into shareable previews."
+   },
+   "mechanism": "Detect listening ports in the sandbox -> probe HTML -> expose through an authenticated preview proxy -> show in the hosted browser surface; agent verifies via browser tools.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-106"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519"
+    ],
+    "gap": "Generated HTML artifacts render in a sandboxed srcdoc iframe, but there is no way to preview a server the agent runs (no network-enabled sandbox, no port forwarding).",
+    "strengths": "Safe HTML artifact rendering (allow-scripts without same-origin)."
+   },
+   "benefit": "Needed if Verevon agents build small apps or dashboards; moderate value for an AI workspace.",
+   "approach": "After C01: sandbox-manager exposes an authenticated preview URL per port; Quarry's hosted browser opens it so the agent can verify (Model proposes, Quarry executes).",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "C24"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Public exposure of previews; require auth.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Valuable only once sandboxes run servers.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-046",
+   "name": "Build, host and publish web/mobile apps from conversation",
+   "description": "Full-stack app builder with hosting modes, custom domains, SEO, auto-publish, visibility controls, scheduled actions, project copies, GitHub-backed checkpoints and mobile store packaging; IDE-side deploy steps (Firebase, Netlify, Cloud SQL).",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "web-manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-069",
+    "antigravity-architecture-064",
+    "web-manus-web-product-061",
+    "web-manus-web-product-062",
+    "web-manus-web-product-063",
+    "web-manus-web-product-064",
+    "web-manus-web-product-065",
+    "web-manus-web-product-066",
+    "web-manus-web-product-067",
+    "web-manus-web-product-097",
+    "web-manus-web-product-101"
+   ],
+   "bestInClass": {
+    "source": "web-manus",
+    "recordIds": [
+     "web-manus-web-product-061",
+     "web-manus-web-product-062",
+     "web-manus-web-product-063"
+    ],
+    "why": "Manus Web Builder (q4, DOC) covers scaffold-to-domain with hosting modes and auto-publish; Antigravity has SRC-level deploy steps."
+   },
+   "mechanism": "Template scaffold -> sandbox build -> checkpoint (git) -> deploy to managed hosting -> domain + TLS.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-106"
+    ],
+    "evidence": [],
+    "gap": "No app building or hosting.",
+    "strengths": ""
+   },
+   "benefit": "A separate product line; not part of Verevon's chat/agent core.",
+   "approach": "Do not build now; revisit as a Studio Plane product if strategy changes.",
+   "effort": "XL",
+   "dependencies": [
+    "C01",
+    "C47"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Hosting abuse, cost.",
+   "tier": "skip",
+   "significance": 2,
+   "rationale": "Out of scope for an AI workspace; supported only by DOC records.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 9,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-047",
+   "name": "Mobile simulator and emulator control panes",
+   "description": "Sessions attach an iOS Simulator or Android Emulator pane the agent controls with screenshots and gestures, with per-device consent.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-product-ux-097"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-097"
+    ],
+    "why": "Only Claude (q4, SRC)."
+   },
+   "mechanism": "simctl/adb screenshot + input bridged as tools.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable.",
+    "strengths": ""
+   },
+   "benefit": "None.",
+   "approach": "Do not build.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Mobile-dev IDE feature.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-048",
+   "name": "Native app integrations (Office add-in bridge, system-wide write-at-cursor, mobile OS intents)",
+   "description": "The desktop sideloads an Office add-in and drives Word/Excel/PowerPoint over a bridge; a global hotkey overlay writes at the cursor in any app with per-app window-read consent; mobile apps expose OS intents, shortcuts and widgets.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-claudeai"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-066",
+    "claude-runtime-architecture-138",
+    "web-claudeai-web-product-065"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-138",
+     "claude-runtime-architecture-066"
+    ],
+    "why": "Claude (q4, SRC) has both the Office add-in bridge and the write-at-cursor assistant."
+   },
+   "mechanism": "Office.js add-in connected to the app over a local bridge; overlay reads focused field via accessibility APIs.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-099"
+    ],
+    "evidence": [],
+    "gap": "No native apps or add-ins; Office files are produced by in-browser OOXML export.",
+    "strengths": "Browser-side Office export works without native code."
+   },
+   "benefit": "An Office add-in (web-based, no desktop app needed) could bring Verevon into Word/Excel for enterprise users.",
+   "approach": "Optional: a Microsoft 365 add-in calling Verevon's existing BFF APIs (Frontend Plane).",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Store review, auth in add-in context.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Distribution channel rather than core capability.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-06-049",
+   "name": "Dangerous file-type guard for agent-produced downloads",
+   "description": "Files the agent produces or downloads are never opened automatically when their type can execute code or install software.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-runtime-architecture-059"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-059"
+    ],
+    "why": "Only Claude (q3, SRC)."
+   },
+   "mechanism": "Extension/MIME denylist checked before open-with-default-app.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-091"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:498",
+     "apps/Model Plane/docs/decisions/ledger.md:1526"
+    ],
+    "gap": "Equivalent rather than identical: Quarry validates download admission and stores downloads as artifacts (blocked under ZDR); screenshots are relayed with an authoritative content type and SVG/HTML excluded.",
+    "strengths": "Server-side admission + renderable allowlist; keep."
+   },
+   "benefit": "Keep.",
+   "approach": "Keep.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 1,
+   "rationale": "Strength.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

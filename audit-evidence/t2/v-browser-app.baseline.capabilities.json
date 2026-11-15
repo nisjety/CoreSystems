@@ -1,0 +1,1249 @@
+[
+  {
+    "id": "v-browser-app-001",
+    "category": "Acquisition API surface",
+    "name": "Unified keyword web search (Exa-style filters, safe_search forced on)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:39",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:51",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:236"
+    ],
+    "plannedIn": [
+      "docs/AI_SEARCH_PLATFORM_PLAN.md"
+    ],
+    "notes": "Proxy to quarry-edge /v1/search. Filters: topic, time_range, days, exact_match, include/exclude domains. [SRC]"
+  },
+  {
+    "id": "v-browser-app-002",
+    "category": "Acquisition API surface",
+    "name": "URL-as-query single-page fetch with browser to static fallback",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:112",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:152"
+    ],
+    "plannedIn": [],
+    "notes": "Search bar input that is a URL is scraped via /v1/scrape (markdown, render_page); returns title/description/600-char excerpt. [SRC]"
+  },
+  {
+    "id": "v-browser-app-003",
+    "category": "Acquisition API surface",
+    "name": "Image and video search verticals",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:42",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:357",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:459"
+    ],
+    "plannedIn": [
+      "docs/AI_SEARCH_PLATFORM_PLAN.md"
+    ],
+    "notes": "Sanitized proxies to quarry /v1/search/images and /v1/search/videos. [SRC]"
+  },
+  {
+    "id": "v-browser-app-004",
+    "category": "Acquisition API surface",
+    "name": "Find-similar (Exa-style) search",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:40",
+      "apps/Frontend Plane/verevonv3/src/shared/api/search-client.ts:124"
+    ],
+    "plannedIn": [],
+    "notes": "Gateway route and SPA client exist; no UI caller found (grep findSimilar outside search-client: none). [SRC]"
+  },
+  {
+    "id": "v-browser-app-005",
+    "category": "Acquisition API surface",
+    "name": "Query suggestions and autocomplete",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:41",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:44",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:524"
+    ],
+    "plannedIn": [],
+    "notes": "/suggest -> quarry; /suggestions -> autocomplete-core, degrades to empty. [SRC]"
+  },
+  {
+    "id": "v-browser-app-006",
+    "category": "Acquisition API surface",
+    "name": "Streaming AI answer for search (SSE citations/delta/done)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:589",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx:339"
+    ],
+    "plannedIn": [
+      "docs/AI_SEARCH_PLATFORM_PLAN.md"
+    ],
+    "notes": "Synthesis lives in Quarry AnswerPipeline (activation is a Quarry config concern, not verified at runtime). [SRC]"
+  },
+  {
+    "id": "v-browser-app-007",
+    "category": "Acquisition API surface",
+    "name": "Knowledge scrape and scrape-preview endpoints",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:166",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:169",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:28",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:62"
+    ],
+    "plannedIn": [],
+    "notes": "SSRF-normalized; preview mirrors Quarry cache admission. [SRC]"
+  },
+  {
+    "id": "v-browser-app-008",
+    "category": "Acquisition API surface",
+    "name": "Whole-site crawl and curated batch crawl",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:306",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:386",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:423"
+    ],
+    "plannedIn": [],
+    "notes": "crawl max_pages <=5000; batch <=200 deduped URLs; returns job_id + SSE event stream. [SRC]"
+  },
+  {
+    "id": "v-browser-app-009",
+    "category": "Acquisition API surface",
+    "name": "Site map / URL discovery feeding a page picker",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:521",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:179",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:549"
+    ],
+    "plannedIn": [],
+    "notes": "quarry /v1/map; CrawlPagePicker lets the user choose pages before ingest. [SRC]"
+  },
+  {
+    "id": "v-browser-app-010",
+    "category": "Acquisition API surface",
+    "name": "Structured / LLM extraction (products, prompt, schedule schema)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/products.rs:203",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:268",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:157"
+    ],
+    "plannedIn": [],
+    "notes": "Ad-hoc extract run forwards only prompt (no JSON schema); schedules can carry schema; product extraction has dedicated UI. [SRC]"
+  },
+  {
+    "id": "v-browser-app-011",
+    "category": "Acquisition API surface",
+    "name": "Ingestion runs API (list across crawl/extract/search/agent/batch; create crawl/batch/extract/scrape)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:27",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:31",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:157"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-012",
+    "category": "Acquisition API surface",
+    "name": "Async job event streams for crawl/batch and run evidence",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:185",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:192",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/evidence.rs:24"
+    ],
+    "plannedIn": [],
+    "notes": "SSE via /api/v1/knowledge/jobs/{id}/events; evidence timeline via quarry /v1/runs/{id}/events. [SRC]"
+  },
+  {
+    "id": "v-browser-app-013",
+    "category": "Acquisition API surface",
+    "name": "Onboarding live crawl preview (SSE seed scrape + crawl)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/onboarding/lookup.rs:18",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/crawl_preview/quarry.rs:35",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/crawl_preview/quarry.rs:118"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-014",
+    "category": "Acquisition API surface",
+    "name": "Action-contract dispatch for scrape/crawl/recrawl/import/monitor/source CRUD",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1298",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1320",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs:270",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs:314"
+    ],
+    "plannedIn": [],
+    "notes": "Human-invoked; not model-executable (model-eligibility allowlist excludes them). [SRC]"
+  },
+  {
+    "id": "v-browser-app-015",
+    "category": "Acquisition API surface",
+    "name": "Browser interact API facade (20 gateway routes over Quarry /v1/agent/runs*)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:369",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:451",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3661"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Works in dev only: prod Quarry requires broker grants the gateway never sends (main.rs:183-184). [SRC+INF high]"
+  },
+  {
+    "id": "v-browser-app-016",
+    "category": "Acquisition API surface",
+    "name": "Model Plane agent web tools web_search / web_fetch (+ web.search/web.read aliases)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:133",
+      "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:152",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4184"
+    ],
+    "plannedIn": [],
+    "notes": "Read-only, no approval gate; Quarry /v1/search and /v1/extract. [SRC]"
+  },
+  {
+    "id": "v-browser-app-017",
+    "category": "Acquisition API surface",
+    "name": "MCP server registry with OAuth connect (consumer side)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:44",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:52"
+    ],
+    "plannedIn": [],
+    "notes": "Verevon consumes MCP servers; Quarry is not exposed as an external MCP server from Verevon (searched GW for quarry MCP exposure: none). [SRC]"
+  },
+  {
+    "id": "v-browser-app-018",
+    "category": "Acquisition API surface",
+    "name": "SPA Quarry SDK client (/api/quarry)",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:30",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/audience_tokens.rs:164"
+    ],
+    "plannedIn": [],
+    "notes": "Dead: no /api/quarry BFF route exists (only /api/quarry/onboarding-token on auth-core). Also flagged in CHAT_PARITY_AUDIT_2026-09-15.md:811. [SRC]"
+  },
+  {
+    "id": "v-browser-app-019",
+    "category": "Acquisition API surface",
+    "name": "Customer-facing webhooks for crawl/scrape completion",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched GW domains/ingestions, knowledge and SPA ingestions for \"webhook\": no hits. Quarry has internal change_webhook.rs. [SRC search]"
+  },
+  {
+    "id": "v-browser-app-020",
+    "category": "Acquisition API surface",
+    "name": "Customer API keys / public scrape API / CLI exposed by Verevon",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched GW and SPA for api key issuance tied to quarry and for CLI: none. Quarry has generated SDKs (Quarry-v2/sdks) not surfaced by Verevon. [SRC search]"
+  },
+  {
+    "id": "v-browser-app-021",
+    "category": "Output formats & content processing",
+    "name": "Markdown output for scrape/search fetch",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:119",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:580"
+    ],
+    "plannedIn": [],
+    "notes": "Preview falls back to /v1/extract markdown when scrape returns an artifact id. [SRC]"
+  },
+  {
+    "id": "v-browser-app-022",
+    "category": "Output formats & content processing",
+    "name": "Page metadata (title/description) and onboarding branding/snippet packets",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:176",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/crawl_preview/quarry.rs:24"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC, lightly read]"
+  },
+  {
+    "id": "v-browser-app-023",
+    "category": "Output formats & content processing",
+    "name": "Browser screenshot and visual_observation artifacts with owner-gated byte serving",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1466",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3427",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserTimelineDetail.tsx:118"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Gateway ownership gate is the only isolation (Quarry /v1/artifacts not tenant-scoped, browser.rs:1463). [SRC]"
+  },
+  {
+    "id": "v-browser-app-024",
+    "category": "Output formats & content processing",
+    "name": "DOM summary, console and network summaries, policy denials per observation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:26",
+      "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:32",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:137"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-025",
+    "category": "Output formats & content processing",
+    "name": "Accessibility snapshot refs / PDF / OCR / tiles / palette artifacts in the Verevon UI",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:374"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md",
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "Quarry produces AX projections and more; SPA BrowserObservation type has no fields for them (browser-client.ts:32-44). Searched SPA for accessibility/snapshot_id in browser files: none. [SRC]"
+  },
+  {
+    "id": "v-browser-app-026",
+    "category": "Output formats & content processing",
+    "name": "Change tracking / monitoring (check, latest, history, Temporal monitors)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:58",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:256",
+      "apps/Frontend Plane/verevonv3/src/features/ingestions/components/VerevonIngestionsPage.tsx:95"
+    ],
+    "plannedIn": [],
+    "notes": "Proxies quarry /v1/change/* and /v1/schedules. [SRC]"
+  },
+  {
+    "id": "v-browser-app-027",
+    "category": "Output formats & content processing",
+    "name": "Product extraction and summary with picker UI",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:171",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:175",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:53"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-028",
+    "category": "Rendering & browser engines",
+    "name": "Remote headless Chromium via Quarry chromiumoxide CDP driver, per-session browser context",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:247"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Cross-session cookie leak fixed in Phase 6 per plan; sandbox on unless QUARRY_BROWSER_NO_SANDBOX. Alternate drivers (browserbase/browserless/kernel) exist in Quarry. [SRC+DOC]"
+  },
+  {
+    "id": "v-browser-app-029",
+    "category": "Rendering & browser engines",
+    "name": "Browser-to-static HTTP fallback for search fetch and scrape preview",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:152",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:120"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-030",
+    "category": "Rendering & browser engines",
+    "name": "Page actions exposed to UI: navigate/click/click_point/type/press/scroll/mouse_wheel/select/wait/wait_for/screenshot/back/forward/get_content",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3702",
+      "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:3"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "evaluate denied (browser.rs:3751); reload emulated via re-navigate (BrowserChrome.tsx:1171). [SRC]"
+  },
+  {
+    "id": "v-browser-app-031",
+    "category": "Rendering & browser engines",
+    "name": "Semantic / ref / frame / dialog / upload / download / PDF actions in the Verevon UI",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:639",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3756"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md",
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "Quarry supports them; gateway sanitize_action rejects anything outside the selector/coordinate set. [SRC]"
+  },
+  {
+    "id": "v-browser-app-032",
+    "category": "Rendering & browser engines",
+    "name": "Scoped browser profiles (ephemeral/user_private/org_shared/run_scoped) with cookie persistence and restore-probe",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:72",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2315",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2420",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1401"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-033",
+    "category": "Rendering & browser engines",
+    "name": "Viewport / device / user-agent / locale / geolocation controls",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:345",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:817"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Gateway accepts viewport but SPA hard-codes 1280x800; grep for userAgent/geolocat/locale in browser files: none. Plan target capability #12. [SRC]"
+  },
+  {
+    "id": "v-browser-app-034",
+    "category": "Rendering & browser engines",
+    "name": "Login / auth handling (credential vault, autofill)",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Only persistent profile reuse; login pages trigger HITL approval. Searched browser files for password/autofill/vault: none. [SRC search]"
+  },
+  {
+    "id": "v-browser-app-035",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Gateway SSRF guard (scheme, credentials, private hosts/IPs)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/public_url.rs:34"
+    ],
+    "plannedIn": [],
+    "notes": "Syntactic only, no DNS resolution at this layer; Quarry adds validate_navigation (agent_routes.rs:2306). [SRC]"
+  },
+  {
+    "id": "v-browser-app-036",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Stale-on-error search cache and recoverable/unrecoverable scrape failure classification",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:286",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:287"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-037",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Gateway search-web cache (4h) keyed without org/user and without ZDR gating",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:218",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/cache.rs:194"
+    ],
+    "plannedIn": [
+      "docs/AI_SEARCH_PLATFORM_PLAN.md"
+    ],
+    "notes": "Contrast with scrape-preview which is ZDR-aware (knowledge/quarry.rs:92-118). Plan Phase 1/4 wants org-scoped ZDR-gated cache. [SRC]"
+  },
+  {
+    "id": "v-browser-app-038",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Rate limiting on browser/search/knowledge/ingestion gateway routes",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:448",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:46",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:58"
+    ],
+    "plannedIn": [],
+    "notes": "Only MCP routes add rate_limit_middleware; browser has Quarry step budget only. [SRC]"
+  },
+  {
+    "id": "v-browser-app-039",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Proxy / geo / CAPTCHA / stealth controls exposed in Verevon",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Exists only inside Quarry (stealth.rs, pinned egress proxy). Searched SPA browser+ingestion files for proxy/captcha: none. [SRC search]"
+  },
+  {
+    "id": "v-browser-app-040",
+    "category": "Orchestration & scale",
+    "name": "Cron / one-shot crawl schedules with overlap policy and pause/unpause/trigger/backfill/delete",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:99",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:191",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardCrawlSchedules.tsx:3"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-041",
+    "category": "Orchestration & scale",
+    "name": "Durable sources registry (crawl/scrape/search, monitor presets)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:47",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:154",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:222"
+    ],
+    "plannedIn": [],
+    "notes": "Body never carries org_id. [SRC]"
+  },
+  {
+    "id": "v-browser-app-042",
+    "category": "Orchestration & scale",
+    "name": "Selective ingest decision (auto/never/prompt) before Data Plane ingest",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:412",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:485"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-043",
+    "category": "Orchestration & scale",
+    "name": "Crawl scoping options (include/exclude paths, depth, sitemap, subdomains)",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:386"
+    ],
+    "plannedIn": [],
+    "notes": "normalize_crawl_body forwards only url, max_pages, ingest. [SRC]"
+  },
+  {
+    "id": "v-browser-app-044",
+    "category": "Orchestration & scale",
+    "name": "Browser session budgets (user session 12 steps/120s single domain; AI loop 5 steps)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:485",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:149"
+    ],
+    "plannedIn": [],
+    "notes": "Every observed action increments the step counter (quarry-runtime observation.rs:1015). [SRC]"
+  },
+  {
+    "id": "v-browser-app-045",
+    "category": "Orchestration & scale",
+    "name": "Queue / concurrency visibility",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:127",
+      "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:163"
+    ],
+    "plannedIn": [],
+    "notes": "Only in dead quarry-client. [SRC]"
+  },
+  {
+    "id": "v-browser-app-046",
+    "category": "Orchestration & scale",
+    "name": "Multi-run fleet console with live views",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:26",
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:131"
+    ],
+    "plannedIn": [],
+    "notes": "Fetches /v1/fleets directly (not proxied, vite.config.ts:65); live-view tiles are placeholder text. [SRC]"
+  },
+  {
+    "id": "v-browser-app-047",
+    "category": "Platform & ecosystem",
+    "name": "Actor store / marketplace / scraper templates",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched SPA and GW for actor|marketplace|template in ingestion/browser contexts: only monitor presets and agent presets exist. [SRC search]"
+  },
+  {
+    "id": "v-browser-app-048",
+    "category": "Platform & ecosystem",
+    "name": "Dataset browser / export of crawl results",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Results go to Data Plane when ingest=true, else Quarry working set; no dataset view in VerevonIngestionsPage views (runs/schedules/monitoring/sources/evidence/profiles). [SRC]"
+  },
+  {
+    "id": "v-browser-app-049",
+    "category": "Platform & ecosystem",
+    "name": "Credit / token usage for web acquisition",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:155"
+    ],
+    "plannedIn": [],
+    "notes": "Only in dead quarry-client; AI run accepts max_cost_usd (browser.rs:300). [SRC]"
+  },
+  {
+    "id": "v-browser-app-050",
+    "category": "Platform & ecosystem",
+    "name": "Org-scoped tenancy for every web/browser route (org from verified session)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/mod.rs:1",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:222",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3813"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-051",
+    "category": "Observability & operations",
+    "name": "Quarry-owned durable browser timeline in UI",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:625",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:2071"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-052",
+    "category": "Observability & operations",
+    "name": "DevTools drawer (console/dom/network/vision)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:199",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1784"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-053",
+    "category": "Observability & operations",
+    "name": "Durable AI-run event stream (dispatch/observation/pause/resume/approval)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:1053",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:371"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Client wiring complete; upstream run start likely fails (grant/bearer). [SRC+INF high]"
+  },
+  {
+    "id": "v-browser-app-054",
+    "category": "Observability & operations",
+    "name": "Ingestion evidence timeline and Insights ingestion section",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/evidence.rs:24",
+      "apps/Frontend Plane/verevonv3/src/features/insights/components/InsightsPage.tsx:112"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-055",
+    "category": "Observability & operations",
+    "name": "Quarry step/egress receipts, procedure compile/replay-check, live-view, typed events stream surfaced in Verevon",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3680",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3688",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3713"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "Searched GW and SPA for egress-receipts|/receipts|procedure|live-view|events/stream: only FleetRunConsole placeholder text. [SRC search]"
+  },
+  {
+    "id": "v-browser-app-056",
+    "category": "Observability & operations",
+    "name": "ZDR artifact withholding and no-store live frames",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3860",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1715"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-057",
+    "category": "Observability & operations",
+    "name": "Browser sandboxing via Model Plane sandbox-manager",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go:84"
+    ],
+    "plannedIn": [],
+    "notes": "sandbox-manager leases code/workspace sandboxes only; grep browser|chromium|playwright in sandbox-manager: none. Browser isolation is per-CDP-context inside quarry-edge. [SRC]"
+  },
+  {
+    "id": "v-browser-app-058",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Embedded browser panel inside dashboard Crawl composer (no standalone browser route)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeScrapePreview.tsx:20",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:402",
+      "apps/Frontend Plane/verevonv3/src/app/App.tsx:172"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-059",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Tabs within a session (new/select/close)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1083",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:385"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-060",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Toolbar back/forward/reload and omnibox",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1146",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-omnibox.ts:4"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Non-URL omnibox input becomes a google.com search URL, which the single-domain allowlist blocks. [SRC+INF high]"
+  },
+  {
+    "id": "v-browser-app-061",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Cross-site navigation within a session",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:487",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2298"
+    ],
+    "plannedIn": [],
+    "notes": "allowed_domains = host of first URL (+subdomains). [SRC]"
+  },
+  {
+    "id": "v-browser-app-062",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Live frame view (HTTP poll 700ms / SSE stream)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:180",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1600",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1730"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-063",
+    "category": "In-app browser shell (user-facing)",
+    "name": "WebSocket live frame + takeover channel",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2691",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1859"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Route and raw WS proxy exist but liveFrameWsUrl is null for all sessions; gateway-side gating helpers are cfg(test). [SRC]"
+  },
+  {
+    "id": "v-browser-app-064",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Human takeover / agent control mode switch",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:663",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:761",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1230"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Agent actions 409 during takeover; authority in Quarry. [SRC]"
+  },
+  {
+    "id": "v-browser-app-065",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Direct pointer/wheel/keyboard input on rendered frame",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:793",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:179"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-066",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Manual selector action bar (click/type/key/wait/scroll)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1668"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-067",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Screenshot button",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1256"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-068",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Profile / cookie / privacy popover with ZDR chip and pre-session ZDR toggle",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1181",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1245",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:1413"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-069",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Timeline and evidence drawer with typed artifact viewer",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:2026",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserTimelineDetail.tsx:118"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-070",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Annotate / comment on page",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:129",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1844"
+    ],
+    "plannedIn": [],
+    "notes": "Single hard-coded anchor; capability string advertised by gateway (browser.rs:2700). [SRC]"
+  },
+  {
+    "id": "v-browser-app-071",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Local (browser-only) web history card",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts:10",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardWebHistory.tsx:1"
+    ],
+    "plannedIn": [],
+    "notes": "Max 10 entries, per workspace+user, purged under ZDR, no server history. [SRC]"
+  },
+  {
+    "id": "v-browser-app-072",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Search results tabs Info/Videos/Images",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/dashboard-home-types.ts:9",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx:729"
+    ],
+    "plannedIn": [
+      "docs/AI_SEARCH_PLATFORM_PLAN.md"
+    ],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-073",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Search Map tab",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx:389"
+    ],
+    "plannedIn": [
+      "docs/AI_SEARCH_PLATFORM_PLAN.md"
+    ],
+    "notes": "Decorative pins over top-4 web results; no maps provider. [SRC]"
+  },
+  {
+    "id": "v-browser-app-074",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Search Shopping tab",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx:436"
+    ],
+    "plannedIn": [
+      "docs/AI_SEARCH_PLATFORM_PLAN.md"
+    ],
+    "notes": "Re-renders web results; no shopping provider. [SRC]"
+  },
+  {
+    "id": "v-browser-app-075",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Chat split-view live browser panel (compact BrowserChrome for runs with frames)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:39",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:608"
+    ],
+    "plannedIn": [],
+    "notes": "Read-only view plus pause/resume control. [SRC]"
+  },
+  {
+    "id": "v-browser-app-076",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Bookmarks, downloads UI, extensions, password/autofill, reader mode, permission prompts, recording, multi-window",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Grep over BrowserChrome.tsx, KnowledgeComposer.tsx, KnowledgeScrapePreview.tsx, browser-session.ts, browser-client.ts for bookmark|password|autofill|extension|reader|download|captcha: no hits. [SRC search]"
+  },
+  {
+    "id": "v-browser-app-077",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Remote support desktop viewer (RustDesk protocol via remote-core + Support Plane hbbs/hbbr)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/support/components/RemoteSupportPage.tsx:6",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/remote_support.rs:30",
+      "apps/Frontend Plane/verevonv3/packages/remote-core/docs/architecture.md:108"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/packages/remote-core/docs/architecture.md"
+    ],
+    "notes": "Live-verified per its docs against stock RustDesk 1.4.9; input permission-gated; durable session audit deliberately unbuilt. Not a web browser. [SRC+DOC]"
+  },
+  {
+    "id": "v-browser-app-078",
+    "category": "AI-browser control",
+    "name": "Single-step AI action suggestion with screenshot + visual observation (AI-steg)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1056",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:2013"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Gateway uses proxy_model_json without x-inference-authorization (domains/chat/shared.rs:375-400) but route requires VerifiedInferenceBearer: likely 401. [SRC+INF high]"
+  },
+  {
+    "id": "v-browser-app-079",
+    "category": "AI-browser control",
+    "name": "Durable multi-step browser-agent run with pause/resume/stop (AI-loop)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1263",
+      "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:296",
+      "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:621"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Gateway sends grant_id \"session:{id}\" and no x-browser-authorization; model-gateway validates grant with BrowserBroker first (browser_run.rs:138-202,337). Likely 401/403 since 1f2ff1ed (2026-07-17). [SRC+INF high]"
+  },
+  {
+    "id": "v-browser-app-080",
+    "category": "AI-browser control",
+    "name": "LLM planner for browser loop (text/AX-ref JSON schema)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:53",
+      "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:135"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Gated by QUARRY_BROWSER_AGENT_LLM=1, not set in Model Plane compose (only QUARRY_BROWSER_AGENT_ENABLED at deploy/docker-compose.yml:1189); default loop is deterministic observe. [SRC]"
+  },
+  {
+    "id": "v-browser-app-081",
+    "category": "AI-browser control",
+    "name": "Risk-classified per-action HITL approval gates (login/checkout/posting_form/destructive/cross-domain/persistent-cookie)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1",
+      "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:809",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:322"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "Fail-closed; reuses generic orchestration approvals; reachable only once a run starts. [SRC]"
+  },
+  {
+    "id": "v-browser-app-082",
+    "category": "AI-browser control",
+    "name": "Agent tool protocol browser.observe / browser.act with AX snapshot refs, frame refs, dialogs, upload/download refs",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4202",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3479",
+      "apps/Model Plane/rust/services/execution-core/src/grpc.rs:856"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "Implemented in Model Plane; requires BrowserBroker grants that nothing issues; not wired to Verevon UI. [SRC+INF high]"
+  },
+  {
+    "id": "v-browser-app-083",
+    "category": "AI-browser control",
+    "name": "BrowserBroker grants (domain allowlist, TTL 15m, org/owner scope, single-use sensitive child grants)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/go/services/browser-broker/internal/server/server.go:42",
+      "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62",
+      "apps/Model Plane/go/services/browser-broker/cmd/main.go:62"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "In-memory store; no production AcquireGrant caller (only tests and a deny-by-default legacy Quarry path). [SRC]"
+  },
+  {
+    "id": "v-browser-app-084",
+    "category": "AI-browser control",
+    "name": "Domain allowlist enforcement for browser runs",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2296",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1397",
+      "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:190"
+    ],
+    "plannedIn": [],
+    "notes": "Exact host or subdomain; broker policy authoritative when grants required. [SRC]"
+  },
+  {
+    "id": "v-browser-app-085",
+    "category": "AI-browser control",
+    "name": "Prompt-injection screening of web/browser tool results (trust classes)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/provenance.rs:1",
+      "apps/Model Plane/rust/services/execution-core/src/provenance.rs:61"
+    ],
+    "plannedIn": [],
+    "notes": "ExternalWeb/BrowserScraped/ThirdPartyMcp screened unconditionally. [SRC]"
+  },
+  {
+    "id": "v-browser-app-086",
+    "category": "AI-browser control",
+    "name": "Raw script evaluation blocked at UI facade",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3751"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-087",
+    "category": "AI-browser control",
+    "name": "UI browser actions are not model-executable (allowlist)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:137",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:113"
+    ],
+    "plannedIn": [],
+    "notes": "Model uses its own execution-core tools instead. [SRC]"
+  },
+  {
+    "id": "v-browser-app-088",
+    "category": "AI-browser control",
+    "name": "Co-browsing: agent acts on the same tab the user sees",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:674"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "AI run acquires its own Quarry lease; continuity only via profile_id/start_url. [SRC+DOC]"
+  },
+  {
+    "id": "v-browser-app-089",
+    "category": "AI-browser control",
+    "name": "Agent cursor / element highlight overlays",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1824"
+    ],
+    "plannedIn": [],
+    "notes": "Only AI rationale bubble and step badges; searched BrowserChrome for cursor/highlight overlay: none. [SRC search]"
+  },
+  {
+    "id": "v-browser-app-090",
+    "category": "AI-browser control",
+    "name": "Task record / replay of browser procedures in Verevon",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3684",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:188"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "Quarry has procedure compile/replay-check; Verevon does not call them; gateway replay buffer is test-only. [SRC]"
+  },
+  {
+    "id": "v-browser-app-091",
+    "category": "AI-browser control",
+    "name": "ZDR propagation to browser runs and suggestions",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:307",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:2023",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:174"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "ZDR refuses browser_run; suggestion skips screenshot vision summary; ZDR sessions cannot attach persistent profiles. [SRC]"
+  },
+  {
+    "id": "v-browser-app-092",
+    "category": "Integration-plane overlap",
+    "name": "integration-corev2 providers / connect-sessions / connections / sync / browse / content via gateway",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations.rs:39",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations.rs:82"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-093",
+    "category": "Integration-plane overlap",
+    "name": "Unified sources view aggregating Quarry sources, Data Plane docs, integration connections, sync jobs, graph",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:49",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:316"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-094",
+    "category": "Integration-plane overlap",
+    "name": "Agent provider actions (list_provider_actions / execute_provider_action, writes approval-gated)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:14",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4174"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-095",
+    "category": "Integration-plane overlap",
+    "name": "SharePoint / M365 knowledge source browsing and registration",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:52",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1397"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-096",
+    "category": "Integration-plane overlap",
+    "name": "MCP server registry + reference stdio/HTTP mcp-bridge",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:46",
+      "apps/Model Plane/bridges/mcp-bridge/server.js:1"
+    ],
+    "plannedIn": [],
+    "notes": "[SRC]"
+  },
+  {
+    "id": "v-browser-app-097",
+    "category": "Integration-plane overlap",
+    "name": "Link between connected accounts and browser profiles/credentials",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched browser.rs and KnowledgeComposer for connection/oauth references to profiles: none. [SRC search]"
+  }
+]

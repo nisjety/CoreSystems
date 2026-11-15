@@ -1,0 +1,735 @@
+{
+  "category": "Tools, plugins & extensibility",
+  "items": [
+    {
+      "id": "R-t3-05-01",
+      "title": "Make MCP tools callable through the signed capability gate, with per-tool allow/ask/never policy",
+      "summary": "The model cannot call any MCP tool today: plain chat strips every mcp__ name, and Do mode offers them but trusted_capability_id returns None for them, which the gate treats as a hard refusal before dispatch. Give each discovered MCP tool a durable, registry-owned capability binding (risk class derived from the already-parsed readOnly/destructive annotations, never from the model-facing name), add a per-tool allow/ask/never policy with thread-scoped grants and an approval card, and harden the client with per-call recovery, a circuit breaker and cache-stable list refresh.",
+      "whyItMatters": "MCP is the connector bus of the reference apps (6 of 12 sources) and the base for custom connectors, plugins, MCP Apps and code mode. Until calls work, every registered server, OAuth flow and Settings screen is dead weight in Verevon chat and Do runs, and items 06, 08, 10 and 11 cannot ship. Per-tool trust settings are what make third-party write tools acceptable to a business customer.",
+      "referenceBestPractice": {
+        "bestSource": "Hermes (MCP runtime: supervision and recovery, SRC) plus Perplexity web (per-tool allow/ask/never with thread grants, DOC)",
+        "others": [
+          "Claude desktop (direct MCP host, per-server process isolation)",
+          "Codex (richest per-server and per-tool config)",
+          "Cursor (OAuth refresh leases)",
+          "Antigravity",
+          "DeepSeek harness"
+        ],
+        "prevalence": "MCP client runtime: 6 of 12 sources, table-stakes; per-tool approval policy: 3 of 12, differentiator",
+        "mechanism": "Hermes: each server is a supervised task owning one MCP session and exposing call(tool,args); dispatch wraps it in an ordered recovery ladder (401 -> refresh through the vault and retry once; session-not-found -> re-initialize; transport closed -> reconnect with backoff; N consecutive failures -> circuit breaker returning 'server unavailable' as a tool result). On notifications/tools/list_changed only the MCP suffix of the tool list is rebuilt so the cached prefix stays byte-identical. Untrusted servers ask for any tool lacking readOnlyHint=true. Perplexity: policy keyed (principal, connector, tool) -> allow|ask|never, with approve-once, allow-for-this-thread (inherited by that thread's recurring runs) and always."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:636-644",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:2014-2018",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:836-838",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:965",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:654-658",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3520",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:1089-1110",
+          "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:223-229",
+          "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:280",
+          "apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs:56-112",
+          "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:559-616",
+          "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs:1",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx:348-353",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:46-54",
+          "apps/Model Plane/rust/services/session-core/src/continuation_crypto.rs:1-9"
+        ],
+        "gap": "Registration, OAuth, SSRF/DNS guards and staged disclosure (mcp_catalog/mcp_call) exist, but calls cannot succeed (SRC, re-read in this audit): (a) inline_tool_allowed refuses mcp__*, mcp_call and mcp_catalog in plain chat/Ask; (b) in Do mode the tools are offered (agent.rs:654-658) yet trusted_capability_id returns None for them (the source comment at capability_policy.rs:836-838 says dynamic MCP tools need a durable registry-owned binding, and a test asserts None at :965), and a None binding is a hard refusal before dispatch (agent.rs:3520), so execute_mcp is unreachable in production; (c) permission::is_risky_tool gates every mcp__ name by prefix, a blanket rule rather than a per-tool setting; (d) Settings offers only a free-text tool_allowlist and an enabled flag, with no discovered-tool list or per-tool policy; (e) a per-call recovery ladder and circuit breaker were not seen (not fully checked: read mcp_gateway.rs and runtime_registries.rs). The baseline note that calls this bridge shipped (v-planned-decisions-071) is contradicted by the code. Separately, any 'ask' pause is unusable on the current stack because the approval-continuation descriptor key is empty (AIF Phase 0 note in the planned-decisions baseline), so the live approval continuation release gate gates this item."
+      },
+      "approach": "Model Plane (capability-core, execution-core, model-gateway). (1) On server register/refresh, capability-core writes one registry-owned capability per discovered tool (a new Kind mcp_tool or child rows of the existing mcp_server Kind; models/capability.go:7-22) with a risk class from the existing McpSideEffect classification (ReadOnly -> low/read; Destructive, NonDestructiveWrite and Undeclared -> write, ask); annotations stay advisory and the per-server tool_allowlist stays the ceiling. (2) Replace the name-prefix fallthrough in trusted_capability_id with a lookup delivered through the existing run-bound server-resolved tool view (capability_policy.resolve_server_tool_definitions, capabilities.go resolveModelActionView), so the binding never derives from model input; add per-owner health attestation and a forged-call denial test (architecture rule 8). (3) Per-tool policy store keyed (principal, server, tool) -> allow|ask|never with defaults from annotations and trust tier; 'always allow' only for the read class, writes get once or this-thread grants that still sign the exact effect (rule 12: no auto-approve tiers, no LLM on the permission path); replace the unconditional mcp__ prefix rule. (4) Keep the inline loop read-only (the two dispatch loops stay separate): offer read-class MCP tools to Ask only through a gateway path that re-checks the same binding; effectful tools run only in execution-core. (5) SPA: Settings tool table fed by a tools/list probe with per-tool state; approval card with once / this thread / deny. (6) mcp_gateway.rs: 401 refresh through the vault in mcp_oauth.rs, session re-init, backoff, circuit breaker, MCP-suffix-only refresh. (7) Refuse non-attested servers on ZDR runs (rule 4).",
+      "effort": "L",
+      "dependencies": [
+        "capability-core registry rows for MCP tools (new Kind or children of mcp_server)",
+        "live approval continuation: SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY provisioned (MVP release gate)",
+        "per-owner capability attestation and forged-call denial test",
+        "ZDR attestation rule for MCP servers",
+        "vault refresh path in mcp_oauth.rs"
+      ],
+      "planeOwner": "Model Plane (capability-core, execution-core, model-gateway) with Frontend Plane for the Settings tool table and approval card",
+      "risks": "Third-party servers become an egress path for user data (ZDR leak) and a prompt-injection channel through tool descriptions and results; annotations are advisory and must never auto-allow a write; over-broad always-allow grants; scheduled (non-interactive) runs need a policy that fails closed rather than asking; recovery and refresh code must not leak tokens into logs.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 27,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Not planned as such (the planned-decisions baseline wrongly records the bridge as shipped). Adjacent only: editable 'don't ask again' rules and a durable approval queue UI are listed as still open in CHD 13.3 (per the planned-decisions baseline section 5), and the live approval continuation is an MVP release gate (apps/Model Plane/MODEL_PLANE_ROADMAP.md)."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-001",
+        "C-t3-05-012"
+      ]
+    },
+    {
+      "id": "R-t3-05-02",
+      "title": "Prove first-party connectors end to end (Gmail, Outlook, Drive, Calendar reads, then approved writes) and add an in-chat connect card",
+      "summary": "The provider-action contract and tools exist, but Outlook, Gmail, OneDrive and Calendar paths are listings only and have never run against a real mailbox. Finish the already-planned F and G series: live-prove reads through the read-only provider tool and the composer picker, then writes with per-action approval under item 01's policy. Then add the missing request_connection tool and card so the model can propose connecting a provider mid-turn and the turn resumes when the connection settles.",
+      "whyItMatters": "Users notice immediately whether the assistant can read their mail, calendar and files; this is the 'chat with my work' promise and a baseline expectation set by Claude, Perplexity and ChatGPT (first-party catalogues in 4 of 12 sources). Credentials stay in the Ingestion Plane, which is a better security posture than most references if the path is actually proven.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (bundled GitHub server with device-code sign-in, token bound to host/client/scope, read-only and toolset switches, admin policy entries; SRC) plus Perplexity web (widest catalogue, project-level binding; DOC); Hermes for the in-chat connect flow (SRC)",
+        "others": [
+          "Codex",
+          "Manus web",
+          "Claude desktop (suggested installs)"
+        ],
+        "prevalence": "First-party connector catalogue: 4 of 12 sources, common; model-suggested connection flows: 3 of 12, differentiator",
+        "mechanism": "Connector = provider OAuth app + curated action catalogue (typed inputs, read/write class, confirmation rule) + scopes; read actions are directly callable, write actions require approval; admin policy enables a connector per org and can force read-only; project/Space binding limits which connectors a thread may use. In-chat: a request_connection(targets[], reason) tool emits a card; each target moves pending -> initiated -> connected|skipped|failed|expired by user action, OAuth callback or timeout; when all targets settle the turn resumes with a summary; the model may only suggest, the user performs the grant (Hermes manage_connections)."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:1-25",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:830-831",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4174-4181",
+          "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:195-218",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:160-163",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:268",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:462-466"
+        ],
+        "gap": "One typed provider-action bridge exists (list_provider_actions bound to cap.tool.provider.read, execute_provider_action to cap.tool.provider.execute; write operations pause for human approval and forward an approval id to integration-corev2). It is Do-mode only, and Do is dark by default on the only route allowed for live tests. Outlook, Gmail, OneDrive and Calendar are listings only with no live proof (needs owner-connected proof accounts, OD12). The read-only provider tool (F6), untrusted-content framing and durable redaction (F8) and composer picker (F9) are planned, not built; Ask-mode reads (F12) are deliberately deferred and the plan recommends not building them (OD10); writes wait for Wave 5. No model-suggested connect flow exists (an absence grep for request_connection, 2026-10-14, found nothing; INF)."
+      },
+      "approach": "Ingestion Plane (integration-corev2) keeps provider tokens and executes actions; Model Plane exposes reads as a LOW capability (the planned read_provider_action under cap.tool.provider.read, behind PROVIDER_READ_TOOL_ENABLED) and writes as cap.tool.provider.execute under item 01's per-tool policy. Sequence: (1) owner decisions OD10 and OD12 and a live reconnect of proof accounts; (2) F2-F4/F6/F8 reads with untrusted-content framing, durable redaction and ZDR refusal; (3) composer-picker proof (F9/F10) because Do cannot run on the Terra route; (4) writes with exact-effect approval (Wave 5, G rows); (5) a request_connection tool in model-gateway/execution-core plus a new typed ChatEvent card in the SPA, with Control/Ingestion executing the OAuth grant (never auto-install, show source and scopes); (6) Space/project connector binding inside the owner ACL; (7) admin enable and force-read-only toggles from item 09.",
+      "effort": "L",
+      "dependencies": [
+        "OD10 and OD12 owner decisions",
+        "item 01 (per-tool policy and approval)",
+        "integration-corev2 live accounts and Google/Microsoft OAuth app verification",
+        "F6 and F8 in the gap-closure plan (provider read tool, untrusted-content framing)"
+      ],
+      "planeOwner": "Ingestion Plane (integration-corev2) with Model Plane (capability exposure, request_connection) and Frontend Plane (picker, card)",
+      "risks": "Mailbox content is highly sensitive: ZDR propagation, retention of tool results, prompt injection through mail bodies, and the org-wide vs owner-only inbox question (OD11). OAuth app verification has lead time. A prompt-injected connect suggestion must show source and scopes on the card.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 11,
+        "DOC": 3,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: connector reads and writes are tasks F1-F13 and the G rows in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (reads Waves 1 and 4, writes Wave 5), with open owner decisions OD10, OD11 and OD12 (lines 462-472). The in-chat connect card and per-connector admin toggles are not in the plan."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-05-004",
+        "C-t3-05-024"
+      ]
+    },
+    {
+      "id": "R-t3-05-03",
+      "title": "Accept open SKILL.md skill bundles with script execution, proven by validated document skills",
+      "summary": "Skills are text records today. Accept the open Agent Skills format (SKILL.md frontmatter plus references, templates and scripts, uploaded as a zip or GitHub path), store the bundle files in object storage, add a skill_file read tool, and run bundled scripts in the hermetic code_interpreter with the bundle mounted read-only, keeping the existing budget and matcher. Prove the runtime with first-party docx/pdf/pptx/xlsx skills that ship scripts and validators, with skill scripts as their own approval class.",
+      "whyItMatters": "SKILL.md is table-stakes (9 of 12 sources have adopted it) and gives users portable skills from Claude, ChatGPT and Manus. Executable, validated document skills turn 'create a document' into a verified procedure, which matters most for business users who want working Word, Excel, PowerPoint and PDF files.",
+      "referenceBestPractice": {
+        "bestSource": "claude.ai (open standard with three-stage loading, DOC) plus Claude desktop (six always-on document skills with scripts and validators, SRC)",
+        "others": [
+          "Codex (tested helpers, distinct skill approval category)",
+          "Cursor",
+          "Hermes (cached tiered index)",
+          "Manus",
+          "ChatGPT web",
+          "Perplexity web",
+          "Antigravity",
+          "DeepSeek harness"
+        ],
+        "prevalence": "SKILL.md packages: 9 of 12 sources, table-stakes; executable first-party skills: 2 of 12, differentiator",
+        "mechanism": "Parse SKILL.md frontmatter (name <= 64, description <= 200, optional dependencies); stage 1 puts name plus a one-line description in the prompt within a budget; stage 2 loads the body when the model calls open_skill or the user types /name; stage 3 reads referenced files through a skill_file tool and runs scripts in the sandbox with the skill directory mounted read-only. Document skills tell the model to run a validator before returning; dependency declarations are checked at load and a missing dependency stops and asks instead of degrading silently."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/skills.rs:1-8",
+          "apps/Model Plane/rust/services/model-gateway/src/skills.rs:775",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5662-5700",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/skill_budget.rs:62",
+          "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts:1-91",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx:42",
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:14-16",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:219"
+        ],
+        "gap": "Skills are markdown text records (disk and learned) with CRUD, sharing, per-turn matching (max 3), a character budget and reattach_skill, but there are no folder bundles with references or scripts, no zip import, skills are off on the Terra route (plan I7 only restores explicit picks), and context:fork skills are not built. SKILL.md appears only in docs and roadmap data (intent, not code; INF). Office documents come from ad-hoc code_interpreter code or client-side export, with no validated first-party document skills; the sandbox has no network and small output caps (8 and 16 MiB)."
+      },
+      "approach": "Model Plane: extend model-gateway/skills.rs and capability-core (Kind=skill) with a bundle type (SKILL.md plus files in object storage, digest recorded), an upload endpoint for zip or GitHub path that scans for injection patterns and rejects paths escaping the bundle, a skill_file tool, and a script runner that mounts the bundle into code_interpreter (cap.command.sandbox) as a distinct skill-script approval class; keep the budget and matcher. SPA: zip upload and a bundle file tree in the Skills section. Build the first-party document skills on the Wave 4 Office work (plan H3-H6) with pinned Python libraries and a mandatory validator step; raise sandbox output caps if decks need it. Imported skills default to user scope, never org-wide.",
+      "effort": "L",
+      "dependencies": [
+        "code_interpreter bundle mount and pinned libraries",
+        "Wave 4 H3-H6 Office outputs in the gap-closure plan",
+        "skill digests and versions (item 07)"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Imported skills carry prompt-injection and script risk (scan on upload, run scripts only in the hermetic sandbox); sandbox caps may be too small for decks; licensing of bundled script libraries; the first slice (bundle runtime, M) can ship before the document skills.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 15,
+        "DOC": 6,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Adjacent only: I7 (explicit skill picks on the Terra route) and I23 (skill-from-real-run, Wave 6 deferred) in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md; 'context: fork' skills are listed as open in CHD 13.3. No plan item covers SKILL.md folder bundles, zip import or validated document skills; the H-series Office work (H3-H6) is the natural first consumer."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-027",
+        "C-t3-05-030"
+      ]
+    },
+    {
+      "id": "R-t3-05-04",
+      "title": "Pass the org, Space and persona instruction stack into Do and Plan runs",
+      "summary": "The authored-instruction hierarchy (platform, org, Space, persona, then the @-mentioned agent) is applied only in the Ask path (model-gateway authored_instructions_message). execution.proto's RunAgentRequest has no instruction fields and execution-core never composes them, so Do and Plan runs ignore org policy, Space instructions and persona. Add resolved, trust-framed instruction layers to the request, populate them in the gateway's agentic dispatch and compose them into execution-core's compositional system prompt, recording which layers applied.",
+      "whyItMatters": "Users expect the same instructions in agent runs as in chat, and org policy that silently stops applying when the user switches to Do is a governance hole as well as a UX break. It is the smallest priority gap and is visible immediately (5 of 12 sources apply persistent instructions in agent runs).",
+      "referenceBestPractice": {
+        "bestSource": "Cursor (rule types always / model-decision / glob / manual from project files, team and user rules; SRC) plus ChatGPT web (custom instructions with workspace policy, project overriding global; DOC)",
+        "others": [
+          "Claude desktop",
+          "Hermes",
+          "Antigravity"
+        ],
+        "prevalence": "5 of 12 sources; common (Verevon's four-level hierarchy is already richer than ChatGPT's two levels)",
+        "mechanism": "Instruction sources are ordered org > Space/project > agent persona > user, each with an activation mode (always, model_decision with description listed and body fetched on demand, manual); 'always' bodies are injected and model_decision descriptions listed within a token budget; the applied sources are recorded per turn."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6368-6400",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6838-6856",
+          "apps/Model Plane/proto/model_plane/v1/execution.proto:76-135",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:208",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:55-96",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:109"
+        ],
+        "gap": "Ask turns get platform, org, Space and persona layers (authored_instructions_message). RunAgentRequest carries no instruction or persona field and execution-core has no reference to them (SRC), so Do and Plan runs get none; there is also no model-decision activation mode."
+      },
+      "approach": "Model Plane. Add an ordered, pre-resolved authored_instructions field (layers plus a layer manifest and precedence framing) to RunAgentRequest in apps/Model Plane/proto/model_plane/v1/execution.proto (one proto steward, regenerate with buf, never hand-merge; plan file-ownership section lines 369-372). Fill it in model-gateway's agentic dispatch from the same server-side resolution used by authored_instructions_message (the BFF gateway resolves org and Space text; never client-suppliable). Compose it in execution-core compose_system_prompt (agent.rs:208) under the prompt budget, hand it to child runs per the leaf/orchestrator split, and emit the applied-layer manifest in the run trace. Defer model_decision activation until Spaces own file-based rules (plan I21).",
+      "effort": "M",
+      "dependencies": [
+        "plan task B3 and the execution.proto steward",
+        "ADR-0003 precedence rules"
+      ],
+      "planeOwner": "Model Plane (model-gateway and execution-core); the BFF gateway keeps resolving org and Space text",
+      "risks": "Prompt budget in long Do runs; precedence conflicts between org policy and persona; instruction text is framing, not authority, and must never widen the tool set; ZDR and temporary-turn behaviour must match the Ask path (persona follows the org-instruction precedent).",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:109 (task B3, Wave 1: pass persona, org and Space instructions into agentic runs; sized M). Not built in this tree: execution.proto has no instruction fields."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-034"
+      ]
+    },
+    {
+      "id": "R-t3-05-05",
+      "title": "Open the typed action registry to the agent: classify every action, admit reads first, mint per-run scoped tokens",
+      "summary": "Verevon's single typed action registry shared by the UI and agents is the reference design, but only 8 actions are model-executable. Classify every action by model access (none, read, write-with-approval, write) and risk, admit read actions per owning plane through the capability gate, then writes under item 01's exact-effect approval, and mint per-run delegated tokens scoped to the thread and capability set.",
+      "whyItMatters": "This is the core of the AI-first thesis: the user can say 'move this to my Space and notify the team' and the agent performs it with the same actions and guards as the UI. 4 of 12 sources expose their own product to the agent; Claude desktop and T3 Code show the pattern.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (built-in MCP servers for sessions, sidebar, settings and host actions; each Preferences key declares whether the model may read or change it; SRC) plus T3 Code (per-session scoped bearer credential stored only as a hash; SRC)",
+        "others": [
+          "Codex",
+          "DeepSeek harness"
+        ],
+        "prevalence": "4 of 12 sources; common",
+        "mechanism": "A typed action registry shared by UI and agent; each action declares model access (none | read | write-with-approval | write) and risk; admitted actions become tools with honest annotations (readOnly, destructive, idempotent); a per-session scoped token limited to the thread and capability set is issued and stored only as a hash."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:125-139",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:104-125",
+          "Verevon-ai-first-plan.md:42-44"
+        ],
+        "gap": "The registry has 168 typed actions (chat/agents baseline v-chat-agents-ui-088; not recounted here), but the model-eligibility allowlist admits only 8: tickets.create, inbox.follow_conversation, inbox.set_csat_preference, inbox.review_ai_action, chat.save_thread_snapshot, chat.submit_feedback, org.mark_exported and org.acknowledge_deletion (SRC). There are no per-setting model-access classes and no session-scoped tool credentials recorded. Each admission needs owner-plane proof (contract, attestation, forged-call denial test), which is why the list is deliberately short."
+      },
+      "approach": "Frontend Plane action registry plus Model Plane capability gate. Add model-access and risk metadata to ActionDescriptor and a CI ratchet that follows the AI-first plan (M2: at least 10 eligible low-risk actions; M3: all eligible actions with explicit exemptions). Treat each admission as per-owner design work (owner contract, capability binding, health attestation, forged-call denial test). Keep security, billing and identity settings non-model-accessible. Writes use item 01's policy and exact-effect approval; the BFF gateway mints a per-run scoped delegated token bound to the thread and capability set.",
+      "effort": "M",
+      "dependencies": [
+        "item 01 (per-tool policy and exact-effect approval)",
+        "owner-plane contracts per admitted action",
+        "AIF M1 trace (one real request through the fleet)"
+      ],
+      "planeOwner": "Frontend Plane (registry, token minting at the BFF gateway) with the Model Plane capability gate and each owning plane",
+      "risks": "Agents acting on account settings (keep security and identity settings out); admitting an action without owner proof ships a dead or unsafe tool (the repo has hit this before); delegated authority needs a Control decision.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Verevon-ai-first-plan.md milestones M2 and M3 (lines 42-43, 92-102): at least 10 eligible actions by M2, all eligible actions by M3 with CI enforcement."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-037"
+      ]
+    },
+    {
+      "id": "R-t3-05-06",
+      "title": "Custom connectors: probe-and-test add flow, a REST/API-key connector kind and a vault-brokered egress proxy",
+      "summary": "Users can register, OAuth-connect, scope and share MCP servers, but cannot probe a server before saving, choose tools from the discovered list, or add a plain REST connector. Add a probe endpoint (initialize, tools/list, auth detection), an API connector kind executed by a server-side egress proxy that injects vaulted secrets and enforces host allow-lists, and a proxy-only network namespace for sandbox code or skills that legitimately need network access.",
+      "whyItMatters": "It lets a business plug in its own ERP, CRM and internal APIs without waiting for first-party connectors (a main reason teams choose Claude or Manus), keeps keys out of model context and sandboxes, and strengthens the ZDR and security story. Custom connectors: 4 of 12 sources; secret brokering: 3 of 12.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (one service validates the server, auto-detects OAuth, inspects tools before save, imports JSON, supports API connectors with secrets, publishes to team or project; SRC) plus Claude desktop (vault-injected credentials with per-operation confirm rules and a network allow-list; SRC)",
+        "others": [
+          "claude.ai (tokens held server-side)",
+          "Perplexity web (egress proxy for custom APIs with session, personal and project scopes)",
+          "Hermes"
+        ],
+        "prevalence": "Custom connectors 4 of 12, common; host-brokered secrets 3 of 12, differentiator",
+        "mechanism": "Add flow: URL -> probe (initialize + tools/list) -> detect auth (401 with WWW-Authenticate or resource metadata) -> OAuth or API-key form -> show discovered tools with per-tool toggles -> save with scope (user | space | org). API connectors are an OpenAPI or header definition executed by a server-side proxy that injects the secret. Vault entries {scope, secret, allowed hosts}; the model and sandbox see only a placeholder; operation rules map request patterns to named operations with confirm or deny."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/api/mcp-client.ts:1-40",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx:57",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:46-54",
+          "apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs:105",
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:14-16"
+        ],
+        "gap": "Register, delete, share, OAuth start/callback and connect routes exist; scope (user or org) and sharing are modelled; MCP OAuth tokens are vaulted. There is no probe or test route, no discovered-tool toggle list, no plain REST/API-key connector type, and no general secret vault with egress-proxy injection for API connectors or sandbox code (the sandbox has no network at all)."
+      },
+      "approach": "Model Plane. model-gateway: a probe endpoint reusing the MCP client and its SSRF and DNS guards. capability-core: an api_connector kind with typed operations carrying read/write class, bound under item 01. Egress proxy (Ingestion Plane or a Model Plane egress service) matching host and injecting header or token from the vault, with per-operation confirm rules; sandbox-manager: a proxy-only network namespace for opted-in skills (item 03). SPA: an Inspect/Test step and tool toggles in McpServersSection. Org-scope sharing stays inside the owner ACL (Space access never widens it).",
+      "effort": "L",
+      "dependencies": [
+        "item 01 (MCP calls and per-tool policy)",
+        "item 03 (bundle runtime, for networked skills)"
+      ],
+      "planeOwner": "Model Plane (with an Ingestion Plane egress service if the proxy lives there)",
+      "risks": "The proxy becomes an exfiltration path if host allow-lists are loose; API connectors need the same SSRF guards as MCP; org-scope sharing must not widen an owner-plane ACL; secrets must never reach logs or traces.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 5,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-003",
+        "C-t3-05-040"
+      ]
+    },
+    {
+      "id": "R-t3-05-07",
+      "title": "One versioned, publishable lifecycle for authored behaviours: skills, slash templates and agent presets",
+      "summary": "Skills, slash prompts and agent personas are all user- or team-authored reusable behaviours, and none of them is versioned today. Give them one lifecycle in capability-core: immutable versions with digests, draft/publish, Space and org libraries with project locks, GitHub or zip import, and run records that pin the version used. Build on it a 'save this as a skill' action that drafts a skill from the thread and tool trace for user approval, user-authored slash templates with $ARGUMENTS, and agent presets whose tool allow-list resolves against the invoking user's ACL.",
+      "whyItMatters": "Teams standardise recurring work (reports, tenders, customer replies) per Space, and the 'save as skill' path directly serves the Hermes-style goal that the assistant learns and tailors itself to its user. Each piece is common in the references (skill libraries 6 of 12, custom agents 4 of 12, authoring 4 of 12) and small once a shared lifecycle exists.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (personal, team, project and official hub skill libraries with versions, restore, project lock; SRC) for libraries; Codex (agent builder with draft/publish, version history, conflict-safe editing; SRC) with DeepSeek (running agents keep their preset revision; SRC) for presets; Manus web (package this workflow as a skill; DOC) for authoring",
+        "others": [
+          "Claude desktop (refuses an org skill download whose SHA-256 differs)",
+          "Hermes (3-way origin-hash sync of bundled skills)",
+          "Perplexity web (Shortcuts with mode, model and sources; agents by id with pinned versions)",
+          "Cursor (user commands passed to subagents)",
+          "ChatGPT web",
+          "claude.ai"
+        ],
+        "prevalence": "Skill distribution 6 of 12 (common); custom agents and presets 4 of 12 (common); agent-assisted authoring 4 of 12 (common); user slash commands 2 of 12 (differentiator)",
+        "mechanism": "Skill versions table (skill_id, version, digest, created_by); library membership per scope (user, team/org, Space/project) with mode subscribe|copy; a Space-level lock list consulted by the matcher; import from GitHub path or zip -> scan -> new version; org bundles pinned by digest. Agent preset {id, version, instructions, model route, tool allow-list, skills, connectors, approval defaults} with draft/publish and optimistic concurrency; a run records preset_id plus version and edits never mutate running runs. Slash template {name, body with $ARGUMENTS/$1.., default mode, model, sources, scope} expanded client-side with the template id in message metadata. A skill-creator action reads the transcript and tool trace, extracts the reusable procedure, writes a draft SKILL.md and proposes it for review."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts:1-91",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:41",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:55-96",
+          "apps/Model Plane/rust/services/model-gateway/src/skills.rs:1-8",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:223",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:274"
+        ],
+        "gap": "Skill CRUD with org and user scope and sharing exists. Missing: versions and restore, a Space-level skill library or lock, GitHub or zip import, a curated hub. Learned skills exist but the learning loop has never produced a skill from a real run (I23 deferred), and learned candidates are matchable org-wide with no promotion review (a confirmed gap the repo deliberately did not build pending a governance decision). There is no explicit 'save as skill' flow and no user-authored slash templates (I13 planned). @-mentioned agent personas apply instructions in Ask turns, but preset agents have empty action sets, no publish/version lifecycle, and runs do not pin a preset revision."
+      },
+      "approach": "Model Plane capability-core owns the lifecycle (Kind skill, plus a new agent kind beside plugin, mcp_server and command): versions, digests and library membership. Application Plane exposes Space libraries as projections and never widens the owner's ACL; the model-gateway skill matcher consults the Space lock; run creation records preset_id and version. SPA: version history and restore, a library picker, a template editor with $ARGUMENTS in the composer slash menu (plan I13), and 'Save as skill' in the message menu that writes a draft version needing user approval (reuse the memory plane's review UX). Gate learned skills behind the promotion review before they can match org-wide. Preset tools resolve against the invoking user's ACL, never the author's.",
+      "effort": "L",
+      "dependencies": [
+        "item 03 (bundle format and digests)",
+        "item 04 (instruction stack, for presets)",
+        "learned-skill promotion gate governance decision (CHD 13.5-6)",
+        "owner ruling OD19 on instruction precedence"
+      ],
+      "planeOwner": "Model Plane (capability-core) with Application Plane projections and the Frontend Plane composer",
+      "risks": "Space sharing must never widen the owner's ACL; stale subscribed versions; low-quality or poisoned auto-skills pollute the catalogue (require approval and evaluation); presets that grant tools beyond the user's own permissions.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 15,
+        "DOC": 9,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: I13 (user-authored slash templates with $ARGUMENTS, apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:223) and I23 (skill-from-real-run proof, Wave 6 deferred, :274). Versions, libraries and presets are not in the plan."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-029",
+        "C-t3-05-031",
+        "C-t3-05-033",
+        "C-t3-05-036"
+      ]
+    },
+    {
+      "id": "R-t3-05-08",
+      "title": "Plugin manifest loader with supply-chain pins, cross-vendor adapters and an org-curated catalogue",
+      "summary": "Plugins are an inert durable registry today: manifests, risk and rollout state are stored but nothing loads them. Build a loader that expands a plugin into child capabilities at install (skills, URL-only MCP servers, slash commands, agent presets, routine templates, hooks), accepts the open agent-plugins.org manifest and foreign .claude-plugin, .codex-plugin and .cursor-plugin layouts through adapters (reporting unsupported stdio or bin components), pins every source to a commit SHA or archive digest with a kill list, and starts with an org-curated catalogue rather than a public marketplace.",
+      "whyItMatters": "A plugin is the unit by which Claude, ChatGPT, Codex and Cursor distribute capability (7 of 12 sources: table-stakes), and for Verevon it is how a vertical solution (for example shipping ops = provider actions + skills + routines) reaches an org. Building on the open formats gives instant compatibility with users' existing skills and plugins (4 of 12), and supply-chain pins are cheap when designed in from the start.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (plugin manifest with typed userConfig, sha-pinned binaries and many extension points; SRC) plus Codex (open agent-plugins.org 1.0 manifest with foreign-namespace adapters, a capabilities-from-this-plugin prompt block, atomic upgrade with rollback; SRC); Hermes for supply chain (about 570 catalogue entries each pinned to a 40-hex commit, CI that clones every entry, a removed.yaml kill list; SRC)",
+        "others": [
+          "Cursor (translates Claude Code hook settings)",
+          "Manus (addons split tools into model-visible and host-callable)",
+          "ChatGPT web",
+          "claude.ai",
+          "Antigravity"
+        ],
+        "prevalence": "Plugin package 7 of 12, table-stakes; marketplaces 4 of 12, common; cross-vendor compatibility 4 of 12, common; supply-chain safety 3 of 12, differentiator",
+        "mechanism": "Manifest (agent-plugins.org 1.0 compatible): name, version, skills/, commands/, agents/*.md (model, tool allow/deny, permission mode), mcpServers (URL-only for Verevon), hooks, scheduled-task templates, userConfig schema. Install resolves components into capability entries (a plugin parent with children), prompts for userConfig and vaults secrets; a selected plugin adds a short capabilities block to the prompt. Every source resolves to an immutable digest, install scripts never run, every referenced path must stay inside the package root, names are checked against advisories, and a server-side blocklist is re-evaluated on each load. Upgrade = stage, validate, swap atomically, keep a rollback copy."
+      },
+      "verevonToday": {
+        "status": "stub",
+        "evidence": [
+          "apps/Model Plane/go/services/capability-core/internal/api/plugins.go:15-22",
+          "apps/Model Plane/go/services/capability-core/internal/api/plugins.go:41",
+          "apps/Model Plane/go/services/capability-core/internal/models/capability.go:7-22",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:380-391",
+          "apps/Frontend Plane/verevonv3/src/shared/api/plugins-client.ts:1-66",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx:32"
+        ],
+        "gap": "A durable per-org plugin registry (manifest JSON, risk level, rollout state, default disabled and unpinned) and the single Capability registry with a Kind discriminator exist, but the handler's own comment says registering a plugin is inert until a host loads its manifest, and nothing does (SRC). No install flow, marketplace or catalogue exists. Whether plugin_packages stores digest or signature fields is unverified. A grep for agent-plugins.org found no code (INF: absent)."
+      },
+      "approach": "Model Plane capability-core: a manifest loader that expands a plugin into child capabilities and rejects stdio and bin components; a digest and signature column per plugin version, a refusal of unpinned sources, a central kill list checked at load, and an install review screen that lists every component and its risk with hash-the-declared-set consent. Adapters normalise foreign layouts into the internal model and report unsupported parts instead of dropping them silently. Control Plane owns the org catalogue and publish review; Model Plane resolves and pins entries; Frontend Plane gets the install and enable UI. Start with an org-curated catalogue only.",
+      "effort": "L",
+      "dependencies": [
+        "item 01 (MCP calls)",
+        "item 03 (skill bundles)",
+        "item 07 (versions and digests)",
+        "item 09 (org policy and snapshots)"
+      ],
+      "planeOwner": "Model Plane (capability-core) with Control Plane for the org catalogue and review",
+      "risks": "A plugin aggregates risk: one install can add write tools and hooks at once, so the install must show every component; foreign plugins assume local shell or stdio, which Verevon refuses; supply-chain attacks through catalogue entries and review workload.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 35,
+        "DOC": 5,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Only as a recommendation: Hermes-style community governance (install vs load split, hash-the-declared-set consent, scanning agent-authored items) is recommended in CHD 13.4 and not built; no plan item."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-05-019",
+        "C-t3-05-021",
+        "C-t3-05-042",
+        "C-t3-05-020"
+      ]
+    },
+    {
+      "id": "R-t3-05-09",
+      "title": "Extension governance console: org allow-lists, frozen tool snapshots, durable hooks and one Customize hub",
+      "summary": "Verevon has the enforcement core (registry rollout, scopes, audit log, health attestation, a hook engine inside the capability pipeline) but not the admin product. Add an org policy (allowed MCP servers and tools, plugin-only mode, required egress hosts) owned by Control and enforced at the gate through signed policy bundles; snapshot tool-schema hashes at admin approval and block drift; persist hooks durably in capability-core, pass hook_context to every Do run and add HTTP and prompt handler types; emit hook-run and resource-activity events into the transcript; and merge the Skills, Plugins and MCP settings sections into one Customize page with origin labels and broken-state banners.",
+      "whyItMatters": "Enterprise buyers require admin control and an audit trail before they allow connectors (admin governance 4 of 12 sources, hooks 4 of 12). Hooks give org admins DLP checks, SIEM logging and destination blocks without code changes, and users and admins need to see what extensions did, in line with Verevon's transparency goal.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (33 hook events with command, HTTP, prompt and agent handlers; per-surface plugin-only lock; per-feature egress list; SRC) plus ChatGPT web (a custom app's tool list is frozen after admin approval; DOC) and Codex (hook runs and MCP calls as typed thread items with resource-activity chips; SRC)",
+        "others": [
+          "Cursor",
+          "Hermes (observers, transforms, vetoes and middleware with schema-versioned payloads)",
+          "Antigravity (origin label on every item)",
+          "DeepSeek harness (broken bundles stay visible)",
+          "claude.ai (Customize area)"
+        ],
+        "prevalence": "Admin governance 4 of 12, common; hooks 4 of 12, common; unified hub 5 of 12, common; extension observability 2 of 12, differentiator",
+        "mechanism": "Org policy document {allowedMcpServers (URL patterns), allowedTools, pluginOnly surfaces, allowed catalogues, network mode}; publish flow: scan tools -> private test -> admin approves -> frozen snapshot of tool names and schema hashes, and any upstream change re-enters review. Hook config {event, matcher, type command|http|prompt|agent, timeout, failClosed}; response {decision allow|deny|ask, reason, additionalContext}. For a SaaS the handlers are HTTP posts to tenant endpoints on an egress allow-list and prompt hooks on the host model, with no shell. One list API returns {kind, name, origin builtin|org|space|plugin|user, status ok|broken|needs_auth, error, enabled}."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1923-1928",
+          "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:418",
+          "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2013-2040",
+          "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:2-11",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:557",
+          "apps/Model Plane/go/services/capability-core/internal/api/capabilities.go:52-76",
+          "apps/Model Plane/go/services/capability-core/internal/registry/capabilities_store.go:553",
+          "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:377",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:41",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx:42",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx:57"
+        ],
+        "gap": "The Pre/PostToolUse hook engine is real (allow, deny, ask with glob matching) and sits inside the capability pipeline, but rules live in an in-memory HookRegistry fed by gRPC RegisterHook and are passed only to browser runs; the Do loop calls execute_step with an empty hook_context (SRC). There is no durable hook store, no HTTP or prompt handler type and no admin UI. The registry has rollout, scopes, audit log and health attestation and the MCP registry has SSRF guards and allow-lists, but no org-level 'only these servers and tools' policy, no frozen snapshots with re-review on change, no egress-requirement listing. Skills, plugins and MCP servers have three separate Settings sections with no origin labels, broken-state banners or discovery view. The typed SSE taxonomy and trace tabs exist, but hook-run items and resource-activity chips do not (narrative baseline)."
+      },
+      "approach": "Control Plane owns org policy and who may define org hooks; Model Plane enforces at the capability gate using signed policy bundles (no cross-plane DB access). capability-core: durable hook table, a policy table, and tool-schema hash snapshots with drift blocking; execution-core: pass hook_context into every Do run (plan task B4, hooks on the governed agentic loop only per OD6) and add HTTP and prompt handler types with an egress allow-list and ZDR awareness. model-gateway: emit hook_started and hook_completed plus resource-activity events behind the existing feature-gated ChatEvent taxonomy. Frontend Plane: one Customize page over a unified capability listing, with an admin tab for policy, hooks and snapshots.",
+      "effort": "L",
+      "dependencies": [
+        "item 01 (MCP tool capabilities to snapshot)",
+        "plan task B4 (hook_context in agentic runs)",
+        "capability-core migration for hooks and policy",
+        "Control Plane policy-bundle signing"
+      ],
+      "planeOwner": "Control Plane (org policy) with Model Plane (hooks, enforcement, events) and Frontend Plane (Customize hub)",
+      "risks": "HTTP hooks can leak run data to tenant endpoints (respect ZDR and the egress allow-list); slow hooks add latency; fail-closed hooks can block every run; the Control and Model policy split must not require cross-plane database access.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 26,
+        "DOC": 6,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:110 (task B4, Wave 1: feed org hook_context into agentic runs) and OD6 (hooks on the governed agentic loop only). The durable store, handler types, org policy, snapshots and hub are not in the plan."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-022",
+        "C-t3-05-018",
+        "C-t3-05-041",
+        "C-t3-05-023"
+      ]
+    },
+    {
+      "id": "R-t3-05-10",
+      "title": "MCP-driven UI in chat: MCP Apps widgets and elicitation forms, then an artifact host bridge",
+      "summary": "Render tool-supplied UI (the ext-apps standard: tool metadata _meta.ui.resourceUri pointing to a ui:// HTML resource) inside the existing sandboxed artifact iframe, on a dedicated origin served by the Rust gateway, with JSON-RPC over postMessage whose tools/call goes through the capability gate and approvals. Render MCP elicitation/create as forms in the approval lane. As a later phase, give generated artifacts a postMessage bridge (complete, callTool, key-value storage) that runs with the viewer's identity, quotas and ZDR.",
+      "whyItMatters": "Six of 12 sources host MCP Apps or the equivalent (common), and connectors from Canva, Figma and Asana already ship them, so supporting the standard yields rich in-chat UIs without building each one. Artifacts-as-apps is a visible differentiator against ChatGPT and Perplexity, but only Anthropic has it (2 of 12).",
+      "referenceBestPractice": {
+        "bestSource": "Codex (full ext-apps implementation including a pull-request review workspace; SRC) plus ChatGPT web (postMessage JSON-RPC and CSP model; DOC); Claude desktop and claude.ai for the artifact bridge (SRI-pinned libraries, frame shell on a separate origin, callTool/complete/kv, viewer billed; SRC and DOC); Codex for form elicitation (SRC)",
+        "others": [
+          "Cursor",
+          "Manus (file bindings with revision checks)",
+          "Hermes (bounded sampling per server)",
+          "claude.ai"
+        ],
+        "prevalence": "MCP Apps 6 of 12, common; elicitation and sampling 2 of 12, differentiator; artifact host bridge 2 of 12, differentiator",
+        "mechanism": "Tool metadata _meta.ui.resourceUri (ui:// scheme) -> the host fetches the text/html;profile=mcp-app resource -> renders it in an iframe on a separate origin with sandbox=allow-scripts (no same-origin) and a CSP from _meta. JSON-RPC over postMessage: ui/initialize (theme, locale, display mode), tools/call (proxied through the host's policy gate), ui/update-model-context. Tools whose ui.visibility excludes the model are omitted from the model's list; a text result shows when widgets are disabled. Elicitation: on elicitation/create pause the tool call, render requestedSchema as a form, return accept, decline or cancel; sampling runs through the host's own model route with per-server caps. Artifact bridge: complete(prompt), callTool(name,args) and kv.get/set each proxied with the viewer's identity."
+      },
+      "verevonToday": {
+        "status": "unknown",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:496-522",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2618"
+        ],
+        "gap": "No baseline record covers MCP Apps, elicitation or an artifact bridge. An absence grep in this audit (2026-10-14) for resourceUri, ui://, mcp-app, elicitation/create and sampling/createMessage across Model Plane Rust and Go and the SPA and gateway source found nothing (INF: absent), and it would be unusable while MCP calls are blocked (item 01). The artifact preview already renders model HTML in a srcdoc iframe with sandbox=allow-scripts and no allow-same-origin (SRC), which is the right base, but there is no bridge for model, connector or storage calls and no pinned library allow-list was recorded."
+      },
+      "approach": "Frontend Plane: a widget host component reusing the artifact sandbox, served from a dedicated origin by the Rust gateway (apps/gateway), with a CSP derived from tool metadata; widget tools/call goes through the gateway to Model Plane and the item 01 capability gate and approvals. Model Plane: hide UI-only tools from the model list, handle elicitation by emitting an awaiting_approval-style event, and route sampling (if adopted) through inference-core with cost-core attribution and ZDR inheritance. Phase 2: an artifact bridge in the iframe with a Model Plane endpoint for viewer-scoped completions and storage in Application Plane projections. Confirm absence by searching for ui:// and mcp-app before starting.",
+      "effort": "L",
+      "dependencies": [
+        "item 01 (MCP calls and per-tool approvals)",
+        "dedicated sandbox origin served by the gateway",
+        "cost attribution for viewer-scoped completions (phase 2)"
+      ],
+      "planeOwner": "Frontend Plane (widget host, artifact bridge) with Model Plane (elicitation, sampling, completions endpoint)",
+      "risks": "Widgets are third-party code: strict CSP, separate origin, no cookies, text fallback; widget tool calls need the same approvals as model calls; sampling is a covert model-usage channel and must inherit the run's ZDR and budget; an artifact bridge can become a free model proxy or exfiltrate connector data through shared artifacts.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 9,
+        "DOC": 4,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-05-015",
+        "C-t3-05-014",
+        "C-t3-05-016"
+      ]
+    },
+    {
+      "id": "R-t3-05-11",
+      "title": "Scale the tool catalogue and cut round trips: deferred tool index, typed tool outputs, then code mode",
+      "summary": "Built-in and Do-mode tool catalogues are unbounded (about 16k characters against an 8k skill cap) and only MCP has staged disclosure. Extend the mcp_catalog/mcp_call pattern into one deferred-tool index (BM25 over name, description and parameter names) covering built-ins, provider actions and MCP tools, add optional output schemas validated on the Tool trait, and then add code mode: the model writes a short program that runs in the hermetic sandbox and calls tools through a host RPC channel where every sub-call re-enters the capability gate and approvals.",
+      "whyItMatters": "It keeps context small and cache-stable as connectors, plugins and provider actions grow (tool search 4 of 12 sources) and cuts round trips and tokens for multi-step data work across connectors (code mode 2 of 12), which reduces cost per run and latency for wide research and spreadsheet operations.",
+      "referenceBestPractice": {
+        "bestSource": "Hermes (tool_search / tool_describe / tool_call bridge with core tools never deferred, BM25 gated on the query's rarest token and a coverage floor; SRC) for the index; Codex (JavaScript in a V8 isolate with injected async tools and bounded output; SRC) with DeepSeek PTC (every sub-call re-enters the full guarded pipeline; SRC) for code mode; DeepSeek (validated, frozen tool outputs rendered purely) for the output contract",
+        "others": [
+          "Cursor (MCP descriptors as files; spills results over 40 KB to files)",
+          "claude.ai",
+          "Codex"
+        ],
+        "prevalence": "Tool search 4 of 12, common; code mode 2 of 12, differentiator; tool-result contract 3 of 12, differentiator",
+        "mechanism": "Classify tools as visible (core, direct-only) or deferrable; replace deferrable schemas with a one-line catalogue entry and give the model tool_search(query, limit) running BM25 (k1 1.5, b 0.75, stemming) over name, description and parameter names, admitting only documents containing the query's highest-IDF token above a coverage floor; matched tools become callable for the rest of the turn by appending to the list suffix so the cache prefix stays intact. Code mode: expose exec(code); run in an isolate or the existing sandbox with a tool-RPC bridge where each tools.name(args) call returns to the host, passes the normal gate and returns JSON; cap wall time, calls and output size. Output contract: validate a typed value against the declared output schema, render model text separately from UI presentation, and spill oversized values to the object store with a pointer."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:559-616",
+          "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:830",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs:1-12",
+          "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:1278",
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:14-16",
+          "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md (section 23.4)",
+          "apps/Model Plane/docs/decisions/ledger.md (Needle entry)"
+        ],
+        "gap": "MCP staged disclosure (mcp_catalog and mcp_call, threshold 40, ceiling 200) is shipped. Built-in and Do-mode catalogues are unbounded with no search over them, and the ledger records that selection collides with the purpose-lock. Tool-result handles (result_query) and pre-dispatch argument validation exist, but there are no declared output schemas or output validation and no follow-up-context ordering (strict function schemas were deliberately deferred). The code interpreter has network disabled and no tool-RPC bridge, so code mode is greenfield (backlog item 11)."
+      },
+      "approach": "Model Plane. Respect architecture rule 9 (purpose-lock = the offered tool list): the whole catalogue stays in the allowlist, the index only controls which schemas are shown, and the model reaches hidden tools through offered tool_search, tool_describe and tool_call bridge tools (the way mcp_call already works), each underlying call still capability-gated; safety-relevant and purpose-locked tools stay always visible; matched tools append to the list suffix for cache stability; report omitted counts. Output schemas are optional first (validate in debug and canary, keep handles). Code mode in execution-core: a unix-socket RPC into the sandbox (no network), each call re-entering capability_policy and approvals, starting with read-only tools, capping wall time, call count and output size, and showing every sub-call in the trace.",
+      "effort": "L",
+      "dependencies": [
+        "item 01 (MCP capability bindings and per-tool policy)",
+        "hermetic code_interpreter (exists)",
+        "purpose-lock design ruling for deferred tools (ledger Needle entry)"
+      ],
+      "planeOwner": "Model Plane (model-gateway and execution-core)",
+      "risks": "Wrong search results hide the right tool (keep safety-relevant tools visible); sub-calls must not bypass approvals or ZDR; runaway loops; users cannot see what happened unless every sub-call is shown; making output schemas mandatory would break existing tools.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 15,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: code mode is scheduled and not built (BKL #11, MODEL_PLANE_IMPROVEMENTS_2026.md section 23.4); the unbounded tool-catalogue budget is a recognised gap that collides with the purpose-lock (decision ledger, Needle entry)."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-007",
+        "C-t3-05-010",
+        "C-t3-05-013"
+      ]
+    },
+    {
+      "id": "R-t3-05-12",
+      "title": "Use Verevon from other agents and work tools: outward MCP endpoint and channel adapters",
+      "summary": "Host an MCP server over the typed action registry (Streamable HTTP with OAuth) so users can reach Verevon from Claude, ChatGPT or Cursor, and let Quarry consume WebMCP site tools as proposals that the Model Plane may select and Quarry executes. Separately, build Slack, Teams and email entry points as channel adapters in the future Channel Plane, with identity binding, per-channel routing, progress mirrored back and a consent card stating who posts as whom.",
+      "whyItMatters": "It grows usage by meeting users where they already work (channel entry points 5 of 12 sources; outward MCP or WebMCP 3 of 12). It is a later phase because it depends on the action registry being open to agents (item 05) and on a Channel Plane ADR.",
+      "referenceBestPractice": {
+        "bestSource": "Hermes (mcp serve exposes conversations as MCP tools; SRC) plus ChatGPT web (consumes WebMCP site tools whose instructions cannot authorise sensitive actions; DOC) for outward interop; Cursor (Slack, Linear, GitHub and Teams start cloud agents with routing rules and mirrored progress; SRC) with Claude desktop (a session bound to a Slack thread through a disclosure-bearing consent card; SRC) for channels",
+        "others": [
+          "Manus and Manus web (email and IM channels)",
+          "Perplexity web",
+          "ChatGPT web"
+        ],
+        "prevalence": "Channels 5 of 12, common; outward MCP and WebMCP 3 of 12, differentiator",
+        "mechanism": "Outward: an MCP server endpoint (Streamable HTTP, OAuth) exposing selected typed actions and search over the user's workspace; WebMCP: the browser surface lists tools a page registers and offers them to the model under the same policy. Channels: adapters (webhook or events API) -> identity binding (channel user to platform user) -> routing rule -> run creation with the channel as origin -> progress and result posted back, with a consent card naming channel, workspace and posting identity."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "Verevon-ai-first-plan.md:44",
+          "Verevon-ai-first-plan.md:114-123",
+          "apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go:1-20",
+          "apps/Model Plane/go/services/bridge-core/cmd/main.go:55-64"
+        ],
+        "gap": "There is no outward MCP server and no WebMCP bridge (only the consumer-side mcp-bridge); planned as M4 after M2. bridge-core has an ingress adapter interface (CLI, VS Code, web, API), a session registry and a webhook adapter with a delivery worker, which is a stub for this purpose. The Channel Plane is docs-only and Slack or Teams continuity needs an ADR before code."
+      },
+      "approach": "Frontend Plane gateway hosts the MCP endpoint over the typed action registry (item 05), inheriting the same risk metadata, approval gates and witness stream; ZDR must propagate to outward calls. WebMCP discovery lives in Quarry (the Model proposes browser actions; Quarry executes or rejects). Channel adapters wait for the Channel Plane ADR and live in that plane, not in Model Plane; identity binding is Control-owned; Application Plane holds routing projections.",
+      "effort": "L",
+      "dependencies": [
+        "item 05 (actions admitted to agents)",
+        "Channel Plane ADR",
+        "Control identity binding for channel users"
+      ],
+      "planeOwner": "Frontend Plane (MCP endpoint) with Ingestion Plane/Quarry (WebMCP) and the future Channel Plane (adapters)",
+      "risks": "External agents acting with user tokens; identity-binding errors post private data to shared channels; ZDR must propagate to outward calls; the WebMCP evidence is DOC and low confidence.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 5,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: outward MCP server and WebMCP bridge are Phase 4 / M4 of Verevon-ai-first-plan.md (lines 44 and 114-123, after M2); channel adapters are blocked on a Channel Plane ADR (architecture rule 7)."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-05-038",
+        "C-t3-05-045"
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t3-05-006",
+      "reason": "Outbound tunnel edge for on-prem MCP servers is a large Ingestion networking product with only 2 sources (Manus, Claude desktop), no Verevon baseline evidence and no demand signal; URL-only Streamable HTTP servers with SSRF and DNS guards cover the common case. Revisit after item 01 if an enterprise customer needs private-network MCP."
+    },
+    {
+      "cluster": "C-t3-05-017",
+      "reason": "Superseded by item 10: MCP Apps entrypoints cover the web case, and in-process third-party UI code in the SPA would break its security model (the sandboxed-iframe rule)."
+    },
+    {
+      "cluster": "C-t3-05-039",
+      "reason": "A2A is unique to Hermes (n=1), speculative, and already parked as design phase 9 (CHAT_PARITY_AUDIT_2026-10-01.md:116); revisit after the outward MCP endpoint in item 12 exists."
+    },
+    {
+      "cluster": "C-t3-05-043",
+      "reason": "Duplicate of items 03 and 08: zip import of SKILL.md bundles and foreign-manifest adapters already give the switching-cost benefit; ChatGPT instruction and memory export belongs to the memory category."
+    },
+    {
+      "cluster": "C-t3-05-044",
+      "reason": "Plugin-hosted monitors and sidecars imply running user processes, which does not fit a multi-tenant web architecture; the fitting version (Ingestion triggers waking a routine) belongs to the routines and triggers category (plan D-series)."
+    }
+  ],
+  "strengthsToKeep": [
+    "Signed, fail-closed capability policy gate before every dispatch: trusted_capability_id is a server-owned mapping the model cannot forge, and a missing binding is a hard refusal (execution-core/src/capability_policy.rs:741-838; runtime_loop/mod.rs:501-552). Few references have this; every new tool source (MCP, plugins, client tools, product actions) must map to a capability id so it cannot bypass the gate.",
+    "One Capability registry with a Kind discriminator (tool, skill, plugin, mcp_server, command, ...), rollout state, scopes, audit log and health attestation (apps/Model Plane/go/services/capability-core/internal/models/capability.go:7-22; internal/api/capabilities.go:52-76; rust/services/execution-core/src/health_attest.rs). More governance than most references; build plugins, presets and policies as new Kinds rather than new stores.",
+    "MCP OAuth 2.1 with dynamic client registration, an encrypted token vault, SSRF range blocks and DNS revalidation, and Streamable-HTTP-only transport with stdio deliberately quarantined server-side (apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs:1-15,105; go/services/capability-core/internal/api/registry_apis.go:377; model-gateway/src/runtime_registries.rs:55,870). Stricter than most references; keep rejecting local MCP and desktop extension packages (clusters 002 and 005).",
+    "MCP tool annotations are parsed as untrusted advisory hints with an explicit Undeclared variant, never as authorization (model-gateway/src/mcp_jsonrpc.rs:56-112). This is the right base for the risk mapping in item 01.",
+    "MCP staged disclosure (mcp_catalog and mcp_call, threshold 40, ceiling 200) already exists, ahead of T3 Code and Manus (model-gateway/src/runtime_registries.rs:559-616).",
+    "Skill budget with degrade-before-drop (about 8,000 characters), per-turn matching (max 3) and reattach_skill, at parity with Codex (model-gateway/src/skills.rs:775; execution-core/src/runtime_loop/skill_budget.rs:62).",
+    "Client-declared tools per request, merged with built-ins that win collisions and still capability-gated in Do, which only Codex shares (model-gateway/src/http_routes.rs:6807-6811; execution-core/src/runtime_loop/agent.rs:659-684).",
+    "Provider actions go through one typed bridge to integration-corev2, so OAuth tokens never leave the Ingestion Plane, with read/write classification and human approval for writes (execution-core/src/integration_tools.rs:1-25; permission/mod.rs:195-218).",
+    "Per-call autonomy ladder with a required justification, shared by gateway and executor through one contracts crate, adapted from the DeepSeek harness (apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs). A solid base for the approval model in item 01.",
+    "Typed action registry shared by the UI and agents with a deliberately conservative model-eligibility allowlist (verevonv3/src/shared/actions/action-registry.ts, model-eligibility.ts:125-139), and a compositional system prompt that grows only with offered tools (execution-core/src/runtime_loop/agent.rs:208).",
+    "Composer slash menu merges built-in commands with backend skills, capabilities and connectors, each degrading to empty (verevonv3/src/features/dashboard/home/DashboardComposer.tsx:259-271,465-532), plus OpenAPI with a generated SDK, a 60+ RPC gRPC ModelGateway and an AG-UI adapter (apps/Model Plane/api/openapi.yaml; proto/model_plane/v1/gateway.proto:17-178; verevonv3/apps/gateway/src/domains/ag_ui.rs:58).",
+    "Tool-result handles with a result_query tool keep oversized results out of context (model-gateway/src/tool_result_handles.rs:1-12), and the artifact preview already renders model HTML in a srcdoc iframe with sandbox=allow-scripts and no allow-same-origin (verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:496-522), the right base for item 10."
+  ]
+}

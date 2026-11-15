@@ -1,0 +1,468 @@
+{
+ "task": "t1",
+ "title": "Verevon Space: audit of Teams, Slack, Grok Bot, Buzz and QM",
+ "asOf": "2026-10-14",
+ "verevonCommit": "afb83928 (2026-10-10), C:/dev/CoresSystem",
+ "sources": [
+  {
+   "key": "teams",
+   "name": "Microsoft Teams (new Teams)",
+   "version": "MSTeams 26260.1701.5139.3736",
+   "kind": "installed app",
+   "method": "REA + direct reading of shipped bundles/strings; public docs for server-side behaviour",
+   "featureRecords": 305
+  },
+  {
+   "key": "slack",
+   "name": "Slack desktop",
+   "version": "4.52.178",
+   "kind": "installed app",
+   "method": "REA on app.asar + extracted bundle; public docs for server-side behaviour",
+   "featureRecords": 281
+  },
+  {
+   "key": "grokbot",
+   "name": "Grok Bot desktop agent",
+   "version": "0.70.2",
+   "kind": "installed app",
+   "method": "REA on app.asar + extracted bundle",
+   "featureRecords": 318
+  },
+  {
+   "key": "buzz",
+   "name": "Buzz",
+   "version": "commit 799cfd705 (2026-10-12)",
+   "kind": "open-source repo",
+   "method": "source and docs",
+   "featureRecords": 296
+  },
+  {
+   "key": "qm",
+   "name": "QM",
+   "version": "commit 1e975255 (2026-10-12)",
+   "kind": "open-source repo",
+   "method": "source and docs",
+   "featureRecords": 305
+  }
+ ],
+ "referenceRecordsTotal": 1505,
+ "clustersTotal": 446,
+ "verevonBaselineByCategoryStatus": {
+  "Messaging core": {
+   "partial": 8,
+   "absent": 14,
+   "shipped": 16,
+   "stub": 1
+  },
+  "Org & membership": {
+   "shipped": 16,
+   "partial": 4,
+   "absent": 9,
+   "stub": 1
+  },
+  "Calls & meetings": {
+   "absent": 3,
+   "partial": 3,
+   "planned": 1
+  },
+  "Search & discovery": {
+   "partial": 5,
+   "shipped": 4,
+   "absent": 3
+  },
+  "Notifications & attention": {
+   "partial": 5,
+   "absent": 6,
+   "shipped": 5,
+   "planned": 1
+  },
+  "Apps & extensibility": {
+   "shipped": 5,
+   "partial": 5,
+   "stub": 3,
+   "planned": 1,
+   "absent": 3
+  },
+  "Agents in the room": {
+   "shipped": 21,
+   "partial": 8,
+   "absent": 11,
+   "planned": 1,
+   "stub": 1
+  },
+  "Collaborative artifacts": {
+   "shipped": 3,
+   "absent": 4,
+   "partial": 1,
+   "stub": 1
+  },
+  "Realtime & sync architecture": {
+   "partial": 3,
+   "shipped": 7,
+   "absent": 5
+  },
+  "Governance, security & compliance": {
+   "shipped": 12,
+   "partial": 6,
+   "absent": 2
+  },
+  "Client shell": {
+   "shipped": 5,
+   "partial": 1,
+   "absent": 2
+  },
+  "UX patterns & layout": {
+   "shipped": 8,
+   "partial": 2,
+   "absent": 1
+  }
+ },
+ "categories": [
+  {
+   "n": 1,
+   "name": "Messaging core",
+   "refs": 120,
+   "base": 39
+  },
+  {
+   "n": 2,
+   "name": "Org & membership",
+   "refs": 95,
+   "base": 30
+  },
+  {
+   "n": 3,
+   "name": "Calls & meetings",
+   "refs": 75,
+   "base": 7
+  },
+  {
+   "n": 4,
+   "name": "Search & discovery",
+   "refs": 35,
+   "base": 12
+  },
+  {
+   "n": 5,
+   "name": "Notifications & attention",
+   "refs": 79,
+   "base": 17
+  },
+  {
+   "n": 6,
+   "name": "Apps & extensibility",
+   "refs": 103,
+   "base": 17
+  },
+  {
+   "n": 7,
+   "name": "Agents in the room",
+   "refs": 358,
+   "base": 42
+  },
+  {
+   "n": 8,
+   "name": "Collaborative artifacts",
+   "refs": 57,
+   "base": 9
+  },
+  {
+   "n": 9,
+   "name": "Realtime & sync architecture",
+   "refs": 171,
+   "base": 15
+  },
+  {
+   "n": 10,
+   "name": "Governance, security & compliance",
+   "refs": 163,
+   "base": 20
+  },
+  {
+   "n": 11,
+   "name": "Client shell",
+   "refs": 181,
+   "base": 8
+  },
+  {
+   "n": 12,
+   "name": "UX patterns & layout",
+   "refs": 68,
+   "base": 11
+  }
+ ],
+ "tiersAfterVerification": {
+  "priority": 23,
+  "recommended": 42,
+  "niceToHave": 31
+ },
+ "tiersBeforeVerification": {
+  "priority": 24,
+  "recommended": 45,
+  "niceToHave": 27
+ },
+ "verificationSummary": {
+  "items": 96,
+  "originalTier": {
+   "priority": 24,
+   "recommended": 45,
+   "nice-to-have": 27
+  },
+  "finalTier": {
+   "priority": 23,
+   "recommended": 42,
+   "nice-to-have": 31
+  },
+  "verevonStatus": {
+   "partial": 68,
+   "absent": 21,
+   "stub": 4,
+   "planned": 3
+  },
+  "verdict": {
+   "keep": 9,
+   "reword": 78,
+   "demote": 9
+  },
+  "refcheck": {
+   "partial": 22,
+   "confirmed": 2
+  },
+  "stillNeedsVerification": 0,
+  "lowConfidence": 0,
+  "effortRevised": 29,
+  "prevalenceWrong": 17
+ },
+ "waves": [
+  {
+   "wave": "W1",
+   "goal": "Foundations and quick wins: a human-first room with shared threads on a live push substrate, ZDR and Space policy that actually bind, and cheap fixes people notice at once (error boundaries, room admin, artifacts in the room, send idempotency, CSP, avatar, audit read check).",
+   "items": [
+    "F-t1-001",
+    "F-t1-003",
+    "F-t1-005",
+    "F-t1-006",
+    "F-t1-014",
+    "F-t1-022",
+    "F-t1-024",
+    "F-t1-030",
+    "F-t1-031",
+    "F-t1-033",
+    "F-t1-063"
+   ]
+  },
+  {
+   "wave": "W2",
+   "goal": "A real multi-human room: addressed agent wake-up, agent work visible to everyone, mentions, notifications and a cross-room Home, DMs, attachments, edits and reactions, search, approvals that resume, sandbox confinement, SSO/SCIM, and the composer, timeline, links and command layer that make it usable.",
+   "items": [
+    "F-t1-002",
+    "F-t1-004",
+    "F-t1-007",
+    "F-t1-008",
+    "F-t1-009",
+    "F-t1-010",
+    "F-t1-013",
+    "F-t1-016",
+    "F-t1-017",
+    "F-t1-018",
+    "F-t1-021",
+    "F-t1-023",
+    "F-t1-032",
+    "F-t1-034",
+    "F-t1-039",
+    "F-t1-040",
+    "F-t1-041",
+    "F-t1-042",
+    "F-t1-048",
+    "F-t1-049",
+    "F-t1-052",
+    "F-t1-055",
+    "F-t1-057",
+    "F-t1-062"
+   ]
+  },
+  {
+   "wave": "W3",
+   "goal": "Agents as colleagues: personal agents with audience-safe memory, a room-scoped agent browser, agent self-API, the room canvas, cards and forms, tool cockpit, automations and webhooks, cost and budgets, push outside the tab, moderation, retention and runtime guardrails.",
+   "items": [
+    "F-t1-011",
+    "F-t1-012",
+    "F-t1-015",
+    "F-t1-019",
+    "F-t1-020",
+    "F-t1-026",
+    "F-t1-027",
+    "F-t1-035",
+    "F-t1-036",
+    "F-t1-037",
+    "F-t1-038",
+    "F-t1-043",
+    "F-t1-044",
+    "F-t1-045",
+    "F-t1-046",
+    "F-t1-047",
+    "F-t1-051",
+    "F-t1-056",
+    "F-t1-059",
+    "F-t1-060",
+    "F-t1-061"
+   ]
+  },
+  {
+   "wave": "W4",
+   "goal": "Cooperation at scale and enterprise depth: multi-agent rooms, persistent per-agent computers, calls and meeting intelligence, guests and teams, lists, templates, governed skills, external meetings and voice.",
+   "items": [
+    "F-t1-025",
+    "F-t1-028",
+    "F-t1-029",
+    "F-t1-050",
+    "F-t1-053",
+    "F-t1-054",
+    "F-t1-058",
+    "F-t1-064",
+    "F-t1-065",
+    "F-t1-066",
+    "F-t1-067",
+    "F-t1-068",
+    "F-t1-069"
+   ]
+  },
+  {
+   "wave": "W5",
+   "goal": "Horizon: nice-to-have polish and speculative bets, built on demand once the earlier waves hold.",
+   "items": [
+    "F-t1-070",
+    "F-t1-071",
+    "F-t1-072",
+    "F-t1-073",
+    "F-t1-074",
+    "F-t1-075",
+    "F-t1-076",
+    "F-t1-077",
+    "F-t1-078",
+    "F-t1-079",
+    "F-t1-080",
+    "F-t1-081",
+    "F-t1-082",
+    "F-t1-083",
+    "F-t1-084",
+    "F-t1-085",
+    "F-t1-086",
+    "F-t1-087",
+    "F-t1-088",
+    "F-t1-089",
+    "F-t1-090",
+    "F-t1-091",
+    "F-t1-092",
+    "F-t1-093",
+    "F-t1-094",
+    "F-t1-095",
+    "F-t1-096"
+   ]
+  }
+ ],
+ "adrNeeded": [
+  {
+   "topic": "Ownership of human room messages and shared-thread append authority",
+   "items": [
+    "F-t1-001",
+    "F-t1-002",
+    "F-t1-003",
+    "F-t1-017",
+    "F-t1-016"
+   ],
+   "why": "Human posts need a home: Session Core (Model Plane) owns threads today and its append is owner-only, while the event projection lives in the Application Plane. Decide which plane is the source of truth for human messages, add the Control space:post/thread:append decision and a turn_origin field (direct, ambient, automation), and define DM kinds, so no plane reads another's database."
+  },
+  {
+   "topic": "Realtime delivery tier under ZDR and Space authority",
+   "items": [
+    "F-t1-003",
+    "F-t1-004",
+    "F-t1-009",
+    "F-t1-035",
+    "F-t1-080"
+   ],
+   "why": "A push tier, a service worker, web push and any client cache can each leak content or outlive a revoked decision. Fix the rules once: metadata and refs only on the wire, authority checked at subscribe and every delivery, content-free wake push, no content cache for ZDR orgs."
+  },
+  {
+   "topic": "Agent memory ownership, audience labels and declassification",
+   "items": [
+    "F-t1-012",
+    "F-t1-011",
+    "F-t1-072"
+   ],
+   "why": "The adoption plan's S3.1 leaves memory ownership split; personal agents in shared rooms need audience-bound memory, an owner-signed declassify path and a rule for which plane enforces the audience fold. This touches Model, Data and Control planes and the rule that Space access never widens an owner-plane ACL."
+  },
+  {
+   "topic": "Personal agents as service subjects: owner-derived admission, access lists and cascade on suspension",
+   "items": [
+    "F-t1-011",
+    "F-t1-043",
+    "F-t1-023"
+   ],
+   "why": "Control refuses personal membership replacement today. Admitting an owner's agent into a shared room, revoking it with the owner, and suspending it when the owner is banned or deprovisioned all change how Control issues decisions for service subjects."
+  },
+  {
+   "topic": "Multi-agent delegation and whose authority an agent acts under",
+   "items": [
+    "F-t1-025",
+    "F-t1-019",
+    "F-t1-038"
+   ],
+   "why": "Agent-to-agent messages, delegates, agent-callable spaces.* actions and agent history search all need one rule: a delegate re-resolves its own authority through Control, and when several humans trigger one run the narrowest authority applies. UI-2c is scoped to one hop in the same room today."
+  },
+  {
+   "topic": "Agent computer network boundary, persistence and local execution",
+   "items": [
+    "F-t1-021",
+    "F-t1-028",
+    "F-t1-020",
+    "F-t1-096"
+   ],
+   "why": "Egress must route through Quarry with an audience-intersected allowlist (Model proposes, Quarry executes); a durable per-agent home interacts with ZDR and retention; and running tools on a user's own machine would bypass Quarry execution and server audit unless the ADR defines an equivalent policy point."
+  },
+  {
+   "topic": "Calls and meetings: reverse the huddle non-goal, buy the SFU, and choose the meeting model",
+   "items": [
+    "F-t1-029",
+    "F-t1-050",
+    "F-t1-066",
+    "F-t1-067"
+   ],
+   "why": "docs/space-defenition.md lists huddles as a non-goal; the brief asks for Teams-like rooms. Decide the product stance, the SFU/TURN deployment, whether a meeting is a sub-resource of a Space or a child Space kind (an ADR-0001 amendment), and whether the external-meeting capture worker belongs to Ingestion or the docs-only Channel Plane."
+  },
+  {
+   "topic": "Retention, legal hold and ZDR precedence",
+   "items": [
+    "F-t1-051",
+    "F-t1-077",
+    "F-t1-005"
+   ],
+   "why": "ZDR is all-or-nothing today and legal hold exists only inside the personal deletion saga. Per-Space retention, custodian hold and compliance export need one precedence order (hold over retention, ZDR refusals unchanged) enforced by every plane's sweeper."
+  },
+  {
+   "topic": "Message search index placement and exclusion rules",
+   "items": [
+    "F-t1-018",
+    "F-t1-038"
+   ],
+   "why": "An index is a second copy of room content. Decide that it lives with the owner of messages, excludes ZDR and privacy-restricted turns at index time, never serves as an access boundary (per-hit re-authorization), and is purged by deletion and retention."
+  },
+  {
+   "topic": "External surfaces and guests: Channel Plane, linked identities and external audiences",
+   "items": [
+    "F-t1-075",
+    "F-t1-053",
+    "F-t1-093",
+    "F-t1-023"
+   ],
+   "why": "The Channel Plane is docs-only. Publishing agents into Slack, Teams or email, guest principals, linked identities and cross-org rooms all need the external-identity graph (S5.1) and QM's rule that an external audience restricts agents to a context without org memory or keys."
+  }
+ ],
+ "modelTiers": {
+  "inventory": "Claude Haiku 5.5, max effort",
+  "deepDive": "Claude Sonnet 5.5, extra-high effort",
+  "baselineAndComparison": "Claude Opus 5.5, high effort",
+  "webResearchAndWriting": "Claude Fable 5.1, medium effort"
+ }
+}

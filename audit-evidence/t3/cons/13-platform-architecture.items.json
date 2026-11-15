@@ -1,0 +1,789 @@
+{
+ "category": "Platform architecture",
+ "items": [
+  {
+   "id": "R-t3-13-01",
+   "title": "Make run control and per-send idempotency multi-replica safe: shared cancel, queued-input, plan-mode, worker and turn state, with durable send receipts",
+   "summary": "Move the process-local run-control state in model-gateway (cooperative cancel flags, mid-run queued input, plan-mode flags, team workers, the chat-turn map, hook/plugin/command/task registries) behind run-id-keyed shared state, and make duplicate-send protection durable. Reuse what session-core already stores (managed-run start_key, completion_key, the unique events idempotency index) instead of the in-memory /v1/invoke idempotency registry, and make the SPA send one idempotency key per user send.",
+   "whyItMatters": "A hosted multi-tenant agent product has to scale past one gateway process and survive redeploys. Today a cancel or queued message that lands on a replica other than the one holding the SSE connection is missed, plan-mode flags and queued input vanish on restart, and a double-clicked send is only deduplicated inside one process; long agentic runs make this worse because the drain window is 120 s.",
+   "referenceBestPractice": {
+    "bestSource": "T3 Code (serial command queue with idempotent receipts); DeepSeek harness documents the process-local limit",
+    "others": [
+     "DeepSeek harness",
+     "Manus"
+    ],
+    "prevalence": "C-013: 3 of 12 (differentiator). C-057: 1 of 12 (unique; the one reference record documents the limitation rather than solving it and no reference is multi-tenant multi-replica, so the priority comes from Verevon's own code)",
+    "mechanism": "T3: CommandEnvelope{id, aggregate, payload} goes through a serial queue; a receipt lookup returns the stored sequence for a repeat of the same id and a conflict for the same id on another aggregate; events, read-model projections and the receipt are written in one SQL transaction, then published. DeepSeek logs compaction and pruning as replace operations over sequence ranges so the transcript and the model-visible surface can both be rebuilt. For run control the equivalent is run-id-keyed state with TTL and compare-and-set in a shared store, routed by run id."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:1-9",
+     "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:24-31",
+     "apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs:9-16",
+     "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:3-22",
+     "apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs:17-30",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:1-5",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2004",
+     "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:10-13",
+     "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20",
+     "apps/Model Plane/rust/services/model-gateway/src/managed_start_key.rs:1-8",
+     "apps/Model Plane/rust/services/session-core/migrations/0040_direct_run_completion_key.sql:1-10",
+     "apps/Model Plane/rust/services/session-core/migrations/0002_events_and_ordinals.sql:35-38",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+     "apps/Model Plane/docs/GATEWAY_DEDUPLICATION_PLAN.md"
+    ],
+    "gap": "SRC: the stream buffer has a Redis backend and resume works across replicas, and session-core already persists the managed-run start_key, a completion_key with a single-transaction completion receipt (0040) and a unique (org_id, idempotency_key) index on events (0002). But CancelRegistry, queued input, the /v1/invoke idempotency registry, PlanModeStore and TeamWorkerStore, the chat-turn registry and the hook/plugin/command/task registries are per-process DashMaps whose own headers say single-replica; an SSE connection pins a run to one process. chat-client.ts contains no idempotency key. The production compose file sets no replica count, so confirm real topology."
+   },
+   "approach": "(1) Cancel and queued input: publish on a NATS subject keyed by run id (or Redis keys with TTL) that the process holding the stream subscribes to; keep a local live-stream counter because drain.rs counts live streams through CancelRegistry. (2) Plan-mode flags and team workers: write to session-core (the coordinator.rs header already says to promote to Postgres when restart tolerance stops holding); chat-turn map to Redis with TTL. (3) Idempotency: drop the in-memory claim path for managed runs and rely on start_key/completion_key; chat-client.ts generates one key per send and handles duplicate_in_flight. (4) Record compaction and tool-result pruning as replace events (phase 2, shared with R-t3-13-05). (5) Add a two-replica conformance test (cancel and queue from the other replica, restart mid-plan).",
+   "effort": "L",
+   "dependencies": [
+    "Redis/Dragonfly (already used by stream_buffer.rs)",
+    "NATS mp.v1 subjects",
+    "session-core migration for plan/worker state",
+    "R-t3-13-02 for durable loop checkpoints"
+   ],
+   "planeOwner": "Model Plane (model-gateway, session-core); SPA change in Frontend Plane",
+   "risks": "Hot-path latency and ordering of cancel versus completion. ZDR turns must stay persistence-free, so their control state has to be TTL-only and never written to Postgres. Keep the (org, user, request_id) binding so a request id never becomes a cross-tenant cancel or inject oracle.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "In-code promotion notes (cancel_registry.rs:7-9, idempotency_registry.rs:14-16, coordinator.rs:22); CHAT_GAP_CLOSURE_PLAN_2026-10-01.md I2 (per-send idempotency key) and I4 (settle orphaned streams); I3 (graceful drain) already shipped"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-13-057",
+    "C-t3-13-013"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 16,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-02",
+   "title": "Resume the agent loop in place after an approval or ask-user answer, with open requests replayed on reconnect",
+   "summary": "Persist a loop checkpoint at every pause (approval, plan gate, clarifying question) and re-enter the Do-mode loop at that cursor when the answer arrives, instead of re-executing three whitelisted effects from a descriptor. Add a typed interaction-request record (approval, question, secret) that blocks the run until answered, is replayed from the run event log on reconnect, and is only issued to clients that declared they can answer.",
+   "whyItMatters": "Agents that stop dead after the user clicks approve, or cannot ask a clarifying question, feel broken and make multi-step Do mode unusable; users notice this immediately in Manus and Claude.",
+   "referenceBestPractice": {
+    "bestSource": "Hermes Agent",
+    "others": [
+     "DeepSeek harness",
+     "Claude desktop app"
+    ],
+    "prevalence": "3 of 12 (differentiator)",
+    "mechanism": "Hermes: the runtime sends a blocking request {id, method, payload, deadline} and the agent thread awaits the answer; cancel events withdraw it; open requests are re-sent on session.resume and events.since; clients declare up front whether they can answer, so the server fails fast for those that cannot. DeepSeek makes the browser a listener in the approval waterfall so the same pipeline serves UI and hooks."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476-4500",
+     "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-33",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:213-214",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7147-7156",
+     "apps/Model Plane/rust/services/session-core/migrations/0018_approval_continuation_receipts.sql",
+     "apps/Model Plane/rust/services/session-core/migrations/0022_encrypted_approval_continuation_descriptors.sql",
+     "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:3-22",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:442"
+    ],
+    "gap": "SRC: approvals are durable (encrypted continuation descriptors, delivery outbox, leased worker) and plan approval exists, but the worker only resumes execute_provider_action, book_shipment and tickets.create from a cold descriptor; browser_agent and arbitrary tools are refused as invalid_continuation, and the LLM loop itself does not continue reasoning afterwards. A grep of all apps code found no ask_user or clarifying-question tool and no interaction-request type, and nothing replays a pending request to a reconnecting client."
+   },
+   "approach": "(1) At pause_for_approval write a loop checkpoint to session-core (step cursor, pending tool call, round counters, pointer to message history), encrypted like the 0022 descriptors and refused on ZDR turns through continuation_gate. (2) Resume path: the approval delivery worker (or a new ResumeRun RPC) re-enters runtime_loop::agent at the cursor with the decision injected as the tool result, re-running capability, hook and ZDR checks. (3) New run_interactions table (request_id, run_id, kind approval|question|secret, JSON schema, deadline, state) with an interaction.requested SSE event replayed from /v1/runs/:id/events/replay and invoke/resume. (4) The BFF sends a client capability header at run start so cron, API and channel runs park or fail fast rather than wait forever. Agent-runtime items R-t3-04-02 and R-t3-04-03 and chat item R-t3-01-05 own loop semantics and UX; this item owns the persistence and protocol.",
+   "effort": "L",
+   "dependencies": [
+    "R-t3-13-01 shared run-control state",
+    "session-core checkpoint and interaction tables",
+    "Related: R-t3-04-02, R-t3-04-03, R-t3-01-05"
+   ],
+   "planeOwner": "Model Plane (execution-core, session-core, model-gateway)",
+   "risks": "A resumed loop must re-check capability decisions and ZDR because continuations are retention-bearing. Cold re-execution of browser_agent or arbitrary MCP tools stays unsafe without an effect ledger. Deadlines and idempotency are needed so a late answer cannot trigger a duplicate effect.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "CHAT_GAP_CLOSURE_PLAN_2026-10-01.md OD6 (open decision on how a plan continues after an approval pause); approval continuation worker shipped for three action kinds only"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-13-041"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-03",
+   "title": "Per-thread sandbox computer: SandboxBackend seam, microVM backend with a persistent thread workspace, typed executor protocol and safe-path hardening",
+   "summary": "Give each agentic thread its own sandbox computer. Add a SandboxBackend seam in sandbox-manager (leases already carry backend_id, scope_type and endpoint) with a microVM backend (Firecracker or Kata) that stops when idle and snapshots to encrypted object storage, extend the CAS workspace layer so a thread outside any Space gets its own durable volume, and define a typed mp.v1 executor protocol (Execute, Progress, Cancel, Transfer) that execution-core uses for every host. As step zero, harden the existing host-side hydrate/diff path with no-follow, fd-based opens.",
+   "whyItMatters": "This is the Manus/Claude 'acts like a PC' capability the product vision needs. Today each tool call runs under bwrap inside the execution-core container, child processes die with their host process, the durable workspace exists only for Spaces, and there is no desktop, screen or transfer action set, so long multi-step code, file or desktop tasks cannot run safely or resume.",
+   "referenceBestPractice": {
+    "bestSource": "claude.ai (per-conversation VM, DOC) with Manus (typed executor protocol, SRC)",
+    "others": [
+     "ChatGPT",
+     "Manus web",
+     "Cursor",
+     "Codex",
+     "Claude desktop app"
+    ],
+    "prevalence": "C-036: 3 of 12 (differentiator, DOC-only evidence). C-003: 3 of 12 (differentiator, SRC). C-016: 6 of 12 (table-stakes). C-025: 1 of 12 (unique)",
+    "mechanism": "One microVM (Firecracker, Kata or gVisor) per thread with a persistent volume; idle stop, encrypted snapshot restored on the next turn, 30-day expiry, egress policy, VM-seconds reported to metering. Manus executor protocol: Hello (capabilities, host kind), Execute with an action oneof (file, git, terminal, mcp, screen), Cancel, ActionProgress, Result and TransferAccess (signed upload/download grants); the host reconciles a server-pushed desired state and reports the applied version, and the cloud loop never touches the host directly. Cursor's ExecServerMessage is the per-tool typed variant. Claude's SafeRoot opens the root once and resolves children with openat and O_NOFOLLOW (RESOLVE_BENEATH on Linux), re-checks containment and bounds reads."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/process_tools.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-20",
+     "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-40",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:1-15",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:96-97",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:155-170",
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:652",
+     "apps/Model Plane/rust/services/execution-core/src/policy.rs:63-70",
+     "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:142-166",
+     "apps/Model Plane/go/services/sandbox-manager/internal/snapshot/snapshot.go:1-45",
+     "apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go:1-20",
+     "apps/Model Plane/docs/decisions/ledger.md:1358",
+     "apps/Model Plane/docs/core-research/agentic-engineering-audit-2026-07-17.md:131",
+     "apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md"
+    ],
+    "gap": "SRC: sandboxing is bwrap inside the execution-core container with --die-with-parent, so a process never outlives its host. Durable state is Space-scoped: sandbox-manager keeps Postgres lease, snapshot and workspace-manifest rows and execution-core hydrates and diffs to CAS (S3.3), but workspace_hydrate.rs and sandbox_lease.rs document that the inline chat path has no run-ended signal so edits can be lost. There is no VM, no thread-scoped workspace, no desktop, no screen or input actions and no transfer grants. Path containment is lexical (safe_relative_path rejects .. and diff skips symlinks via DirEntry::file_type) and then re-opens by path, not fd-based openat. The ledger defers a SandboxBackend trait until a second real backend exists; this is that second backend."
+   },
+   "approach": "Phase 0: fd-based/no-follow file opens in workspace_hydrate.rs and sandbox-manager file paths (cap-std in Rust, x/sys/unix openat2 in Go) and a symlink-escape test. Phase 1: introduce the SandboxBackend seam in sandbox-manager with the current bwrap path as backend one and define executor.proto in mp.v1 (Hello, Execute, Progress, Cancel, Result, TransferAccess) so every action routes through execution-core's capability, hook, permission and approval pipeline first. Phase 2: microVM backend pinned to a thread-scoped lease, persistent volume via the S3.3 CAS manifests with a thread scope, snapshot-on-idle to encrypted MinIO, egress through a policy proxy, VM-seconds reported to cost-core. Phase 3: screen and input actions on the sandbox desktop (owned by category 06 items R-t3-06-03 and R-t3-06-04). Quarry stays the only browser executor. Do not let integration tokens enter the VM.",
+   "effort": "XL",
+   "dependencies": [
+    "Control-signed lease decisions (existing)",
+    "cost-core VM-seconds metering",
+    "Quarry for browser actions",
+    "Category 06 items R-t3-06-03 and R-t3-06-04 own the user-facing computer panel and desktop actions",
+    "S3.3 durable workspace wiring"
+   ],
+   "planeOwner": "Model Plane (sandbox-manager, execution-core)",
+   "risks": "Cost, VM isolation escapes, credential isolation (no Integration Core tokens in the VM, brokered egress only) and ZDR: snapshots and persistent volumes are retention-bearing, so ZDR turns must use a no-snapshot, destroy-on-end profile. The executor protocol must not let a local host hold user credentials.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md (Space-scoped CAS workspace); agentic-engineering-audit-2026-07-17.md:131 recommends Firecracker/runc or a remote executor pool; ledger.md:1358 defers the SandboxBackend trait until a second backend exists"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-13-036",
+    "C-t3-13-003",
+    "C-t3-13-016",
+    "C-t3-13-025"
+   ],
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 27,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-04",
+   "title": "Runtime release safety: signed candidate and separate rollback artifact, rehearsed rollback, deployed audit fix and a release gate",
+   "summary": "Finish artifact format v3 end to end: build a signed candidate per release (image digests, migration set, compatibility gates) and a separate accepted rollback artifact, rehearse restoring it against a database snapshot, deploy the already-built audit publisher fix and replay the stuck rows, and gate deploys on a release-evidence check in coresystem-conformance.sh with numeric canary and rollback thresholds.",
+   "whyItMatters": "Verevon cannot claim production readiness, or defend a ZDR and audit promise to enterprise buyers, without a reproducible signed release and a proven rollback. Postmortem 0002 shows the failure mode: a built fix sat undeployed while 4,992 audit events stayed stuck.",
+   "referenceBestPractice": {
+    "bestSource": "T3 Code",
+    "others": [
+     "Claude desktop app (signed manifest, staged rollout)",
+     "Codex",
+     "Hermes Agent (drain-first fleet restarts)"
+    ],
+    "prevalence": "4 of 12 (common)",
+    "mechanism": "T3 installs the new version beside the old, preflights it, starts a trial child against a database snapshot and rolls back on failure. Claude ships a signed manifest {version, artifacts[sha256, size], compat} with staged rollout; Hermes restarts drain-first and keeps receipts for interrupted steps."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/scripts/release-artifact.sh:1-40",
+     "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20",
+     "apps/Model Plane/MODEL_PLANE_ROADMAP.md:40-52",
+     "apps/Model Plane/docs/MODEL_PLANE_RELEASE_EVIDENCE.md:1-22",
+     "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md:1-12",
+     "apps/Model Plane/deploy/docker-compose.production.yml",
+     "scripts/coresystem-cross-plane-preflight.sh:1-30"
+    ],
+    "gap": "SRC/DOC: artifact v3 tooling (11 services, pinned infrastructure images, refuses a dirty tree) and graceful drain exist, and the evidence register defines candidate and rollback evidence classes. The roadmap states no signed candidate or rollback artifact has been built, and postmortem 0002 (2026-10-06) records the audit publisher fix as built but not deployed. These docs are dated (the roadmap text also describes the approval dispatcher as missing although the worker now exists), so the current state needs a code-level re-check."
+   },
+   "approach": "Run artifact v3 in release mode with signing and verification keys; produce a separate rollback artifact from the prior revision; script a rollback rehearsal that restores the retained digest and runs the migration revert scripts against a snapshot; add a release-evidence check to coresystem-conformance.sh that fails when candidate or rollback evidence is missing; require forward-compatible (expand/contract) migrations; define canary thresholds and observation windows; deploy the session-core audit publisher fix and requeue the stuck rows.",
+   "effort": "M",
+   "dependencies": [
+    "Clean isolated source tree",
+    "Signing keys and an external runtime environment allowlist",
+    "Postgres migration revert scripts (session-core/migrations/revert)"
+   ],
+   "planeOwner": "Model Plane (release tooling), Infra Plane for deploy",
+   "risks": "Rolling back Postgres migrations that changed data requires forward-compatible schemas; a rehearsal on production-shaped data is needed. Release gates can block urgent fixes without an emergency path.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "MODEL_PLANE_ROADMAP.md next steps 5-9 (signed artifact-v3 candidate, separate rollback artifact, canary thresholds); postmortem 0002 (publisher fix built, not deployed)"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-13-032"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-05",
+   "title": "Conversation history foundation in session-core: durable message identity with supersede, confirmed rewind, fork with lineage, and full-text search",
+   "summary": "Add three session-core capabilities that share one data model. (a) A supersede primitive (archive, never delete, with a lineage root id) plus a confirmed rewind endpoint that names the user turn to cut at by durable message id and is refused while a run is active. (b) A fork endpoint that copies a message range into a new thread with lineage and inherited Space audience and ZDR posture. (c) Server-side full-text search over past conversations with a read-only recall_conversations tool for the agent.",
+   "whyItMatters": "Edit-and-resend, regenerate, branching and finding an old chat are table-stakes chat behaviour; today none of them persist server-side or across devices, and the agent cannot recall earlier conversations, which is also the Hermes-style personalisation lever.",
+   "referenceBestPractice": {
+    "bestSource": "Hermes Agent (truncating rewind with durable row ids; FTS5 plus trigram search and a recall tool)",
+    "others": [
+     "Cursor (ForkSession, AttachSession, WatchSessions)",
+     "Codex (resume and fork by id)"
+    ],
+    "prevalence": "C-043: 1 of 12 (unique). C-011: 3 of 12 (differentiator). C-015: 2 of 12 (differentiator)",
+    "mechanism": "Hermes: the user message is written durably before the turn runs; prompt.submit names truncate_before_row_id with confirm flags and typed refusal codes; truncated rows are archived; a lineage root id survives compaction. Search: an external-content FTS index over a truncating view of messages (tool output capped), a separate trigram index for substrings, an optional CJK tokenizer and a resumable rebuild with high-water markers, exposed both as a user search API and as a recall_conversations agent tool. Cursor's AgentHostService offers CreateSession, ForkSession, WatchSessions, InterruptTurn, CancelQueuedTurn and AttachSession."
+   },
+   "verevonToday": {
+    "status": "planned",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:220-222",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:251-252",
+     "apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:144-181",
+     "apps/Model Plane/rust/services/session-core/migrations/0025_message_space_audience_context.sql",
+     "apps/Model Plane/rust/services/session-core/migrations/0035_message_author_attribution.sql",
+     "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:1-9"
+    ],
+    "gap": "SRC/DOC: the gateway has thread list, archive, delete, messages and events-replay routes but no fork, rewind, supersede or search route, and no tsvector or trigram index exists in session-core migrations (the only Postgres full-text work is in Data Plane v2). The gap plan lists I8 branch, I9 supersede, I10 persisted versions, I11 checkpoint/rewind and I12 full-text chat search plus recall_conversations as planned, none built."
+   },
+   "approach": "Phase 1 (I9): add superseded_by, archived_at and lineage_root_id to messages; a supersede call used by regenerate, edit and continue so superseded rows never enter model history. Phase 2: POST /v1/threads/:id/rewind {truncate_before_message_id, confirm} with typed refusal codes, and POST /v1/threads/:id/fork {at_message_id} that copies the range with parent lineage and inherits Space audience revision and ZDR posture without widening either; mark side effects as non-rewindable. Phase 3 (I12): Postgres tsvector (Norwegian and simple dictionaries) plus pg_trgm over user and assistant text and truncated tool output, org, user and Space-audience scoped; GET /v1/threads?q=; recall_conversations tool in the read-only gateway loop; ZDR threads are absent by construction; GDPR erasure removes index rows. Keep this to conversation text; Data Plane owns document retrieval. Chat-category items R-t3-01-02, R-t3-01-03 and R-t3-01-09 own the user-facing UX.",
+   "effort": "L",
+   "dependencies": [
+    "R-t3-13-01 for command receipts and replace events",
+    "Related chat items R-t3-01-02, R-t3-01-03, R-t3-01-09",
+    "session-core migrations"
+   ],
+   "planeOwner": "Model Plane (session-core, model-gateway)",
+   "risks": "Rewind must not imply undoing external side effects, so show what cannot be undone. Fork and search must respect Space audience revisions, ZDR (no persistence means no index) and GDPR erasure. Indexing tool output risks indexing secrets, so scrub before indexing.",
+   "tier": "recommended",
+   "significance": 4,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "CHAT_GAP_CLOSURE_PLAN_2026-10-01.md I8, I9, I10, I11 (Waves 4-5) and I12 (full-text search plus recall_conversations)"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-13-043",
+    "C-t3-13-011",
+    "C-t3-13-015"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-06",
+   "title": "Always-on web client: live per-user shell stream, installable PWA with a host-capability seam, and a version and capability meta endpoint",
+   "summary": "Push thread and run summaries to the SPA instead of polling: a per-user SSE shell stream in model-gateway (baseline snapshot, sequence resume, per-thread coalescing) fed from session-core outbox and NATS events. Make the SPA an installable PWA (manifest, shell-only service worker, web push for approvals and run completion) behind a HostCapabilities context, and add /api/v1/meta with build revision and capability booleans so long-open tabs detect a rollout and offer a reload.",
+   "whyItMatters": "Background agents (Do mode, scheduled runs, subagents) must update the sidebar and Run Console live and reach the user when the tab is closed; this is what users notice in Manus and Claude. A stale tab after a Model Plane rollout can otherwise send requests or ignore new events silently.",
+   "referenceBestPractice": {
+    "bestSource": "T3 Code (live sync); Antigravity (one UI bundle for web, PWA, desktop and remote view)",
+    "others": [
+     "Claude desktop app",
+     "DeepSeek harness",
+     "Hermes Agent",
+     "claude.ai"
+    ],
+    "prevalence": "C-010: 4 of 12 (common). C-033: 5 of 12 (common). C-022: 3 of 12 (differentiator)",
+    "mechanism": "T3: the server attaches the live event buffer before taking the snapshot so no event is lost, coalesces per aggregate so bursts become one refetch per thread per window, and resumes after the client's snapshot sequence; the client paints from an IndexedDB snapshot first, then the HTTP snapshot, then increments, with shell and detail projections so the sidebar stays light. T3 also serves a /.well-known descriptor with optional capability booleans where a missing key means unsupported. Antigravity builds a composition root that injects host feature providers so one bundle serves Electron, web, PWA and remote control."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts:11-13",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:6-20",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:92",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:205-220",
+     "apps/Frontend Plane/verevonv3/src/demo/product-demo/guard.ts:241",
+     "apps/Application Plane/convex-core/convex/agentRuns.ts:1-20",
+     "apps/Application Plane/convex-core/convex/agentRuns.ts:96-130",
+     "apps/Application Plane/notification-core/README.md"
+    ],
+    "gap": "SRC: the SPA keeps a ZDR-aware derived localStorage cache and fetches thread lists and run states by REST. No server-pushed sidebar stream, no web manifest and no service worker were found (a grep only hits the product-demo guard, which disables service workers), and the BFF /version route returns revision and build date that the SPA never reads. An Application Plane Convex mirror of mp.v1 run events (agentRuns.listForOrg) exists but is org-membership scoped, stores an untyped payload with no ZDR handling and is not used by the SPA (no convex dependency), so it should not be reused for a per-user sidebar as is. notification-core has feed, preferences, channels and retention_mode but no web-push channel was found."
+   },
+   "approach": "(1) model-gateway: GET /v1/shell/stream per user; first event is a snapshot of thread summaries (id, title, status, unread, pending approval), then increments with sequence ids and Last-Event-ID resume; subscribe to NATS mp.v1 events before snapshot, coalesce per thread, check Space audience revision on every push, content-free so ZDR threads emit status only. (2) SPA: HostCapabilities context (clipboard, notifications, file pick) with a web implementation, PWA manifest, a service worker that precaches shell assets only and never caches API responses (ZDR), and a Web Push channel added to notification-core with content-free payloads. (3) Gateway /api/v1/meta {revision, build_date, capabilities, min_spa_revision}; SPA polls on focus and prompts for reload on mismatch; the same flow drives service-worker updates.",
+   "effort": "L",
+   "dependencies": [
+    "R-t3-13-01 (cross-replica fan-out)",
+    "notification-core web-push channel",
+    "Session-core outbox and NATS mp.v1 subjects (existing)"
+   ],
+   "planeOwner": "Model Plane (shell stream) with Frontend Plane (PWA, meta) and Application Plane (push)",
+   "risks": "Fan-out cost per user; pushing summaries must honour Space audience revisions; a service worker that caches responses would violate ZDR; push payloads must not carry conversation text.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-13-010",
+    "C-t3-13-033",
+    "C-t3-13-022"
+   ],
+   "provenanceMix": {
+    "REA": 3,
+    "SRC": 23,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-07",
+   "title": "Contract and architecture guardrails in CI: generated SPA types from Rust, plane-boundary and logging gates, and a size ratchet",
+   "summary": "Generate TypeScript types for SSE payloads and BFF JSON from the Rust contracts (ts-rs or schemars into json-schema-to-ts, or from proto) with a CI diff failure, and add a test-mode payload validator in the SPA stream client that rejects unknown keys. Add syntax-aware fitness gates: no cross-plane DB access, no raw user content in logs, and a baselined file and function size ratchet whose enforcement level is read from the base branch.",
+   "whyItMatters": "It removes the recurring class of bug where the backend emits an event the SPA silently drops, and it turns the plane-ownership and ZDR rules, which are enforced today by review and by docs that go stale, into durable checks that still hold when AI agents write most of the code.",
+   "referenceBestPractice": {
+    "bestSource": "Hermes Agent (schema codegen); DeepSeek harness (AST fitness gates)",
+    "others": [
+     "T3 Code",
+     "Codex"
+    ],
+    "prevalence": "C-007: 4 of 12 (common). C-046: 3 of 12 (differentiator)",
+    "mechanism": "Hermes: one Pydantic model per method, server request and event; a generator renders TypeScript types and an OpenRPC document; extra keys are rejected and test isolation raises ContractViolation on a mismatched payload. DeepSeek: AST-based repository checks that cannot be dodged by renamed imports, with SHA-256 baselines for retiring legacy violations; Hermes reads the ratchet level from main so a PR cannot relax its own check."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     ".github/workflows/sse-taxonomy.yml",
+     ".github/workflows/contract-goldens.yml",
+     ".github/workflows/buf.yml",
+     ".github/workflows/secret-scan.yml",
+     ".github/workflows/model-plane-rust-ci.yml:92-119",
+     "scripts/lint-resource-taxonomy.sh",
+     "scripts/coresystem-conformance.sh",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:875"
+    ],
+    "gap": "SRC: CI guards SSE event-name taxonomy freshness, vendored contract goldens with sha256 pins, buf breaking changes, a resource-taxonomy lint and secret scanning. Not found: generated SPA payload types (chat-client.ts is hand-written; no ts-rs, specta, schemars or utoipa in the verevonv3 manifests), an automated check of the no-cross-plane-DB-access rule, a complexity ratchet (agent.rs is 13,521 lines, sse.rs 13,325 and http_routes.rs 11,681) or a stale-doc gate; the Model Plane CI job runs fmt, check and tests only."
+   },
+   "approach": "Types: derive schemars or ts-rs on the SSE event and BFF DTO structs in model-gateway and the verevonv3 gateway, emit committed .ts files under src/shared/api/generated, fail CI on diff, and add an assert-on-unknown-keys validator used in tests and dev builds of the SSE parser. Fitness: add a syn and go/ast based job that scans each service's DB URLs and migrations for foreign schemas, a lint gate that forbids logging prompt, message and tool-result fields (pairs with R-t3-13-09), a file and function size ratchet baselined by hash with the level read from the base branch, and a doc-freshness check tied to STALE_DOC_DELETION_REGISTER.md. This ratchet is also the answer to the oversized loop functions; do not add a contributor-registry abstraction for a single implementation (ledger.md:1358 rule).",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane (types) and Support Plane (CI gates)",
+   "risks": "Codegen churn in a fast-moving SPA and the BFF reshaping layer must also be covered; false positives slow development, so baseline existing violations.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-13-007",
+    "C-t3-13-046"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 14,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-08",
+   "title": "Typed feature-flag and settings registry served by Control Plane, with kill switches and an agent-access class",
+   "summary": "Replace the sprawl of per-crate environment flags with one typed registry (name, stage, default, owner, kill switch, agentAccess excluded|read|write) whose values are evaluated per org by Control Plane, cached in each service with a TTL and served to the SPA in the BFF boot payload. Fold the fragmented composer, org and profile settings into the same schema so one source feeds the settings UI and any future agent settings tool.",
+   "whyItMatters": "Verevon has many built-but-dark features (Do on subscription, hooks, MCP dispatch, fine-tuning); today turning one on or off needs a redeploy and there is no per-org staging or record of what is live. An agent-access class is required before the agent can be given a settings tool.",
+   "referenceBestPractice": {
+    "bestSource": "Claude desktop app",
+    "others": [
+     "Codex (about 170 staged features)",
+     "Antigravity",
+     "Cursor",
+     "DeepSeek harness (validate, persist, hot-apply)"
+    ],
+    "prevalence": "C-019: 4 of 12 (common). C-020: 5 of 12 (common)",
+    "mechanism": "Flags: layered sources (static map, remote refresh, disk cache, fallback), exposure events, and staleness windows that disable security-sensitive features when flags are stale. Settings: a zod schema where each key carries scope, default and agent access (excluded, read, write); security-relevant keys are excluded from the agent's own settings tool, main-only keys cannot be set from the renderer, and grant maps can only be reduced."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/finetune_routes.rs:307-316",
+     "apps/Model Plane/rust/services/execution-core/src/control_http_client.rs:81",
+     "apps/Model Plane/rust/crates/mp-contracts/src/agentic_subscription.rs:38-47",
+     "apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv",
+     "apps/Control Plane/billing-core/migrations/0001_init_billing_core.up.sql:7",
+     "apps/Frontend Plane/verevonv3/src/shared/api/composer-settings-client.ts",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs",
+     "apps/Model Plane/rust/services/model-gateway/src/profile.rs"
+    ],
+    "gap": "SRC: features are gated by ad hoc environment variables (AGENTIC_SUBSCRIPTION_ENABLED, the fine-tune feature env and separate env_flag helpers in execution-core and session-core) plus a capability promotion ledger TSV; there is no central typed registry, no per-org evaluation and no runtime kill switch. The only flag-like store in Control Plane is billing-core's per-plan feature_flags JSON map. Settings are spread across composer settings, BFF org settings and server-resolved profiles; the profile already lets clients only tighten posture, which is the right idea at the wrong breadth."
+   },
+   "approach": "Define a flag and settings schema crate in mp-contracts (name, stage dev|beta|stable|deprecated, default, owner, scope, agentAccess); Control Plane org-core serves per-org values (billing-core plan feature_flags can seed entitlement-driven flags); each service caches with TTL and fails closed for security gates when stale; the BFF boot payload exposes the SPA-visible subset; link flag state to the capability promotion ledger so a capability cannot be live without ledger evidence. Flags may only restrict: a flag must never widen ZDR or authority posture.",
+   "effort": "M",
+   "dependencies": [
+    "Control Plane org settings",
+    "R-t3-13-04 ledger and release evidence"
+   ],
+   "planeOwner": "Control Plane (registry), consumed by all planes",
+   "risks": "Flag debt; a flag path that widens ZDR or authority would defeat the posture model; migration of existing settings rows.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-13-019",
+    "C-t3-13-020"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 16,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-09",
+   "title": "Privacy by construction: type-level user-content wrappers and allow-list scrubbing of telemetry names and labels",
+   "summary": "Introduce a UserContent (Redacted) newtype in mp-contracts for prompt, message, tool-result and memory fields so Debug, Display and serde refuse to emit raw content except through an explicit privacy context that carries the ZDR posture. Add an attribute and label sanitizer in mp-telemetry with a first-party allow-list and salted hashes for user-defined tool, MCP server, skill and plugin names and URLs, with an org-policy toggle for stricter scrubbing.",
+   "whyItMatters": "It makes ZDR and audit-safe logging provable by construction instead of by pattern scrubbing and review, and keeps tenant-defined names out of shared observability; this supports the ZDR claim that Verevon sells.",
+   "referenceBestPractice": {
+    "bestSource": "Cursor (privacy-typed fields); Claude desktop app (allow-list telemetry scrubbing)",
+    "others": [
+     "Antigravity"
+    ],
+    "prevalence": "C-017: 1 of 12 (unique). C-018: 3 of 12 (differentiator)",
+    "mechanism": "Cursor marks user content in proto field options and wraps it in a RedactedString that refuses to serialize into logs unless privacy mode allows, with content-addressed AES-GCM blobs behind it. Claude's shared redaction library keeps an allow-list of first-party tool, MCP, plugin and skill names, turns everything else into a sentinel or salted hash, scrubs emails, IPs, paths and query parameters, and runs an extra rescrub for HIPAA organisations."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/scrub.rs",
+     "apps/Model Plane/rust/services/session-core/src/continuation_crypto.rs",
+     "apps/Model Plane/rust/crates/mp-contracts/src/retention.rs:1-20",
+     "apps/Model Plane/rust/crates/mp-telemetry/src/lib.rs",
+     "apps/Model Plane/rust/services/model-gateway/src/gateway_metrics.rs",
+     "apps/Model Plane/rust/services/model-gateway/src/security_events.rs:1-10",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:274"
+    ],
+    "gap": "SRC: a ZDR resolver with a golden matrix, encrypted approval continuation descriptors, pattern-based secret scrubbing, hash-only security events and Prometheus plus OTLP telemetry exist. A grep for Redacted, secrecy and SecretString in the Rust workspace finds only RedactedArgv in execution-core's process host path, so there is no type-level classification of user content, and no allow-list scrubbing of user-defined MCP, skill or tool names in labels or spans was found (not exhaustively searched)."
+   },
+   "approach": "Add UserContent<T> in mp-contracts (Debug and Display print a redaction marker; serde only through a PrivacyContext derived from the retention resolver) and adopt it on message, prompt, tool-argument, tool-result and memory fields across model-gateway, execution-core, session-core and inference-core. Add a lint or grep gate against logging raw content (delivered through the gates in R-t3-13-07) and an audited break-glass path for debugging. In mp-telemetry add a sanitizer applied to OTEL span attributes and Prometheus labels with a first-party allow-list, salted hashing and an org toggle.",
+   "effort": "M",
+   "dependencies": [
+    "R-t3-13-07 for the logging gate"
+   ],
+   "planeOwner": "Model Plane (mp-contracts, mp-telemetry)",
+   "risks": "Wide refactor touching many call sites; debugging gets harder without a break-glass path; over-scrubbing hurts support.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-13-017",
+    "C-t3-13-018"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 12,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-10",
+   "title": "Public, versioned Agent API with origin-tagged runs as the one entry for every surface (SPA, API keys, schedules, mail, later channels)",
+   "summary": "Expose a versioned /v1/agent API on model-gateway (create run, stream, resume, cancel, answer an interaction) behind Control-issued API keys exchanged for audience-bound delegated bearers, generate an SDK from the same contract, and make every run carry an origin and parent id (chat, console, api, schedule, mail, channel, subagent). Route scheduled and mail-triggered runs through the same governed pipeline, and treat future Channel Plane adapters (Teams, Slack) and a thin CLI as clients of this API.",
+   "whyItMatters": "Enterprise customers and internal surfaces (Office add-ins, mail tasks, cron) can reuse the governed Do-mode pipeline instead of re-implementing it, and agents reachable from Teams or Slack raise daily use. Today Model Plane has one real front door, the SPA through the BFF, plus a hollow scheduled path.",
+   "referenceBestPractice": {
+    "bestSource": "Codex (one runtime, many thin surfaces); Manus (everything is a task with an id and URL)",
+    "others": [
+     "Antigravity (trajectories tagged by source)",
+     "Hermes Agent (messaging gateway with about 25 adapters)",
+     "T3 Code",
+     "DeepSeek harness"
+    ],
+    "prevalence": "C-001: 6 of 12 (table-stakes). C-037: 3 of 12 (differentiator). C-038: 1 of 12 (unique)",
+    "mechanism": "Codex: one Rust binary exposes exec, review, resume and fork by id, queue, sandbox, execpolicy and an app-server daemon, so each surface is a thin client of the same runtime. Manus: a task.* API where chats, API tasks, schedules and sub-tasks are all tasks with a task_url. Hermes: channel adapters are plugins that connect, normalise, authorise, resolve a canonical session key (agent:{ns}:{platform}:{chat_type}:{chat_id}), queue busy sessions and stream replies."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:136-351",
+     "apps/Model Plane/rust/services/session-core/migrations/0034_thread_origin.sql:1-12",
+     "apps/Model Plane/rust/services/session-core/migrations/0041_mail_task_thread_origin.sql",
+     "apps/Model Plane/rust/services/execution-core/src/grpc.rs:497-525",
+     "apps/Control Plane/auth-core/src/auth/auth.ts:1112-1124",
+     "apps/Control Plane/auth-core/src/auth/model-plane-token.controller.ts:1-30",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/briefs.rs:36-40",
+     "apps/Model Plane/go/services/bridge-core",
+     "apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md"
+    ],
+    "gap": "SRC: the gateway already serves a rich /v1 surface (invoke, stream, resume, runs, orchestration, tasks, cron) but only the BFF consumes it; there is no public Agent API, SDK, CLI or OpenAI-compatible endpoint. Threads carry a stored origin and system runs are listed, but a scheduled step is a single no-tool 1,024-token call with a receipt and no result delivery, and the daily-brief route has no SPA caller. auth-core has an optional API-key plugin (API_KEY_ENABLED) and a model-plane token controller that mints audience-bound RS256 bearers, so key-to-bearer exchange is feasible. The Channel Plane is docs-only and bridge-core is scaffolding."
+   },
+   "approach": "(1) Versioned /v1/agent routes in model-gateway that wrap the existing managed-run start, events, resume, cancel, plan-approval and interaction answers, with an OpenAPI spec generated from the Rust types (shares tooling with R-t3-13-07) and a generated SDK. (2) API keys from auth-core exchanged at the edge for audience-bound delegated bearers; the API must never bypass the BFF's bearer minting, ZDR propagation or per-org rate limits. (3) Extend the thread and run origin enum (api, schedule, mail, channel, subagent) and parent run id; run ScheduledRunSupervision through the full governed Do-mode loop with an unattended identity and deliver results to the thread plus notification-core (agent-runtime item R-t3-04-05 owns the loop semantics). (4) Later: stand up the Channel Plane with a Teams then Slack adapter calling this API, with per-channel identity mapping through Control, and a thin CLI.",
+   "effort": "L",
+   "dependencies": [
+    "R-t3-13-07 contract generation",
+    "R-t3-13-02 interaction requests (API runs must declare they cannot answer)",
+    "R-t3-13-01 multi-replica state",
+    "auth-core API-key issuance enabled",
+    "Related: R-t3-04-05, R-t3-05-12"
+   ],
+   "planeOwner": "Model Plane (model-gateway); Control Plane for keys; Channel Plane (not yet built) for adapters",
+   "risks": "Widening the edge enlarges attack surface; unattended runs need always-ask or pre-approved plans; channel identity linking and per-platform data residency; the Channel Plane does not exist yet.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": "Channel Plane docs only (apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md); scheduled-run gap is tracked in category 04"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-13-001",
+    "C-t3-13-037",
+    "C-t3-13-038"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 18,
+    "DOC": 6,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-11",
+   "title": "Hosted runtime for generated artifacts: dedicated user-content origin, viewer-scoped storage and viewer-bound connectors",
+   "summary": "Serve interactive HTML artifacts from a dedicated user-content origin with a narrow postMessage bridge instead of a srcdoc iframe, and give each artifact a small key-value store with personal and shared scopes keyed by the viewer identity issued by Control. Calls to connectors made from a shared artifact run as the viewer through Integration Core, never as the creator.",
+   "whyItMatters": "Interactive artifacts that remember state (trackers, forms, dashboards) are a visible differentiator of Claude and ChatGPT, and viewer-scoped connectors fit Verevon's rule that Space access never widens an owner-plane ACL.",
+   "referenceBestPractice": {
+    "bestSource": "ChatGPT Sites (DOC)",
+    "others": [
+     "claude.ai artifacts (DOC)",
+     "Manus hosted apps"
+    ],
+    "prevalence": "3 of 12 (differentiator; documentation-level evidence only)",
+    "mechanism": "Artifacts are served from a user-content origin and talk to the host through a postMessage bridge; each artifact gets personal and shared key-value storage and the platform injects the viewer's identity. ChatGPT Sites adds relational and object storage, hosted secrets and WebSockets; claude.ai binds a shared artifact to the viewer's connectors rather than the creator's."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:497-519",
+     "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-21"
+    ],
+    "gap": "SRC: HTML artifacts render through srcdoc in an iframe with sandbox=allow-scripts and no allow-same-origin (opaque origin, cannot reach cookies or the BFF), which is the correct baseline. Artifact versions are assigned by the gateway as a process-local projection rehydrated from durable thread metadata. There is no artifact storage, no viewer-identity binding, no sharing model and no hosted runtime (absence in the baseline; not exhaustively searched)."
+   },
+   "approach": "Serve artifact bundles from a separate registrable user-content domain with strict CSP; a postMessage API (storage.get/set, host.resize, connector.call) mediated by the SPA; an artifact KV in the Application Plane keyed by (artifact id, scope, viewer id from Control) with personal and shared scopes and Space-audience checks; connector calls executed by Integration Core with the viewer's grants. Disable artifact storage on ZDR threads. Artifact versioning and the host bridge are owned by chat items R-t3-01-04 and R-t3-05-10; this item adds the origin, storage and identity layer.",
+   "effort": "L",
+   "dependencies": [
+    "Application Plane storage",
+    "Control viewer identity",
+    "Related: R-t3-01-04, R-t3-05-10"
+   ],
+   "planeOwner": "Application Plane (storage) with Frontend Plane (origin and bridge)",
+   "risks": "XSS and phishing through hosted content; retention under ZDR; storage abuse limits; shared state must never widen audience beyond the Space.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-13-059"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-12",
+   "title": "Parked: local execution host companion with authenticated local bridges and multi-environment connections",
+   "summary": "Only if user-desktop control is ever unparked: a small Tauri/Rust local host that speaks the executor protocol from R-t3-13-03, started with a per-launch secret over an inherited fd, bound to a concrete loopback address with Host-header checks and verified pipe owners, plus an environment registry in the SPA (cloud, paired machine) with an environment id on each thread. Do not build a desktop shell that re-hosts the SPA.",
+   "whyItMatters": "It would let power users run agents against their own machine, but a web-first business product gets most of the value from the cloud sandbox computer first; the preconditions are listed here so a later local host is designed safely.",
+   "referenceBestPractice": {
+    "bestSource": "T3 Code (backend supervision and environments)",
+    "others": [
+     "Claude desktop app (pipe owner verification)",
+     "Antigravity (Host header pinning)",
+     "Manus (local operator)",
+     "Codex",
+     "DeepSeek harness",
+     "Hermes Agent",
+     "Cursor"
+    ],
+    "prevalence": "C-002: 7 of 12 and C-004: 7 of 12 (table-stakes, desktop and IDE tools only). C-024: 5 of 12 (common)",
+    "mechanism": "T3: the shell spawns the backend on port 0 with a one-time bootstrap token on an extra fd, polls a readiness endpoint, restarts with capped backoff and loads the UI from a privileged scheme; a connection registry holds typed targets (local, paired bearer, managed relay, SSH) with per-target backoff and an environment id in each thread URL. Local bridges use per-launch 32-byte tokens compared in constant time, concrete bind addresses, Host-header pinning against DNS rebinding and peer-credential or owner checks on pipes."
+   },
+   "verevonToday": {
+    "status": "absent",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/policy.rs:63-70",
+     "apps/Frontend Plane/verevonv3/package.json:22-39"
+    ],
+    "gap": "No desktop shell, no local or SSH execution environment and no local bridge exists; Verevon is a web SPA plus Rust BFF and all execution is cloud-side. Category 06 explicitly keeps user-desktop control parked."
+   },
+   "approach": "Do after R-t3-13-03 defines executor.proto. Add a host kind in sandbox-manager for a paired machine (registered through Control, never a new plane), a small Tauri host that runs only the executor, per-launch auth and bind rules from day one, and an environment picker in the SPA. User credentials stay in Integration Core; the host never holds connector tokens.",
+   "effort": "XL",
+   "dependencies": [
+    "R-t3-13-03 executor protocol",
+    "Category 06 decision to unpark user-desktop control"
+   ],
+   "planeOwner": "Model Plane (sandbox-manager host kind) with Frontend Plane",
+   "risks": "Large maintenance surface (signing, auto-update, OS quirks); a local host holding user credentials conflicts with Integration Core token ownership; data residency and ZDR on a user machine.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-13-002",
+    "C-t3-13-004",
+    "C-t3-13-024"
+   ],
+   "provenanceMix": {
+    "REA": 2,
+    "SRC": 29,
+    "DOC": 5,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t3-13-13",
+   "title": "Operability and trust long tail: per-run support bundle, SPA long-task telemetry, a product-guide skill and rule-driven detection over the audit stream",
+   "summary": "Four small, independent additions. (a) A per-run support bundle in the Run Console (events, turn timing, errors, versions; no content on ZDR runs). (b) A PerformanceObserver long-task reporter in the SPA with throttled profile capture. (c) A verevon-guide skill answering how-to questions from curated help docs, after checking whether one exists. (d) CEL-style detection rules over mp.v1 and Audit Core events, only after the audit publisher fix is deployed.",
+   "whyItMatters": "Support bundles and the guide skill cut enterprise support load, long-task telemetry catches streaming re-render jank, and detection rules give security teams a timeline of agent actions; each is modest value on its own.",
+   "referenceBestPractice": {
+    "bestSource": "Antigravity (debug bundle, guide skill); Claude desktop app (stall profiler)",
+    "others": [
+     "Hermes Agent",
+     "Perplexity (Numbat, documentation-level evidence only)",
+     "DeepSeek harness"
+    ],
+    "prevalence": "C-029: 2 of 12 (differentiator). C-030: 1 of 12 (unique). C-048: 2 of 12 (differentiator). C-054: 1 of 12 (unique, DOC-only)",
+    "mechanism": "Antigravity keeps the last 50 RPCs in a ring buffer and exposes CreateDebugBundle, pprof and flight-recorder RPCs, and embeds an antigravity-guide skill with offline-then-sitemap retrieval. Claude's heartbeat in shared memory is polled by a worker that starts a bounded inspector profile on stall. Perplexity's Numbat evaluates CEL rules over hook and OTel events to block egress or file access and build a forensic timeline."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/turn_timing.rs:1-12",
+     "apps/Model Plane/rust/services/model-gateway/src/security_events.rs:1-10",
+     "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs",
+     "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md:1-12",
+     "apps/Frontend Plane/verevonv3/src/app/App.tsx"
+    ],
+    "gap": "SRC: per-turn phase timing events, Prometheus metrics, hash-only security events and an audit outbox exist and the SPA lazy-loads 31 routes. No user-exportable per-run support bundle, no SPA long-task telemetry (not exhaustively searched), no rule-driven detection layer and, unverified, no product-help skill. The audit trail is not delivered live until the postmortem 0002 fix is deployed."
+   },
+   "approach": "(a) Support-bundle endpoint for a run assembled from existing events, turn_timing and error codes, scrubbed through the R-t3-13-09 sanitizer and surfaced in the Run Console. (b) PerformanceObserver longtask reporter feeding SPA telemetry. (c) Check the skills catalogue first, then ship a verevon-guide skill sourced from curated help docs. (d) After R-t3-13-04 deploys the audit fix, add detection rules in Audit Core over mp.v1 events with alert thresholds to avoid fatigue.",
+   "effort": "M",
+   "dependencies": [
+    "R-t3-13-09 sanitizer",
+    "R-t3-13-04 audit fix deployed"
+   ],
+   "planeOwner": "Model Plane (bundle), Frontend Plane (telemetry), Control Plane Audit Core (rules)",
+   "risks": "Content leakage in bundles; stale help content; alert fatigue; low-confidence evidence for the detection rules.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "confidence": "low",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-13-029",
+    "C-t3-13-030",
+    "C-t3-13-048",
+    "C-t3-13-054"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 1,
+    "INF": 0
+   }
+  }
+ ],
+ "dropped": [
+  {
+   "cluster": "C-t3-13-034",
+   "reason": "Deployment profiles and bring-your-own inference endpoints duplicate R-t3-09-10 (declarative provider registry and bring-your-own connections, models category); keys stay in Integration Core."
+  },
+  {
+   "cluster": "C-t3-13-040",
+   "reason": "MCP dispatch reachability is owned by R-t3-05-01 (MCP tools through the signed capability gate with capability-core bindings). ACP is irrelevant for a non-IDE product, A2A is not needed, and the AG-UI client adapter stays optional."
+  },
+  {
+   "cluster": "C-t3-13-044",
+   "reason": "Runtime extension API is internal-refactor trivia; docs/decisions/ledger.md forbids a registry for a single implementation, and the oversized loop files are addressed by the size ratchet in R-t3-13-07."
+  },
+  {
+   "cluster": "C-t3-13-053",
+   "reason": "Browser-session recording duplicates R-t3-06-09 (reviewable session recordings, computer category); Quarry owns capture."
+  },
+  {
+   "cluster": "C-t3-13-055",
+   "reason": "Usage meter and credit reservation duplicate R-t3-09-09 (live credit meter and cost by token category); VM-seconds metering is a dependency of R-t3-13-03."
+  },
+  {
+   "cluster": "C-t3-13-056",
+   "reason": "Prompt-cache-preserving context duplicates R-t3-09-03 (cache stability tiers and measured hit rate) and R-t3-04-09 (prompt-tier contract with append-only tail); the current prefix order still needs checking there."
+  },
+  {
+   "cluster": "C-t3-13-060",
+   "reason": "Streaming generative UI rests on inference-only evidence and duplicates R-t3-01-11 (inline generative UI widgets) and R-t3-05-10; it would depend on the generated contracts from R-t3-13-07."
+  }
+ ],
+ "strengthsToKeep": [
+  "Credential isolation: Integration Core owns connector tokens and auth-core mints short-lived audience-bound bearers per request, so secrets never reach the agent or sandbox (apps/Control Plane/auth-core/src/auth/model-plane-token.controller.ts:1-30).",
+  "Multi-tenant isolation: org, user and Space scoping with recipient audience revisions on threads and messages, and Space access never widening an owner-plane ACL (apps/Model Plane/rust/services/session-core/migrations/0024_thread_recipient_audience_revision.sql, 0025_message_space_audience_context.sql, 0032_space_membership_revocations.sql).",
+  "Server-resolved session contract that clients can only tighten, plus a pure ZDR retention resolver pinned by a golden matrix shared by all planes (apps/Model Plane/rust/services/model-gateway/src/profile.rs; apps/Model Plane/rust/crates/mp-contracts/src/retention.rs:1-20).",
+  "Two deliberately separate loops, a plain-chat gateway loop and the governed Do-mode agent loop, which keeps the authority boundary explicit; every effect passes capability, hook, permission and approval gates, with exact-effect continuation descriptors stored encrypted (apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-33; migrations/0022).",
+  "Durable outbox tables and JetStream-backed events with Postgres migrations that ship revert scripts, plus staged-lifecycle drain, terminalization and service-level process isolation (apps/Model Plane/rust/services/session-core/migrations/0012_audit_outbox.sql, 0014_approval_delivery_outbox.sql, revert/; apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20).",
+  "Redis-backed resumable run streams that work across replicas, and per-client SSE event families guarded by a taxonomy-freshness CI job (apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:10-13; .github/workflows/sse-taxonomy.yml).",
+  "One typed RPC contract with buf breaking-change checks and cross-plane contract goldens vendored byte-identically with sha256 pins, which goes beyond any reference (.github/workflows/buf.yml; .github/workflows/contract-goldens.yml).",
+  "Plane ownership matrix, decision ledger with explicit rejections and numbered postmortems as architecture memory (apps/master-ownership-matrix.md; apps/Model Plane/docs/decisions/ledger.md; apps/Model Plane/docs/postmortem/).",
+  "Opaque-origin sandboxed artifact preview (allow-scripts without allow-same-origin) and gateway-owned artifact version counters (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:497-519; apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-21).",
+  "Durable, idempotent receipts for scheduled steps, approval continuations and direct-run completion already exist in session-core, a better base than any reference's in-process state (apps/Model Plane/rust/services/session-core/migrations/0018, 0029_scheduled_step_receipts.sql, 0040_direct_run_completion_key.sql)."
+ ]
+}

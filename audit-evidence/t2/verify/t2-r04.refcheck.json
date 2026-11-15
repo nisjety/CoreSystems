@@ -1,0 +1,111 @@
+[
+ {
+  "finalId": "F-t2-017",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/routes/v2.ts:308-390 (crawl, /crawl/ongoing, /crawl/active, GET/DELETE /crawl/:jobId, WS /crawl/:jobId, /crawl/:jobId/errors)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-status.ts:275-332 (pageSize 100, bytesLimit 10485760, next=?skip=start+iteratedOver)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-cancel.ts (sets sc.cancelled, cancels the NuQ group, 409 when already completed)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2077-2088 (CrawlErrorsResponse errors[{id,timestamp,url,code,error,requiresAction}], robotsBlocked[])",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:206 (TTL from crawlTtlHours, default 24 h)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-status-ws.ts (catchup/document/done messages; close codes 1008, 3003, 1000; setTimeout(loop,1000) polling)",
+   "grep 'pause' in controllers/v2 (only monitor.ts has paused/resume, not crawl)",
+   "https://docs.apify.com/platform/actors/running/runs-and-builds (statuses, graceful abort 30 s, resurrect with same storage and a timeout counted from resurrection, meta.origin list incl. MCP; no pause)",
+   "https://docs.apify.com/platform/actors/development/programming-interface/system-events (aborting, migrating {timeRemainingSecs}, persistState every 60 s as an SDK-level virtual event)"
+  ],
+  "corrections": "Pause/resume in the title is not a reference capability. Firecrawl crawls have only cancel (pause/resume exists only for Firecrawl monitors), and Apify has abort, graceful abort and resurrect of a finished run, but no pause. Say that pause/resume comes from Quarry's own Temporal signals, or that it is a Verevon addition. Last-Event-ID resume and an event-history tail are recommendations: neither reference has them. The Firecrawl WS has no resume cursor and polls once a second, and the source has no SSE. Apify's 30 s grace period comes from the runs page; the system-events page gives no duration. The 'recorded steps' timeline comes from Firecrawl's legacy multi-page extract (extract-redis), not from crawl jobs.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Apify half is DOC-only (public docs, not code)",
+   "Firecrawl half is SRC and was verified in the local repo",
+   "Firecrawl stores a per-team crawlTtlHours override in account flags; the default is 24 h",
+   "Firecrawl only registers a WS route for /crawl/:jobId; a batch WS variant is SDK-side and unverified on the server",
+   "Firecrawl step timeline is legacy extract only (medium confidence)"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-005",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:361-374 (comment: semaphore has 2/3 of the timeout to get a lock; teamConcurrencySemaphore.withSemaphore)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:841, 899, 908-918 (skipTlsVerification defaults true unless headers or actions are set; waitFor <= timeout/2)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-status.ts:20-40 (GET /scrape/:id refused with 400 for forced-ZDR teams; 404 when the access row is missing or expired)",
+   "C:/dev/firecrawl/apps/api/src/services/logging/log_job.ts:514-527 (writeApiJobAccess is called whenever jobAccess !== false and passes a zeroDataRetention flag; it is not skipped for ZDR)",
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/index.ts:621-690 (transformerStack order; rawBase64 short-circuits)",
+   "C:/dev/firecrawl/apps/api/native/src/html.rs (EXCLUDE_NON_MAIN_TAGS has 42 entries; FORCE_INCLUDE_MAIN_TAGS has 13)",
+   "https://apify.com/apify/web-fetch (formats markdown/html/text/links/raw; Standby sync; 10 MB cap; 2 min timeout)",
+   "https://apify.com/apify/website-content-crawler (htmlTransformer: Readable text with fallback, Readable text, Extractus, Defuddle, None)"
+  ],
+  "corrections": "(1) 'Write none for ZDR' is a Verevon design choice, not what the reference does. Firecrawl still writes the job-access row and tags it with zeroDataRetention. It refuses GET /scrape/:id only for teams forced into ZDR. (2) The described transformer order does not match the code. The actual order is html, markdown, LLM clean (onlyCleanContent), redactPII, prompt-injection guard, links, images, branding, metadata, product/menu, LLM json/deterministicJson, summary, query, attributes, agent, removeBase64Images, diff, audio/video, then coerceFieldsToFormats. So redaction runs early, not after the LLM formats, and every transformer runs and checks its own option before the final coercion strips unrequested fields. Requested transformers are not the only ones run. (3) The 'choice of extractor with fallback to full HTML' comes from Apify (DOC), not Firecrawl, and Apify ties the fallback to whether the page is a clear article, not to a text-length threshold. Firecrawl uses fixed selector heuristics. (4) Apify Web Fetch does not have 'the same format list': it has only markdown/html/text/links/raw, with no screenshot, json, attributes or images.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Firecrawl parts are SRC; the Apify Web Fetch and Website Content Crawler parts are DOC-only",
+   "The skipTlsVerification=true default is a real footgun in the reference; do not copy it",
+   "onlyCleanContent is an LLM pass that is unsupported under ZDR and looks experimental",
+   "Firecrawl's openapi.json lags the code (formats are missing), so cite the code, not the spec"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-009",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/utils/specialtyHandler.ts:138-365 (magic table: %PDF-, PK 03 04, OLE2 D0CF11E0A1B11AE1; HANDOFF_SNIFF_BYTES; AddFeatureError handoff; GCS reference handled first; ZIP_ARCHIVE_MEDIA_TYPES exclusion; image path behind imageOcrEnabled)",
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/fetch/index.ts:214 and engines/fire-engine/index.ts:220 (callers)",
+   "C:/dev/firecrawl/apps/api/src/lib/image-ocr-gate.ts (isImageOcrEnabled requires FIRE_PDF_BASE_URL and config.IMAGE_OCR_ENABLED)",
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/index.ts:530-545 (image OCR follows the parsers option and sits behind the deployment switch)",
+   "C:/dev/firecrawl/apps/api/src/lib/image-formats.ts (sniffable images include png, jpeg, tiff, gif, bmp, jp2, webp)",
+   "https://apify.com/apify/website-content-crawler (saveFiles/saveContentTypes download PDF/DOC/DOCX/XLS/CSV to the key-value store; no text extraction)"
+  ],
+  "corrections": "The OOXML/ODF check sniffs only the PK 03 04 local-file header and excludes genuine ZIP media types. It does not look for [Content_Types].xml. The first-512-bytes window is a recommendation: the reference computes HANDOFF_SNIFF_BYTES from its signature table. The order is: a GCS PDF reference first, then the Content-Type header, then magic bytes. Image routing is not always on: it needs a deployment switch (IMAGE_OCR_ENABLED plus a FirePDF base URL) and the per-request parsers option. Otherwise images are rejected as unsupported files. Archives, audio, video and executables are rejected explicitly. The rest of the mechanism, including the prefetch handoff so parsers do not re-download, is accurate.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "SRC (Firecrawl repo)",
+   "Image OCR handoff is deployment-gated and option-gated; PDF parsing quality depends on the FirePDF service, which is external in the hosted product",
+   "Apify Website Content Crawler selects files by content type but only downloads them and does not parse them (DOC), so '1 of 4' holds for parser routing"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-021",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/tmp/aside/daemon_sea_blob.bin@2987327 (capture-redaction.ts: CAPTURE_REDACTED '[redacted:capture]', SENSITIVE_AUTOCOMPLETE_TOKENS, SENSITIVE_INPUT_TYPES {password, tel}, SENSITIVE_FIELD_LABEL_RE, SECRET_VALUE_PATTERNS jwt/aws-access-key/api-key/slack-token/private-key-block/labeled-secret/otp-numeric/otp-numeric-reverse, CARD_CANDIDATE_RE plus passesLuhn)",
+   "scratchpad/tmp/aside/daemon_sea_blob.bin@10346349 (fillPasswordInput: Runtime.callFunctionOn checks origin, isConnected, type=password, disabled/readOnly, then sets the value with the native HTMLInputElement setter and dispatches input/change; its only caller is autofillUnlockPassword with origin chrome-extension://<provider id>)",
+   "daemon_sea_blob.bin grep for redact identifiers (redactArg for tool args, redactSensitive for error bodies, context_awareness_blobs.redacted_bytes; no screenshot, image or OCR redaction found)",
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/redactPII.ts (opt-in redactPII on markdown through the external fire-privacy service; fails closed to an empty string)",
+   "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables (Secret env vars are encrypted at rest and redacted from run logs)"
+  ],
+  "corrections": "(1) Scope is overstated. No reference redacts screenshots, OCR output or receipts. Aside's rules apply to text and ARIA snapshots for durable Context Awareness capture, plus redaction of tool arguments and error bodies in logs. (2) 'Before model exposure' is only partly true. The interactive agent snapshot path redacts only non-empty password inputs, so other secrets on a page reach the model. (3) The fill mechanism is wrong in one detail and over-generalized. Aside's origin-checked fillPasswordInput sets the value with the native HTMLInputElement value setter plus input/change events, not Input.insertText. Its only call site is autofillUnlockPassword, which unlocks an external password-manager extension page (chrome-extension:// origin), not a general website login fill. Aside Vault website fills go through the Vault extension with agent-session, policy and URL-match checks (record 054). (4) Prevalence: Firecrawl also has opt-in output redaction (redactPII on markdown through an external fire-privacy service, failing closed), and Apify's redaction covers only secret env vars in run logs. Restate this as: capture-time page redaction is 1 of 4 (Aside); some redaction is 3 of 4 (Aside capture and logs, Firecrawl PII on output, Apify secret env vars in logs, DOC).",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Aside evidence is a bundled string or byte offset in the scratch copy of the NODE_SEA_BLOB; no runtime confirmation",
+   "The Context Awareness passive capture is the durable path; whether it is on by default or opt-in was not determined",
+   "Apify secret log redaction is DOC-only",
+   "Firecrawl redactPII depends on an external fire-privacy service that is not in the repo"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-011",
+  "verdict": "confirmed",
+  "checked": [
+   "extract/codex/.vite/build/main-BklS_2Y2.js (browserAutocomplete service Jy with start/stop/accept/recordNavigation/deleteMatch; coordinator Uy calls session.autocomplete.createController; acceptToken/deleteToken matches; navigateBrowserBack, hardReloadBrowserPage menu commands, reloadIgnoringCache; on loadError, reload calls navigatePageToUrl(loadError.failedUrl), else pendingUrl)",
+   "extract/codex/.vite/build/browser-page-preload.js (mouseup/auxclick handlers for buttons 3/4, isTrusted check, invoke browser-sidebar-runtime-mouse-navigation)",
+   "extract/codex/.vite/build/main-BklS_2Y2.js config requirements (browserPane, browserExtensions, inAppBrowserUse, inAppBrowserUseAllowed default false; no URL allowlist for human browsing found, only commentModeBlocklist and cookieDomainAllowlist)",
+   "extract/codex/package.json (electron 42.3.0)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (strings asideOmnibox.queryAutocomplete, addTabContext, deleteAutocompleteMatch, setActiveModelMode, at.studio.Aside.ext.private.omnibox each present)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/newtab-ZLplOYox.js and search-navigation-DuuoGVFz.js (chrome.asideOmnibox.queryAutocomplete; one-off session with a 1500 ms wait for the first match)"
+  ],
+  "corrections": "None to the mechanism. Wording: 'free cross-site browsing' for Codex is inferred from the absence of a URL allowlist for human navigation (INF). The 'human-session policy' framing is a Verevon proposal. Routing non-URL text to Verevon search is the recommendation; which search provider Codex's suggestions use was not verified.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Codex browser pane, extensions and browser-use are remote config requirements that default to false (flag or plan gated); the in-app browser is not universally available",
+   "Codex autocomplete runs through session.autocomplete.createController, which stock Electron does not offer: INF that this is a patched Electron/Chromium omnibox; suggestion sources unverified",
+   "Aside AI-mode omnibox members are upstream Chromium composebox/AIM names wrapped in an Aside private extension API; whether Google AI Mode is reachable is unverified",
+   "REA not used; evidence from grep over pre-extracted bundles and installed files"
+  ],
+  "confidence": "high"
+ }
+]

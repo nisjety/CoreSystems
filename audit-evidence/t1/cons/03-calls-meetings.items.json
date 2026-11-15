@@ -1,0 +1,631 @@
+{
+  "category": "Calls & meetings",
+  "items": [
+    {
+      "id": "R-t1-03-01",
+      "title": "Room-scoped audio/video calls on a bought SFU, with Control-authorized join and a navigation-persistent call bar",
+      "summary": "Add a Call button to the Space header that starts or joins the single live call of a room. Run media on a self-hostable open-source SFU plus TURN (LiveKit OSS or equivalent) and keep Verevon code to authority and signalling: a call record in the Application Plane, a gateway route that mints a short-lived SFU join token only after a Control decision for a new space.call.join effect, and a Solid call store with explicit phases (connecting, live, reconnecting, ending, failed), a pre-join device picker and a call bar that survives route changes. Ship audio-only small rooms first, then video.",
+      "whyItMatters": "A Teams plus Slack hybrid room without a way for its humans to talk live is visibly incomplete, and live audio is the substrate for transcripts (R-t1-03-02), agents in calls (R-t1-03-06) and screen share (R-t1-03-07). Gating the join on the Space decision keeps the rule that Space access never widens an owner-plane ACL, and buying the media stack keeps this out of the feature race the Space doc warns about.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (huddles, DOC) for the product model; Grok Bot (SRC) for the client call state machine; Teams SlimCore (SRC) for lifecycle depth",
+        "others": [
+          "Teams (ring members individually or all, roster-size cap; REA)",
+          "Buzz (audio-only WebSocket relay of Opus frames, O(n^2) fan-out; SRC)"
+        ],
+        "prevalence": "Calls started from a room: 3 of 5 (Slack, Teams, Buzz), table-stakes. Explicit call lifecycle and reconnect: 3 of 5, common. Device enumeration and permission probing: 2 of 5 (Slack, Teams), common.",
+        "mechanism": "The call is an attachment of the room: one click from any room, optional video, ends when the last person leaves. Server side: POST creates or returns the live call for the room, checks membership, and mints a short-lived SFU token (room = call id, identity = actor id, publish/subscribe grants); media flows browser to SFU over WebRTC (Opus audio, simulcast video); roster and speaking state come from the SFU and are projected to the room as a live call card with Join. Client side (Grok Bot): a pure reducer with phases connecting|live|reconnecting|ending|failed, isMuted, startedAt and a fault field, a recoverable-close policy with bounded backoff, and a call island that persists across navigation; never re-open the mic silently after relaunch (Buzz rule). Devices (Slack): enumerate with a devicechange listener, probe that a device actually opens, route output with setSinkId, and map getUserMedia failures to actionable messages."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/docs/space-defenition.md:352 (DOC: huddles listed among the non-goals)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:358-381 (SRC: header shows kind, lifecycle, role and a room presence sentence; no call affordance)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:87 (SRC: SPACE_TIMELINE_POLL_MS = 6000; room liveness is polling, no push transport)",
+          "apps/Frontend Plane/verevonv3/src/features/voice/voice-mode-state.ts:1-35 and voice-recorder.ts:103-127 (SRC: half-duplex voice reducer and mic error classifier to extend)",
+          "apps/Application Plane/convex-core/convex/spacePresence.ts (SRC: room-scoped presence heartbeat, not call state)",
+          "Repo grep this session for livekit|mediasoup|RTCPeerConnection|webrtc over apps (excluding node_modules/target): only generated protobuf and one single-frame getDisplayMedia screenshot in DashboardComposer.tsx:1915-1950"
+        ],
+        "gap": "No call, huddle, SFU or WebRTC code in the gateway, Model or Application planes and nothing under src/features/spaces. The Space doc lists huddles as a non-goal, so this is a code gap and an open product decision. Two substrate gaps shape the build: the Space has no push transport (6 s poll), so a live-call badge lags up to 6 s unless SFU webhooks feed a push path; and there are no Space notifications or human-only posts, so ring-others and a call card in the thread are blocked."
+      },
+      "approach": "Application Plane (apps/Application Plane/convex-core/convex, next to spacePresence.ts): a spaceCalls record {call_id, space_id, org_id, state live|ended, started_by (server-derived), started_at, ended_at, participant_count} fed by signed SFU webhooks; this is the minimal form of the meeting aggregate in R-t1-03-05. Gateway (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs): POST /api/v1/spaces/{id}/calls (create or get live) and POST .../calls/{call_id}/join, which obtains a Control decision for a new space.call.join effect (same pattern as the thread create/read decisions, deny by default through per-org space_effect_policies) and then signs the SFU token with the Control subject id as identity; the browser never supplies identity. Frontend: src/features/calls with a Solid store modelled on voice-mode-state.ts, SFU web SDK, call bar mounted at shell level, Call button and live badge in SpacePage.tsx, and a shared media-devices module extracted from voice-recorder.ts (enumerateDevices, permissions.query, level-meter pre-join test, setSinkId, persisted device ids). Start/end rows go to the Space activity feed (src/features/spaces/lib/activity-grammar.ts). Self-hosted SFU for sovereign and ZDR tenants; media is relayed, not stored.",
+      "effort": "L",
+      "dependencies": [
+        "Product decision reversing the huddle non-goal in docs/space-defenition.md",
+        "SFU and TURN deployment (Infra Plane), self-hostable",
+        "Control effect space.call.join plus space_effect_policies rows",
+        "Push transport for Space liveness (realtime and sync category) for a sub-6 s live badge",
+        "Space notifications for ring-others (notifications category)"
+      ],
+      "planeOwner": "Application Plane (call record); Frontend Plane gateway and UI; Control Plane (join decision); Infra Plane (SFU/TURN)",
+      "risks": "Reverses a documented non-goal. Media infra cost and operations. ZDR posture must state that media is relayed but never stored unless recording (R-t1-03-09) is enabled. Building a custom media engine would be XL, so stay on the SDK. Calls are built on a room whose human-to-human messaging path is still missing.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 12,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Not planned; docs/space-defenition.md:352 lists huddles as a non-goal"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-001",
+        "C-t1-03-002",
+        "C-t1-03-015"
+      ]
+    },
+    {
+      "id": "R-t1-03-02",
+      "title": "Meeting transcription and an authority-scoped AI recap saved as a Space artifact",
+      "summary": "Build the meeting-intelligence MVP: long-form speech-to-text with speaker labels and timestamps in the Model Plane, transcript segments stored as Data Plane knowledge units (not as room posts), and a recap (decisions, action items with owners, topics or chapters with timestamps, citations to transcript segments) written back as an editable Space document. Start from uploaded recordings, then live calls (R-t1-03-01) and external meetings (R-t1-03-04). Transcript and recap are visible to attendees by default and shared to the room by an explicit action.",
+      "whyItMatters": "Highest agent-first value in the category: a transcript becomes retrievable knowledge for every Space agent and the recap is a durable artifact, which is exactly what the human-only call tools cannot offer. It realises the meeting-intelligence design that treats a meeting as a source type on existing retrieval, graph, wiki, ZDR and org-scoping rails.",
+      "referenceBestPractice": {
+        "bestSource": "Teams (REA): recap with notes, tasks, topics, chapters, speaker timeline, citations back to the recording and visibility derived from transcript access",
+        "others": [
+          "Slack (DOC): notes become a canvas in the huddle",
+          "Buzz (SRC): transcript segments are ordinary chat messages in the meeting channel"
+        ],
+        "prevalence": "3 of 5 (Buzz, Slack, Teams); table-stakes. Citations, attendance report and content-bin report are Teams-only.",
+        "mechanism": "Audio to streaming or batch ASR with diarisation produces segments {speaker, t_start, t_end, text}; on meeting end a reasoning pass produces the recap with citations to segments; the recap is saved as an editable document or canvas in the room; action items become tasks only after human approval; recap visibility equals transcript visibility (no transcript access, no AI summary); attendance comes from roster events."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43-54 (SRC: Meeting Scribe template summarises the text conversation only, decisions first, never invent)",
+          "apps/Channel Plane/docs/meeting-intelligence.md:18-58 and :136-150 (DOC: meeting as a source type, ownership table, phasing MVP upload to WhisperX through live bots)",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:3955-4040 (SRC: dictation chains inference-core TranscribeSpeech with a cleanup pass; Azure Speech short audio plus an Azure OpenAI whisper deployment; refused with 412 for ZDR while no speech deployment is attested)",
+          "apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts:17-19 (SRC: dictation capped at 60 s and 1.4 MB)",
+          "Grep this session of apps/Model Plane for diariz: no matches"
+        ],
+        "gap": "A short-clip STT path already exists (the comparator note that no ASR exists is too strong), but it is dictation-sized: no long-form chunked or batch job, no diarisation, no segment timestamps, no transcript knowledge units, no recap document, no attendance, and no ASR option that satisfies ZDR tenants. Also, every room post is an AI turn today (SpaceRoomComposer.tsx:402-420), so transcript segments cannot be posted as room messages the way Buzz does."
+      },
+      "approach": "Model Plane: add a long-form transcription job beside TranscribeSpeech in inference-core (self-hosted WhisperX plus diarisation for sovereign and ZDR tenants, cloud ASR otherwise) returning segments with speaker, start, end, text and language, exposed through a model-gateway job route. Data Plane v2: ingest segments as knowledge units of source kind meeting with speaker and timestamp metadata so existing dense, sparse and graph retrieval work unchanged. Recap: Model Plane reasoning with the Meeting Scribe rules, written back as a wiki page or Space document through Data Plane contracts; action items proposed as tasks behind the existing approval cards (SpaceApprovalPanel). Control Plane: private-until-shared visibility with attendees as the default audience and the R-t1-03-03 policy as precondition. Frontend: a Meetings section in the Space cockpit (SpaceCockpit.tsx tab list has chat, work, knowledge, activity, agent, members), upload-recording flow and a recap viewer with citation links. Attendance from call roster events.",
+      "effort": "L",
+      "dependencies": [
+        "Model Plane long-form ASR and diarisation provider",
+        "Data Plane knowledge units with time and speaker metadata",
+        "R-t1-03-03 consent policy",
+        "R-t1-03-05 meeting record",
+        "Space document surface (collaborative artifacts category)"
+      ],
+      "planeOwner": "Model Plane (ASR, recap); Data Plane v2 (transcript storage); Control Plane (visibility)",
+      "risks": "Diarisation model licensing (pyannote gating). Hallucinated action items, so keep HITL. Visibility must follow transcript ACL on the data, not only the UI. Cost of streaming ASR and ZDR tenants needing self-hosted ASR.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 4,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Channel Plane/docs/meeting-intelligence.md:136-150 (phases 1-3 are this item; docs only, no code)"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-006"
+      ]
+    },
+    {
+      "id": "R-t1-03-03",
+      "title": "Per-meeting AI access policy: consent, privacy mode, ephemeral answers and admin-locked settings, deny by default",
+      "summary": "Introduce a Control-owned policy object per meeting {ai_access: off|transcript_only|full, privacy_mode, answer_retention: ephemeral|retained, managers, locked_fields} that is checked server-side before any ASR, agent or recap reads meeting audio or transcript. Turning AI on posts an announcement to all participants and shows a persistent badge; external participants force default-off; admin-locked fields show as locked with the lock owner. Meeting-level organiser roles decide who may change the AI settings. Lobby and green room are deferred until Spaces support guests.",
+      "whyItMatters": "Trust prerequisite for transcription and any agent in a meeting, and a sales differentiator against products whose AI is on by default. It maps onto Verevon authority model and ZDR propagation instead of adding a parallel consent system, and it must ship together with R-t1-03-02 and R-t1-03-04.",
+      "referenceBestPractice": {
+        "bestSource": "Teams (REA): visible AI on/off, privacy mode that blocks Copilot and all agents, ephemeral versus retained answers by org policy, only selected people can change AI settings, admin-locked options shown as locked",
+        "others": [
+          "Slack (DOC): announce to all when AI notes start, default off with external guests",
+          "Grok Bot (SRC, medium): per-meeting or blanket consent card for the agent and an admin visibility setting (MANAGERS or EVERYONE)"
+        ],
+        "prevalence": "2 of 5 (Teams, Slack) for AI policy, differentiator; Grok Bot adds consent for agent attendance; admin-locked indicator is Teams-only.",
+        "mechanism": "Policy evaluated server-side before any agent or ASR reads meeting content. Enabling AI emits a system message to participants and a badge. Externals present means default off. Ephemeral answers are stored with a meeting-scoped TTL. Fields locked by an admin render as locked with the owner of the lock."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/docs/space-defenition.md:150-156 (DOC: agents participate only when mentioned or explicitly invoked)",
+          "apps/SPACE_AUTHORITY_ADR_2026-08-13.md (DOC: Control decisions already bind purpose, privacy class, third-party-processing allowance, retention, residency and ZDR)",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:4900-4905 and zdr_posture.rs:277 (SRC: realtime voice calls decide_content_route and fails closed on ZDR)",
+          "apps/Frontend Plane/verevonv3/src/features/voice/voice-mode-state.ts:1-35 (SRC: zdr-unavailable error kind)"
+        ],
+        "gap": "No meeting AI policy exists because there are no meetings. The building blocks exist (explicit-invocation rule, per-effect Control decisions with privacy and ZDR fields, fail-closed ZDR routing) but none covers meeting media or transcript, there is no locked-setting display on Space settings, and room roles are fixed to editor so there is no manager role to delegate AI control to."
+      },
+      "approach": "Control Plane (apps/Control Plane/user-core, spaces package): policy storage with org default and admin lock, plus new effects such as space.meeting.transcribe and space.meeting.ai_read whose signed decisions carry purpose and privacy class per ADR-0001. Application Plane enforces per meeting and emits the announcement event to the Space activity feed. Model Plane ASR and agents must present an allow decision and refuse otherwise, failing closed like decide_content_route. Enforcement sits on the data: transcript and recap knowledge units carry the policy revision so retrieval cannot leak them through a chat copy. Ephemeral answers use a meeting-scoped TTL. Frontend: policy chip in the call bar and meeting card; reuse the admin-locked affordance on existing Space settings.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-03-05 meeting record",
+        "Control Plane policy service and manager role (org-membership category)",
+        "ZDR propagation"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Policy bypass through side channels (an agent reading a chat copy of the transcript) unless enforcement is on the data. Retention TTLs must not conflict with legal hold.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 2,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-007",
+        "C-t1-03-024"
+      ]
+    },
+    {
+      "id": "R-t1-03-04",
+      "title": "Agents attend Zoom, Meet and Teams meetings as visible guests through an Ingestion capture worker, with approval-gated chat drafts",
+      "summary": "Let a user hand an agent a meeting link, or let it pick one up from the user calendar. A capture worker joins as a clearly labelled guest after per-meeting or standing consent, feeds the transcript into the R-t1-03-02 pipeline, and leaves. The agent may post to the meeting chat only through drafts that a human approves, with an internal-meeting mark respected. Start after R-t1-03-02 and R-t1-03-03; it does not depend on R-t1-03-01.",
+      "whyItMatters": "Gives Verevon meeting coverage on day one for customers who live in Teams, Zoom or Meet, without building a conferencing stack, and it feeds Space knowledge. It follows the rule that the Model proposes and Quarry executes: the bot is an Ingestion capture worker and the agent only proposes chat posts.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (SRC, medium confidence from RPC names and strings)",
+        "others": [],
+        "prevalence": "1 of 5 (Grok Bot only); unique.",
+        "mechanism": "Tools JoinMeeting(link), LeaveMeeting, ListMeetings, ReadMeetingTranscript, RespondInMeeting; a server-side bot joins as a guest named after the agent; chat posts go through a MeetingChatDraft {meeting_id, body, mark_internal} that a human approves; per-meeting or blanket consent card; versioned summaries per meeting; admin setting for who can see meeting records; meetings addressed as meeting:{id} like other channels."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/Channel Plane/docs/meeting-intelligence.md:136-150 (DOC: phase 4 live plus Teams/Zoom/Meet connector bots)",
+          "apps/Channel Plane/docs/meeting-intelligence.md:18-58 (DOC: capture via Channel adapter to Ingestion/Quarry; ASR in Model Plane; storage in Data Plane)",
+          "apps/Ingestion Plane/integration-corev2/internal/actions/calendar_read.go:1-60 (SRC: read-only calendar.events for Outlook and Google that can surface meeting links)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx (SRC: in-room approval cards to reuse for chat drafts)"
+        ],
+        "gap": "No code. The design places capture in the Channel Plane adapter (docs only) handing evidence to Quarry, so ownership is unresolved. No guest-join worker, no meeting-link tools for agents, no draft-and-approve path for posts to an external meeting chat, and no consent record."
+      },
+      "approach": "Ingestion Plane: a meeting-capture worker (headless browser guest through Quarry, or a vendor meeting-bot API) authorised through integration-corev2 and Quarry browser grants; Quarry executes or rejects the join and any chat post. Transcript or audio goes to the R-t1-03-02 pipeline and Data Plane. Model Plane: Space agent tools ListMeetings, ReadMeetingTranscript, DraftMeetingChat that only propose. Space UI: consent card and approval card for chat drafts, meeting-link intake in the Meetings section, link discovery from calendar.events. Consent and internal mark enforced by the R-t1-03-03 policy; standing consent stored in Control, not in the browser.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-03-02 ASR pipeline",
+        "R-t1-03-03 consent policy",
+        "Quarry browser execution and grants",
+        "integration-corev2 meeting and calendar connectors",
+        "Decision on Channel Plane versus Ingestion ownership of the capture worker"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Platform terms of service and bot detection on Zoom, Meet and Teams. Recording-consent law varies by jurisdiction. Channel Plane is docs-only, so ownership must be confirmed. Evidence for the reference behaviour is medium confidence.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Channel Plane/docs/meeting-intelligence.md:136-150 (phase 4; no code)"
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-03-012"
+      ]
+    },
+    {
+      "id": "R-t1-03-05",
+      "title": "Meeting as a first-class sub-resource of a Space: live badge, start and end events, authority inherited from the parent room",
+      "summary": "Model every call, uploaded recording and external meeting as a meeting record that belongs to a Space: state, start and end, attendee list derived server-side, a link to its AI policy and to its transcript and recap artifacts. Show a live badge with Join in the room header, and put meeting started and ended rows in the Space activity feed with links to the recap. Authority is derived from the parent Space decision and can never be wider than it.",
+      "whyItMatters": "This is the small data-model decision that lets transcript, recap, agent notes and policy attach to the existing Space authority, ZDR and retention rules instead of creating a parallel meetings store, which matches the meeting-intelligence principle that a meeting is a source type and not a new plane. R-t1-03-01 builds its minimal call record on it.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz (SRC): the data model; Teams (REA): the UX",
+        "others": [
+          "Teams: live participant count and Join in the channel header, Meet now, scheduled channel meetings"
+        ],
+        "prevalence": "2 of 5 (Buzz, Teams); differentiator.",
+        "mechanism": "Buzz: a huddle is an ephemeral private child channel (ttl 3600) referenced from the parent by creator-signed started and ended events, relay-emitted joined and left events, and the last human leaving ends it, so chat, reactions and transcript inherit room authorisation and leave a persistent record in the parent. Teams: header badge with live count and Join, meetings as channel objects with companion chat."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/docs/space-defenition.md:352 (DOC: huddles are a non-goal)",
+          "apps/SPACE_AUTHORITY_ADR_2026-08-13.md (DOC: SpaceRef kind is personal|room|project|case; each SpaceRef needs the Application-to-Control registration saga)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts (SRC: activity feed with honest generic rows for unknown events)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43 (SRC: tab list chat, work, knowledge, activity, agent, members)"
+        ],
+        "gap": "No meeting object, no time-bounded session type and no live indicator. Threads and run status exist but nothing models a bounded live session. A literal copy of the Buzz child-channel model would mean a new SpaceRef kind registered with Control for every call, which the authority ADR does not define. A companion chat is blocked because every room post is currently an AI turn and there is no human-only post path."
+      },
+      "approach": "Application Plane: a spaceMeetings record {meeting_id, space_id, kind live|uploaded|external, state, started_at, ended_at, attendees, policy_ref, artifact_refs} authorised under the parent Space decision with purpose meeting; artifacts carry space_id plus meeting_id. Prefer this sub-resource over a new child SpaceRef kind; if a child Space is wanted later it needs an ADR-0001 amendment and a cheap registration path. Frontend: live badge in the SpacePage.tsx header, meeting card in the activity feed, Meetings section in the cockpit. Server derives attendees from SFU or capture roster events, never from the client. Companion notes thread only after the messaging category delivers human-only posts.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-03-01 call record",
+        "Human-only post path (messaging category) for a companion chat",
+        "ADR-0001 amendment only if a child Space kind is chosen"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Ephemeral TTL semantics must not conflict with legal hold or retention policy. Child-Space-per-call would load the Control registration saga.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 3,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-003"
+      ]
+    },
+    {
+      "id": "R-t1-03-06",
+      "title": "Duplex voice for agents: a voice front that delegates to the Space agent, then agents as attributed participants in room calls",
+      "summary": "Phase A (M, no SFU needed): inside a Space, a user holds a realtime voice conversation with an agent. A fast voice persona talks and its only tools delegate: send_task hands real work to the existing agent run in the Space (still behind approval gates) and a history search covers Space threads and past voice sessions; each agent gets voice, speed and language settings. Phase B (L, after R-t1-03-01): a server-side participant per invited agent hears the call through STT, answers with an attributed audio track, and stops when a human starts talking.",
+      "whyItMatters": "This is the defining hybrid moment of the Space vision: humans and agents in the same voice room, and a personal agent that can be tasked hands-free. The front and worker split avoids a second agent brain, and doing it server-side is better than Buzz, whose agent voice runs on the owner desktop.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (SRC) for the voice-front and worker split; Buzz (SRC) for agents as audio participants with floor control",
+        "others": [],
+        "prevalence": "1 of 5 each (Grok Bot, Buzz); unique.",
+        "mechanism": "Grok Bot: realtime session (session.update, input_audio_buffer.append, response.create/cancel) with voice tools send_task(constraints), recall_text_messages and search_conversations{query, scope this-chat|earlier|everything, from, to, if_missing}; worker results come back as async updates the persona announces; one active voice chat per user and ending needs confirmation; the refusal text for send_task tells the model not to drop prohibitions or approval requirements; per-agent voice_id, voice_speed, voice_language. Buzz: agent audio publisher authenticates as the agent and shows in the roster; VAD with about 300 ms silence flush; any human speech cancels agent TTS (barge-in); agent speaks only when addressed."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:448-450 and :4900-4945 (SRC: /v1/ai/realtime/session creates a realtime session returning client secret and websocket URL, default server_vad turn detection, ZDR-gated through decide_content_route)",
+          "apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx and voice-mode-state.ts:1-35 (SRC: tap-to-talk dictation, review, send, optional read-aloud)",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3683 (SRC: VoiceModeDialog mounted only in the dashboard composer, not in Spaces)",
+          "apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts:6,91 (SRC: governed TTS pinned to azure-speech, fails closed on a different provider)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-420 (SRC: room posts go through streamChat with spaceRef and mentionedAgentRef)"
+        ],
+        "gap": "A realtime session route and a tested half-duplex voice mode exist, but nothing is full-duplex, Space-scoped or delegating to a Space agent, there is no per-agent voice profile and no agent audio identity in a room. The baseline also records that personal agents are not possible today (a personal Space cannot hold an agent), which limits a personal-agent voice phase until that is changed."
+      },
+      "approach": "Model Plane: a realtime voice session type whose only tools are send_task (calls the existing agent run API in the Space so approval gates and Control decisions still apply) and search_conversations (Space threads read under the read decision); add voice_id, voice_speed and voice_language to the agent profile in the registry behind SpaceCreateAgentDialog. Frontend: upgrade VoiceModeDialog into a duplex call island that can mount in SpaceRoomComposer and reuse the call store from R-t1-03-01. Phase B: a Model Plane SFU participant per invited agent subscribing to room audio, streaming to /v1/ai/realtime, publishing an agent track under the agent identity, label shown in the roster; floor policy cancels agent playback on any human speech (response.cancel) and the agent speaks only when explicitly invited to the call or addressed, consistent with the explicit-invocation rule. Enforce R-t1-03-03 before the agent hears the room.",
+      "effort": "L",
+      "dependencies": [
+        "Model Gateway realtime route",
+        "Agent run API and approval gates",
+        "R-t1-03-01 call substrate (phase B only)",
+        "R-t1-03-03 consent policy",
+        "Agents in personal Spaces (agents-in-the-room category) for personal-agent voice"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "ZDR attestation for realtime providers (the route already fails closed). Cost per minute. Agents talking over humans; always label agent voices. Delegated actions must still hit in-room approval gates and must carry the constraints of the spoken request.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 11,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-010",
+        "C-t1-03-011"
+      ]
+    },
+    {
+      "id": "R-t1-03-07",
+      "title": "Screen sharing in calls with a sharing indicator, sensitive-surface redaction, and the same cue for agents acting in a room",
+      "summary": "Publish a getDisplayMedia track to the call as a second SFU track, show a persistent \"you are sharing\" bar with Stop, and switch the app into a redacted mode while sharing so approval cards, secrets and token-like fields are masked (a web page cannot exclude its own windows from capture). Reuse the border and indicator design for the agent run live view and the Quarry browser view so humans see when an agent is acting.",
+      "whyItMatters": "Screen share is the main reason people start work calls, and it is cheap once an SFU exists. The agent-acting cue gives one consistent trust signal for the Model proposes, Quarry executes browser model, where the baseline shows agent work is opaque inside the room.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (SRC): a native border overlay follows the shared window and the picker excludes the app own sensitive windows",
+        "others": [
+          "Teams (SRC): deeper capture pipeline, annotation and single-controller remote control"
+        ],
+        "prevalence": "2 of 5 (Slack, Teams); common.",
+        "mechanism": "Picker with thumbnails clamped to 480 px that filters excluded windows; an overlay with border width and colour that tracks the window bounds; share published as its own track. Web equivalent: navigator.mediaDevices.getDisplayMedia, an in-app sharing bar, and a redact-sensitive-surfaces mode."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1915-1950 (SRC: addScreenshotFile uses getDisplayMedia for a single frame, not a stream)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/remote_support.rs:1-12 (SRC: RustDesk config only; sessions run browser to hbbs/hbbr and bypass the gateway, no durable record)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:116-131 (SRC: agent run live-view grid)",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497,559-560 (SRC: browser control mode with human_takeover)"
+        ],
+        "gap": "No human screen share in Spaces. Adjacent pieces only: a one-frame screenshot capture in the dashboard composer, RustDesk remote-support config that is not a Space feature and leaves no audit record, and agent live-view and human-takeover controls that are not reachable from a Space."
+      },
+      "approach": "Frontend Plane: after R-t1-03-01, add getDisplayMedia publishing to the call store with a sharing state; a sharing banner; a global redact mode that masks SpaceApprovalPanel content, secrets and credential-like inputs while sharing; extract the border and indicator component and mount it on the agent run live view and, once Space-scoped browser runs exist, on the Quarry browser view in the room. No annotation or remote control in the first cut. Keep RustDesk remote support separate and add a durable session record there later if it is ever surfaced in Spaces.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-03-01",
+        "Space-scoped agent browser view (agents-in-the-room category) for the agent cue"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Leaking approval cards or secrets during a share, since the web cannot exclude its own windows. Browser support for display capture constraints varies.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 9,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-004"
+      ]
+    },
+    {
+      "id": "R-t1-03-08",
+      "title": "Calendar-triggered agent work and approval-gated scheduling, built on the existing calendar read action (no native calendar)",
+      "summary": "Add a calendar-event trigger type next to the existing agent cron schedules so a Space agent can run at the start or just before a followed event (prep pack from Space history and Data Plane retrieval, post-meeting follow-up). Add a write operation for creating a meeting behind an exact-effect approval card, and a read-only upcoming-meetings panel in the Space Work tab. Do not build a native calendar.",
+      "whyItMatters": "Makes agents proactive around meetings and supplies meeting links to R-t1-03-04 without building a calendar product; Slack and QM show that integration-only calendars are acceptable, while Grok Bot shows calendar as an agent trigger.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (SRC, medium): calendar as an agent trigger source plus approval-gated scheduling and prep packs",
+        "others": [
+          "Teams (REA): native calendar and Outlook add-in",
+          "Slack and QM: integrations or an agent skill only"
+        ],
+        "prevalence": "4 of 5 (Teams native; Grok Bot, Slack and QM via integration or agent skill); table-stakes only in the integration-level sense.",
+        "mechanism": "OAuth calendar connector reads events; triggers {event or series, offset} start agent runs; a schedule_meeting tool produces an approval card \"Schedule this meeting?\" and then a provider action; repeat model {frequency, interval, days_of_week, month_day, weekday_of_month, time, timezone}."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/integration-corev2/internal/actions/calendar_read.go:1-60 and service.go:208,294 (SRC: read-only calendar.events for Outlook via Graph and Google, Europe/Oslo windows, paging token; its header says live proof against a provider is still pending)",
+          "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:103,113 (SRC: calendar.events listed as a non-write agent tool for Google and Outlook)",
+          "apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts:257-275 (SRC: Calendar nav entry is the social post calendar)",
+          "Baseline (SRC): agent cron schedules exist and are filtered by space_ref in the gateway Space work projection"
+        ],
+        "gap": "The comparator recorded this as absent, but the read side exists: an agent can already list calendar events through integration-corev2. Missing: any write operation (create or update event), a calendar-event trigger beside cron, a prep-pack run template, a Space surface for upcoming meetings, and live verification of the read action. Writing needs extra OAuth scope and a reconnect."
+      },
+      "approach": "Model Plane (capability-core schedules and watches): new trigger kind calendar_event {connection, event or series, offset} implemented first as a poller over windowed calendar.events reads, no webhook dependency; the run executes in the Space with the room agent. integration-corev2: add calendar.create_event as is_write behind the existing effect-bound authorization (payload digest, idempotency key); Frontend: approval card \"Schedule this meeting?\" in the room and an Upcoming meetings read-only section in the Work tab. Prep pack uses Space thread history plus Data Plane retrieval under the Space decision. Meeting links found in events are offered to R-t1-03-04 with consent.",
+      "effort": "M",
+      "dependencies": [
+        "integration-corev2 calendar connectors with write scope",
+        "Agent scheduler in capability-core",
+        "In-room approval cards",
+        "Live proof of calendar.events on a real provider"
+      ],
+      "planeOwner": "Ingestion Plane (provider actions); Model Plane (trigger)",
+      "risks": "OAuth scope breadth and calendar data sensitivity under ZDR. Polling cost. The read action has not been proven live per its own header.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "integration-corev2 calendar_read.go header: agent read tool planned as F6, live proof F10 (read only; no trigger or write)"
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-03-014"
+      ]
+    },
+    {
+      "id": "R-t1-03-09",
+      "title": "Meeting recording to governed object storage with a state machine, a mandatory recording indicator and expiry (defer behind transcripts)",
+      "summary": "After calls and transcripts exist, add optional recording: SFU egress writes to object storage under the Space data owner, a recording record tracks started, processing, saved, failed and expired with size and expiry, every participant sees a recording indicator while it runs, an expiry job deletes the media, and access follows the meeting record. Recording stays off unless the meeting AI and recording policy allows it.",
+      "whyItMatters": "Some organisations need replay and compliance evidence, but for an agent-first product the transcript and recap carry most of the value with far less sensitive data, so recording should follow, not lead.",
+      "referenceBestPractice": {
+        "bestSource": "Teams (REA): complete state machine started, stopped, processing, saved to cloud storage, expires in N days, upload errors by cause, duration and size limits",
+        "others": [
+          "Slack (SRC): tray recording indicator only"
+        ],
+        "prevalence": "2 of 5 (Teams, Slack); differentiator.",
+        "mechanism": "SFU egress (composite or per-track) to object storage; recording record {id, meeting id, state, storage ref, expires_at, size}; mandatory banner or badge for all participants; expiry job deletes media; access follows the meeting ACL."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Channel Plane/docs/meeting-intelligence.md:18-58 (DOC: raw AV stored in access-controlled MinIO, but only for uploaded files in the MVP)",
+          "Baseline v-space-ui and v-space-backend (SRC): no calls, so no recording"
+        ],
+        "gap": "No recording, no storage lifecycle and no indicator. The only planned raw-AV storage is for uploaded files."
+      },
+      "approach": "Data Plane registers the recording artifact in MinIO; SFU egress runs under the Application Plane call record; Control Plane policy decides whether recording is allowed under the org ZDR posture and requires explicit recording consent in the R-t1-03-03 policy; Frontend shows the indicator in the call bar and announces start to all participants. An expiry job in the Data Plane owner deletes media and records a receipt.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-03-01",
+        "R-t1-03-05",
+        "R-t1-03-03",
+        "Object storage with retention and deletion receipts",
+        "Control Plane recording policy"
+      ],
+      "planeOwner": "Data Plane",
+      "risks": "Raw media is high-sensitivity and conflicts with ZDR tenants. Consent law varies by jurisdiction. Retention must interoperate with Space deletion receipts.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Only uploaded-file AV storage appears in apps/Channel Plane/docs/meeting-intelligence.md:18-58"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-005"
+      ]
+    },
+    {
+      "id": "R-t1-03-10",
+      "title": "Live in-meeting AI layer: captions, an optional interpreter agent and a facilitator agent (agenda, timers, live context)",
+      "summary": "Once live ASR exists for R-t1-03-02, publish caption events to the call with language auto-detect, add an interpreter as an agent participant that translates and publishes a TTS track per target language, and add a Facilitator agent template beside Meeting Scribe that tracks an agenda posted by a human, nudges on time and goal, and surfaces Data Plane context when an entity is mentioned. Everything is opt-in, ephemeral and gated by the meeting AI policy.",
+      "whyItMatters": "Accessibility and multilingual teams (the UI is already Norwegian and English), and a visible agent-in-the-room moment that human-only call tools cannot copy. It reuses the live transcript, Space agents and Data Plane retrieval instead of adding stores.",
+      "referenceBestPractice": {
+        "bestSource": "Teams (REA): captions with spoken-language auto-detect, AI interpreter with a named roster identity, agenda and timer smart actions",
+        "others": [
+          "Slack (DOC, low confidence): meeting-aware Slackbot"
+        ],
+        "prevalence": "Captions and interpretation 1 of 5 (Teams, unique); facilitator behaviours 2 of 5 (Teams, Slack), differentiator.",
+        "mechanism": "Streaming ASR per active speaker emits caption events on the realtime channel; the interpreter is an agent participant that subscribes to audio, translates and publishes per-language audio; a facilitator bound to the meeting reads live transcript and chat, triggers on an agenda message, elapsed-time checkpoints and entity mentions, and posts suggestions as drafts or ephemeral messages."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts:6,91 (SRC: only governed TTS through Azure Speech; no captions)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43-54 (SRC: Meeting Scribe template, text conversation only)"
+        ],
+        "gap": "No captions, interpretation or live meeting context. Space agents run on explicit invocation and schedules; nothing listens to a live session."
+      },
+      "approach": "Model Plane: streaming ASR variant of the R-t1-03-02 job that emits partial segments; Application Plane fans out caption events to the call; the interpreter is a case of the agent participant from R-t1-03-06 phase B; the Facilitator is a new template in SpaceCreateAgentDialog whose agent subscribes to transcript events of the meeting record under the R-t1-03-03 policy and posts suggestions only as ephemeral drafts.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-03-01",
+        "R-t1-03-02 live ASR",
+        "R-t1-03-03",
+        "R-t1-03-06 phase B for the interpreter",
+        "Push transport for caption latency"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Latency and cost of streaming ASR per call. Interruption noise from facilitator nudges, so keep them opt-in and ephemeral. Slack evidence is marketing-level and low confidence.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "apps/Channel Plane/docs/meeting-intelligence.md lists live transcription in phase 4 only"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-008",
+        "C-t1-03-009"
+      ]
+    },
+    {
+      "id": "R-t1-03-11",
+      "title": "Call polish and operability: call-health feedback, browser audio and video processing, in-tab push-to-talk and mute keys, wake lock and busy guard, call sounds and Join notifications",
+      "summary": "A bundle of small web-native follow-ups to R-t1-03-01. Use browser audio constraints and SDK-provided noise filters instead of custom ML. Sample WebRTC getStats into a call-health panel and a short reason-code feedback prompt when thresholds are crossed. Add in-tab push-to-talk and mute keys. Acquire the Screen Wake Lock during calls and register busy reasons (call, upload, pending approval) that guard beforeunload. Add join, leave and ring sounds and a notification Join action.",
+      "whyItMatters": "These make calls reliable and pleasant without building any desktop shell. The reason-code feedback pattern also suits rating agent runs, and the busy-reason registry protects long agent runs and approvals watched in a tab.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (SRC): push-to-talk with separate press and release, restart veto with reason codes, port-bound keep-awake lease, sound pack; Teams (REA and SRC): metric-triggered feedback and cloud-delivered audio DSP",
+        "others": [
+          "Buzz (SRC): global push-to-talk in its desktop engine",
+          "Teams (SRC): most OS entry points for joining meetings"
+        ],
+        "prevalence": "Per capability 1 to 2 of 5 (A/V enhancement Teams, call health Teams, hotkeys Slack and Buzz, restart veto Slack, sounds and entry points Slack and Teams); differentiator or unique.",
+        "mechanism": "Web equivalents: getUserMedia noiseSuppression, echoCancellation and autoGainControl constraints; getStats sampling for RTT, jitter and loss; keydown and keyup push-to-talk while the tab is focused; navigator.wakeLock during calls; a busy registry consulted before any app version swap or navigation; short audio cues; Web Notifications with a Join action and a web+verevon protocol handler for deep links."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts:36-41 (SRC: VOICE_AUDIO_CONSTRAINTS already enables echoCancellation, noiseSuppression and autoGainControl)",
+          "apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx:512 (SRC: only a dialog-level keydown handler; tap-to-talk, no push-to-talk)",
+          "Grep this session of verevonv3/src for wakeLock, registerProtocolHandler, new Notification and PushManager: no non-test matches; no service worker or PWA manifest in verevonv3/public"
+        ],
+        "gap": "Browser audio processing is on for dictation only. No call media to measure, no feedback prompt, no push-to-talk, no wake lock, no busy-reason guard, no call sounds, notifications or deep links. The comparator open question is answered: there is no service worker, so no skipWaiting deferral exists or is needed today; updates arrive on reload. Verevon is web-only, so global hotkeys and OS jump lists are out of reach."
+      },
+      "approach": "Frontend Plane only, after R-t1-03-01: add noise-filter options to the media-devices module, a getStats sampler feeding a health panel and an Application Plane feedback record that is reused for agent-run feedback, in-tab key handlers (space to talk, M to mute) that do not collide with the composer, a small busy-reason registry plus Wake Lock, sound cues behind a user setting, and notification Join actions once Space notifications exist. Do not store voice profiles or other biometric-like data.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-03-01",
+        "Space notifications (notifications category) for Join actions"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Wake Lock is not supported everywhere and must always be released. Notification permission fatigue. Call telemetry must stay aggregate for privacy. Shortcut conflicts with the room composer.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 14,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-016",
+        "C-t1-03-017",
+        "C-t1-03-018",
+        "C-t1-03-019",
+        "C-t1-03-020"
+      ]
+    },
+    {
+      "id": "R-t1-03-12",
+      "title": "Agent outbound phone calls behind a consequence-stated approval card (later, reuse the voice-agent runtime)",
+      "summary": "Much later, let an agent propose a call to a third party. The user approves a card that states the agent may repeat anything to the callee and that the call cannot be recalled; on approval a telephony provider dials and a realtime voice session runs the call, then posts transcript and outcome to the Space. The reusable piece worth adopting earlier is the consequence-stated wording for every irreversible agent effect.",
+      "whyItMatters": "Real-world task completion for personal agents (bookings, follow-ups), and the approval pattern generalises to any effect that cannot be undone.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (SRC, medium)",
+        "others": [],
+        "prevalence": "1 of 5; unique.",
+        "mechanism": "Agent proposes call(destination, purpose); approval card with a consequence statement and a Do not call option; on approve a voice harness dials through a telephony provider and runs a realtime voice agent; transcript and outcome return to the chat."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Control Plane/auth-core/src/sms/twilio-verify.service.ts (SRC: only SMS verification, no voice telephony found by repo grep for twilio, telephony, pstn, sip)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx (SRC: in-room approval cards exist for gated agent effects)"
+        ],
+        "gap": "No telephony or outbound voice. Whether the existing approval cards state the consequence of irreversible effects was not checked."
+      },
+      "approach": "Ingestion Plane: a telephony connector as an integration-corev2 provider action with Quarry-style propose and execute separation; Model Plane realtime voice from R-t1-03-06; Space approval card with an explicit consequence statement bound to the exact destination and purpose.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-03-06",
+        "Telephony provider connector",
+        "Approval gates with exact-effect binding"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Regulation of automated calls, impersonation and cost abuse. Single-source reference at medium confidence.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-03-013"
+      ]
+    }
+  ],
+  "dropped": [],
+  "strengthsToKeep": [
+    "Realtime voice session route with ZDR fail-closed routing already exists in the Model Gateway (apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:448-450, 4900-4945; zdr_posture.rs:277), so voice and agent-voice can be server-side and governed, which Buzz (desktop-local STT/TTS) cannot match.",
+    "Voice mode is built and tested: pure reducer with typed errors including zdr-unavailable, mic error classifier, silence tracker and governed read-aloud pinned to Azure Speech with fail-closed provider check (apps/Frontend Plane/verevonv3/src/features/voice/voice-mode-state.ts, voice-recorder.ts:103-127, src/shared/api/speech-client.ts:6-108). It is a head start for the call state machine and device layer, but only mounted in the dashboard composer (DashboardComposer.tsx:3683).",
+    "A short-audio STT path with ZDR gating exists (http_routes.rs:3955-4040 over inference-core TranscribeSpeech), giving the transcript pipeline a governed starting point; cloud ASR is refused for ZDR until a deployment is attested, which is the right default.",
+    "Meeting-intelligence design treats a meeting as a source type on existing Data Plane retrieval, graph, wiki, ZDR and org-scoping rails, with a clear cross-plane ownership table (apps/Channel Plane/docs/meeting-intelligence.md:18-58). This is architecturally stronger than the siloed Teams and Slack recap stores and than QM, which has none.",
+    "Authority model is ahead of every reference for call and meeting gating: per-effect Control decisions that bind purpose, privacy class and ZDR, and Space membership never widens an owner-plane ACL (apps/SPACE_AUTHORITY_ADR_2026-08-13.md; apps/Frontend Plane/verevonv3/docs/space-defenition.md:150-156 explicit-invocation rule). Meeting policy and call tokens can reuse the pattern.",
+    "Agents act only when explicitly invoked and the Meeting Scribe template already encodes decisions first, never invent (apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43-54). Together with the approval panel and agent run live view (FleetRunConsole.tsx:116-131; BrowserChrome.tsx human_takeover control mode) these are good foundations for AI consent and an agent-is-acting cue.",
+    "Calendar read already exists for Outlook (Graph) and Google behind integration-corev2 with typed, validated windows and paging (apps/Ingestion Plane/integration-corev2/internal/actions/calendar_read.go) and is offered to agents as a non-write tool (apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:103,113). Slack and QM have integration-only calendars, so this is at parity for an agent-first product once triggers are added."
+  ]
+}

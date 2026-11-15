@@ -1,0 +1,294 @@
+{
+ "verdict": "Mostly trustworthy and close to complete, but not ready to hand over unpatched. Every number in the front matter, Appendix A and section 9 recomputes exactly from _context.json and items.verified.json (500 baseline records 290/122/57/9/22 with all 13 per-category splits, 2,743 reference records, 595 clusters, 159 R-items, tiers 23/45/30 to 22/46/30, verdicts 13/81/4, refcheck 2/21, 40 effort revisions, statuses 78/16/2/2, 12 quick wins with 9 at S or M). All 98 wave-table rows and all card headers match the verified tier, status, effort and wave in _titles.json, every Priority item appears in a wave, and every link resolves. The document answers all six points of the brief: shared gaps (section 2), best of breed (section 3), differentiators (section 7), nice-to-haves (section 6, W5), the three tiers, and an audit that changes nothing. Section 2 statuses and prevalences agree with the verified items and corrected counts. The problems are concentrated in the narrative framing. Six major issues: (1) headline 6 and (2) section 7.2 say Hermes stages learned skills, although verification found its skill approval gate is off by default; (3) section 7.5 repeats the refuted claim that Manus' side-effect taxonomy drives policy and adds an exactly-once ledger the card does not support; (4) section 10.1 says 11 efforts went from L to XL, but the figure is 15; (5) section 7 tags installed-app findings [REA] where the cards and Appendix A say SRC; (6) section 8 lists ZDR as a strength without saying that Priority card F-t3-005 finds it unusable today. The minor issues are softer over-claims, provenance tags, a stale tense, undefined acronyms and ADR links missing from cards. All but one have exact patches. After those patches the document can go to the team.",
+ "checked": [
+  "Front matter and Appendix A counts recomputed with node from _context.json and items.verified.json: 13 category baselines, totals 290/122/57/9/22=500, 2,743 records over 12 sources, 595 clusters, 159 R-items (unique sourceItems plus 2 dropped), tiers before and after, verdicts, refcheck outcomes, effort revisions, statuses (all match)",
+  "Effort-change direction recomputed: 30 up and 10 down (matches); 15 moved from L to XL, not the 11 stated in 10.1",
+  "Priority table in 1.4 (22 rows) and all 98 rows of the section 9 wave tables parsed against _titles.json tier, effort, original effort and wave, and _context.json waves (0 mismatches, no item missing)",
+  "All 98 card headers (sec-30, sec-40, sec-50) parsed against _titles.json (0 mismatches)",
+  "10 headline findings and 6 executive-summary claims checked against cards 001-008, 010-012, 014, 018, 022, 023, 028, 031, 034, 038, 048, 049, 053 (5 inconsistencies)",
+  "Section 1.4 and 9.3 ADR topics compared with _context.json adrNeeded (all 10 topics match; the 1.4 item lists are shortened) and cards scanned for ADR mentions (11 carrying items lack one)",
+  "Section 9.2 quick wins (12 flagged, 9 at S or M), 9.4 dependency notes recomputed from the wave-table dependency columns, and the F-t3-016 dependents (match)",
+  "Section 2: all 58 table-stakes rows checked against _inputs.table-stakes.json prevalence and status, and every row's Verevon status against the verified status of its linked item (consistent apart from one uncorrected double-count)",
+  "Section 3: 50 best-of-breed rows compared with _titles.json bestSource and with the verification corrections on the cards (1 omission)",
+  "Section 7: every link resolves and matches its topic; about 25 bullets checked against cards and refchecks (Hermes, Manus, Claude, DeepSeek, Cursor and Antigravity over-claims plus a systematic REA/SRC tag mismatch)",
+  "Section 8: 15 strengths checked against _inputs.strengths.json and Priority cards (ZDR contradiction with F-t3-005; Redis resume and the Ask/Do switch are supported)",
+  "Appendix A REA limits verified in the deep dives (Antigravity heap, Claude's 6.9 MB chunk, Manus' 355 limitations) and the connector-baseline re-read in analysis.md and cons; nothing-launched and web-docs-only statements present",
+  "Brief coverage (6 points) and clarity of the framing sections, including status, tier and verification definitions and undefined acronyms",
+  "All 22 patch find strings confirmed to occur exactly once in their section file with node"
+ ],
+ "issues": [
+  {
+   "id": 1,
+   "severity": "major",
+   "file": "sec-10-front.md",
+   "where": "1.3 Headline findings, item 6",
+   "problem": "Says Hermes and Manus both stage learned skills before use. The verified reference check for F-t3-007 says Hermes' skill write-approval gate is opt-in and off by default; only unattended memory replace/remove is staged fail-closed. Only Manus stages learned skills as proposals (PENDING/ACCEPTED/REJECTED).",
+   "evidence": "items.verified.json F-t3-007 verification.reference.corrections (4): 'skills.write_approval default False'; card F-t3-007 in sec-30-p1.md ('its skill write-approval gate is opt-in (default off)').",
+   "patch": {
+    "find": "Hermes and Manus stage learned skills before use;",
+    "replace": "Manus stages learned skills as proposals the user accepts or rejects, and Hermes stages unattended memory edits (its skill approval gate is opt-in and off by default);"
+   }
+  },
+  {
+   "id": 2,
+   "severity": "major",
+   "file": "sec-60-diff.md",
+   "where": "7.2 Hermes Agent, bullet 'Fail-closed staging and a skill ledger' (and the 7.2 intro 'it stages what it learns')",
+   "problem": "States that Hermes' learned skills start as staged entries. Verification corrected this: skill write approval is opt-in (default off); only unattended memory replace/remove is fail-closed; the skill ledger describes itself as telemetry, not a gate, with a coarse actor and no run id. The 7.2 intro sentence 'it stages what it learns' carries the same over-claim and should be softened the same way.",
+   "evidence": "items.verified.json F-t3-007 verification.reference.corrections (3) and (4); card F-t3-007 'What the references do'.",
+   "patch": {
+    "find": "Learned skills start as staged entries and every mutation is recorded with actor and before/after so one edit can be rolled back [SRC].",
+    "replace": "Unattended memory replace and remove are staged fail-closed, skill write approval is opt-in (off by default), and every skill mutation is recorded with a coarse actor and before/after manifests so one edit can be rolled back; the ledger calls itself telemetry, not a gate [SRC]."
+   }
+  },
+  {
+   "id": 3,
+   "severity": "major",
+   "file": "sec-60-diff.md",
+   "where": "7.5 Manus, bullet 'Declared side-effect taxonomy and an exactly-once action ledger'",
+   "problem": "Says Manus' five declared levels 'drive policy' and 'every effect is ledgered once'. This contradicts the document's own section 1 ('Manus's side-effect taxonomy drives replay deduplication, not approvals'), section 2.5 and cards F-t3-003 and F-t3-002: the levels cover its browser tools and drive only replay dedupe and MCP annotations, and the ledger is in-memory (4096 entries, 10-minute horizon), browser side-effect actions only.",
+   "evidence": "Card F-t3-003 ('in code they drive only replay deduplication and MCP annotations, not approvals [SRC]'); card F-t3-002 ('Manus keeps an in-memory action ledger (4096 entries, 10-minute horizon) for browser side-effect actions only'); sec-10-front.md 'What changed during verification'.",
+   "patch": {
+    "find": "Five declared levels plus MCP annotations drive policy; every effect is ledgered once [REA].",
+    "replace": "Five declared levels on its 22 browser tools drive replay deduplication and MCP annotations, not approvals, and an in-memory ledger (4096 entries, 10-minute horizon) returns a replay conflict on digest mismatch [SRC]. Driving approvals from a declared class is a Verevon synthesis [INF]."
+   }
+  },
+  {
+   "id": 4,
+   "severity": "major",
+   "file": "sec-70-roadmap.md",
+   "where": "10.1 Main risks, item 7",
+   "problem": "Wrong count: says 11 efforts moved from L to XL. Recomputed from items.verified.json (effort vs verification.verevon.effortRevised): 30 up, 10 down (correct) but 15 moved L to XL; the 11 listed are only the Priority and Recommended ones, F-t3-070, F-t3-081, F-t3-089 and F-t3-090 (Nice to have) are missing. The W5 table itself shows these four as 'XL (was L)'.",
+   "evidence": "node over items.verified.json: L->XL = 008 014 027 032 037 043 046 047 051 058 062 070 081 089 090 (15); sec-70-roadmap.md W5 table rows for 070, 081, 089, 090.",
+   "patch": {
+    "find": "(11 from L to XL: [F-t3-008]",
+    "replace": "(15 from L to XL; the 11 in Priority and Recommended are [F-t3-008]"
+   }
+  },
+  {
+   "id": 5,
+   "severity": "major",
+   "file": "sec-60-diff.md",
+   "where": "7 intro and all installed-app subsections (7.1, 7.4 to 7.8)",
+   "problem": "Provenance mismatch: section 7 tags nearly every installed-app capability [REA], while the cards for the same capabilities tag them [SRC] (for example Claude toolPolicy 'SRC, from prettified bundles', Manus browser tools SRC, Cursor StrReplace SRC, Codex decisions SRC) and Appendix A.3 says plainly that 'most app evidence in this audit is tagged SRC' because REA hit heap limits and does not index string literals. Read literally, section 7 overstates what REA established. A full retag is not a safe single patch; the patch clarifies the tag in the section intro, and the bullets should ideally be retagged [SRC] to match the cards.",
+   "evidence": "sec-80-appx-A.md A.3; cards F-t3-003, F-t3-008, F-t3-030, F-t3-006 tags; deep dives (antigravity heap exhaustion, claude 6.9 MB chunk left out).",
+   "patch": {
+    "find": "[REA] reverse engineering of the shipped app,",
+    "replace": "[REA] findings from the shipped installed apps, which REA analysed for structure but which were mostly read directly from the extracted bundles (the cards tag the same findings [SRC]; see Appendix A.3),"
+   }
+  },
+  {
+   "id": 6,
+   "severity": "major",
+   "file": "sec-60-diff.md",
+   "where": "8. What Verevon already does well, bullet 'ZDR by construction'",
+   "problem": "Presents ZDR (including the persistence-free temporary turn) as a strength to protect without saying it is not usable today. Priority card F-t3-005 says no provider is attested, every ZDR turn is refused and Temporary chat is unavailable. The brief requires that a strength must not contradict a Priority card; the bullet needs the caveat.",
+   "evidence": "Card F-t3-005 'Why it matters' ('With no attested provider every ZDR turn is refused and Temporary chat is unavailable'); _inputs.strengths.json supports the design itself.",
+   "patch": {
+    "find": "enforced before the network [SRC]. Evidence:",
+    "replace": "enforced before the network [SRC]. The design is built but not live: with no attested provider every ZDR turn is refused and Temporary chat is unavailable ([F-t3-005](#F-t3-005)). Evidence:"
+   }
+  },
+  {
+   "id": 7,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.3 Headline findings, item 2",
+   "problem": "Says connector reads are 'refused by the gate'. Card F-t3-010 says they are approval-gated (operation_is_write returns None for the .get and content operations, so the calls require approval); only MCP calls are refused outright.",
+   "evidence": "Card F-t3-010 'Verevon today' (integration_tools.rs, permission/mod.rs: 'the calls are approval-gated').",
+   "patch": {
+    "find": "connector reads and MCP (Model Context Protocol) calls are refused by the gate",
+    "replace": "MCP (Model Context Protocol) calls are refused by the gate and connector reads are approval-gated as if they were writes"
+   }
+  },
+  {
+   "id": 8,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.3 Headline findings, item 7",
+   "problem": "Calls verified Office files, decks, the editable canvas and passage-level citations 'the table stakes the web products set'. The cards rate them lower: decks 4 of 12 (F-t3-038), versioned artifacts common at 4 of 12 with selection comments a differentiator (F-t3-031), passage-level source viewing 2 of 11 (F-t3-053); and the best Office reference is Claude desktop, not a web product (F-t3-014).",
+   "evidence": "Cards F-t3-014, F-t3-031, F-t3-038, F-t3-053 'Reference practice'.",
+   "patch": {
+    "find": "are the table stakes the web products set.",
+    "replace": "are where the web products and Claude desktop set the bar (Office skills are table-stakes; decks, the canvas and passage-level citations are common or differentiators)."
+   }
+  },
+  {
+   "id": 9,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.3 Headline findings, item 3",
+   "problem": "Says declared tool side-effect classes (among others) 'are what the references show'. Card F-t3-003 and the verification paragraph in 1.4 say no reference drives approval policy from a declared side-effect class; that part is a Verevon synthesis.",
+   "evidence": "Card F-t3-003 ('Using a declared class to drive approval policy is therefore a Verevon synthesis [INF]'); sec-20-common.md 2.5 closing sentence.",
+   "patch": {
+    "find": "are what the references show and Verevon lacks.",
+    "replace": "are what the references show in parts (driving approvals from a declared side-effect class is a Verevon synthesis) and Verevon lacks."
+   }
+  },
+  {
+   "id": 10,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.2 Where Verevon stands today",
+   "problem": "'Agent runtime is the largest category' is ambiguous: in the Verevon baseline it ties with Chat experience (77 records each); it is the largest only in the reference data (420 records).",
+   "evidence": "_context.json categories: Chat experience base 77, Agent runtime base 77, refs 420 (largest).",
+   "patch": {
+    "find": "Agent runtime is the largest category and",
+    "replace": "Agent runtime is the largest category in the reference data (420 records) and"
+   }
+  },
+  {
+   "id": 11,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "How to read this document, 'Ids and anchors'",
+   "problem": "Says N is 12 in every 'n of N' prevalence, but section 2 and several cards use 11 (multimodal, research) and 9 (coding), e.g. '4 of 11', '5 of 9', and F-t3-053 '2 of 11'. Also says IDs are ordered by tier and rank, but F-t3-016 sits among the Priority numbers while being Recommended after verification.",
+   "evidence": "sec-20-common.md intro and 2.2/2.3/2.7 tables; cards F-t3-053, F-t3-076; _titles.json F-t3-016 tier recommended, originalTier priority.",
+   "patch": {
+    "find": "where N is 12, the number of reference sources in this audit.",
+    "replace": "where N is normally 12, the number of reference sources in this audit; categories that could be assessed on fewer sources say so (11 for multimodal and research, 9 for coding). Numbering follows the pre-verification tier order, so F-t3-016 keeps its number after moving to Recommended."
+   }
+  },
+  {
+   "id": 12,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "How to read this document (status vocabulary paragraph) and section 1 generally",
+   "problem": "The framing uses terms an engineering lead cannot decode from the front matter: waves W1 to W5 (explained only in section 9), 'OD' numbers (OD2, OD8, OD13, OD19), D10, F12 (easily confused with F-t3-012), Z-40, Ask/Plan/Do modes, PWA and SIEM in the Priority table, and the effort scale S/M/L/XL has no stated meaning (team-weeks or similar). The patch adds the definitions the data supports; the effort scale and D10/F12/Z-40 still need a one-line gloss from the authors.",
+   "evidence": "sec-10-front.md lines on the Priority table (SIEM, PWA) and 'Decisions leadership must make' (OD8, D10, F12, Z-40, OD2); OD is defined only in sec-70-roadmap.md 9 intro.",
+   "patch": {
+    "find": "Effort uses S, M, L and XL.",
+    "replace": "Effort uses S, M, L and XL. Waves W1 to W5 are the build order set out in section 9. \"OD\" numbers refer to the open decisions in the chat gap-closure plan (CHAT_GAP_CLOSURE_PLAN_2026-10-01.md). Ask, Plan and Do are Verevon's answer, planning and acting chat modes."
+   }
+  },
+  {
+   "id": 13,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "2.4 Agent runtime, row 'Scheduled agent runs'",
+   "problem": "The row states '10 of 12' without the correction its own paragraph and card F-t3-018 give (the count double-counts Manus and Anthropic). Other double-counted rows (2.12) carry an inline note; this one does not, contrary to the section's rule that corrected rows say so.",
+   "evidence": "sec-20-common.md 2.4 closing paragraph; card F-t3-018 ('The 10 of 12 references count double-counts Manus and Claude vendors').",
+   "patch": {
+    "find": "| Scheduled agent runs (cron or RRULE) with result delivery | 10 of 12 |",
+    "replace": "| Scheduled agent runs (cron or RRULE) with result delivery | 10 of 12 (two vendors double-counted) |"
+   }
+  },
+  {
+   "id": 14,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "3. Best of breed, row 'Learning governance'",
+   "problem": "Names only Hermes, but _titles.json bestSource for F-t3-007 names Manus first (proposal events) and Hermes second (staging), and the card's lead reference is Manus' PENDING/ACCEPTED/REJECTED proposals.",
+   "evidence": "_titles.json F-t3-007 bestSource 'manus (proposal events); hermes (fail-closed staging)'; card F-t3-007.",
+   "patch": {
+    "find": "| Learning governance | Hermes [SRC] | Opt-in write-approval staging",
+    "replace": "| Learning governance | Manus [SRC], Hermes [SRC] | Learning proposals the user accepts or rejects (Manus); opt-in write-approval staging"
+   }
+  },
+  {
+   "id": 15,
+   "severity": "minor",
+   "file": "sec-60-diff.md",
+   "where": "7.1 Claude desktop, bullet 'Document skills with scripts and validators'",
+   "problem": "Says six always-on document skills ship with validators that run in a sandbox. Card F-t3-014: six always-on skills, of which four are document skills with scripts; three share the OOXML validator; runtime execution was not observed.",
+   "evidence": "Card F-t3-014 'What the references do'.",
+   "patch": {
+    "find": "Six always-on document skills ship with scripts and validators that run in a sandbox [REA].",
+    "replace": "Six always-on skills ship with the app; four are document skills with scripts, three share an OOXML schema validator, and runtime execution was not observed [SRC]."
+   }
+  },
+  {
+   "id": 16,
+   "severity": "minor",
+   "file": "sec-60-diff.md",
+   "where": "7.1 Claude desktop, bullet 'Scheduled tasks that store approved permissions'",
+   "problem": "Says approvals are stored 'with expiry'. Card F-t3-018: expiry is computed at check time from an admin-managed lifetime, and when that is unset approvals never expire.",
+   "evidence": "Card F-t3-018 'What the references do'.",
+   "patch": {
+    "find": "Approved permissions are stored with expiry and a non-delegable tool set",
+    "replace": "Approved permissions are stored per tool with an admin-managed lifetime (no expiry when it is unset) and a non-delegable tool set"
+   }
+  },
+  {
+   "id": 17,
+   "severity": "minor",
+   "file": "sec-60-diff.md",
+   "where": "7.3 DeepSeek harness, bullet 'Verify-and-render Office output'",
+   "problem": "Implies DeepSeek verifies and renders its Office output. Card F-t3-014 says its checker explicitly does not judge pagination, clipping, fonts or Excel recalculation, rendering comes from a separate LibreOffice Kit, and Claude desktop is the best verify-and-render reference.",
+   "evidence": "Card F-t3-014 'What the references do'.",
+   "patch": {
+    "find": "Documents are checked structurally and rendered to look at after writing [SRC and DOC].",
+    "replace": "docx, pptx and xlsx skills carry a structural checker that does not judge pagination, clipping, fonts or Excel recalculation; rendering comes from a separate LibreOffice Kit, and Claude desktop is the stronger verify-and-render reference [SRC and DOC]."
+   }
+  },
+  {
+   "id": 18,
+   "severity": "minor",
+   "file": "sec-60-diff.md",
+   "where": "7.8 Cursor, bullet 'Typed request context with hydration flags'",
+   "problem": "Tagged [REA] as observed, but section 10.3 and the F-t3-001 reference check mark the hydration flags as inference from field names [INF].",
+   "evidence": "sec-70-roadmap.md 10.3 ('Cursor's \"hydration flags\" on RequestContext [INF]').",
+   "patch": {
+    "find": "A request carries what it was given (rules, history, memory) and a component-tree system prompt [REA].",
+    "replace": "A request carries what it was given (rules, history, memory) and a component-tree system prompt [SRC; the hydration flags are inferred from field names, INF]."
+   }
+  },
+  {
+   "id": 19,
+   "severity": "minor",
+   "file": "sec-60-diff.md",
+   "where": "7.8 Cursor, bullet 'Firecracker cloud agents'",
+   "problem": "Tagged [REA] as if the mechanism was observed. The F-t3-009 reference check says the evidence is agent prompt text plus a client proto enum; the orchestration is server-side and not inspectable.",
+   "evidence": "items.verified.json F-t3-009 verification.reference.corrections (2); card F-t3-009.",
+   "patch": {
+    "find": "**Firecracker cloud agents** and prebuilt images with health tracking [REA].",
+    "replace": "**Firecracker cloud agents** and prebuilt images with health tracking [SRC, from agent prompt text and a client proto enum; the orchestration is server-side]."
+   }
+  },
+  {
+   "id": 20,
+   "severity": "minor",
+   "file": "sec-60-diff.md",
+   "where": "7.7 Antigravity, bullet 'Browser subagent'",
+   "problem": "Attributes the fail-closed denylist to [REA]; card F-t3-008 marks fail-closed as documentation only.",
+   "evidence": "Card F-t3-008 ('[SRC; fail-closed is DOC]').",
+   "patch": {
+    "find": "with a fail-closed server denylist, and its recording",
+    "replace": "with a server denylist (fail-closed per documentation, DOC), and its recording"
+   }
+  },
+  {
+   "id": 21,
+   "severity": "minor",
+   "file": "sec-60-diff.md",
+   "where": "7.11 chatgpt.com, last bullet",
+   "problem": "Says ChatGPT 'is retiring group chats in July 2026'; the document is dated 2026-10-14 and the source records the retirement as having happened on 2026-07-09.",
+   "evidence": "web-chatgpt.web-product.deep.md retired-features list: 'group chats (2026-07-09) [DOC RN]'.",
+   "patch": {
+    "find": "ChatGPT is retiring group chats in July 2026",
+    "replace": "ChatGPT retired group chats on 2026-07-09"
+   }
+  },
+  {
+   "id": 22,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "9.3 ADR candidates (and 1.4 'Decisions leadership must make' in sec-10-front.md)",
+   "problem": "Several items that 9.3 and _context.json adrNeeded place under an ADR carry no ADR, OD or owner-decision mention on their card or in their wave-table dependency column: F-t3-035 and F-t3-084 (sandbox backend), F-t3-026 (computer-use scope, OD13), F-t3-050 and F-t3-081 (OD13), F-t3-061 (OD19), F-t3-047 (unattended authority), F-t3-080 (share model), F-t3-059 (skill and plugin supply chain), F-t3-042 (model entitlements), F-t3-027 (connector content and ZDR). Separately, the 1.4 list in the front matter drops some adrNeeded items (F-t3-061, F-t3-081, F-t3-019, F-t3-080, F-t3-084, F-t3-085) that 9.3 lists. A reader planning from a card or a wave row would miss the gating decision; add the ADR to those dependency cells or note in 1.4 that the item lists are abbreviated.",
+   "evidence": "node scan of sec-30/40/50 cards for 'ADR|OD\\d|owner ruling|decision' against _context.json adrNeeded; sec-70-roadmap.md wave tables; sec-10-front.md 1.4.",
+   "patch": null
+  },
+  {
+   "id": 23,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.3 Headline findings, item 4",
+   "problem": "'The conversation data model is thinner than every reference' is an unqualified universal claim not supported by the cards: F-t3-012 says Hermes is the only verified indexed search and Claude desktop search is a capped substring scan; several references were not shown to have message versions or sharing. Suggest 'thinner than the leading references'.",
+   "evidence": "Card F-t3-012 'What the references do'; section 2.1 prevalence (fork 8 of 12, versions 4 of 12).",
+   "patch": {
+    "find": "is thinner than every reference.",
+    "replace": "is thinner than in the leading references."
+   }
+  }
+ ]
+}

@@ -1,0 +1,102 @@
+[
+ {
+  "finalId": "F-t2-001",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/extract/codex/.vite/build/main-BklS_2Y2.js (grep: 'delete e.allowpopups,delete e.disablewebsecurity,delete e.webpreferences,t.sandbox=!0,...nodeIntegration=!1')",
+   "scratchpad/tmp/cxib/main.pretty.js:36712-36800 (ICe will-attach-webview handler: route/instance-id/hostGeneration checks, preventDefault on unmatched attach, src blanked, pendingWebviewRoutesByInstanceId)",
+   "scratchpad/tmp/cxib/main.pretty.js:36853-36864 (LCe/RCe/cU hardening; RCe re-allows popups for the browser-settings webview only)",
+   "REA inspect_pe_resources C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/Codex.exe (20272 bytes, single RT_MANIFEST type 24; ev_be48cc5443c2...)",
+   "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/ (chrome.dll, 155.0.8059.40.manifest present)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:1236 and :26688 (codex.browserAccess.v1 signed per-turn check, 'Local browser use is disabled in Work settings')",
+   "scratchpad/tmp/aside/daemon_sea_blob.bin@2735497 (AsideSecureCdpAuthorizer: /json/challenge -> signInstallationChallenge -> POST /json/auth/session, AsideSessionToken, EXPIRY_MARGIN_SEC=10, no retry on 401/403)",
+   "scratchpad/tmp/aside/daemon_sea_blob.bin@2750919 (ExtensionBridgeServer, connection key account:profile:mode, ping 5 s, stale 15 s)",
+   "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (strings json/auth/session and AsideSessionToken present)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9834, :9986 (bridge URL; 'routed to the wrong browser profile or mode')",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:42-43 (ttl 30-3600 default 600, activityTtl 10-3600 default 300)",
+   "C:/dev/firecrawl/apps/api/src/lib/hangar.ts:111-120 (ttl/activityTtl passed to Hangar as max_lifetime_seconds/idle_timeout_seconds)",
+   "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:489-530 (reconcileBrowserSessions: 15 s redlock sweep that settles billing for unsettled Hangar sessions)",
+   "C:/dev/firecrawl/apps/api/src/routes/v2.ts:275-282, 651-673 (/scrape/:jobId/interact; /browser and /interact aliases)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-browser.ts:61-75 (prompt <=10000, code <=100000 bytes, node|python|bash)"
+  ],
+  "corrections": "1) Prevalence/class: the cluster C-t2-08-001 mechanism (will-attach-webview rewrite) is Electron-specific; Aside being a Chromium fork does not imply it has the same attach hardening, so the 'treated as common because Aside is a Chromium fork (INF)' line must go. State '1 of 3 (Codex), unique' for the attach hardening; 'real Chromium engine' alone is 2 of 3. 2) Best-in-class fit: Codex webview hardening is not an analogue of grant issuance. The closest reference mechanisms are Aside's signed-challenge short-lived CDP token plus routed bridge (SRC) and Codex's signed, nonce-bound per-turn browser/access check (SRC, CA028). Both are single-user local-device trust checks, not multi-tenant durable grant stores. Say plainly that no reference implements a durable org-scoped grant issuer; the issuer is a Verevon design requirement and not a parity item. 3) Firecrawl: the session timers are enforced by the external Hangar browser service (Firecrawl sends max_lifetime_seconds and idle_timeout_seconds; Hangar is not in the repo). Firecrawl's own code runs a 15 s reconciler that settles billing. It is not a reaper that closes sessions on either timer. Reword 'a reaper closes a session on either timer and settles billing' to say this.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Firecrawl browser sessions depend on Hangar (HANGAR_URL, hosted and closed source); TTL enforcement is INF from the parameter names and not observed",
+   "Firecrawl /interact needs USE_DB_AUTHENTICATION and is rejected for Safe Mode orgs (per record notes; not re-read)",
+   "Codex per-turn browser access is tied to a 'Work settings' toggle; enterprise or workspace gating is possible (INF from the error string)",
+   "Aside evidence comes from a scratch copy of the aside-daemon.exe NODE_SEA_BLOB (SRC by byte offset), not from a source repo"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-010",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:20-22 (MAX_STEPS 25, SNAPSHOT_MAX_CHARS 40000)",
+   "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:128-129 (prompt rule: never open new tabs)",
+   "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:271-330 (single 'browser' tool takes a free-form agent-browser command or && chain run in the sandbox; only guard is regex denylist for 'tab new'/'open')",
+   "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:380, 407 (stopWhen stepCountIs(25); ACTION LOG reminder injected in prepareStep)",
+   "scratchpad/tmp/aside/daemon_sea_blob.bin@6350853 (Aside SYSTEM_PROMPT: Reading Escalation, 'Treat an action as unconfirmed until a fresh snapshot', switch strategy after 2-3 failures, updates about every 30 s, Completion and Verification)",
+   "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/docs/api-use-behavior.md:10-26",
+   "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/skills/control-in-app-browser/SKILL.md:6-17"
+  ],
+  "corrections": "1) The Firecrawl loop description is overstated. The single tool accepts free-form agent-browser CLI strings, && chains included, executed through the sandbox's bash. The only command guardrail is a regex denylist for 'tab new'/'open', so 'guardrails reject commands outside the allowed set' is wrong (there is no allowlist). There is no snapshot diff: the model re-runs snapshot and gets the full output. The only stops are the 25-step cap and a per-command timeout, with no token or cost budget. Per-run step/time/token budgets and an allowlisted verb set are Verevon additions, not Firecrawl practice. Because its guardrails are weaker than Verevon's 'one governed action per call', Firecrawl should be cited for loop shape only (capped interactive snapshot, refs, step cap, action-log reminder), not for guardrails. 2) The ladder 'AX ref -> semantic locator -> set-of-marks -> coordinates' is a Verevon synthesis. Aside's actual ladder is interactive snapshot -> full snapshot -> wait and re-snapshot -> annotated screenshot (ref boxes) or raw screenshot, plus 'unconfirmed until re-snapshot' and 'switch strategy after 2-3 failures'. Attribute it accordingly. 3) Codex connector-first routing is skill/prompt text (DOC) that the model is told to follow, not a code-level router. Say so and do not describe it as a 'routing step'. 4) Loop prevalence: Codex also runs a multi-step model loop over browser tools (Node REPL), so 'loop 2 of 3' undercounts; it is 3 of 3 (table-stakes).",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Codex procedure, efficiency caps and connector-first rules are DOC (shipped skill/doc text), enforced only by model compliance",
+   "Aside prompt is SRC from the daemon SEA blob; provider-specific overrides exist and which harness (v1/v2) a surface uses is INF",
+   "Firecrawl interact runs inside the Hangar sandbox (hosted); ZDR switches to a different model with store:false (per record, not re-read)"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-014",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/agent-trace.ts:1-60 (trace is proxied from EXTRACT_V3_BETA_URL/internal/extracts/:id/trace; throws 'Agent beta is not enabled' without it; liveView sessions merged locally)",
+   "C:/dev/firecrawl/apps/elixir-sdk/openapi.json:3603, 7271-7286 (envelope schemaVersion, eventId, runId, occurredAt, producerSequence, agent; producerSequence monotonic per emitting agent)",
+   "C:/dev/firecrawl/apps/api/src/routes/v2.ts:441 (/agent/:jobId/trace)",
+   "C:/dev/firecrawl/apps/api/src/lib/external-request-id.ts:1-50 (request-row attribution reads External-Request-Id, not x-request-id; 2048-byte cap, never 400)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-alexandria.ts:78-80, 147 (x-request-id adopted or generated, echoed, used for safe retry on provider tools)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/research-proxy.ts:38-39; routes/exchange.ts:25; controllers/v2/support-proxy.ts:12; lib/exchange.ts:869 (x-request-id forwarded per route; Exchange billing keyed by it)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:10274 (tab_dev_logs schema: levels enum debug|info|log|warn|error, filter, limit)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:18965-18968 (tab_dev_logs handler)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:25101-25125 (Lee toolSurface/browser_use url; GN openTabIds for all backends, openTabs title/origin only when backend is chrome)",
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:24914-24925, 25490 (po() gate: browser notifications and tab meta suppressed when native credentials were used)",
+   "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/docs/api.json (TabDevLogsOptions present)",
+   "https://docs.apify.com/platform/actors/running/runs-and-builds (meta.origin: DEVELOPMENT, WEB, API, CLI, SCHEDULER, TEST, WEBHOOK, ACTOR, STANDBY, CI, MCP; no log cap or redaction on this page)"
+  ],
+  "corrections": "1) Firecrawl run trace: only the API contract (openapi plus types) and a proxy controller are in the repo. The events come from an upstream agent-beta service (EXTRACT_V3_BETA_URL), so the producer, persistence and ordering are not inspectable, and the feature is beta-gated. producerSequence is monotonic per emitting agent, not global: consumers group by agent.id and then order by sequence. Mark it 'contract observed, implementation upstream'. 2) Firecrawl x-request-id has no edge middleware. It is handled per route: provider tools adopt or generate and echo it and use it for safe retries, research/exchange/support proxies forward it, and Exchange billing is keyed by it. Request-row attribution uses a separate External-Request-Id header. Reword 'caller's x-request-id is logged, forwarded upstream and reused as the idempotency key' to cover only those routes. The proposed tower-layer design is Verevon's own. 3) Run-trace prevalence '2 of 4' is generous: Codex has size-capped WebMCP activity, response meta and drained notifications, but no ordered, versioned run envelope. Say 1 of 4 full envelope (Firecrawl, beta) plus Codex for UI-side pieces. 4) Codex details: the open-tab list with titles and origins is filled only for the Chrome backend (the in-app backend gets ids), notifications and tab meta are suppressed after native credential use, and the shipped console level enum is debug|info|log|warn|error ('warning' is not in the service schema).",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Firecrawl agent trace is beta-only (EXTRACT_V3_BETA_URL) with an upstream closed implementation",
+   "Apify meta.origin is DOC (verified on the public page); the 10M-char log cap and secret redaction are DOC from other Apify pages and were not re-verified here",
+   "Codex behaviour comes from a prettified copy of the shipped browser-service bundle (SRC); the notification gate depends on credential-observation state"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-020",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/lib/browser-sessions.ts:115, 228-330 (save ignored unless savedAt > tombstone deletedAt; saved_at = GREATEST(...); tombstone stored as key browser-profile-deleted:<teamHash>_<name> via getValue/recordBrowserProfileDeleted, not a DB column; delete removes rows with saved_at <= deletedAt)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:850, 875-876 (profiles rejected with lockdown)",
+   "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:133-140 (ZDR rejects recordSession and profile)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:235-250 (409 while a session is saving to the profile)",
+   "grep 'encrypt' in C:/dev/firecrawl/apps/api/src/lib/hangar.ts and lib/browser-*.ts (no hits)",
+   "C:/dev/firecrawl/apps/playwright-service-ts/api.ts:474-502 (Cookie header -> requestContext.addCookies with domain = last two host labels; Playwright API, not CDP Network.setCookies)",
+   "scratchpad/tmp/cxib/main.pretty.js (grep: 'persist:codex-browser-' partitions, browserStorageId, browserProfileImporter x4)",
+   "Apify isSecret / SessionPool records are DOC (docs.apify.com secret-input page, crawlee.dev session-management); not re-fetched"
+  ],
+  "corrections": "1) The snapshot spec (all cookies with expiry, SameSite and partition key, per-origin storage, IndexedDB export) and 'encrypted with a per-org key' must not be attributed to Firecrawl. Firecrawl keeps only a profile listing; the profile state lives in the external Hangar service, and no encryption code exists in the repo. These are Verevon requirements, from Verevon's own docs/CONTRACTS.md:185-199. 2) Apify's encryption (AES-256-GCM key wrapped by a per-(user, Actor) RSA key) applies to secret Actor input fields, not to browser profiles or session cookies. No reference shows envelope encryption of browser profiles, so present it as a security baseline borrowed from the input-secret pattern, not parity. 3) The Firecrawl tombstone is a key-value entry keyed by team hash and name, not a deleted_at column; the save-ordering mechanism is otherwise accurate. 4) Caller cookies are seeded with Playwright context.addCookies using a 'last two host labels' heuristic, which is not a registrable/public-suffix domain and is wrong for co.uk-style suffixes. It is not CDP Network.setCookies. Fix the wording. 5) Prevalence '2 of 4 (apify, firecrawl)' undercounts persistence: Codex keeps browser storage in persistent 'persist:codex-browser-*' partitions with a browserStorageId and a profile importer (SRC grep), and Aside is a full Chromium browser with profiles (INF). Apify's SessionPool cookie-per-proxy-session is only a weak analogue of a named profile.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Firecrawl profile contents and at-rest handling live in Hangar (closed and hosted); only the listing and ordering logic is SRC",
+   "Apify evidence is DOC only",
+   "Chromium-based agent browsers (Codex, Aside) likely protect cookies at rest with OS-bound keys (INF, not verified here); this is local-device encryption, not per-org",
+   "The per-org envelope encryption design is Verevon-internal intent (DOC CONTRACTS.md), not a reference feature"
+  ],
+  "confidence": "high"
+ }
+]

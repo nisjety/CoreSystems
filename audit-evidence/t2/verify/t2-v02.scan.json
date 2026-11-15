@@ -1,0 +1,1406 @@
+[
+  {
+    "finalId": "F-t2-004",
+    "title": "ZDR-safe telemetry: span sampler, late-ZDR registry, log filter and safe/sensitive log fields in Quarry and the gateway",
+    "searches": [
+      "ShouldSample|impl.*Sampler|with_sampler|WithSampler|ParentBased|NOT_RECORD|SpanProcessor|SpanExporter (Quarry, integration-corev2, gateway, verevonv3, Model Plane)",
+      "(?i)late.?zdr|zdr_registry|ZdrRegistry|zdr_trace|trace_registry|zdr_span|ZdrSampler (all of CoresSystem/apps)",
+      "tracing_subscriber::Layer|with_filter|fn on_event|zdr near fmt/layer/telemetry/otel (Quarry crates, pkg, gateway, Model Plane)",
+      "(?i)sensitive_fields?|safe_fields?|SafeFields|SensitiveFields|log_sensitive|LogSafe|redact_for_log (Quarry, IC, gateway, Model Plane)",
+      "(?i)kill.?switch|OTEL_SDK_DISABLED|disable_exporters?|TELEMETRY_DISABLED|OTEL_TRACES_EXPORTER|OTEL_EXPORTER_OTLP_ENDPOINT",
+      "(?i)x-zero-data-retention|x-zdr|zdr[-_]?header|zdr[-_]?posture|ZDR_HEADER; Quarry-side header readers",
+      "(?i)nats.*zdr|zdr.*headers.insert; natsx ZDR suppression; quarry-runtime events ZDR gate",
+      "(?i)fn .*zdr.*(log|span|trace|telemetry|export|otel) and url-near-zdr test or log lines (change_routes, pipeline)",
+      "(?i)zdr.*(telemetry|otel|span|trace|tracing|logs|sampler|siem) across Quarry and Model Plane docs",
+      "mp_telemetry::init|mp-telemetry crate; quarryotel.Init; init_telemetry call sites"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs",
+        "line": 25,
+        "why": "init_telemetry installs JSON fmt plus optional OTLP layer; no ZDR awareness.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs",
+        "line": 60,
+        "why": "Tracer provider built with batch exporter only; no sampler or ZDR span processor.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs",
+        "line": 29,
+        "why": "OTLP layer gated only by endpoint env var; crude exporter off-switch, not a kill switch.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/quarryotel.go",
+        "line": 80,
+        "why": "Go helper uses ParentBased(AlwaysSample); no ZDR-aware sampler.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/quarryotel.go",
+        "line": 40,
+        "why": "Go Init is a no-op when OTLP endpoint is unset; env-based off only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs",
+        "line": 635,
+        "why": "source_url logged at debug inside the zdr.is_active() branch; the leak named in the item.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-telemetry/src/lib.rs",
+        "line": 27,
+        "why": "Model Plane mp-telemetry repeats JSON plus OTLP init; no ZDR filter or sampler.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/pkg/natsx/publisher.go",
+        "line": 57,
+        "why": "natsx drops envelopes whose body zdr key is true; body key, not a NATS header.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/events.rs",
+        "line": 137,
+        "why": "emit_for_zdr routes events by ZDR posture; ZDR callers use in-process path only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/page_renderer.rs",
+        "line": 126,
+        "why": "Debug log under ZDR gate with no URL; shows ZDR-gated logging pattern.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs",
+        "line": 137,
+        "why": "Claims effective_zdr ORs claim floor with request zdr; Quarry reads posture from claims and body.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs",
+        "line": 14,
+        "why": "Gateway request_zdr reads x-zdr header or zdr body field; BFF-side only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs",
+        "line": 1788,
+        "why": "Gateway sets x-zdr true on outbound upstream requests; target service not confirmed.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/gen/model_plane/v1/execution.pb.go",
+        "line": 276,
+        "why": "Proto zdr flag threaded into each inference round and tool GDPR audit detail.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/events.rs",
+        "line": 282,
+        "why": "Test asserts a ZDR event must not enter NATS JetStream.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+        "line": 827,
+        "why": "x-zdr header to Quarry appears only in a test; no production header hop found.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+        "line": 585,
+        "why": "ZDR enforcement row covers agent loops and screenshots; no telemetry scope.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/gap-quarry.md",
+        "line": 35,
+        "why": "Doc lists quarry-edge OTEL OTLP as done; no ZDR sampler mentioned.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/core-research/plane-audit-2026-07-13.md",
+        "line": 368,
+        "why": "Audit MP-009: ZDR unproved across traces and bridges.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/core-research/plane-audit-2026-07-16.md",
+        "line": 329,
+        "why": "Audit MP-011: ZDR content may persist in traces, caches and bridges.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/ZDR.md",
+        "line": 96,
+        "why": "ZDR design: persistence-free chat path; no telemetry or log scope shown.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-013",
+    "title": "Co-browsing: the agent works in the user's visible session in agent-flagged tabs, with takeover enforced inside Quarry",
+    "searches": [
+      "control_mode|human_takeover|USER_TOOK_OVER|control_epoch|ControlMode|takeover_active across Quarry, gateway, Model Plane, frontend",
+      "Take over|takeover|Give back|Reveal|request_handoff|lease_holder|transfer_lease (code, UI strings, actions registry)",
+      "opened_by|openedBy|agent_tab|agent-flagged|agent_flag|tab_owner|TabOwner|agent badge (Quarry, gateway, frontend, execution-core)",
+      "attach_session_id|attach mode|AttachSession|session-bound grant|child grant|grant_id session plus brace (gateway, execution-core, broker)",
+      "deliverable|tab_mark|TabMark|marked_tab|keep_open|keepOpen|handoff_tab (Quarry, gateway, frontend, execution-core)",
+      "HumanTakeover|AgentControl|human_takeover|agent_control usage sites in Quarry crates and services",
+      "Test names: takeover tests in agent_routes, step_receipts, gateway browser.rs, frontend browser-session tests",
+      "co-brows|cobrowse|shared session|visible session|agent works in visible session (docs and strings)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1760,
+        "why": "Quarry set_browser_session_control stores control_mode from request body.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1766,
+        "why": "Control timeline event tagged initiated_by Human; no agent takeover check.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2228,
+        "why": "step handler: grant, capability, sensitive-approval and budget checks; never reads control_mode.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2294,
+        "why": "Step path has no takeover check; enforce_step_budget runs at this line.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+        "line": 67,
+        "why": "control_mode persisted on run record so restart cannot reset takeover.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+        "line": 86,
+        "why": "BrowserControlMode enum with AgentControl and HumanTakeover variants.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+        "line": 143,
+        "why": "Timeline Control event carries mode and initiated_by fields.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+        "line": 161,
+        "why": "BrowserTimelineInitiator enum Human/Agent/System exists for timeline events only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+        "line": 169,
+        "why": "Tab timeline op Opened/Selected/Closed with tab_id; no owner or initiator field.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2539,
+        "why": "Comment: human takeover live-preview path; no artifact written.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+        "line": 670,
+        "why": "Run acquires its own leased session via start_run; no attach_session_id path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+        "line": 678,
+        "why": "start_run passes profile_id and start_url only; continuity is profile-based.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 705,
+        "why": "Gateway rejects agent actions while HumanTakeover is the current mode.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 715,
+        "why": "Gateway requires human actions to switch mode to HumanTakeover first.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 761,
+        "why": "Gateway set_control_mode handler for browser owner control mode.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 1235,
+        "why": "AI run body sends grant_id as plain session id string, not a bound grant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 2071,
+        "why": "Second gateway check blocks agent action under human takeover.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "line": 3060,
+        "why": "Action registry text says owner rejects agent actions while human holds control.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1228,
+        "why": "Control chip toggles human_takeover vs agent_control with aria-pressed state.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1230,
+        "why": "Take over and give back control labels (Norwegian aria-label) present.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 225,
+        "why": "Timeline label: human took over versus agent control active.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1099,
+        "why": "Tab list shows Live mode label; no agent badge or opened-by marker.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts",
+        "line": 191,
+        "why": "attachBrowserSession is client model attach only; not agent attach mode.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-loop.ts",
+        "line": 156,
+        "why": "attachRun records a run in client loop state; not co-browse attach.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+        "line": 608,
+        "why": "Chat live run panel embeds BrowserChrome in a compact live view.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+        "line": 797,
+        "why": "Test uses HumanTakeover mode with human-initiated control event.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 5631,
+        "why": "Test: websocket agent action rejected during human takeover (gateway-only).",
+        "kind": "test"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-008",
+    "title": "Enforce cost and runtime budgets in the Quarry executor, meter browser time, and clamp crawls to the remaining entitlement",
+    "searches": [
+      "max_cost_usd|max_runtime_s|maxCostUsd|maxRuntimeS|cost_cap across Quarry crates, gateway, Model Plane services, frontend shared API",
+      "BUDGET_EXCEEDED|budget_exhausted|enforce_step_budget|enforce_budget|MaxCostExceeded|spent_usd|cost_usd in Quarry and gateway",
+      "browser_seconds|browser_minutes|browser-minutes|browser_time|lease_seconds|duration_s and UsageEvent metric names (Quarry, cost-core)",
+      "reserve|settle|reconcil|CheckBudget|budget/check|ErrBudgetExceededCost in cost-core, model-gateway and Quarry",
+      "entitlement|remaining_quota|quota|clamp max_pages|max_requests_per_minute|max_concurrency in Quarry, quarry-control, gateway knowledge",
+      "UsageEvent|meter( call sites in quarry-edge and quarry-runtime (metering and billing hooks)",
+      "Docs and tests: budget abort, max_cost_usd, W4 action-cost meter, enforce_step_budget tests",
+      "fleet budget tracker and action_cost table (quarry-runtime fleet.rs, action_cost.rs)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 446,
+        "why": "enforce_step_budget checks only max_steps; no cost or runtime check.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2294,
+        "why": "Step path has no takeover check; enforce_step_budget runs at this line.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2346,
+        "why": "Per-step cost_usd computed after execution and written into receipt.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 709,
+        "why": "Receipt cost helpers: provider-billed cost, else flat action-cost fallback.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 725,
+        "why": "estimated_action_cost_usd: flat table used when provider cost is absent.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1370,
+        "why": "Comment says max_cost_usd now supported; blanket reject removed.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1446,
+        "why": "max_runtime_s used as lease TTL, default 120 seconds.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs",
+        "line": 30,
+        "why": "LoopTermination enum includes MaxCostExceeded and MaxRuntimeExceeded.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs",
+        "line": 154,
+        "why": "over_budget compares cumulative spend with max_cost_usd.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs",
+        "line": 248,
+        "why": "AgentLoop aborts with MaxCostExceeded when over budget.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs",
+        "line": 295,
+        "why": "AgentLoop charges flat action cost per executed step.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fleet.rs",
+        "line": 93,
+        "why": "Fleet spend tracker sums receipt costs across member runs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/fleet_routes.rs",
+        "line": 193,
+        "why": "Fleet route exposes tracker spent_usd in its response.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_cost.rs",
+        "line": 4,
+        "why": "ActionCost table: model, browser, egress and total USD with source.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs",
+        "line": 50,
+        "why": "UsageEvent carries a free-form metric string; no browser-time metric found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs",
+        "line": 344,
+        "why": "Extract route meters one unit per source attempted via UsageEvent.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+        "line": 255,
+        "why": "Browser plan config carries max_cost_usd, never checked locally.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+        "line": 320,
+        "why": "check_limits enforces max_steps and max_runtime_s only; no cost check.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+        "line": 324,
+        "why": "Runtime cap enforced from started_at elapsed seconds in execution-core.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs",
+        "line": 887,
+        "why": "Tool bridge forwards max_cost_usd into the run constraints; runtime defaults to 120.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 1243,
+        "why": "Gateway ai-run request forwards max_steps, max_runtime_s and max_cost_usd.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+        "line": 404,
+        "why": "Gateway clamps crawl max_pages to a static 5000; no entitlement read.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/resources_v2_mem.go",
+        "line": 125,
+        "why": "Comment: no ceiling modeled; Control Plane owns entitlements.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/server/server.go",
+        "line": 614,
+        "why": "Check-only budget decision with max_cost_usd and max_tokens for model spend.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/server/server.go",
+        "line": 664,
+        "why": "budgetDecision returns ErrBudgetExceededCost when cost reaches the cap.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go",
+        "line": 28,
+        "why": "Typed ErrBudgetExceededCost for model spend caps; no reserve or settle.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/budget.rs",
+        "line": 48,
+        "why": "check_budget in model-gateway budget module; not read in depth.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "line": 1105,
+        "why": "UI action schema accepts maxRuntimeSeconds and maxCostUsd.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/browser-run-client.ts",
+        "line": 75,
+        "why": "UI browser run client posts maxRuntimeS and maxCostUsd to ai-runs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2121,
+        "why": "Test asserts enforce_step_budget errors at the step cap.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2111,
+        "why": "Test fixture sets max_runtime_s and max_cost_usd to None.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/server/server_test.go",
+        "line": 224,
+        "why": "TestBudgetCheckEndpoint covers the model-spend budget check route.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md",
+        "line": 50,
+        "why": "Doc says max_cost_usd enforced via action-cost table and AgentLoop, fleet aggregated.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/DRIVER_MATRIX.md",
+        "line": 71,
+        "why": "Cost guards section: AgentLoop aborts on MaxCostExceeded when max_cost_usd set.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/FOLLOWUP_TASKS_2026-08-28.md",
+        "line": 526,
+        "why": "W4 task: action-cost meter so max_cost_usd becomes real.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/gap-model.md",
+        "line": 331,
+        "why": "Doc claims cost budget abort before model spend exceeds policy.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-019",
+    "title": "Structured extraction that works in production: json, summary, question and highlights formats over a real Model Plane structured-output grant",
+    "searches": [
+      "AiFormatRunner|ai_formats|summary_for_org|query_for_org|highlights|AI_FORMATS|FormatSpec|ScrapeOptions across Quarry crates, gateway, verevonv3 shared",
+      "structured/extract|StructuredExtractClient|structured_output_schema|json_schema|response_format across Quarry, Model Plane services and protos",
+      "model-invoke|model-stream|model-gateway audience|granted false in cross-plane-token-requests.json and Control Plane principals",
+      "invoke_with_schema|ModelPlaneClient invoke functions and whether Quarry sends the schema over the wire",
+      "schema|prompt forwarding in gateway ingestions runs.rs, schedules.rs and knowledge products.rs",
+      "Summary and question callers: summary_for_org, query_for_org, /v1/answer, answer pipeline",
+      "Docs: DEF-QB-T17, QB-T17, AI_FORMATS, highlights format, invoke_with_schema claims in Quarry docs",
+      "Test names: structured extraction, json format, schema issues, extract_routes 501 tests"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs",
+        "line": 84,
+        "why": "summary_for_org defined; no caller outside its own module.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs",
+        "line": 126,
+        "why": "json extraction embeds the schema in the invoke prompt; schema sent as prose.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs",
+        "line": 178,
+        "why": "json_schema validate runs after the model call; schema_issues reported post hoc.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs",
+        "line": 199,
+        "why": "query_for_org defined; question-style answering is in the library.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs",
+        "line": 627,
+        "why": "Answer pipeline calls query_for_org; the question format is live via answer.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_routes.rs",
+        "line": 256,
+        "why": "POST /v1/answer route calls query_for_org.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs",
+        "line": 205,
+        "why": "Runner built only when AI_FORMATS flag on and a Model Plane URL exists.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs",
+        "line": 229,
+        "why": "Schema extraction refused with message when AI_FORMATS or Model Plane path is absent.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs",
+        "line": 48,
+        "why": "ExtractRequest.prompt is dead_code scaffolding; always None at call sites.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs",
+        "line": 33,
+        "why": "AiFormats gate flag maps to QUARRY_EDGE__AI_FORMATS.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/structured_extract.rs",
+        "line": 85,
+        "why": "StructuredExtractClient posts to Model Plane /v1/structured/extract; no matching route found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/mp_client.rs",
+        "line": 166,
+        "why": "ModelPlaneClient posts to /v1/invoke; no structured_output_schema field sent.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 136,
+        "why": "POST /v1/invoke route exists on model-gateway.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 6693,
+        "why": "InvokeRequest for POST /v1/invoke has optional structured_output_schema string.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 8987,
+        "why": "invoke handler forwards normalized schema into InferRequest.structured_output_schema.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 1825,
+        "why": "AiChatRequest on the v1/ai path also carries structured_output_schema.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 2370,
+        "why": "v1/ai chat handler forwards schema into InferRequest.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/inference.proto",
+        "line": 123,
+        "why": "InferRequest proto already carries structured_output_schema string.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dream_extractor.rs",
+        "line": 465,
+        "why": "session-core already uses structured_output_schema for model extraction.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+        "line": 941,
+        "why": "StructuredExtractRequest contract with schema, cost cap and ZDR fields.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs",
+        "line": 283,
+        "why": "Gateway forwards prompt to Quarry; no schema forwarded in runs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs",
+        "line": 183,
+        "why": "Gateway stores schema in schedule config, not in run requests.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs",
+        "line": 391,
+        "why": "ai_formats defaults to false; feature off unless env set.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json",
+        "line": 45,
+        "why": "model-invoke row has granted false; quarry-edge refused at Model Plane.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+        "line": 763,
+        "why": "Doc claims ModelPlaneClient invoke_with_schema exists; no such function in code.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/QUARRY_V2_MODEL_PLANE_PARITY.md",
+        "line": 29,
+        "why": "Parity doc says gateway still needs schema wiring; gateway code now accepts it.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/SELF_HOST.md",
+        "line": 114,
+        "why": "Model Plane switches off by default; model-invoke granted false in manifest.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/CROSS_PLANE_AUTH.md",
+        "line": 12,
+        "why": "quarry-edge has no model-gateway audience; Auth Core refuses Model Plane mints.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-024",
+    "title": "Credential handoff where the model never sees secrets: executor-side fill_secret and email OTP via integration-corev2",
+    "searches": [
+      "fill_secret|FillSecret|fillSecret|secret_ref|secretRef|SecretRef|vault://|secret://|vault_ref|VaultRef across Quarry, integration-corev2, gateway, Model Plane",
+      "(?i) otp|one-time code|mail.otp|otp_read|OtpRead|verification code across Quarry, IC, gateway, browser-broker, execution-core",
+      "insertText|createIsolatedWorld|isolated world|mask screenshot|redact frame|credential field|password across quarry-browser, quarry-core, quarry-runtime, quarry-edge",
+      "allowedSensitiveActions|CreateScopedSensitiveApproval|respond_dialog|upload_ref|sensitive approval parent grant (browser-broker)",
+      "mail.read|gmail.read|gmail.readonly|mail_read action|INTEGRATION_TOKEN_LEASE_CONSUMERS|token lease consumer allowlist (IC)",
+      "AgentAction variants Type|TypeRef|FrameTypeRef|TypeSemantic and any secret-reference variant in quarry-core contracts",
+      "Docs: fill_secret, vault://, secret reference, OTP, secret references never raw credentials (Quarry and Model Plane docs)",
+      "Test names: password redaction in URLs, login test site, sensitive approval tests in browser-broker"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 1109,
+        "why": "MCP OAuth payload carries a secret:// reference, not a raw token.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+        "line": 785,
+        "why": "capability-core validates managed secret references for MCP auth (secret:// scheme).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+        "line": 805,
+        "why": "validMCPSecretReference checks the opaque reference format.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+        "line": 675,
+        "why": "AgentAction Type variant carries plaintext text; no secret-reference variant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+        "line": 679,
+        "why": "TypeRef variant exists for element refs, not secret references.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+        "line": 693,
+        "why": "TypeSemantic variant types by semantic target; plaintext only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 1309,
+        "why": "Typing dispatches a JS InputEvent insertText; no CDP insertText or isolated world.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 2061,
+        "why": "Second JS insertText dispatch for typed operations in page context.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 584,
+        "why": "Edge strips URL password before storing or returning the URL (redaction substrate).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs",
+        "line": 351,
+        "why": "Browser lib rejects URLs carrying a password component.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go",
+        "line": 32,
+        "why": "allowedSensitiveActions lists respond_dialog, upload_ref, download_ref only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go",
+        "line": 102,
+        "why": "CreateScopedSensitiveApproval binds a one-time grant to an ordinary parent grant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/server/server.go",
+        "line": 85,
+        "why": "Server issues scoped sensitive approval requiring parent_grant_id.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go",
+        "line": 62,
+        "why": "Grant store is a thread-safe in-memory map; not durable across restarts.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+        "line": 1315,
+        "why": "Internal connectors token route returns provider tokens to allowlisted consumers only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/mail_read.go",
+        "line": 126,
+        "why": "Mail read action query parsing exists; no OTP-specific action found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/config/config.go",
+        "line": 347,
+        "why": "Default token-lease consumer allowlist omits quarry.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go",
+        "line": 254,
+        "why": "mail.read capability defined for Microsoft connections.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go",
+        "line": 431,
+        "why": "gmail.read capability with gmail.readonly scope defined for Google.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md",
+        "line": 1114,
+        "why": "Plan doc: fill_secret action with secretRef vault:// reference.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+        "line": 1339,
+        "why": "Model Plane plan: models receive secret references, never raw credentials.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/core-research/capability-core.md",
+        "line": 42,
+        "why": "capability-core doc: managed secret references for tools.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t2-007",
+    "title": "Stop viewport-triggered browser relaunches: per-page emulation, a small Chromium process pool and page hygiene",
+    "searches": [
+      "ensure_browser|active_viewport|setDeviceMetricsOverride|SetDeviceMetricsOverride|set_device_metrics|DeviceMetrics in quarry-browser and quarry-edge",
+      "setFocusEmulationEnabled|setWebLifecycleState|focus emulation|lifecycle state across Quarry, gateway, browser-broker, execution-core",
+      "RuntimeLeasePool|LeasePool::new|BrowserSlot|maxOpenPages|retireAfter|retire_after|semaphore|process pool across quarry-browser and quarry-edge",
+      "health|healthz|readiness probe routes in quarry-edge, and any browser probe that opens a page",
+      "pool size config keys (POOL_SIZE, LEASE_POOL, MAX_BROWSERS) in quarry-edge config and quarry-runtime",
+      "viewport tests and relaunch tests (fn viewport, mismatch, differ) across Quarry crates",
+      "UI viewport literals sent to browser runs (1280 by 800) in verevonv3 features",
+      "Docs and lease contract: relaunch when viewport differs, multi-process, focus emulation (Quarry docs and code comments)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 120,
+        "why": "One active_viewport field per driver; viewport is not per page.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 197,
+        "why": "ensure_browser reuses browser only when viewport equals active viewport.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 200,
+        "why": "Viewport mismatch closes the shared browser before relaunch.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 208,
+        "why": "Relaunch clears pages, devtools, egress, dialog and telemetry maps for all sessions.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 1919,
+        "why": "acquire compares lease viewport to active viewport to pick warm or cold startup.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 1851,
+        "why": "chromium_viewport maps lease viewport at launch; no per-page emulation call.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/pool.rs",
+        "line": 3,
+        "why": "LeasePool caches sessions by affinity key with TTL; one browser process, not a process pool.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/pool.rs",
+        "line": 7,
+        "why": "Tokio semaphore caps concurrent live sessions; no retire-after-N-pages.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs",
+        "line": 34,
+        "why": "RuntimeLeasePool struct; concurrency is a constructor argument.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+        "line": 1285,
+        "why": "One shared ChromiumoxideDriver serves all agent runs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+        "line": 337,
+        "why": "Browser lease pool hard-coded to RuntimeLeasePool::new(2); no config key.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+        "line": 323,
+        "why": "Browserbase lease pool hard-coded to RuntimeLeasePool::new(4).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/lease.rs",
+        "line": 20,
+        "why": "Lease contract says drivers that apply viewport only at launch must relaunch on change.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1447,
+        "why": "Viewport is Option from checkpoint or body; None and Some(1280x800) count as different.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1446,
+        "why": "ttl_s from max_runtime_s with default 120; no pool retire or health use.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 309,
+        "why": "health route returns static ok; does not open a browser page.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 312,
+        "why": "ready route depends on durable readiness flag only, not browser probe.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx",
+        "line": 817,
+        "why": "UI always sends viewport 1280 by 800 with browser runs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2127,
+        "why": "normalize_viewport tests cover size bounds, not relaunch or emulation.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 3143,
+        "why": "Test maps desktop viewport dimensions; no multi-viewport concurrency test.",
+        "kind": "test"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-016",
+    "title": "Scoped, robots-compliant crawl: wire CrawlFrontier scoping, robots enforcement and typed denials into the live crawl path",
+    "searches": [
+      "CrawlFrontier|FrontierEnqueue|filter_links|CrawlScopeConfig|crawl_frontier|frontier enqueue callers across Quarry crates, services, gateway",
+      "RobotsCache|RobotsTxt|respect_robots|RobotsDisallowed|robots.txt|Sitemap: across Quarry crates, services, gateway",
+      "includePaths|excludePaths|allowSubdomains|allowExternal|crawlEntireDomain|maxDiscoveryDepth|sitemap_mode scope keys across Quarry, gateway, frontend",
+      "crawl_denial|CrawlDenialReason|blocked URL|page.blocked|crawl.links_denied denial events and typed per-URL errors",
+      "CrawlJobWF BFS link enqueue loop and CrawlJobInput fields in the Go orchestrator workflows",
+      "queue enqueue route (/v1/internal/queues) and whether it applies crawl scope or robots",
+      "normalize_crawl_body and max_pages clamp in gateway knowledge quarry domain",
+      "ZDR refusal for durable crawl and batch; docs and GAP.md robots claims; test names for robots and scope"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs",
+        "line": 178,
+        "why": "CrawlFrontier struct holds queue, seen set and scope config; library only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs",
+        "line": 39,
+        "why": "FrontierConfigSnapshot: max depth, pages, allow_external, seed_host, host whitelist.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs",
+        "line": 238,
+        "why": "CrawlFrontier::enqueue returns typed CrawlDenialReason; no production caller found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs",
+        "line": 15,
+        "why": "RobotsDisallowed denial reason defined with user agent and path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/robots_cache.rs",
+        "line": 89,
+        "why": "RobotsCache TTL logic exists; only re-exported, no production caller.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs",
+        "line": 165,
+        "why": "Public re-export of RobotsCache and fetcher; no crawl wiring found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/robots.rs",
+        "line": 12,
+        "why": "RobotsTxt parser struct; parse tests include Sitemap lines.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs",
+        "line": 173,
+        "why": "/v1/map fetches and parses robots.txt for its origin.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs",
+        "line": 252,
+        "why": "Robots allow-filter applied only inside /v1/map, not crawl or batch.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 533,
+        "why": "CrawlRequest carries url, max_pages, max_depth, ingest and zdr; no scope or robots fields.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 596,
+        "why": "Durable crawl refused when ZDR active; batch refused at routes.rs:687.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go",
+        "line": 474,
+        "why": "BFS enqueues every discovered link after depth check only; no scope or robots.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go",
+        "line": 84,
+        "why": "CrawlJobInput carries MaxDepth and MaxPages only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go",
+        "line": 530,
+        "why": "Durable frontier enqueue per link with no scope or robots check.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go",
+        "line": 579,
+        "why": "Second durable enqueue loop for child links, depth check only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/activities.go",
+        "line": 101,
+        "why": "FrontierEnqueue posts URL and depth to Quarry queue; no scope check.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/queue_routes.rs",
+        "line": 200,
+        "why": "Generic internal queue enqueue route; checks org and queue auth only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs",
+        "line": 276,
+        "why": "off() policy preset sets respect_robots false for exploratory runs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs",
+        "line": 62,
+        "why": "DiscoveryPolicy respect_robots flag; no behavioral reader found in crawl path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+        "line": 386,
+        "why": "normalize_crawl_body forwards crawl fields; no scope or robots keys.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+        "line": 404,
+        "why": "Gateway clamps max_pages to static 5000; no entitlement or robots step.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs",
+        "line": 182,
+        "why": "POST /api/v1/knowledge/crawl forwards to quarry start_crawl.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows_test.go",
+        "line": 306,
+        "why": "Test covers duplicate URL dedup in crawl workflow, not robots or scope.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows_test.go",
+        "line": 200,
+        "why": "Test covers max_pages respect in crawl workflow only.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+        "line": 178,
+        "why": "GAP row says robots respect Closed with Go orchestrator enforcing checks; code does not.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+        "line": 292,
+        "why": "Doc says CrawlJobWF checks robots before RunPage; code shows no such check.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+        "line": 431,
+        "why": "Doc cites an internal robots check endpoint used by crawl; no such endpoint found.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md",
+        "line": 38,
+        "why": "Roadmap item to port sitemap, robots, include and exclude paths, typed denials.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/CONTRACTS.md",
+        "line": 122,
+        "why": "Contract sketch with robots mode strict, respect or ignore.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/CONTRACTS.md",
+        "line": 429,
+        "why": "Denial codes listed: include_pattern, exclude_pattern, depth_limit, robots_txt.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-017",
+    "title": "Public async job lifecycle: status, paginated results, per-URL errors, cancel/pause/resume, origin and live tail",
+    "searches": [
+      "Quarry edge route table: /v1/crawl, /v1/batch, /v1/jobs/:id/events, /v1/:kind/jobs, GET or DELETE /v1/crawl/:id",
+      "Temporal signal channels and query handlers (Pause, Resume, Cancel, QueryState, QueryProgress) and their senders",
+      "Temporal client wiring in quarry-control (nil client, 501 for trigger and backfill) and orchestrator main",
+      "SSE and event stream code in resource_routes (drain once, Event::default, done frame) and agent events stream from_seq",
+      "Last-Event-ID and after_seq or from_seq cursors across Quarry edge, gateway knowledge quarry domain, Model Plane model-gateway sse.rs",
+      "origin or started_by fields on job records; step timeline on job records (quarry-control store, resource routes)",
+      "Gateway crawl routes and proxies (knowledge.rs 179-186, quarry.rs crawl_run_events) and crawl UI cancel or pause controls",
+      "Docs: GAP.md API endpoint surface table rows for GET and DELETE /v1/crawl/:id; gateway-integration-plan crawl job rows"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 133,
+        "why": "Only POST /v1/crawl route; no GET or DELETE /v1/crawl/:id.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 134,
+        "why": "Only POST /v1/batch route; no batch status or cancel.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 192,
+        "why": "Generic GET /v1/:kind/jobs list route only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 232,
+        "why": "GET /v1/jobs/:id/events route; drain-once event read.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 263,
+        "why": "Only schedule pause route exists; no job pause or resume.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs",
+        "line": 955,
+        "why": "/v1/runs/:id/events durable job-history read, JSON form with after_seq.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs",
+        "line": 1052,
+        "why": "Job events SSE drains control once and then closes the stream.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs",
+        "line": 1118,
+        "why": "SSE frames built from drained events; no snapshot-then-tail or Last-Event-ID.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs",
+        "line": 1127,
+        "why": "Stream ends with a done frame after the drained events.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2641,
+        "why": "Agent events stream GET /v1/agent/runs/:id/events/stream exists as a live stream.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2705,
+        "why": "from_seq is accepted but ignored; the agent stream is live-only despite docs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go",
+        "line": 91,
+        "why": "Workflow pause, resume and cancel signal channels exist with no sender in edge or control.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go",
+        "line": 124,
+        "why": "QueryState and QueryProgress handlers installed in the crawl workflow.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go",
+        "line": 66,
+        "why": "Orchestrator dials Temporal; the Temporal client is not in the edge or control.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/cycle23.go",
+        "line": 273,
+        "why": "Trigger and backfill return 501 when the Temporal client is nil.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/temporal/client.go",
+        "line": 129,
+        "why": "Temporal Dial example is commented out; no live client in control.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs",
+        "line": 182,
+        "why": "Gateway exposes only POST crawl and GET crawl jobs; no status or cancel.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs",
+        "line": 186,
+        "why": "Gateway run events SSE route for knowledge runs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+        "line": 1098,
+        "why": "crawl_run_events proxies Quarry /v1/runs/:id/events SSE and forwards Last-Event-ID.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs",
+        "line": 205,
+        "why": "Gateway forwards POST /v1/crawl only; no status, cancel or pause proxy.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/knowledge-client.ts",
+        "line": 587,
+        "why": "Frontend crawl client lists jobs only; no cancel or pause call.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx",
+        "line": 350,
+        "why": "Crawl composer polls job list; no cancel or pause control found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 7321,
+        "why": "Model Plane SSE replays buffered deltas after Last-Event-Id; reusable resume pattern.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 5458,
+        "why": "Process output paging with after_seq cursor on model-gateway.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+        "line": 213,
+        "why": "API surface table marks GET /v1/crawl/:id done for V2; no route in code.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+        "line": 214,
+        "why": "API surface table marks DELETE /v1/crawl/:id cancel done for V2; no route in code.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/gateway-integration-plan.md",
+        "line": 288,
+        "why": "Doc says knowledge crawl jobs route to quarry GET /v1/crawl/jobs, marked BUILT.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  }
+]

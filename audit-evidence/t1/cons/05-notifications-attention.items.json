@@ -1,0 +1,631 @@
+{
+  "category": "Notifications & attention",
+  "items": [
+    {
+      "id": "R-t1-05-01",
+      "title": "Make Space events produce notifications: mention records, typed signals, refs-only payload, rate limit",
+      "summary": "Turn @person mentions into server-side mention records in conversation-core, then let conversation-core, capability-core and Control publish typed signals (mention, reply, approval_needed, agent_done, agent_awaiting, invite) into notification-core through a per-service, per-type producer allowlist. Use one shared payload (signal, space_ref, thread_ref, message_ref, run_ref, actor, urgency, actions, trace_id, deep link, preview only when retention allows). Ship it with documented low-noise defaults and a per-recipient and per-agent-sender token-bucket limiter that collapses bursts into one summary.",
+      "whyItMatters": "Nothing else in this category works until Space events produce notifications: the inbox, push, toasts and digests all consume this pipeline. Four of five references route events this way, and without it an agent that finishes, fails or waits on a human cannot reach that person the way a colleague would. Defaults and rate limits matter more here than in Slack because agents, not people, will be the chattiest posters in a room.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (payload and gating); Grok Bot for the agent-turn contract and the only implemented rate limiter",
+        "others": [
+          "Teams (closed signal enum)",
+          "Grok Bot (turn finished vs awaiting user)",
+          "Buzz (default-quiet rule, draft spec only)"
+        ],
+        "prevalence": "4 of 5 sources; table-stakes (low-noise defaults are Buzz-only DOC intent; the implemented limiter is Grok Bot-only SRC)",
+        "mechanism": "Slack validates one schema-checked payload (team, channel, message and thread ids plus a trace id) and runs it through display-allowed and DND gates, with telemetry for received, click, reply and action. Grok Bot's agent-turn notification carries agent id, message preview, last message id and an awaiting_user_response flag, so 'done' and 'needs you' are different signals. Teams keeps the signal enum closed (call, mention, chat, channel, other) so routing rules stay manageable. Grok Bot throttles at a minimum interval of 5000 ms and 10 per 300 s window and only notifies the active device. Buzz default: rooms silent (mentions still pass), DMs urgent-only, workflow and approval on, agent chatter off. Buzz lesson: it declared agent job kinds but never emitted them, leaving dead settings rows, so declare only signals that have a producer."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Application Plane/notification-core/internal/http/handlers.go:163-215",
+          "apps/Application Plane/notification-core/migrations/005_create_channel_configs.up.sql:60-62",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs:1-56",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:184-211,307-312"
+        ],
+        "gap": "The producer allowlist (isNotificationTypeAuthorized) lets verevon-gateway send only notification.created to the delegated user itself, support-worker its ticket and SLA types, and capability-core only modelplane.run_completed and modelplane.run_failed. mention.received is seeded in channel config but has no producer. @person mentions are inserted as plain text with no server record. There is no signal taxonomy and no deep-link contract for Space or thread. The per-user run watcher ('notify me when this run finishes') is the only Space-adjacent producer."
+      },
+      "approach": "conversation-core: persist a mention record on post (refs only, no body) and emit mention and reply events. capability-core: extend beyond run_completed and run_failed to agent_done, agent_awaiting and approval_needed. Control: emit invite. notification-core: extend isNotificationTypeAuthorized per service and signal, add the Space signal types, and define the payload as a shared contract; the body is refs-only for ZDR orgs and a preview is included only when retention mode allows (check at enqueue, matching the worker's existing refusal of async ZDR delivery). Deep link as a stable route (web path plus a verevon:// form) carrying space, thread and message ids plus the trace id. Seed defaults in notification-core config: mentions, approvals and agent-awaiting-you on; room posts and agent progress off; per-room override comes in R-t1-05-04. Add a per-recipient and per-agent-sender token bucket in the router. The device-routing half of the cross-device cluster (active-device suppression) ships with push in R-t1-05-05.",
+      "effort": "L",
+      "dependencies": [
+        "Server-side mention records in conversation-core (shared with the Messaging category)",
+        "notification-core producer allowlist change",
+        "Retention-mode check at enqueue",
+        "Product decision on badge and default semantics (documented here, reused by R-t1-05-02)"
+      ],
+      "planeOwner": "Application Plane (notification-core, conversation-core); producers in capability-core and Control",
+      "risks": "Notification storms from chatty agents; ZDR preview leakage if retention mode is not checked at enqueue; defaults that are too quiet hide things until the inbox (R-t1-05-03) exists; allowlist widening must stay per service and per type so no service can notify arbitrary recipients.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 9,
+        "DOC": 5,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-003",
+        "C-t1-05-008",
+        "C-t1-05-010"
+      ]
+    },
+    {
+      "id": "R-t1-05-02",
+      "title": "Cross-room unread and mention counts with mark-all-read, on a sequenced realtime stream",
+      "summary": "Keep a per-Space latest-activity aggregate in conversation-core, join it with the durable per-member read markers into a per-user map {space_ref: {unread, mentions, needs_you}}, and push it to the sidebar over one sequenced realtime stream with resync frames instead of relying on the open room's 6 s poll. Define badge semantics (mentions, followed-thread replies and approvals badge; agent progress does not) and add mark-all-read to the action registry.",
+      "whyItMatters": "Users notice immediately when the sidebar cannot say where new activity is. Today an unread dot only appears for a room the browser has already opened, so a human in a Space-heavy org has to open each room to learn that an agent finished or someone replied. It is the most visible missing table-stakes item and it is the data source for the sidebar needs-you count, the tab badge and the inbox.",
+      "referenceBestPractice": {
+        "bestSource": "Teams (aggregation and consistency checks); Slack for badge semantics",
+        "others": [
+          "Slack",
+          "Buzz ('more unread' overflow pattern)"
+        ],
+        "prevalence": "3 of 5 sources; table-stakes",
+        "mechanism": "Server keeps a per-member read marker per room (and per followed thread) and a per-room latest-activity aggregate. Unread equals latest activity later than last read, for rooms the user has not muted, counted only for event kinds allowed to badge. Teams aggregates missed chats, channels and activity into one hub with consistency-checked counters and typed navigation errors. The client receives a compact map over the realtime stream with a sequence number and a periodic consistency check; mark-all-read bulk-writes the markers."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:40-70",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:52-99",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:281-321",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:87,293-298",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs:17-30"
+        ],
+        "gap": "A durable per-member lastReadAt exists in convex-core with sensible rules (no marker means nothing is new; your own post is never unread), but the sidebar's unread dots come from a browser-local store (publishSpaceUnread) that only the open room fills. There is no per-Space latest-activity aggregate, no counts, no mention count, no mark-all-read for Spaces, no badge semantics and no push transport (the timeline polls every 6 s). The generic notification feed already has unread-count and mark-all-read routes, but Spaces do not feed it."
+      },
+      "approach": "Application Plane: conversation-core maintains the per-Space latest-activity aggregate on post write; join it with spaceReadMarkers into a per-user unread map (reuse the existing unreadThreadIds rules server-side). Expose it through one SSE or WebSocket stream with sequence numbers and resync frames; QM's multiplexed session-state stream is the transport reference. Frontend Plane: sidebar counts, a 'more unread' pill and a mark-all-read action registered in the action registry; retire the browser-only unread store once the map is authoritative. Derive badge eligibility from the signal classes defined in R-t1-05-01.",
+      "effort": "M",
+      "dependencies": [
+        "Realtime stream (replaces the 6 s poll for the sidebar)",
+        "Badge semantics from R-t1-05-01",
+        "Mention records from R-t1-05-01"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "The aggregate must not reveal activity in rooms the viewer cannot access; agent posts can inflate unread unless excluded by badge semantics; counts go stale if the stream drops, so resync frames are required; double-counting against the inbox needs-action count.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 6,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-013"
+      ]
+    },
+    {
+      "id": "R-t1-05-03",
+      "title": "Personal cross-room Inbox with slices and an agent 'waiting on you' lane",
+      "summary": "Build a per-user ActivityItem projection (refs only) fed by the R-t1-05-01 signals: mentions, replies, followed threads, approvals awaiting the user, agent questions and hand-offs (new item kinds next to approvals), failed runs and, later, reminders. Add a SolidJS Inbox route with slices (All, Mentions, Threads, Needs action, Agents, Reminders), inline reply or jump-to, per-item dismiss and snooze, and a capped 'waiting on you' count in the sidebar and nav, all rendered through the existing activity grammar.",
+      "whyItMatters": "It is the single place where a human sees everything humans and agents are waiting on across Spaces. Without it, agent asks get lost inside rooms, which is the main source of latency in a human-plus-agent room. Teams, Slack and Buzz all have it; Grok Bot's 'waiting for you' queue is the agent-specific version and Verevon is already ahead per room.",
+      "referenceBestPractice": {
+        "bestSource": "Teams (typed catalog and slices); Grok Bot for the agent needs-you queue; Buzz for the open, re-implementable version",
+        "others": [
+          "Slack",
+          "Buzz (Needs-action and Agents lanes)",
+          "QM (SSE state stream, '99+ waiting on you' badge)"
+        ],
+        "prevalence": "Inbox: 3 of 5 sources, table-stakes; agent needs-you queue: 2 of 5, differentiator",
+        "mechanism": "Teams materialises about 60 typed activity kinds and exposes slices (Mentions, Threads, Tag mentions, VIP, Reminders, Drafts, Saved, Requests) as saved filters with show rules. Buzz assembles the inbox fan-out-on-read (mention join plus needs-action query, capped at 100 rows) grouped by conversation root, in a list plus detail layout with filter chips and an inline reply composer. Grok Bot unifies approvals, NEEDS_INPUT tasks, hand-off requests and routine failures into one queue with a reason and dismissable trays. QM pushes {threadRef, state, participants} over one SSE stream with stale-delta rejection and refetch on resync. Buzz also collapses notes from one agent within 5 minutes into a single card; borrow that grouping rule for the Agents slice."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1349-1652",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx:56-83",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:252-265",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1253-1324",
+          "apps/Frontend Plane/verevonv3/src/shared/api/notifications-client.ts:28-62"
+        ],
+        "gap": "Activity is room-scoped (runs, awaiting approvals, owner receipts, named gaps) and the generic notification feed receives no Space events. There is no cross-room inbox, no mention, reply or reaction items, no slices and no inline reply. The in-room Needs-attention lens is strong but covers approvals only: agent questions and hand-offs are not distinct item kinds, items cannot be dismissed or snoozed, and the state arrives by 6 s poll."
+      },
+      "approach": "Application Plane: a per-user attention projection (extend notification-core or a sibling) storing refs only, fed by conversation-core (mentions, replies), capability-core (run finished or failed, approval awaiting, agent question, hand-off) and Control (invites). Bodies are fetched at render time through the gateway under the viewer's current ACL so ZDR rooms stay content-free and Space access never widens an owner-plane ACL. Add 'agent_question' and 'handoff' kinds beside approvals in capability-core. Frontend Plane: an Inbox route with the slices above, reusing activity-grammar salience (critical, attention, normal, muted) as the item renderer; the sidebar and nav needs-you count comes from the R-t1-05-02 stream. Approvals opened from the inbox go through the existing signed Control decision flow.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-05-01 producers and mention records",
+        "R-t1-05-02 realtime stream and unread map",
+        "R-t1-05-04 follow state for the Threads slice"
+      ],
+      "planeOwner": "Application Plane (projection); Frontend Plane (route and rendering)",
+      "risks": "Fan-out cost in large rooms; leaking previews of content the viewer can no longer read, so ACL must be re-checked on render; ZDR rooms must not persist bodies in the projection; double-counting with unread badges.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 8,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-001",
+        "C-t1-05-002"
+      ]
+    },
+    {
+      "id": "R-t1-05-04",
+      "title": "Per-room and per-thread notification control: levels, follow and mute",
+      "summary": "Add space_ref-scoped notification levels (All, Mentions only, Off) and a hide_preview flag (default on for ZDR orgs) to notification-core, plus a per-user ThreadSubscription {followed or muted, reason mentioned, authored, participated or manual} stored next to the convex-core read markers and exposed as spaces.thread.follow and spaces.thread.mute actions. The router applies Buzz's rule order: a mention always passes, then room mute, then thread rules, then the event slot, then 'viewing this room' suppression. UI: a room-header bell menu and a Settings page.",
+      "whyItMatters": "Agents spawn many long-running threads; follow is how a human opts in to one agent's work and mute is how they opt out of noise. Without per-room control, an agent-heavy room is either unusable or ignored. A hide-preview default is a cheap ZDR-aligned setting for regulated orgs.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (levels and privacy flag); Teams for explicit auto-follow rules; Buzz for the decision order",
+        "others": [
+          "Teams (banner and feed, feed only, off per channel)",
+          "Buzz (follow before first reply, per-user state synced across devices)"
+        ],
+        "prevalence": "3 of 5 sources; table-stakes (follow and mute alone: 2 of 5 in this record set, common in real Slack)",
+        "mechanism": "Slack: a global level with per-conversation exceptions, separate desktop and mobile settings and a no-text-in-notifications flag mirrored into the native layer. Teams: auto-follow when mentioned, when my message gets a reply and when I reply, plus a 'replies to followed threads' setting. Buzz decision function: mention always passes, then channel mute, then thread rules (participated, followed, authored, muted roots), then slot enabled, then an alert-while-viewing check; mutes, stars and sections live in one per-user replaceable state with last-writer-wins merge across devices."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs:17-30",
+          "apps/Application Plane/notification-core/internal/channels/channels.go:1-40",
+          "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:40-70"
+        ],
+        "gap": "notification-core has per-event by per-channel preferences and the gateway proxies them, but there is no per-room level, no hide-preview flag, no desktop and mobile split and no UI in Spaces. A grep of verevonv3 src/features found no thread follow or mute (INF); the Space definition names pause and mute only for an agent's presence in a room, not for notifications."
+      },
+      "approach": "Application Plane: add space_ref-scoped preference rows and hide_preview to notification-core; store thread subscriptions beside spaceReadMarkers (per-member state already lives there); implement the Buzz decision order in the router from R-t1-05-01. Register follow and mute as actions in the AI-first action registry so an agent may auto-follow on the user's behalf but can never mute a human's mentions. Frontend Plane: bell menu in the room header, follow control on threads and a Settings page that lists overrides.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-05-01 router and payload"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Preference sprawl and inconsistency between room and global levels unless precedence is documented; auto-follow rules too aggressive inside agent threads; agent-driven mute must be impossible for mentions.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 6,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-004",
+        "C-t1-05-005"
+      ]
+    },
+    {
+      "id": "R-t1-05-05",
+      "title": "Web push with a content-free wake, plus service-worker notifications (Open, Reply)",
+      "summary": "Add Web Push (VAPID) subscriptions per device in notification-core and a service worker in verevonv3. The push payload is an opaque wake plus a notification_id; the service worker fetches the notification through the gateway under the user's session (scoped token) and renders it locally, honouring hide_preview. Actions are Open and Reply only: an approval toast opens the approval view or requires re-auth, because approvals are signed, effect-bound Control decisions. Ask for browser permission in context when the user turns on a concrete notification, report permission and subscription state to the server, and hold push while an active-device lease is fresh.",
+      "whyItMatters": "'Agent finished' or 'agent needs you' reaching a human outside the tab is the difference between minutes and hours of agent idle time, and it is what makes a personal agent feel like a colleague. A content-free wake is the only design that also satisfies Zero-Data-Retention: the one thing that leaves Verevon is 'you have something'. Today ZDR orgs get no async delivery at all.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz (content-free wake push); Slack for toasts with inline reply and action buttons",
+        "others": [
+          "Slack (grouped toasts, reply input, content-free logs)",
+          "Teams (wake-for-calls path, dismissal and suppression reasons)",
+          "Grok Bot (permission state reported to the server, active-device routing)"
+        ],
+        "prevalence": "4 of 5 sources across push, native toasts and permission handling; common",
+        "mechanism": "Buzz: the device registers an encrypted, expiring (at most 30 days), installation-scoped lease with self-only filters; after read-authorization checks the server queues a wake; a blind gateway sends a constant payload; the client wakes, fetches pending items through the authenticated API, verifies and renders locally, so neither the push provider nor the gateway sees content. Slack builds a ToastGeneric toast from the normalised payload with grouped header, avatar, reply input and action buttons; the reply dispatches with channel, thread and trace ids and logs only non-content fields. Grok Bot reports {platform, os_permission, can_ask_again, in_app_enabled} per device so the server skips denied devices; Slack throttles macOS re-prompts (3 per session, 10 minutes apart). On the web the equivalent is showNotification with actions plus a notificationclick handler."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs:17-30",
+          "apps/Application Plane/notification-core/internal/notification/delivery_worker.go:91-94"
+        ],
+        "gap": "A Novu adapter exists but is disabled by default, and provider-side ZDR is not proven. The delivery worker marks any ZDR request failed with zdr_async_delivery_unavailable, so ZDR orgs get no push. There is no service worker, Notification API use or PushManager in the web app (INF from grep, low risk) and no permission or device-state reporting. No OS or browser notifications exist at all."
+      },
+      "approach": "Application Plane (notification-core): store Web Push subscriptions per device with the permission state; enqueue a wake through the S4.4 ledger (R-t1-05-10); lift the ZDR refusal only for the wake class whose payload is constant and content-free. Gateway: a scoped, short-lived token for the service worker's fetch of /notifications/{id}. Frontend Plane: register a service worker; render with Open and Reply actions; Reply posts to the right thread without opening the app; approvals never act from the toast. Active-device suppression: reuse the gateway's presence calls to keep a renewable activity lease (store only the current lease, no log) and default to sending when unsure; this is the device-routing half of the cross-device cluster. Use Novu only for non-ZDR orgs, if at all.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-05-01 payload and signals",
+        "R-t1-05-10 delivery ledger",
+        "Service worker in verevonv3",
+        "Scoped token for session-less fetch",
+        "R-t1-05-04 hide_preview"
+      ],
+      "planeOwner": "Application Plane (notification-core); Frontend Plane (service worker and permission UX)",
+      "risks": "Session-less service-worker fetch needs a narrowly scoped token; iOS web push limits; any third-party push provider needs ZDR proof even for a constant payload; approving effectful actions out of context; preview text leaking ZDR content into the OS notification centre; browsers block repeated permission prompts permanently.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-026",
+        "C-t1-05-012",
+        "C-t1-05-011"
+      ]
+    },
+    {
+      "id": "R-t1-05-06",
+      "title": "Do not disturb, quiet-hours schedules and urgent break-through, visible to agents",
+      "summary": "Add a per-user attention state {dnd_until, schedules [{days, start, end, tz}], vip subjects} to notification-core and gate the router on it: while in DND, non-critical signals from non-VIP actors are stored for the inbox only and do not go to push or the OS, then flush when DND ends. Agents classify approval requests by urgency in capability-core, with a per-agent daily cap and an owner-configurable limit on critical break-through. Expose a coarse 'can I interrupt now' answer to agents, not the schedule itself.",
+      "whyItMatters": "Agents work around the clock. Without DND they will page humans at night, and push (R-t1-05-05) should not ship before this gate. It also helps the agents: one that can check whether a human is interruptible can defer a non-urgent ask instead of blocking a run.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (manual pause, schedule, admin default hours, VIP and urgent break-through); Teams for urgent messages and meeting auto-DND",
+        "others": [
+          "Teams (priority contacts, urgent messages, auto-DND in meetings)",
+          "Buzz (explicitly has none; spec defers DND)",
+          "QM (has no DND at all)"
+        ],
+        "prevalence": "2 of 5 sources; common",
+        "mechanism": "Slack combines a manual pause, a recurring schedule, admin default hours, a VIP override and a once-a-day 'notify anyway' urgent break-through (DOC). Teams adds urgent messages and priority contacts that pass DND and automatic DND in meetings (REA). Router rule: if the user is in DND, the signal is not critical and the actor is not VIP, store it in the inbox only and do not deliver to OS or push; queued items flush when DND ends; urgent break-through is rate-limited per sender."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Application Plane/notification-core/internal/channels/channels.go:1-40",
+          "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:226"
+        ],
+        "gap": "No DND, quiet hours or schedule exists in Spaces or notification-core (channels.go holds only org-level event-by-channel configuration). Quiet hours are named as part of S4.4, whose current source state is the delivery attempt state machine and a disabled-by-default worker."
+      },
+      "approach": "Application Plane (notification-core): attention-state table and a router gate placed after the R-t1-05-04 preference checks. Model Plane (capability-core): add an urgency class to approval and agent-awaiting signals, plus a per-agent daily critical cap. Frontend Plane: DND toggle, schedule editor and VIP list in Settings. Expose DND to agents only through a narrow 'interruptible now' read so the schedule itself is not disclosed to every room member's agents.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-05-01 router and urgency field",
+        "R-t1-05-04 preferences",
+        "R-t1-05-10 ledger for queued flush"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Urgent-flag abuse by agents (cap per agent per day, owner-configurable); disclosing a user's schedule to agents or room members; queued items must flush once and in order.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 1,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "S4.4 quiet hours: apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (execution tracker, line 226) and the baseline note 'Quiet hours are planned in S4.4'"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-007"
+      ]
+    },
+    {
+      "id": "R-t1-05-07",
+      "title": "'Catch me up' recap of what I missed, scoped to my own read access",
+      "summary": "Add a 'Catch me up' entry point on the room header and the inbox. It runs a Model Plane recap turn over the unread messages and runs since the user's last read marker, prioritising items that mention the user or need action, with scopes unread, last 7 days or a custom range, and offers mark-as-read on completion. The scope is computed from the viewer's own access, ZDR is propagated, and the result is ephemeral for ZDR orgs.",
+      "whyItMatters": "The highest-value AI feature for a returning user in an agent-heavy room: what did the agents do while I was away, and what needs me. Verevon owns its Model Plane and already puts agents in rooms, so this is an agent turn rather than a new subsystem, and it is the sort of attention feature Slack and Teams only bolt on.",
+      "referenceBestPractice": {
+        "bestSource": "Teams (cross-thread prioritised recap)",
+        "others": [
+          "Slack (unread-only, last 7 days or custom range, plus a recurring-summary workflow step)"
+        ],
+        "prevalence": "2 of 5 sources; common",
+        "mechanism": "Teams does a holistic, cross-thread recap prioritised by relevance, with read-aloud, and marks chats read when the recap is dismissed (REA). Slack offers unread-only, last-7-days and custom-range scopes and a workflow step for recurring summaries (DOC). Collect unread content since last_read for the requested scope (only content the viewer can access), summarise with a model, prioritise mentions and action items, offer mark-as-read."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43-54"
+        ],
+        "gap": "Only a 'Meeting Scribe' agent template that summarises the text conversation when it is mentioned. There is no 'catch me up' entry point, no unread-scoped or cross-room recap and no link to read markers."
+      },
+      "approach": "Frontend Plane: 'Catch me up' action in the room header and the inbox, registered in the action registry. Model Plane: a recap run invoked with the viewer's own read scope (never a wider room scope), zdr=true propagated, token and cost limits through the existing cost plane. Use the unread map and read markers from R-t1-05-02 to pick the window; optionally mark-as-read on completion. Output is not persisted for ZDR orgs.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-05-02 read markers and unread map",
+        "Model Plane run with viewer-scoped access"
+      ],
+      "planeOwner": "Model Plane (recap run); Frontend Plane (entry point)",
+      "risks": "Summaries quoting content the viewer cannot see if the scope is computed from the room rather than the viewer; cost on large rooms; stale recap if new messages arrive mid-run.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-021"
+      ]
+    },
+    {
+      "id": "R-t1-05-08",
+      "title": "In-tab attention surfaces: toast store, tab-title and app badge, optional sounds",
+      "summary": "Add one SolidJS toast store fed by the realtime attention stream, with a capped stack, timeouts, grouping by room, in-place updates for live agent progress, and respect for DND, mute and rate limits. Derive a tab-title and favicon count and navigator.setAppBadge for installed PWAs from the unread map with Grok Bot's monotonic projection (epoch plus sequence checks, muted items skipped). Offer 3 to 5 sounds keyed by signal class, stored in the preferences from R-t1-05-04.",
+      "whyItMatters": "It is the lowest-friction way to surface 'an agent in another room finished or needs you' without any OS permission, and the fallback when OS notifications are blocked. The tab count and sound give ambient cues while the tab is in the background and let a user tell 'done' from 'needs approval' by ear.",
+      "referenceBestPractice": {
+        "bestSource": "Teams (in-app toast panel and banners); Grok Bot for the badge projection; Slack for sounds",
+        "others": [
+          "Slack (HTML toast window, 13-14 named sounds, tray and overlay cues)",
+          "Buzz (per-slot sounds)"
+        ],
+        "prevalence": "4 of 5 sources; toasts common, badge and sounds table-stakes",
+        "mechanism": "Teams draws its own toast panel (corner, compact or comfortable density, grouped collections, in-place update) and a separate web-layer banner system, distinguishing in-context banners from OS toasts. Grok Bot computes the badge from the same roster as the sidebar, skips muted or hidden items, and rejects stale snapshots by epoch and sequence so the number never moves backwards. Slack stores a sound id per event type and plays it in the web layer when visible, otherwise passes it to the OS notification."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/tickets/lib/ticket-bulk-actions.ts",
+          "apps/Frontend Plane/verevonv3/src/features/voice/speech-playback.ts"
+        ],
+        "gap": "A grep of verevonv3 src found toast code only in ticket bulk actions and global.css, no notification sounds (the only audio code is voice read-aloud), and no Badging API use or title count. A shared notice component under another name could exist outside these greps, so status rests on negative searches (INF)."
+      },
+      "approach": "Frontend Plane: a notification store in a shared module consuming the R-t1-05-02 stream and R-t1-05-01 signals, rendered by a toast stack (max N, timeout, pause on hover, in-place update for agent progress). Compute the title and favicon badge and setAppBadge from the same unread map as the sidebar, applying updates only on newer sequence numbers. Sounds via Web Audio when the tab is visible, with settings in the R-t1-05-04 preferences. Keep scope to agent-attention, not Slack-level polish.",
+      "effort": "S",
+      "dependencies": [
+        "R-t1-05-02 unread map and stream",
+        "R-t1-05-01 signals",
+        "R-t1-05-04 preferences"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Toast spam from agents (rate limits must apply); badge drifting from the sidebar if computed separately; the Space definition lists 'notification polish' as a non-goal (docs/space-defenition.md:352-353), so keep this minimal; native tray and OS focus cues wait for a desktop shell.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 0,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-05-015",
+        "C-t1-05-014",
+        "C-t1-05-018"
+      ]
+    },
+    {
+      "id": "R-t1-05-09",
+      "title": "Reminders and snooze on messages, threads and agent asks",
+      "summary": "Add a reminder primitive {id, owner, not_before, status, sealed target_ref and note} with presets (30 min, 1 h, 3 h, tomorrow 9:00, next Monday), fired at not_before into the inbox Reminders slice and the notification router. Store refs only, so ZDR rooms stay content-free. The same primitive lets a human tell an agent 'ping me at 9 if X is still open', and snooze on inbox items reuses it.",
+      "whyItMatters": "A cheap personal attention tool present in all three chat references, and the natural way for a human to defer an agent's question without losing it. It also gives agents a first-class way to schedule follow-ups to a person.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz (privacy-preserving design); Teams for shared room reminders",
+        "others": [
+          "Teams (reminders visible to all room members)",
+          "Slack (reminders, assigned to another cluster)"
+        ],
+        "prevalence": "3 of 5 sources; table-stakes",
+        "mechanism": "Buzz encrypts the reminder target and note to the author and leaves only a not_before time public, so the server can schedule without knowing what it is about; due reminders surface under Needs action and can wake agents. The reminder id is at least 128 bits of randomness and status is pending, done or cancelled. Teams adds shared room reminders where anyone can delete for all."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/inbox/components/InboxPage.tsx:1057-1068"
+        ],
+        "gap": "No Space or message reminders. Greps found snooze only for support tickets (InboxPage snoozed_until), ticket follow-up in conversation-core, and the org-deletion reminder notification; nothing in src/features/spaces, capability-core or convex-core. capability-core already has Space-scoped schedules with Control decisions that could host the due-time trigger."
+      },
+      "approach": "Application Plane: store reminders with refs only; fire due items via the capability-core scheduler or a notification-core delayed job; due items enter the inbox Reminders slice (R-t1-05-03) and respect DND (R-t1-05-06). Frontend Plane: a reminder menu on messages and threads, snooze on inbox items. Add an agent-callable action in the registry so an agent can create a reminder for its owner within explicit grants.",
+      "effort": "S",
+      "dependencies": [
+        "R-t1-05-03 inbox Reminders slice",
+        "capability-core scheduler or notification-core delayed job"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Shared room reminders need an owner and delete rule; agent-created reminders need a cap so they cannot be used to spam a person.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-019"
+      ]
+    },
+    {
+      "id": "R-t1-05-10",
+      "title": "Finish the S4.4 delivery ledger and add a content-free missed-activity digest",
+      "summary": "Generalise notification-core's lease-based delivery-attempt ledger into the S4.4 Space delivery ledger: idempotency keys, max-age expiry, bounded retries, and delivery errors reported back to the agent run that produced the message. Then add an email channel and a per-user digest (hourly or daily) that auto-pauses after inactivity and, for ZDR orgs, carries counts and links only.",
+      "whyItMatters": "The ledger is the foundation for push, email digests, scheduled agent output and the future Channel Plane without losing or duplicating messages. The digest pulls absent humans back when agents are blocked on them, cutting approval latency.",
+      "referenceBestPractice": {
+        "bestSource": "QM (delivery outbox and morning digest)",
+        "others": [
+          "Buzz (content-free mention outbox bridged by an operator)",
+          "Teams (configurable missed-activity email)"
+        ],
+        "prevalence": "Outbox: 2 of 5 sources, differentiator; digest: 2 of 5, common",
+        "mechanism": "QM's DeliveryStore does enqueue, claimPending and ack with idempotency keys, max-age expiry and 5 retries, and reports undeliverable errors back to the source session; its personal morning digest runs on a managed schedule that auto-pauses when the person is inactive. Teams-style missed-activity email summarises unread mentions and activity. Outbox row: id, idempotency_key, destination, source_ref, status, attempts, lease_until, with a reaper for stale leases."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/notification-core/internal/notification/delivery_state.go:13-22",
+          "apps/Application Plane/notification-core/internal/notification/delivery_worker.go:91-94",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1618-1622",
+          "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:226"
+        ],
+        "gap": "notification-core already has a leased delivery-attempt state machine (pending, claimed, sent_unconfirmed, acknowledged, failed, unknown) whose worker is disabled by default, but the Space delivery ledger is only a named gap (delivery_ledger_not_built) and the plan's tracker still lists durable feed reconciliation, provider and ZDR proof and HA as open. There is no email channel for Space events and no digest of any kind."
+      },
+      "approach": "Application Plane: extend notification-core's attempt ledger into the S4.4 Space ledger, keeping its semantics (provider acceptance is not confirmation; ambiguous outcomes stay 'unknown'; ZDR attempts content-free). Add idempotency keys and a reply-to-source error path for agent runs. Model Plane (capability-core schedule) composes the digest and notification-core delivers it, with counts and links only for ZDR orgs. Avoid a second parallel ledger for notifications versus Space delivery.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-05-01 signals",
+        "R-t1-05-03 inbox as digest source",
+        "Email channel in notification-core",
+        "Provider and ZDR proof for any third-party sender"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Two ledgers diverging if not unified; email is a content-persisting boundary outside Verevon, so a ZDR org's digest must carry no bodies; digest fatigue without inactivity auto-pause.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "S4.4 durable Space completion delivery: apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (execution tracker, line 226); named gap delivery_ledger_not_built in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1618-1622"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-022",
+        "C-t1-05-020"
+      ]
+    },
+    {
+      "id": "R-t1-05-11",
+      "title": "Provenance footer on relayed and automated messages and notifications; optional system voice",
+      "summary": "Carry {sender_agent, on_behalf_of, trigger: reply, cron or relay, schedule_ref} on posts and notification payloads, and render a footer such as 'sent for @person' or the schedule name with a link back to the schedule settings. As an optional second phase, give platform notices (policy changes, new Space features) one system sender identity with a per-user cap and opt-out.",
+      "whyItMatters": "It prevents confusion about who an automated message speaks for and fits Verevon's authority model, where owner effect receipts and authorising grants are already recorded. In a room full of agents and scheduled runs, a user needs to know whether a ping came from a person, an agent acting for a person, or a cron.",
+      "referenceBestPractice": {
+        "bestSource": "QM (provenance); Grok Bot for system-voice announcements",
+        "others": [
+          "Slack (Slackbot as single voice for notices and reminders)"
+        ],
+        "prevalence": "Provenance: 1 of 5 sources, unique; system voice: 2 of 5, differentiator",
+        "mechanism": "QM sets a relaySender field when attributeAs differs from the sender, renders a footer, and records the trigger in delivery provenance. Grok Bot delivers changelog items through the bot with relevance guidance, delivery windows, eligibility gates, a minimum client version and a maximum number of offers; the agent decides whether to mention them in a relevant conversation."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1349-1652"
+        ],
+        "gap": "The room Activity feed already shows owner effect receipts and the grants that authorised them, but a grep of src/features/spaces and spaces.rs found no on-behalf-of, relay-sender or trigger fields on posts or notifications (INF). Whether schedule-run posts in conversation-core carry an attribution field was not checked, and no system sender identity for platform notices was found."
+      },
+      "approach": "Application Plane: add on_behalf_of and trigger to the post model and to the R-t1-05-01 notification payload; reuse the grants and receipts already in Activity as the source. Frontend Plane: render the provenance footer on timeline posts, inbox items and toasts. Phase 2 (Model Plane plus Control): an announcement store the user's agent can consult, gated by Control eligibility and capped per user, only after the footer ships.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-05-01 payload",
+        "Schedule-run post attribution check in conversation-core"
+      ],
+      "planeOwner": "Application Plane (provenance); Model Plane and Control (system voice, phase 2)",
+      "risks": "System-voice announcements can feel like ads inside an agent, so cap and allow opt-out; attribution fields must come from the server, never from the browser.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-05-023",
+        "C-t1-05-024"
+      ]
+    },
+    {
+      "id": "R-t1-05-12",
+      "title": "Delivery health: channel failover and a 'why am I not notified' diagnosis",
+      "summary": "Track per-device and per-channel health {consecutive_failures, failover_at} in the S4.4 ledger and fall back along an order such as push, then in-app, then email digest, retrying the primary after a TTL. Pair it with a Settings and bell banner that lists typed reasons notifications are not arriving (DND active, browser permission denied, push subscription expired, room muted, channel failing), computed client-side for browser state and server-side for preferences and last failed attempt.",
+      "whyItMatters": "Cuts support load and builds trust that agent alerts will arrive. Silent channel switching confuses users unless it is paired with a diagnosis, which is why the two belong together. Only worthwhile after push and email exist.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (only source)",
+        "others": [],
+        "prevalence": "1 of 5 sources; unique",
+        "mechanism": "Slack keeps a consecutive-failure counter (5 triggers telemetry), records a failover timestamp for a week and clears it at the next start so the native path is retried, and policy can force native. Its warning call returns typed reason codes, cached 30 s when warnings exist and 1 h when clean."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Application Plane/notification-core/internal/notification/delivery_state.go:13-22"
+        ],
+        "gap": "notification-core records per-attempt status but a grep of its Go sources found no failover or channel-health logic, and no per-user delivery-status or diagnostics endpoint was found in its HTTP routes (INF from grep)."
+      },
+      "approach": "Application Plane: add channel health and fallback order to the ledger from R-t1-05-10, plus a read endpoint exposing server-side reasons (preferences, DND, last failed attempt). Frontend Plane: compute browser-side reasons (permission, subscription) and show a banner in Settings and next to the bell.",
+      "effort": "S",
+      "dependencies": [
+        "R-t1-05-10 ledger",
+        "R-t1-05-05 push",
+        "R-t1-05-04 preferences"
+      ],
+      "planeOwner": "Application Plane (health state); Frontend Plane (banner)",
+      "risks": "Low; silent failover without the diagnosis would confuse users. The Space definition treats notification polish as a non-goal (docs/space-defenition.md:352-353).",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-05-016",
+        "C-t1-05-017"
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t1-05-006",
+      "reason": "Keyword alerts (Slack-only, DOC). Superseded by S4.3 agent watches ('watch this room for X'); expose that template once watches are reachable through the gateway instead of building a keyword engine."
+    },
+    {
+      "cluster": "C-t1-05-009",
+      "reason": "OS focus and do-not-disturb awareness needs a native desktop shell; browsers do not expose OS focus state. Revisit if a desktop client is planned."
+    },
+    {
+      "cluster": "C-t1-05-025",
+      "reason": "A separate workspace-wide agent feed (Buzz) does not fit Verevon's work-room model; only its burst-collapsing rule is worth borrowing, and it is folded into R-t1-05-03 (Agents slice)."
+    }
+  ],
+  "strengthsToKeep": [
+    "In-room attention is at least as good as any reference: a Needs-attention lens with critical, attention, normal, muted salience ordering plus working indicators on the post, composer and sidebar (apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx:56-83, src/features/spaces/lib/activity-grammar.ts:70, src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:281-321). Reuse this grammar for the inbox.",
+    "Approvals are signed, effect-bound Control decisions that no reference has; a toast or push must open the approval view rather than approve blind (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1349-1652; Control decision contract in apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md).",
+    "The delivery-attempt model is stricter than QM's: provider acceptance is not confirmation, ambiguous outcomes stay unknown, ZDR attempts are content-free and async ZDR delivery is refused (apps/Application Plane/notification-core/internal/notification/delivery_state.go:13-22, delivery_worker.go:91-94).",
+    "Durable server-side per-member read markers already exist with careful rules (no marker means nothing is new; your own post is never unread) (apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:40-70), which is the hard part to retrofit.",
+    "Per-user run watchers ('notify me when this run finishes') ship through capability-core to notification-core with caller-scoped authority (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs:1-56).",
+    "notification-core already has preference storage, an unread-count route and a mark-all-read route behind the gateway, so most of this category is an extension, not a new service (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs:17-30; apps/Application Plane/notification-core/internal/channels/channels.go)."
+  ]
+}

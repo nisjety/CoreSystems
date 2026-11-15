@@ -1,0 +1,866 @@
+[
+  {
+    "finalId": "F-t1-029",
+    "title": "Room calls on a bought SFU with Control-authorized join and a navigation-persistent call bar, modelled as a meeting record that belongs to the Space",
+    "searches": [
+      "rg -i 'livekit|mediasoup|\\bsfu\\b|webrtc|RTCPeerConnection|coturn|getDisplayMedia|getUserMedia|enumerateDevices' over verevonv3 src and gateway src",
+      "rg -i 'huddle|space[._]call|spaceCalls|call_session|meeting_id|spaceMeetings|call\\.join' repo-wide, code and docs",
+      "rg -i 'Join call|Start call|Call button|live call|Join huddle|Meet now|Start meeting' repo-wide",
+      "rg 'api/v1/spaces/[^\"]*/(calls?|meetings?|huddles?)' plus read of spaces.rs route table lines 651-731",
+      "rg -o '[a-z_]+_entitled' in Control user-core, then read migrations 018-028 for effect names",
+      "rg -i 'meeting|transcript|recap|minutes|scribe' in Space feature and gateway spaces domain",
+      "rg -i 'websocket|EventSource|realtime|wss?://' in Space, voice and gateway files (push transport check)",
+      "rg -il 'coturn|livekit|mediasoup|janus|jitsi|turnserver' over yml, yaml, conf, toml, env, json (infra)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts",
+        "line": 351,
+        "why": "SRC: getUserMedia opens the microphone for voice-note capture, not a call.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+        "line": 1919,
+        "why": "SRC: getDisplayMedia takes a single screenshot frame; no shared-screen call.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+        "line": 87,
+        "why": "SRC: room liveness is a 6 s poll (SPACE_TIMELINE_POLL_MS); no push transport.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 724,
+        "why": "SRC: only a room presence POST route; route table has no call or meeting routes.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spacePresence.ts",
+        "line": 1,
+        "why": "SRC: room-scoped presence heartbeat for who is here, not call or session state.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/018_space_effect_policies.up.sql",
+        "line": 6,
+        "why": "SRC: Control effect policy table has no call-join or meeting effect.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx",
+        "line": 47,
+        "why": "SRC: Meeting Scribe agent template writes minutes; adjacent to recap only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-mode-state.ts",
+        "line": 4,
+        "why": "SRC: tap-to-talk voice state machine; no live audio transport to extend.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx",
+        "line": 421,
+        "why": "SRC: realtime-voice modal records then sends to the agent; not a call.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/packages/remote-core/src/transport/WebSocketTransport.ts",
+        "line": 36,
+        "why": "SRC: WebSocket transport serves remote-support sessions; only adjacent live relay.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Support Plane/docker-compose.yml",
+        "line": 12,
+        "why": "SRC: hbbs and hbbr remote-support relay (RustDesk); not an SFU or TURN.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/realtime.rs",
+        "line": 1,
+        "why": "SRC: realtime AI session broker; not human-to-human media.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+        "line": 24,
+        "why": "DOC: not building a better Slack or Microsoft Teams; stated non-goal.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+        "line": 352,
+        "why": "DOC: huddles listed among chat-parity items the team will not race.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+        "line": 590,
+        "why": "DOC: research names voice huddles as a feature to consider; not built.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-042",
+    "title": "Read state, presence and personal follow-ups: per-thread read frontier, mark unread, global presence and agent availability, saved items, reminders and snooze",
+    "searches": [
+      "rg -i 'lastReadAt|last_read|read_marker|mark_space_read|read_frontier|last_read_seq' repo-wide, code",
+      "rg -i 'mark.?as.?unread|first.?unread|jump.?to.?unread|unread.?divider|read.?receipt|seen.?by' repo-wide",
+      "rg -i 'presence|typing|do.?not.?disturb|custom.?status|status_?text|away' in Space, Convex and notification code",
+      "rg -i 'saved_items|bookmark|reminder|remind|snooz|follow.?up' in Frontend, Application and Control code",
+      "rg -i 'agent.?availability|working_state|waiting|run_status|availability' in Space client and Model Plane",
+      "rg -i 'reminder|remind' over src/features/dashboard (Home reminders slice check)",
+      "rg -n 'MarkRead|UnreadCount|read_at' over Application Plane notification-core feed"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceReadMarkers.ts",
+        "line": 50,
+        "why": "SRC: unread derived from one room-level lastReadAt marker, not per-thread.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceReadMarkers.ts",
+        "line": 123,
+        "why": "SRC: gateway mutation advances the single room read marker via advanceMarker.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 845,
+        "why": "SRC: spaceReadMarkers table stores the room-level marker only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 722,
+        "why": "SRC: POST /read marks the whole room read; no per-thread frontier route.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts",
+        "line": 23,
+        "why": "SRC: client unreadThreadIds from the marker; no mark-unread or divider.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spacePresence.ts",
+        "line": 42,
+        "why": "SRC: room presence lease 30 s; typing decays after 8 s; no global status.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts",
+        "line": 137,
+        "why": "SRC: isSpaceWorking derived client-side from the 6 s polled thread projection.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+        "line": 87,
+        "why": "SRC: the 6 s timeline poll drives room liveness; no push transport.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-presence.ts",
+        "line": 3,
+        "why": "SRC: turns room roster presence into a sentence; no DND or custom status.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/feed/service.go",
+        "line": 36,
+        "why": "SRC: per-user notification UnreadCount exists; not per-thread.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/feed/service.go",
+        "line": 50,
+        "why": "SRC: MarkRead on notification rows; read_at stored; no thread scope.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/http/handlers.go",
+        "line": 267,
+        "why": "SRC: unread count endpoint for the notification feed only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/InboxPage.tsx",
+        "line": 1068,
+        "why": "SRC: support-ticket snooze for 24 hours via snoozed_until; not Space.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/InboxAside.tsx",
+        "line": 1086,
+        "why": "SRC: personal follow-up calendar in Inbox with reminder copy; no fire path found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts",
+        "line": 128,
+        "why": "SRC: personal calendar events POST to /api/v1/navbar/calendar.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs",
+        "line": 31,
+        "why": "SRC: navbar calendar GET and POST route to user-core.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/navbar_handlers.go",
+        "line": 120,
+        "why": "SRC: calendar events stored as user settings JSON; no due-time trigger.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/schedule_create_decision.go",
+        "line": 1,
+        "why": "SRC: Control decision for Space-scoped schedules exists; timer basis (INF).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+        "line": 857,
+        "why": "SRC: /api/v1/cron scheduler; plausible due-time firing basis (INF).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/availability.go",
+        "line": 191,
+        "why": "SRC: capability health attestation, not agent presence (false positive).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/test/space-read-markers.test.cjs",
+        "line": 1,
+        "why": "SRC: tests cover room-level marker behaviour only.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.test.ts",
+        "line": 1,
+        "why": "SRC: tests cover open-room unread derivation only.",
+        "kind": "test"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-043",
+    "title": "Room moderation: report, queue, tombstones, user block, and timeout or ban that also stops the person's agents",
+    "searches": [
+      "rg -i 'report(ed)?_?(message|thread|content|post)|reportMessage|/reports|moderat|tombstone|sanction' repo-wide, code only",
+      "rg -i 'block_?list|block_user|blockUser|blocked_members|ban(ned)?_|timeout_until|timed_out|suspend(ed)?_until|suspension'",
+      "rg -i 'Report message|Block user|Remove message|moderation queue|Timed out' repo-wide (UI strings)",
+      "rg -i 'report|moderat|block|mute|tombstone|sanction|timeout' over gateway social, shares, notifications, inbox, agents, orchestration, ag_ui",
+      "rg -i 'membership_revoked|space_membership_revocations|remove_space_member' repo-wide",
+      "read user-core user.proto Block and Suspend RPCs (lines 23-26) and 017 migration constraints"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/proto/user/v1/user.proto",
+        "line": 23,
+        "why": "SRC: account-level BlockUser, UnblockUser, SuspendUser RPCs; admin, not room-scoped.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/grpc/handlers.go",
+        "line": 389,
+        "why": "SRC: BlockUser handler; default reason 'Blocked by administrator'.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql",
+        "line": 26,
+        "why": "SRC: Space registration can be suspended; no per-member sanction columns.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql",
+        "line": 63,
+        "why": "SRC: space_memberships roles only; no suspended_until or timeout column.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0032_space_membership_revocations.sql",
+        "line": 2,
+        "why": "SRC: durable projection of Control membership_revoked events.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+        "line": 40,
+        "why": "SRC: revoked Space membership denies run owner access.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+        "line": 91,
+        "why": "SRC: same revocation check denies thread owner access.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 3529,
+        "why": "SRC: remove_space_member delegates to apply_room_membership; the removal path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 546,
+        "why": "SRC: Space table at this line; grep finds no report, block or tombstone tables.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+        "line": 1,
+        "why": "SRC: moderation of model-bound content (injection, PII); not human reports.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs",
+        "line": 1,
+        "why": "SRC: semantic screening of model-bound content; adjacent, not room moderation.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs",
+        "line": 498,
+        "why": "SRC: 'friction report' is product feedback; false positive for moderation.",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-055",
+    "title": "Personal sidebar organisation: stars, custom sections, per-group sort, hide, mute, drag-and-drop, computed system sections and cross-org badges",
+    "searches": [
+      "rg -i 'starred|favorite|pinned|custom_section|sidebar_pref|section_order|hidden_refs|mute_' code, non-test",
+      "rg -i 'draggable|onDragStart|onDrop|sortable|reorder|dnd-kit|solid-dnd' code",
+      "rg -i 'workspace.?switcher|cross.?org|org_badge|attention_count|Ctrl\\+1' code",
+      "rg -i 'Waiting for approval|Agent runs|system section|Muted|stale.?room' code",
+      "rg -i '\\bhide|\\bmute' over core sidebar folder and CoreNavbar",
+      "rg -n 'localStorage|writeClientJson' over chat-organization and client-storage (persistence check)",
+      "read package.json dependencies for drag or virtualisation libraries"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx",
+        "line": 14,
+        "why": "SRC: chat-only drag type; threads drag into projects in the chat sidebar.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx",
+        "line": 82,
+        "why": "SRC: drag enabled only when grouping is by project.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx",
+        "line": 201,
+        "why": "SRC: group-by, sort-by (recent, oldest, title) and filter controls.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts",
+        "line": 18,
+        "why": "SRC: organisation state saved via writeClientJson, which is browser storage.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/session/client-storage.ts",
+        "line": 7,
+        "why": "SRC: client storage prefers window.localStorage; per browser, not synced.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/chat-organization.ts",
+        "line": 18,
+        "why": "SRC: typed action union: project create, rename, remove, pin; thread.move; view.update.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts",
+        "line": 55,
+        "why": "SRC: chat pins documented as 'Local-only', never synced from the server.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+        "line": 714,
+        "why": "SRC: ChatSidebarOrganizer mounted for chat sessions only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+        "line": 893,
+        "why": "SRC: 'Needs attention' run chip in chat rail; no computed system section.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx",
+        "line": 236,
+        "why": "SRC: Spaces rail renders fixed groups; no custom sections or ordering.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx",
+        "line": 252,
+        "why": "SRC: working dot from live-work store; no hide, mute or sort controls.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx",
+        "line": 295,
+        "why": "SRC: unread dot from live-work store; only for rooms observed in this browser.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx",
+        "line": 303,
+        "why": "SRC: pinned flag comes from the server and renders in the row.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 719,
+        "why": "SRC: owner-bound PATCH presentation route for thread pin and title.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 2159,
+        "why": "SRC: comment says any editor pinning another post is deliberately deferred.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx",
+        "line": 86,
+        "why": "SRC: message and notification unread counts for the active org only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/http/handlers.go",
+        "line": 267,
+        "why": "SRC: per-user unread count endpoint; no per-org attention projection found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts",
+        "line": 835,
+        "why": "SRC: multiSession enabled; cross-org session basis (INF for switcher badges).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts",
+        "line": 945,
+        "why": "SRC: organizationLimit set via parsePositiveInt; limits organizations per user (INF).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/package.json",
+        "line": 36,
+        "why": "SRC: no drag-and-drop or virtualisation library listed; solid-js 2.0 RC.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx",
+        "line": 1,
+        "why": "SRC: tests cover chat organiser behaviour only.",
+        "kind": "test"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-058",
+    "title": "Typed room records and Lists: one revisioned work-object substrate with a table view, assignees and item threads",
+    "searches": [
+      "rg -i 'space_records?|record_revisions?|prev_revision|expected_revision|revision_seq|compare_and_swap' code",
+      "rg -i 'kanban|table_view|work_items?|list_items?|assignees?|saved_views?|item_thread' code",
+      "rg -i 'planner_documents?|plannerDocuments?|workspaceId' code",
+      "rg -i '\\btodos?\\b' in Model Plane and Frontend code",
+      "rg -i 'list_read|list_update|record_update|space_list|space_record' (Model tool names)",
+      "read SpaceCockpit tab list (SpaceCockpit.tsx:43) and gateway /work route (spaces.rs:711)",
+      "read Convex Space instructions (spaces.ts lines 1495-1526) for revision handling",
+      "rg -n 'ticket-views|Saved views|saved_views' in gateway tickets domain and TicketingPage"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 277,
+        "why": "SRC: plannerDocuments table keyed by workspace; no Space-scoped record table.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/plannerDocuments.ts",
+        "line": 115,
+        "why": "SRC: planner documents listed by workspace, not by Space.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/plannerDocuments.ts",
+        "line": 240,
+        "why": "SRC: update mutation; no revision or compare-and-swap field found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts",
+        "line": 1495,
+        "why": "SRC: Space instructions are one text field, max 4000 chars, no revision.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-orchestration/src/todo.rs",
+        "line": 86,
+        "why": "SRC: todo assignee is a user or agent id; scoped to one thread.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-orchestration/src/todo.rs",
+        "line": 1,
+        "why": "SRC: durable thread-scoped todo states; not Space records or lists.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+        "line": 633,
+        "why": "SRC: /api/v1/tasks agent task routes; not Space records.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/tickets/components/TicketingPage.tsx",
+        "line": 928,
+        "why": "SRC: support tickets assignable by user; not Space-scoped.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx",
+        "line": 43,
+        "why": "SRC: cockpit tabs are chat, work, knowledge, activity, agent, members; no lists.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 711,
+        "why": "SRC: /work route feeds runs, schedules and processes to the Work panel; no record writes.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx",
+        "line": 14,
+        "why": "SRC: work panel is an activity view over runs, schedules and processes.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx",
+        "line": 10,
+        "why": "SRC: knowledge tab is a read-only Data Plane projection.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/tickets.rs",
+        "line": 94,
+        "why": "SRC: ticket saved views exposed at /api/v1/ticket-views; ticket scope, not Space.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/tickets/components/TicketingPage.tsx",
+        "line": 2066,
+        "why": "SRC: Saved views section lists ticket views; adjacent substrate, not Space records.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+        "line": 84,
+        "why": "DOC: Convex projects a migration candidate; no second generic project authority.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+        "line": 85,
+        "why": "DOC: planner workspaceId is a resource-local partition; map after authorization.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-059",
+    "title": "Do not disturb, quiet-hours schedules and urgent break-through, visible to agents",
+    "searches": [
+      "rg -i 'do.?not.?disturb|\\bdnd\\b|quiet.?hours|quietHours|interrupt(ible)?|break.?through|urgen(t|cy)|focus.?mode|\\bvip\\b' repo-wide, code",
+      "rg -i 'suppress|urgency|priority|throttle|quiet' in notification-core and capability-core",
+      "rg -i 'urgency' in Model Plane (approval urgency; non-test)",
+      "rg -i 'quiet|ikke forstyrr|do not disturb|stille' over verevonv3 src (settings UI check)",
+      "rg -i 'quiet hours|S4\\.4' over the QM plan doc",
+      "rg -i 'quietHours|calendarReminders' repo-wide (consumer check)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/handlers.go",
+        "line": 1264,
+        "why": "SRC: notification defaults set quietHours disabled, 22:00 to 08:00; stored only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/handlers.go",
+        "line": 1000,
+        "why": "SRC: QuietHours struct stores enabled, start, end; no consumer enforces it.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/handlers.go",
+        "line": 1012,
+        "why": "SRC: NotificationSettings carries QuietHours and CalendarReminders flags.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/preferences/preferences.go",
+        "line": 127,
+        "why": "SRC: per-user, per-event, per-channel opt-in check; no time window.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/service.go",
+        "line": 333,
+        "why": "SRC: dispatch marks request suppressed on opt-out; natural gate for DND.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/cmd/server/main.go",
+        "line": 151,
+        "why": "SRC: V0 dispatch creates an in-app row per dispatch; no DND check.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/channels/channels.go",
+        "line": 1,
+        "why": "SRC: org-level event-by-channel configuration only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/service_preferences_test.go",
+        "line": 18,
+        "why": "SRC: test covers opt-out suppression before dispatch; no time windows.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 2216,
+        "why": "DOC: S4.4 scope names quiet hours; planned, not built.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 226,
+        "why": "DOC: execution tracker row covering S4.1 to S4.5.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-060",
+    "title": "Finish the S4.4 delivery ledger and add a content-free missed-activity digest",
+    "searches": [
+      "rg -i 'delivery_ledger|delivery_state|idempotency|sent_unconfirmed|lease' in notification-core",
+      "rg -i 'delivery_ledger_not_built|S4\\.4' in gateway and docs",
+      "rg -i 'digest|missed.?activity' in Application, Control and Model code (only sha2 Digest hits)",
+      "rg -i 'smtp|sendgrid|mailgun|postmark|resend|sesv2|amazonses' in code (Postmark inbound only)",
+      "rg -i 'ChannelEmail|in_app' and read notification-core cmd/server/main.go dispatch",
+      "rg -n 'NOTIFICATION_DELIVERY_WORKER_ENABLED' in config (default check)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/delivery_state.go",
+        "line": 15,
+        "why": "SRC: attempt states: pending, claimed, sent_unconfirmed, acknowledged, failed, unknown.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/delivery_worker.go",
+        "line": 67,
+        "why": "SRC: RunOnce claims a leased delivery attempt; worker code exists.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/config/config.go",
+        "line": 63,
+        "why": "SRC: delivery worker gated by env flag, default false.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/config/config.go",
+        "line": 100,
+        "why": "SRC: worker needs novu delivery mode and a callback secret.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/cmd/server/main.go",
+        "line": 151,
+        "why": "SRC: V0 dispatch writes in-app rows only; email and push unused.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/feed/types.go",
+        "line": 17,
+        "why": "SRC: email and push channel constants declared; dispatch uses in_app.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/preferences/preferences.go",
+        "line": 6,
+        "why": "SRC: preference writes fan out to Novu subscriber preferences.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/consumers/conversation_followed_message.go",
+        "line": 27,
+        "why": "SRC: conversation-message consumer; conversation-scoped, no Space events found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 1622,
+        "why": "SRC: named gap delivery_ledger_not_built, reason S4.4 not yet published.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs",
+        "line": 2,
+        "why": "SRC: Postmark inbound mail-task pipeline; no outbound Space email found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+        "line": 857,
+        "why": "SRC: /api/v1/cron scheduler; could drive a digest job (INF).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 6099,
+        "why": "SRC: test asserts the delivery_ledger_not_built gap code.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 2211,
+        "why": "DOC: S4.4 defined as durable idempotent Space completion delivery.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 226,
+        "why": "DOC: execution tracker row covering S4.1 to S4.5.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-064",
+    "title": "Room creation flows: templates with an agent roster and seed artifacts, clone, project and case Spaces bound to work objects, invite-on-mention",
+    "searches": [
+      "rg -i 'template|clone|duplicate|blueprint' in Space code (only agent and schedule templates)",
+      "rg -i 'unsupported_space_kind|space_kind|kind.*(project|case)' in gateway and Control",
+      "rg -i 'non_member|invite.?on.?mention|mention' in SpaceRoomComposer and Space gateway",
+      "rg -i 'ticket.?created|ticket\\.created' in Application, gateway and Spaces",
+      "rg -i 'Meeting Scribe|AGENT_TEMPLATES|SpaceCreateAgentDialog' repo-wide",
+      "read space-defenition.md mention rule (lines 163-164) and ADR rows 82 and 84"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 2837,
+        "why": "SRC: create_personal_space accepts only personal and room kinds.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 2877,
+        "why": "SRC: other kinds refused with unsupported_space_kind.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql",
+        "line": 20,
+        "why": "SRC: registered_spaces accepts personal, room, project and case kinds.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx",
+        "line": 43,
+        "why": "SRC: three built-in agent templates; no room template or seed artifacts.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 184,
+        "why": "SRC: mention candidates are roster people and actively bound agents only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+        "line": 36,
+        "why": "SRC: a mention never grants; an unbound agent is not a candidate.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 30,
+        "why": "SRC: schedule_template module covers scheduled-run task templates, not rooms.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/schedule_template.rs",
+        "line": 1,
+        "why": "SRC: digest-stable schedule task template check; adjacent only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+        "line": 1985,
+        "why": "SRC: ticket.created events feed automation rules; none create a Space.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 9588,
+        "why": "SRC: test covers non-member denial of Space instructions; no invite flow.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+        "line": 163,
+        "why": "DOC: mentioning an unbound agent offers to add it, a governed action.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+        "line": 82,
+        "why": "DOC: support chat maps to a future case Space; server-owned binding planned.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+        "line": 84,
+        "why": "DOC: Convex projects a migration candidate; ADR forbids a second generic project authority.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  }
+]

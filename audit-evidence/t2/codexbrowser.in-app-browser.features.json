@@ -1,0 +1,2244 @@
+[
+  {
+    "id": "codexbrowser-in-app-browser-001",
+    "category": "Acquisition API surface",
+    "name": "Self-describing runtime docs with documentation-read enforcement",
+    "what": "The runtime ships its own API manifest and guidance, loads only the documents relevant to the selected backend, and refuses risky commands until the model has read the matching docs.",
+    "how": "agent.documentation.get(name) and browser.documentation() return markdown assembled from documents.json entries with mode model|included|lookup and conditions (browserTypes, requiredApiMembers, requiredTabCapabilities); capability docs are read with capabilities.get(id).documentation(). requiredFor lists command types (tab_cdp_call, tab_cdp_events, webmcp_list_tools, webmcp_invoke_tool, tab_browser_auth_handoff); assertRequiredDocumentationRead throws Required documentation has not been read and names the exact documentation call.",
+    "evidence": [
+      "PLUG/browser/docs/documents.json",
+      "tmp/cxib/browser-service.pretty.js:25248 [pretty copy of plugins/browser/scripts/browser-service.mjs] (assertRequiredDocumentationRead)",
+      "PLUG/browser/docs/api.json",
+      "tmp/cxib/browser-client.pretty.js:3542 [pretty copy of plugins/browser/scripts/browser-client.mjs]"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon could expose Quarry tools the same way: small core prompt, capability docs on demand, and a server-side check that high-risk tools were preceded by reading their policy doc.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-002",
+    "category": "Acquisition API surface",
+    "name": "Bulk URL content fetch (tabs.content) exists in the API but is disabled for the in-app browser",
+    "what": "A batch API loads several URLs in temporary background tabs and returns html, text or a DOM snapshot, but the in-app browser rejects it and tells the model to open tabs and read them directly.",
+    "how": "Tabs.content({urls,contentType html|text|domSnapshot,timeoutMs}) returns [{url,title,content|null}]; api.json marks it unsupportedByDefaultIn iab, extension, cdp and mcpapps; the IAB backend throws browser.tabs.content is not supported in Codex in-app browser and recommends tabs.new() plus navigation.",
+    "evidence": [
+      "PLUG/browser/docs/api.json (Tabs.content, TabsContentOptions)",
+      "tmp/cxib/main.pretty.js:41087 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (error text in executeUnhandledCommand)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "This is the Firecrawl-style batch scrape that Codex does not ship for its own browser; Quarry /v1/batch (up to 200 URLs) is ahead here, and the gap shows where Codex relies on one live tab at a time.",
+    "notes": "Which backend (if any) enables it is unknown."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-003",
+    "category": "Acquisition API surface",
+    "name": "Document and media content export (Google Workspace formats, YouTube transcript)",
+    "what": "The agent can export a Google Doc, Sheet or Slides tab in its native formats, or save a YouTube watch-page transcript as text.",
+    "how": "tab.content.exportGsuite(pdf|md|xlsx|csv|docx|pptx) and exportYouTubeTranscript() (https youtube.com or www.youtube.com /watch only, UTF-8 .txt) return a file path; generic export() is not supported in iab, extension or cdp; client commands TabContentExportGSuite and TabContentExportYouTubeTranscript.",
+    "evidence": [
+      "PLUG/browser/docs/api.json (ContentAPI)",
+      "tmp/cxib/browser-client.pretty.js:133 [pretty copy of plugins/browser/scripts/browser-client.mjs] (TabContent* command types)"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Site-specific exports through the user session beat scraping for Google Docs; a Quarry export adapter for signed-in workspace documents would complement Integration Plane providers.",
+    "notes": "Implementation not read in detail."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-004",
+    "category": "Acquisition API surface",
+    "name": "Browser history query for the agent with bounds, terms and approval",
+    "what": "The agent may read recent browsing history, filtered by dates and keywords, but only when the user allows it.",
+    "how": "Browser.history({from,to,limit,queries[]}) returns [{dateVisited,title,url}] sorted newest first; IAB implementation fans out one searchHistory per query term, dedupes by URL and caps at limit (default 100); requires feature inAppBrowserUseHistory and the browser-history-read consent check (iab_history_approval_mode); docs say use rarely, one focused call.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:41144 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (getUserHistory)",
+      "tmp/cxib/browser-service.pretty.js:11563 [pretty copy of plugins/browser/scripts/browser-service.mjs] (HR history permission)",
+      "PLUG/browser/docs/api-use-behavior.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "History is sensitive context; if Verevon adds user-history access for chat, keep it consent-gated and bounded like this.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-005",
+    "category": "Output formats & content processing",
+    "name": "Screenshots: viewport, full page and clip as JPEG, with explicit visual surfaces",
+    "what": "Screenshots are JPEG with clip and full-page options, can be taken as part of AX state, and must be embedded inline in the answer when the user asked for them.",
+    "how": "tab.screenshot({clip,fullPage}) returns Uint8Array; ax.write(screenshot|both) emits the image without advancing AX state; full-page uses Page.captureScreenshot with captureBeyondViewport and the host enlarges the capture surface until the visual viewport is big enough (1 s cap); docs/screenshots.md says images are image/jpeg and must be embedded with Markdown image syntax; proof-of-work rule: after a state-changing action save and embed a screenshot of the result.",
+    "evidence": [
+      "PLUG/browser/docs/screenshots.md",
+      "PLUG/browser/docs/api-use-behavior.md",
+      "tmp/cxib/main.pretty.js:41728 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (waitForCaptureSurface)",
+      "tmp/cxib/main.pretty.js:41796 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (YOe captureBeyondViewport clip handling)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "The proof-of-work screenshot rule gives users verifiable evidence for state-changing steps; Quarry already stores screenshot artifacts, so surface them in the answer.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-006",
+    "category": "Output formats & content processing",
+    "name": "DOM snapshot with frame ownership for locator and iframe planning",
+    "what": "A DOM snapshot shows iframe hierarchy and owner attributes, which the AX text omits, so the agent can build exact frame locators.",
+    "how": "tab.playwright.domSnapshot() and DomCUAAPI.get_visible_dom(); browserAuth doc: start with domSnapshot to identify iframe hierarchy and owner attributes because tab.getAXState omits frame ownership; implementation joins CDP DOMSnapshot documents with Page.getFrameTree and DOM.getFrameOwner.",
+    "evidence": [
+      "PLUG/browser/docs/capabilities/tab/browserAuth.md",
+      "tmp/cxib/browser-service.pretty.js:18441 [pretty copy of plugins/browser/scripts/browser-service.mjs] (DOMSnapshot capture)",
+      "PLUG/browser/docs/api.json (PlaywrightAPI.domSnapshot)"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry frame refs exist; ensure observation output includes owner relationships for nested iframes.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-007",
+    "category": "Output formats & content processing",
+    "name": "Page asset inventory and bundling (fonts, images, stylesheets, video, inline SVG)",
+    "what": "The agent can list every asset the rendered page uses, including images referenced only from CSS and inline SVGs, and export chosen assets into a local folder with a manifest.",
+    "how": "tab capability pageAssets.list() returns {id, assets[{id,kind,name,url,sources[attribute|computedStyle|resource]}], inlineSvgs[{id,markup,name}], summary}; bundle({inventoryId, kinds|assetIds}) downloads fonts, images, stylesheets and video into a temporary artifact directory and returns {directoryPath, manifestPath, assets, failures, summary}. Discovery combines network resources, DOMSnapshot attributes and computed styles over background-image, border-image-source, cursor, list-style-image and mask-image. Downloads need page-asset-download consent and cross-origin fetches page-asset-cross-origin-fetch consent. Docs: do not navigate to asset URLs just to fetch them.",
+    "evidence": [
+      "PLUG/browser/docs/capabilities/tab/pageAssets.md",
+      "tmp/cxib/browser-service.pretty.js:23533 [pretty copy of plugins/browser/scripts/browser-service.mjs] (VM CSS image properties)",
+      "tmp/cxib/browser-service.pretty.js:11169 [pretty copy of plugins/browser/scripts/browser-service.mjs] (tab_page_assets_bundle)",
+      "tmp/cxib/browser-service.pretty.js:11634 [pretty copy of plugins/browser/scripts/browser-service.mjs] (consent for page asset downloads)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Directly comparable to Firecrawl branding and image extraction; a consent-gated page-asset export would suit Verevon brand and onboarding crawl previews.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-008",
+    "category": "Output formats & content processing",
+    "name": "QR and barcode decoding from the live page",
+    "what": "The runtime can decode a QR code shown on a page (used for QR sign-in) and only trusts decoded HTTPS payloads without embedded credentials.",
+    "how": "zxing-wasm 3.1.2 reader (zxing_reader.wasm shipped; default locateFile points at fastly.jsdelivr.net) decodes the visible QR code in browserAuth (qr_code:true); the decoded payload is published only to the broker, and a payload is surfaced to the model only if it is an https URL with host and no username or password.",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:12614 [pretty copy of plugins/browser/scripts/browser-service.mjs] (zxing locateFile)",
+      "tmp/cxib/browser-service.pretty.js:14715 [pretty copy of plugins/browser/scripts/browser-service.mjs] (qr payload handling)",
+      "INSTALL/resources/plugins/openai-bundled/plugins/browser/scripts/zxing_reader.wasm"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Small capability but useful for MFA flows; note the CDN default is a supply-chain egress risk Verevon should avoid by vendoring the WASM.",
+    "notes": "Whether the CDN default is overridden in the shipped runtime was not established."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-009",
+    "category": "Rendering & browser engines",
+    "name": "Four backend types: embedded Chromium, user Chrome-family via extension, remote CDP, MCP Apps",
+    "what": "The same agent API drives an embedded browser, the user own Chrome, Edge, Brave, Opera or Vivaldi through an extension, a remote cloud browser over CDP, or MCP App widgets.",
+    "how": "Browsers.list() returns {type iab|extension|cdp|mcpapps, family, profileName, metadata{codexSessionId|extensionInstanceId}}; backends advertised by env BROWSER_USE_AVAILABLE_BACKENDS (chrome, iab, cdp, mcpapps); extension family catalogue with store ids and icons; selection scenarios in the skill (explicit browser wins, URL-based getForUrl, default prefers iab then Chrome).",
+    "evidence": [
+      "PLUG/browser/docs/api.json (Browsers.list)",
+      "tmp/cxib/main.pretty.js:1540 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Aee backends)",
+      "INSTALL/resources/plugins/openai-bundled/plugins/browser/scripts/extension-ids.json",
+      "PLUG/browser/skills/control-in-app-browser/SKILL.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry should model engine tiers explicitly (hosted headless, hosted headful live view, user-session extension) behind one session API and choose per URL and per login need.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-010",
+    "category": "Rendering & browser engines",
+    "name": "Control of the user own Chromium browsers via extension and native messaging host",
+    "what": "With the ChatGPT extension installed, the agent can use the user real Chrome-family browser with existing logins, extensions and tabs.",
+    "how": "Native messaging host com.openai.codexextension (extension-host.exe, manifest dir AppData/Local/OpenAI/extension, registry root under HKCU); extension ids hehggadaopoacecdllhhajmbjkdcmajg (Chrome Web Store ChatGPT) and odlomjlbamekndcpllcnffbgeohgkmjh (Edge add-ons); chromium-browser-diagnostics.mjs and scripts (installed-browsers, chrome-is-running, check-extension-installed, check-native-host-manifest, open-chrome-window) plus a troubleshooting decision tree that forbids self-installing the manifest.",
+    "evidence": [
+      "INSTALL/resources/plugins/openai-bundled/plugins/chrome/extension-host/windows/x64/extension-host.exe",
+      "INSTALL/resources/plugins/openai-bundled/plugins/browser/scripts/extension-ids.json",
+      "PLUG/browser/docs/chrome-troubleshooting.md",
+      "tmp/cxib/preload.pretty.js:15997 [pretty copy of codex/.vite/build/browser-page-preload.js] (extension descriptors KS/qS in preload bundle)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "The only route to a customer signed-in state without importing credentials; a Verevon browser extension plus native host or a hosted bridge would be the enterprise equivalent.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-011",
+    "category": "Rendering & browser engines",
+    "name": "Absence of stealth, fingerprint and locale spoofing in the browser stack",
+    "what": "No user-agent, timezone, geolocation or locale override, stealth patches or webdriver masking were found in the shipped browser code.",
+    "how": "Zero occurrences of setUserAgentOverride, setGeolocationOverride, setTimezoneOverride, setLocaleOverride, stealth or webdriver in main-BklS_2Y2.js, browser-service.mjs and browser-client.mjs; the stack relies on a real Chromium with real profile and on cloud-side egress for blocked sites.",
+    "evidence": [
+      "grep -c over tmp/cxib/main.pretty.js, browser-service.pretty.js and browser-client.pretty.js for setUserAgentOverride, setGeolocationOverride, setTimezoneOverride, setLocaleOverride, Emulation.setUserAgent, Network.setUserAgentOverride, stealth and webdriver returned 0 in all three files"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry has stealth.rs and proxy pinning that Codex does not; a real-browser, real-profile approach reduces the need for evasion in user-session tasks.",
+    "notes": "Absence evidence: grep counts, not proof the engine itself does not randomize anything."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-012",
+    "category": "Rendering & browser engines",
+    "name": "Thin 20 KB launcher with the Chromium runtime shipped as separate DLL and resources",
+    "what": "The visible Codex.exe is a tiny launcher; the browser engine and shell live in chrome.dll and sibling Chromium files, so the product is effectively a Chromium distribution with an app attached.",
+    "how": "REA PE resource inspection of Codex.exe: 20,272 bytes, PE32+, a single resource (type 24 RT_MANIFEST, id 1, lang 1033, 381 bytes) and no icon groups; the install tree holds chrome.dll (329 MB per scout listing), chrome_elf.dll, chrome_proxy.exe, chrome_pwa_launcher.exe, elevation_service.exe, resources.pak, snapshot_blob.bin, v8_context_snapshot.bin and a 155.0.8059.40.manifest; ChatGPT.exe is a second launcher.",
+    "evidence": [
+      "REA ev_70342411d41c31bf3581cde372e8c5acb3dfe68dffbcb42705f580c269229d9b",
+      "INSTALL/155.0.8059.40.manifest",
+      "INSTALL/resources/owl-electron-app.json"
+    ],
+    "provenance": "REA",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Confirms the in-app browser is a full Chromium build rather than a thin Electron webview; Verevon should treat parity targets (password manager, omnibox, extensions) as Chromium features, not app features.",
+    "notes": "chrome.dll size and sibling list come from the scout inventory and a directory listing; only Codex.exe was parsed with REA."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-013",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Tab creation handshake with bounded wait and ordered cleanup",
+    "what": "Opening a tab for the agent waits up to 15 seconds for the renderer to attach the page, and cancels cleanly if the window, route or tab closes first.",
+    "how": "Class kke (BrowserUseOpenRequests) keeps pending open requests with a timer (Oke 15000 ms) and resolves them when the webview attach completes (resolveForWindow) or rejects with ChatGPT browser tab was closed by Browser Use/by the user/route disposed; debug events browser-open-wait-started, -resolved, -rejected, -timeout feed the registry debug ring; navigations are tagged with source browser_use.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:42576 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (kke)",
+      "tmp/cxib/main.pretty.js:42621 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Mke pendingNavigationUsage browser_use)",
+      "tmp/cxib/main.pretty.js:41279 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (createTabForBrowserUse unwinds on failure)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Explicit open handshakes with timeouts and distinct failure causes avoid hung sessions in Quarry when a live view never attaches.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-014",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Cloud browser egress proxy with site-instruction header channel",
+    "what": "In the cloud browser configuration an operator proxy can attach per-site guidance to responses; the runtime strips the header from the page and gives the guidance to the model on the next result.",
+    "how": "class th (SiteInstructions) captures document responses (Fetch.enable on Document responses) whose x-openai-site-instruction header is present, removes the header from the response, URL-decodes the text, ignores localhost, loopback, link-local and private IPv4/IPv6 hosts and non-http(s), keys by tab and URL and clears on navigation; enabled only when backend type is cdp, a gaas runtime is present and OPERATOR_PROXY_URL or HTTP_PROXY is set; delivered once as response meta codex/browserSiteGuidance; suppressed after native credentials were used (Ve()).",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:23498 [pretty copy of plugins/browser/scripts/browser-service.mjs] (jM header and class th)",
+      "tmp/cxib/browser-service.pretty.js:25001 [pretty copy of plugins/browser/scripts/browser-service.mjs] (siteInstructions constructed with proxy condition)",
+      "tmp/cxib/browser-service.pretty.js:25346 [pretty copy of plugins/browser/scripts/browser-service.mjs] (setResponseMeta codex/browserSiteGuidance)",
+      "tmp/cxib/browser-service.pretty.js:24914 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Ve credential guard)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "An out-of-band, per-site instruction channel from a trusted egress proxy is a clean way to ship site playbooks and rate hints to agents without trusting page content; note it makes the proxy a prompt-injection trust anchor.",
+    "notes": "Trust model risk: a malicious origin could send the same header if the proxy does not strip upstream copies (not verifiable here)."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-015",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Fail-closed timeouts, stale-state detection and bounded waits",
+    "what": "Browser commands have bounded timeouts, detect stale tabs and handles, and clean up debugger leases on timeout.",
+    "how": "HOe constants: CDP command timeout 20 s (FOe), page-ready 15 s (POe), cursor arrival 1.5 s (IOe), clipboard cleanup 3 s (LOe), capture surface wait 1 s (ROe), download grant 10 s (BOe); wq() promise timeout helper; Sq() identifies timeouts and triggers cleanupDebuggerForTabBestEffort unless preserveDebuggerOnTimeout; assertTabMatchesCurrentBrowserUsePage rejects stale page keys; WebMCP handles expire per document; locators retry within timeouts (startLocatorRetry).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:40954 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (constants)",
+      "tmp/cxib/main.pretty.js:41878 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (wq timeout helper)",
+      "tmp/cxib/main.pretty.js:41458 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (assertTabMatchesCurrentBrowserUsePage)",
+      "tmp/cxib/browser-service.pretty.js:11539 [pretty copy of plugins/browser/scripts/browser-service.mjs] (startLocatorRetry)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry step budgets are coarse (steps and runtime); per-command timeouts plus stale-target checks reduce flakiness.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-016",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Cloud tunnel to remote environments (not browser-specific)",
+    "what": "A QUIC/MASQUE tunnel with an origin allowlist file connects the app to cloud environment portals such as SSH ports of remote containers.",
+    "how": "resources/masque-proxy-origins.txt holds one origin (codex-portals.api.openai.com); class with masqueCli and assertDestinationAllowed validates the proxy origin and destination before connecting; portal list endpoint /v1/environments/<id>/portals with protocol ssh and access scope owner.",
+    "evidence": [
+      "INSTALL/resources/masque-proxy-origins.txt",
+      "tmp/cxib/main.pretty.js:20818 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (masqueCli, assertDestinationAllowed)",
+      "tmp/cxib/main.pretty.js:20510 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (OS cloud portal client)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Not a web-access feature; relevant only as the transport a hosted dev-environment preview might use.",
+    "notes": "Relation to the browser is not established; recorded to prevent misattribution."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-017",
+    "category": "Orchestration & scale",
+    "name": "Per-session browser routes with child-agent sharing",
+    "what": "Each chat session gets its own browser route; spawned sub-agents reuse the parent browser window and their tabs are cleaned up when their session ends.",
+    "how": "BrowserSessionRegistry sessionRoutes map sessionId to {browserConversationId, windowId, ownerWebContentsId, disposeAfterSessionActivity}; captureSessionRoute and captureChildSessionRoute (child inherits the parent owner with disposeAfterSessionActivity=true); bindSessionRouteOwner rebinds on window moves; reassignRoute moves tabs and selected tab ids; SubagentStop hook calls turn_ended with agent_id.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:42008 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (kq)",
+      "tmp/cxib/main.pretty.js:42096 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (captureChildSessionRoute)",
+      "PLUG/browser/.codex-plugin/plugin.json (SubagentStop)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry fleets are a stub in Verevon; a route model where sub-agents share a parent browser with scoped cleanup is the pattern to follow.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-018",
+    "category": "Orchestration & scale",
+    "name": "Crawl, schedule and queue features are absent from the browser stack",
+    "what": "The agent browser has no crawl frontier, sitemap, scheduler, rate limiter or distributed workers; multi-page work is one tab at a time driven by the model.",
+    "how": "No crawl, sitemap, schedule, queue or dedupe code was found in main browser modules, browser-client or browser-service; limits that exist are per-feature (webMcpMaxTools 100, 8 MB and 64 MB pipe frames, readEvents 1000, tab budget 32).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:2327 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (webMcpMaxTools default)",
+      "tmp/cxib/main.pretty.js:41891 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (pipe frame limits)",
+      "PLUG/browser/docs/capabilities/tab/cdp.md (limit 1 to 1000)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "This is where Quarry plus Verevon Ingestions is ahead (crawl, map, batch, schedules); do not replace them with browser-driving for bulk acquisition.",
+    "notes": "Absence evidence only."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-019",
+    "category": "Platform & ecosystem",
+    "name": "Bundled plugin packaging with auto-install gates and migration",
+    "what": "Browser, Chrome and computer-use agent stacks ship as bundled plugins that install based on feature availability and migrate from an older local plugin.",
+    "how": "Plugin table (mf) lists codexAppTools, browser (isAvailable when inAppBrowserUseAllowed or externalBrowserUseAllowed, autoInstallOptOutKey, migrate), chrome, computer-use (windows when native pipe ready), unified-computer-use; BrowserUseLocalToBundledMigration uninstalls the local browser-use plugin, trashes its files and removes the marketplace entry; aliases @browser, @browser-use, Browser, in-app browser; plugin signing receipts.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:5830 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (mf)",
+      "tmp/cxib/main.pretty.js:5703 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (migration logger ff and Xre)",
+      "PLUG/browser/.codex-plugin/plugin.json",
+      "INSTALL/resources/plugin-signatures/openai-bundled/receipt.json"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon could package Quarry browsing as an installable, versioned capability bundle with admin gating per org.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-020",
+    "category": "Platform & ecosystem",
+    "name": "Remote feature gates with defaults off and developer overrides",
+    "what": "Browser features roll out behind server-delivered gates that default to off, with an environment override for development.",
+    "how": "Gate schema yi/bi: browserPane, browserExtensions, browserSettingsCloudSync, inAppBrowserUse, mcpAppsBrowserUse, inAppBrowserUseAllowed, inAppBrowserUseHistory, browserUseTinysky, externalBrowserUse(Allowed), computerUse, webMcp, webMcpMaxTools=100, unifiedTabStrip, multiWindow, pageCreation, autoAuthForSites, cuaPIP, recordAndReplay, skysight; override env CODEX_ELECTRON_DESKTOP_FEATURE_OVERRIDES; Rust config keys in codex.exe include in_app_browser, browser_annotation_api, browser_use, browser_use_full_cdp_access, browser_use_external, computer_use.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:2327 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (feature schema and defaults)",
+      "tmp/cxpe/codex_exe.strings.txt (in_app_browser, browser_annotation_api, browser_use_full_cdp_access)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry browser features (AX, WebMCP, history) should be individually gateable per org and per backend, as here.",
+    "notes": "Presence of a gate does not mean the feature is enabled in the audited build."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-021",
+    "category": "Platform & ecosystem",
+    "name": "Chrome Web Store distribution with beta and stable extension channels",
+    "what": "The Chrome extension is distributed through the Chrome Web Store and Edge Add-ons with separate beta, stable and internal ids.",
+    "how": "Extension descriptors with distribution chrome-web-store, extensionIds, releaseChannel beta|stable, storeUrl; ids for dev, internal and prod channels (YS.chrome.dev/internal/prod, YS.edge.*); settings browser-family-enabled:<family> toggle each family in the composer.",
+    "evidence": [
+      "tmp/cxib/preload.pretty.js:15997 [pretty copy of codex/.vite/build/browser-page-preload.js] (KS, qS, YS descriptors)",
+      "INSTALL/resources/plugins/openai-bundled/plugins/browser/scripts/extension-ids.json",
+      "tmp/cxib/src-CP7.pretty.js:2445 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (browser-family-enabled setting)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Plan the same channel structure if Verevon ships a browser extension.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-022",
+    "category": "Platform & ecosystem",
+    "name": "Browser agent runtime is Electron-independent plain Node/ESM",
+    "what": "The browser-client and browser-service plugin scripts contain no Electron windows, IPC or preload code, so the same agent runtime can run against any backend through a pipe or native host.",
+    "how": "REA analyze_javascript_application over the plugin scripts directory (9 JS files parsed, 1,696,069 text bytes, 336,139 AST nodes, 151 findings, 0 parse failures) reported electron.browser_windows 0, preload_entrypoints 0, context_bridge_apis 0, ipc operations 0 and utility_processes 0; the two large bundles exhausted the semantic worker heap (partial semantic coverage, 2,010 semantic unknowns); sender/origin check observations 49 (observations only). Follow-up trace_application_feature and inspect_analysis_view calls failed because the retained evidence was no longer available in the shared REA session.",
+    "evidence": [
+      "REA ev_3d3e178cafece7ee1e5ba858b5895123c45f7b4c6c3b0c22668073198dd957f8 (summary view of parent ev_32feb7f315289064769cdba6cd7f63a0e6315bcd20c85e05a27fbc48355bbf90)",
+      "tmp/cxib/browser-service.pretty.js:1 [pretty copy of plugins/browser/scripts/browser-service.mjs] (process shim header of browser-service.mjs)",
+      "tmp/cxib/browser-client.pretty.js:3541 [pretty copy of plugins/browser/scripts/browser-client.mjs] (export block of browser-client.mjs)"
+    ],
+    "provenance": "REA",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A backend-agnostic, Electron-free agent runtime (Node/ESM plus a transport) is the shape Verevon needs so the same browser tools run against Quarry-hosted Chromium, remote desktops and extensions.",
+    "notes": "Absence of Electron constructs is REA static output for these scripts only; main-process behavior is covered by the other records."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-023",
+    "category": "Observability & operations",
+    "name": "Console log capture API for tabs",
+    "what": "The agent can read recent console messages from a tab, filtered by level and text, to debug the page it is testing.",
+    "how": "tab.dev.logs({filter, levels[debug|info|log|warn|error|warning], limit}) returns entries {level, message, timestamp, url}; client command TabDevLogs; MCP App sandboxes additionally log console messages with a rate cap (mcp_app_sandbox.console_message, console_limit_reached).",
+    "evidence": [
+      "PLUG/browser/docs/api.json (TabDevAPI, TabDevLogsOptions, TabDevLogEntry)",
+      "tmp/cxib/browser-client.pretty.js:133 [pretty copy of plugins/browser/scripts/browser-client.mjs] (TabDevLogs)",
+      "tmp/cxib/main.pretty.js:8121 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (console_message capture)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry DevTools drawer already shows console and network summaries; expose the same filtered log read to the model for frontend testing runs.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-024",
+    "category": "Observability & operations",
+    "name": "Structured lifecycle logging with safe versus sensitive field separation",
+    "what": "Browser lifecycle events are logged with explicit safe and sensitive field buckets, so diagnostics can be shared without leaking URLs or errors.",
+    "how": "Logger entries use {safe:{...}, sensitive:{...}} (conversationId, tab ids in safe; urls, errors, window ids in sensitive); IAB_LIFECYCLE and IAB_ADOPTION prefixes mark every attach, route, page, cursor and visibility transition; failures are also reported as non-fatal errors with groupingFingerprint (for example in-app-browser-availability-backstop) to Sentry.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:42008 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (registry logger usage)",
+      "tmp/cxib/main.pretty.js:44698 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (admitBrowserTab non-fatal report)",
+      "tmp/cxib/main.pretty.js:36771 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (IAB_LIFECYCLE will attach webview log)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Adopt the safe/sensitive split in Quarry and Verevon logs (ZDR-friendly) for browser sessions.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-025",
+    "category": "Observability & operations",
+    "name": "Audit events for every browser permission decision",
+    "what": "Each consent check emits a structured audit event with outcome and source, and analytics only records denials for URL checks.",
+    "how": "Yt() emits {check, outcome success|denied|error_fail_closed|bypassed, permissionSource (user_decision, config, guardian-auto-review, site-status, navigation-url-policy, codex-network-policy, security-mode, browser-use-persisted-state, codex-history-policy), reason, origin, durationMs, backend, browserFamily, cached}; the Statsig mapping $ee turns outcomes into decision allowed|denied with decision_context evaluated|not_required|error and skips allowed navigation-url and site-status events; browser auth also logs browser_auth_submission_rejected/failed with request id.",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:11376 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Yt)",
+      "tmp/cxib/browser-service.pretty.js:25173 [pretty copy of plugins/browser/scripts/browser-service.mjs] ($ee mapping)",
+      "tmp/cxib/browser-service.pretty.js:25175 [pretty copy of plugins/browser/scripts/browser-service.mjs] (skips allowed URL checks)",
+      "tmp/cxib/browser-service.pretty.js:14752 [pretty copy of plugins/browser/scripts/browser-service.mjs] (logStatsigEvent browser_auth_*)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry audit_events for browser sessions should carry check, source, outcome and reason with this granularity to support compliance reviews.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-026",
+    "category": "Observability & operations",
+    "name": "Browser usage telemetry and tab analytics",
+    "what": "The app records navigation, address commits, autocomplete impressions, annotation feature use and tab lifecycle counts.",
+    "how": "recordBrowserNavigation, recordBrowserAddressCommit, recordBrowserAutocompleteSuggestionsShown, recordBrowserAnnotationFeature, recordAnnotationFeatureUse via a telemetry source (codexStatsigEventName, browserTelemetryMetadata); tab lifecycle messages carry thread and app tab counts and whether a tab is browser-use managed (IAB_TAB_ANALYTICS); site annotation detections reported from the preload as feature classes only.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:19394 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (recordBrowserNavigation)",
+      "tmp/cxib/main.pretty.js:19398 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (recordBrowserAnnotationFeature)",
+      "tmp/cxib/main.pretty.js:42495 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (tab lifecycle analytics)",
+      "tmp/cxib/browser-service.pretty.js:5200 [pretty copy of plugins/browser/scripts/browser-service.mjs] (telemetry module browserTelemetryMetadata, codexStatsigEventName)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Instrument adoption of Verevon browser features (omnibox use, takeover, annotation) with similarly coarse, URL-free counters.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-027",
+    "category": "Observability & operations",
+    "name": "Model JavaScript sandbox controls (node_repl)",
+    "what": "Model-written JavaScript runs in a separate Node REPL process with environment flags for strict auto-review, tool overrides, trace metadata and analytics control.",
+    "how": "Per-thread MCP server config launches node_repl (cua_node/bin/node_repl.exe) with NODE_REPL_HOST_SERVICES_PIPE_PATH, NODE_REPL_FORCE_STRICT_AUTO_REVIEW, NODE_REPL_TOOL_OVERRIDES, NODE_REPL_JS_BANNER, NODE_REPL_DISABLE_ANALYTICS, NODE_REPL_TRACE_META, model-check enforcement (nodeReplEnforceModelCheck) and BROWSER_USE_DISABLE_AMBIENT_NETWORK; the REPL can be run under a sandbox that needs the codex CLI path on some platforms (warning browser_use_codex_cli_missing_for_node_repl_sandbox when it is missing).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:2818 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (env constant names)",
+      "tmp/cxib/main.pretty.js:4218 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (host services pipe)",
+      "tmp/cxib/main.pretty.js:4235 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (ac thread config)",
+      "INSTALL/resources/cua_node"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "If Verevon lets models write code against Quarry, a no-ambient-network REPL with host-signed authorizations is the right isolation.",
+    "notes": "Sandbox strength not verified (separate audit covers Windows sandbox)."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-028",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Embedded real Chromium (Owl runtime) behind an Electron-compatible shell",
+    "what": "The in-app browser is a real Chromium 155 browser engine, not a thin webview: the install ships chrome.dll, a Chromium 155 manifest and Chrome-only services, and the app is launched through a 20 KB launcher stub.",
+    "how": "Packaged runtime is named owl (owl-electron-app.json, owl-app.ini, owl-shell-runtime.json). Install ships chrome.dll, chrome_pwa_launcher.exe, elevation_service.exe, IwaKeyDistribution, PrivacySandboxAttestationsPreloaded and 155.0.8059.40.manifest. Codex.exe is only a stub with an RT_MANIFEST resource. The main process obtains a browser-level session object over capnweb RPC that exposes browserProfileImporter, topSites, faviconService, searchHistory, cookies, getCacheSize, getDownloadHistory, getBrowsingDataSettings; webContents gains non-standard methods (clone, showPageInfoDialog, setPageCapturePaintLeaseEnabled, capturePage with stayHidden) and sessions accept permissionHandling:browser and setPermissionPromptHandler.",
+    "evidence": [
+      "REA ev_70342411d41c31bf3581cde372e8c5acb3dfe68dffbcb42705f580c269229d9b (Codex.exe is 20272 bytes, one RT_MANIFEST resource)",
+      "INSTALL/resources/owl-electron-app.json",
+      "INSTALL/resources/owl-app.ini",
+      "INSTALL/155.0.8059.40.manifest",
+      "tmp/cxib/main.pretty.js:19230 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (class Fb: clearBrowsingData, getBrowsingDataSummary, searchHistory, topSites over capnweb RPC)",
+      "tmp/cxib/main.pretty.js:36986 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (ewe.configure: fromPartition permissionHandling browser, setPermissionPromptHandler)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry drives headless Chromium over CDP; a visible Chromium-class shell with real password manager, omnibox and extensions is the bar for a user-facing browser, though Verevon would need a hosted equivalent (remote Chromium plus streamed frames) rather than an Electron fork.",
+    "notes": "Relationship to Electron 42 in package.json is INF (owl is a custom Chromium host exposing Electron-compatible APIs). Atlas-style architecture is INF from the name only."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-029",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Webview-per-tab hosting with hardened guest preferences",
+    "what": "Every browser tab is a guest web contents created from a renderer webview element, but the main process rewrites the attach request so the page cannot gain Node access, popups or relaxed web security.",
+    "how": "will-attach-webview handler (ICe) rewrites params: partition, session, preload (browser-page-preload.js), navigateOnDragDrop, transparent=false. Function cU deletes allowpopups, disablewebsecurity and webpreferences attributes and forces sandbox=true, nodeIntegration=false (also in subframes and workers), contextIsolation=true, webSecurity=true, allowRunningInsecureContent=false, webviewTag=false, plugins=false, disablePopups=true. The src attribute is blanked so the app (not the renderer) owns the first navigation; attach requests are matched to a pre-registered route and instance id or rejected with preventDefault.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:36712 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (ICe will-attach-webview)",
+      "tmp/cxib/main.pretty.js:36788 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (LCe call)",
+      "tmp/cxib/main.pretty.js:36858 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (LCe)",
+      "tmp/cxib/main.pretty.js:36864 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (cU hardening)",
+      "tmp/cxib/main.pretty.js:36758 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (reject unmatched attach)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "If Verevon ever embeds third-party pages (Quarry live view or an in-app browser) in the SPA, the attach-time policy rewrite plus route pre-registration is a template for refusing unknown guests.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-030",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Single shared persistent profile for all tabs, route token kept separate",
+    "what": "All in-app tabs share one persistent browser profile, so a login made in one tab or task is visible to every other tab, while a per-tab partition string is used only as a routing token.",
+    "how": "cU/LCe force params.partition = persist:codex-browser-app (af(app)) and webPreferences.session to the shared configured session. The renderer-supplied partition (persist:codex-browser-app-route:<conversation>\\0<tab>:host:<renderer>:<gen>) is parsed by NCe/MCe to bind the guest to a conversation and tab and is never used as real storage. Settings webviews use separate partitions (persist:codex-password-manager-settings, persist:codex-site-settings, persist:codex-contact-info-settings).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:200 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (route partition constants $e, at())",
+      "tmp/cxib/main.pretty.js:36858 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (partition = persist:codex-browser-app)",
+      "tmp/cxib/src-CP7.pretty.js [pretty copy of src-CP7XXlpZ.js] src-CP7XXlpZ ha = persist:codex-browser-app, Da/Sa/ba settings partitions"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon Quarry has scoped profiles (ephemeral/user_private/org_shared/run_scoped); Codex shows the simpler end of the range (one persistent user profile) and relies on per-origin consent rather than profile scoping to protect it.",
+    "notes": "Quality 3: simple and convenient, but one profile means the agent and the user share cookies; that is mitigated only by consent prompts."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-031",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Per-task (thread) browser tabs with persistent storage identity",
+    "what": "Browser tabs belong to a chat task: each conversation has its own set of tabs, which come back when the task is reopened.",
+    "how": "Pages are keyed by conversationId plus browserTabId (QB key, route string with NUL separator). thread-browser-tabs-v1:<id> storage key. kje (BrowserHostManager) keeps windows to threads to page state; a browserStorageId reconciles persisted snapshots with live threads (reconcileBrowserStorageId). Telemetry events carry threadBrowserTabCount and appBrowserTabCount.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:44630 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (kje class)",
+      "tmp/cxib/main.pretty.js:200 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (tt = thread-browser-tabs-v1:)",
+      "tmp/cxib/main.pretty.js:42495 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (tab lifecycle analytics with thread counts)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon chat runs could own their browser tabs the same way (run-scoped tab set, restored with the run) instead of one global crawl-preview browser.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-032",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Tab strip operations and detached windows",
+    "what": "Users can create, close, reopen, duplicate, rename, pin, reorder and drag tabs out into separate windows, and keep a detached window on top or restore it.",
+    "how": "Tab context menu ids: copyUrl, duplicate (clone via webContents.clone to keep history), newTabToTheRight, rename, reload, openInExternalBrowser. Drag cues: dragNewWindowCue (Release to open in a new window), dragPinCue. Detached window menu: focusSource, pin (Keep window on top), restore. Window moves use moveTabToWindow with a transfer token and pendingWindowTransfer; handoff is blocked while a task has tabs in separate windows. A unifiedTabStrip feature gate merges workspace and browser tabs.",
+    "evidence": [
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n thread.sidePanel.browserTabMenu.*, appShell.tabs.*, appShell.detachedWindow.*)",
+      "tmp/cxib/main.pretty.js:44851 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (cloneTab)",
+      "tmp/cxib/main.pretty.js:45076 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (moveTabToWindow)",
+      "tmp/cxib/main.pretty.js:2327 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (feature gate unifiedTabStrip)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Basic tab ergonomics (duplicate, rename, pop out) are table stakes the Verevon BrowserChrome lacks beyond new/select/close.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-033",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Panel placement: right, bottom, detached, hidden, floating composer, side chat",
+    "what": "The browser can dock to a right or bottom panel, maximize, pop out, or run hidden; a floating composer can sit over the page and a Side chat tab opens beside it.",
+    "how": "Host kinds include right, bottom and hidden-browser-use (zR hostKind). Commands: toggleBrowserPanel, showWorkspaceTabView, toggleWorkspaceTabs, stepWorkspaceLayout. Message browser-sidebar-floating-composer-reveal and settings hideFloatingComposer/showFloatingComposer. Side chat is a tab type (thread.sidePanel.openSideChat). The panel can open without animation when the agent starts using it (pendingBrowserUsePanelOpen).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:44630 [pretty copy of codex/.vite/build/main-BklS_2Y2.js]",
+      "codex/webview/assets/hidden-browser-use-webview-host-b6797e1e4891.js (hostKind hidden-browser-use)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n thread.browser.options.*, thread.sidePanel.openSideChat)",
+      "codex/.vite/build/src-CP7XXlpZ.js codex.command.* ids (toggleBrowserPanel, showWorkspaceTabView)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon chat already has a live-run browser panel; docking choices and a composer-over-page mode map directly onto its split-view needs.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-034",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Tab suspension budget with protection rules and cold restore",
+    "what": "When more than 32 background pages are alive, the least valuable one is suspended and later restored from a snapshot, with active, audible, loading, capturing or agent-controlled tabs protected.",
+    "how": "Class rje: budget LJ=32 live detached pages, working-set expiry RJ=1,800,000 ms. getProtection protects active tab, working-set selected tab, presented, isBrowserUseActive, isTabCaptureActive, audible, capturing camera or mic, loading, restoring, or having an active download. Only live-detached pages count toward the budget. Candidates are ranked inactive-secondary first, then inactive-selected, then current-thread-secondary last (function zJ), ties broken by last tab activity; working-set protection expires 30 minutes after the tab was last selected. Events browser-tab-budget-suspension-selected and browser-tab-budget-tab-suspended are logged. Suspended pages keep a serialized snapshot and are rematerialized (cold-restore) on demand.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:44129 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (rje)",
+      "tmp/cxib/main.pretty.js:44179 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (getProtection)",
+      "tmp/cxib/main.pretty.js:44166 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (suspension selected log)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A tab and context budget with explicit protections would let Quarry keep many agent tabs cheap (suspend to snapshot) instead of holding one live Chromium page per session.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-035",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Persisted tab snapshots with real navigation history",
+    "what": "Tabs survive app restarts with their back/forward history, title and favicon, and are restored lazily when first shown.",
+    "how": "MV/EV store writes browser-sidebar-page-states.json in browserPersistenceDirectory. oV serializes {runtime:electron-webview, faviconUrl, navigation:{currentIndex, entries[{url,title,pageState}]}, title, updatedAt, url}; entries carry Chromium opaque pageState. Restore uses navigationHistory.restore({entries,index}); error pages are stored under their failed URL and attach-token placeholder URLs (about:blank#codex-browser-sidebar-attach-token=) are stripped from the stored history. Persisted on window close, query-session-end and session-end; deleted when a tab is closed (deleteClosedPageAndFlush).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:35696 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (NV)",
+      "tmp/cxib/main.pretty.js:35437 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (oV)",
+      "tmp/cxib/main.pretty.js:42628 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (navigationHistory.restore)",
+      "tmp/cxib/main.pretty.js:35674 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (persistWindowBeforeShutdown)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Run-scoped browser state (history plus scroll/form state) could be checkpointed in Quarry artifacts so a paused agent run or a HITL handoff resumes exactly where it stopped.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-036",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Chromium omnibox autocomplete in the address bar",
+    "what": "The address bar uses a real omnibox engine: ranked suggestions, search-the-web entries, per-suggestion removal, optional full-URL display and a focus shortcut.",
+    "how": "Main exposes an autocomplete service with start, stop, accept, recordNavigation, deleteMatch; results carry acceptToken, deleteToken, contents/contentsClass, description, iconURL, destinationURL, deletable, defaultMatch, done. Renderer overlay browser-address-suggestion-overlay renders them. Settings browser-show-full-url, command focusBrowserAddressBar, telemetry recordBrowserAutocompleteSuggestionsShown and recordBrowserAddressCommit.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:18532 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (autocomplete result wrappers Wy/Gy/qy) and M:18545 (class Jy start, stop, accept, deleteMatch)",
+      "codex/webview/assets/browser-address-suggestion-overlay-be134e9595f8.js",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n thread.browser.search, removeAddressSuggestion)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon omnibox turns non-URL text into a Google search blocked by the domain lock; a suggestion pipeline (history, top sites, search) would fix that if cross-site browsing is allowed.",
+    "notes": "Whether suggestions use OpenAI-side search is not verified."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-037",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Navigation controls, mouse side buttons and hard reload",
+    "what": "Back, forward, reload and hard reload work from toolbar, shortcuts and mouse back/forward buttons; reload retries the failed URL when the page is on an error screen.",
+    "how": "Commands navigateBrowserBack/Forward, reloadBrowserPage, hardReloadBrowserPage (reloadIgnoringCache). Preload captures mousedown/mouseup/auxclick buttons 3 and 4, prevents default and sends browser-sidebar-runtime-mouse-navigation. reload() navigates to loadError.failedUrl when an error page is showing and to pendingUrl for a never-loaded tab.",
+    "evidence": [
+      "tmp/cxib/preload.pretty.js:15988 [pretty copy of codex/.vite/build/browser-page-preload.js] (HS mouse handlers, button 3/4)",
+      "tmp/cxib/main.pretty.js:44994 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (reload)",
+      "tmp/cxib/main.pretty.js:45429 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (navigateCurrentPageHistory)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Reload currently re-navigates in Verevon; real history navigation and mouse buttons are cheap parity wins.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-038",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Custom network and crash error pages with targeted guidance",
+    "what": "Failed loads show a Chrome-style page that distinguishes DNS, offline, proxy, firewall, certificate, refused and timeout failures and offers a reload.",
+    "how": "loadBrowserErrorPage renders an error document (snapshots keep the failed URL rather than the error document). i18n keys browserSidebar.loadError.* (heading, dnsSummary, offlineSummary, refusedSummary, timeoutSummary, certificateSummary, checkProxyFirewallDns, networkAccessHeader) and browserSidebar.crashError.* (render process gone with open in external browser). Error pages are keyed per URL (errorPagesByUrl) and preserved on tab clone.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:45389 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (loadBrowserErrorPage)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n browserSidebar.loadError.*)",
+      "tmp/cxib/main.pretty.js:43322 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (render process gone handler)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry live view should classify navigation failures this way for users (and for the model) rather than showing a generic error.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-039",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Find in page, zoom, print and tab mute",
+    "what": "Standard page utilities are built in: find with next/previous, per-tab zoom with a banner and shortcuts, print, and mute/unmute of a tab.",
+    "how": "findInPage state machine (openFind, setFindQuery, findNext, findPrevious, closeFind; i18n codex.threadFindBar.*). Zoom: setThreadZoomPercent persists zoomPercent in the snapshot, setZoomFactor on the guest, accelerators step-zoom and reset-zoom (Ctrl +/-/0). print() calls webContents.print. setAudioMuted with i18n browser.tabAudioMuteContextMenu.*.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:44968 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (openFind..closeFind)",
+      "tmp/cxib/main.pretty.js:45110 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (setThreadZoomPercent)",
+      "tmp/cxib/main.pretty.js:45052 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (print)",
+      "tmp/cxib/main.pretty.js:45048 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (setAudioMuted)",
+      "tmp/cxib/main.pretty.js:34678 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (OR zoom accelerator mapping)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "None of these exist in the Verevon BrowserChrome; find and zoom matter for dense pages the user reviews while the agent works.",
+    "notes": "Scout inventory said print was not found; webContents.print is present at main L45052."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-040",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Media indicators and global browser activity menu",
+    "what": "Tabs show when they play audio or use the camera or microphone, and a sidebar menu lists all browser tabs currently using media across tasks.",
+    "how": "Per-tab state isAudible and isCapturingUserMedia; i18n thread.sidePanel.browserTab.using* and audioMuted; sidebar.browserMedia.globalMenuTitle (Browser activity) with count plural and Open action that focuses the tab.",
+    "evidence": [
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n thread.sidePanel.browserTab.*, sidebar.browserMedia.*)",
+      "tmp/cxib/main.pretty.js:44179 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (isAudible, isCapturingUserMedia used in protection)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Useful as a privacy affordance if Verevon agents ever open pages with media capture (remote support, meeting tools).",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-041",
+    "category": "In-app browser shell (user-facing)",
+    "name": "In-app web permission prompts (camera, microphone, location, etc.)",
+    "what": "Site permission requests appear as an in-app prompt tied to the tab, with allow or allow-this-time, approximate versus precise location, and a path to OS settings when the OS blocks access.",
+    "how": "Session is created with permissionHandling:browser and a setPermissionPromptHandler; default Electron request/check handlers answer false. Class xje stores pending prompts per web contents with hostGeneration, rendererInstanceId, navigationVersion, mountGeneration, validates responses with a strict zod union (action allow|allow-this-time, geolocationAccuracy approximate|precise, dismiss), supports variant os-system-settings, and transfers presentation when a tab moves windows.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:44409 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (xje)",
+      "tmp/cxib/main.pretty.js:44452 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (respond validation)",
+      "tmp/cxib/main.pretty.js:36994 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (setPermissionPromptHandler)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Prompt state bound to navigation and mount generations avoids stale approvals; worth copying for any Verevon-hosted live view that forwards permission prompts.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-042",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Download manager with agent-aware cancellation",
+    "what": "Downloads show in a popover (pause, resume, cancel, reveal, copy address) with a history page, a configurable location and an optional save dialog; unsolicited downloads are cancelled.",
+    "how": "Download store (Xwe) plus handler Ywe: a will-download item is cancelled (event.preventDefault, item.cancel) unless it is user initiated or matches an agent grant consumed via consumeAllowedBrowserUseDownload. Status machine started/in_progress/paused/complete/failed/canceled with updated and done events; notifyBrowserUseDownloadChange pushes status to the REPL. Settings browser-download-directory, browser-download-prompt-enabled; history persisted (electron-browser-download-history); a hidden WebContentsView (Jwe) performs app-initiated URL downloads with a 60 s timeout.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:38328 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Ywe)",
+      "tmp/cxib/main.pretty.js:38295 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Jwe)",
+      "codex/webview/assets/browser-use-settings-aaf0938b1b1a.js (downloads.* and settings.browserUse.downloads.*)",
+      "tmp/cxib/main.pretty.js:41060 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (allowDownload grants)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has no download UI; treating background downloads as denied-by-default with explicit grants is a safe baseline for agent runs.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-043",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Browsing history with agent/other source filter",
+    "what": "Chromium history is searchable in settings with an Agent badge and a filter that separates pages the agent visited from pages the user visited.",
+    "how": "Settings page browsingHistory: search, all-time, remove selected, pagination, source filter (all/agent/other) and agentBadge. Backing store is the owl session searchHistory with deduplicateByDay and favicon lookup. The agent-facing browser.history() is gated by feature inAppBrowserUseHistory and iab_history_approval_mode.",
+    "evidence": [
+      "codex/webview/assets/browser-use-settings-aaf0938b1b1a.js (settings.browserUse.browsingHistory.*)",
+      "tmp/cxib/main.pretty.js:19230 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (class Fb searchHistory in owl browser session)",
+      "tmp/cxib/main.pretty.js:41144 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (getUserHistory)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Tagging history entries by actor (agent vs human) is a cheap audit feature for Quarry sessions and the Verevon web-history list.",
+    "notes": "How the agent tag is stored is INF (navigation initiator browser_use passed to navigatePageToUrl); the UI strings are SRC."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-044",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Clear browsing data dialog with time ranges and data summaries",
+    "what": "A dialog clears history, cookies and site data, cache, download history, autofill form data and site settings for last hour, 24 hours, 7 days, 4 weeks or all time, with counts such as cache size and number of sites.",
+    "how": "cf(session, dataTypes, timeRange) maps to Electron storage clears (cookies, fileSystems, indexedDB, localStorage, webSQL, serviceWorkers), cache, downloads, history, formData. getBrowsingDataSummary computes first site, site count, cookie site count, cache bytes and download count. After clearing, reloadOpenPages reloads every live tab. Quick actions also exist for single types.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:5717 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (cf)",
+      "tmp/cxib/main.pretty.js:19251 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (getBrowsingDataSummary)",
+      "tmp/cxib/main.pretty.js:71533 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (clearBrowsingData then reloadOpenPages) and M:44951 (reloadOpenPages)",
+      "codex/webview/assets/browser-use-settings-aaf0938b1b1a.js (settings.browserUse.clearBrowsingData.*)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon profile popover can inspect cookies but offers no scoped clear; a time-ranged clear with summaries would complement ZDR.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-045",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Extensions with manager UI, toolbar actions and import",
+    "what": "Chrome extensions can be installed and managed from an embedded extension page, extension actions show in a toolbar menu, and extensions can be imported from a Chrome profile after an unverified-files confirmation.",
+    "how": "chrome://extensions/ opened in a dedicated settings webview (partition allowlist FCe with allowedNavigationUrls); feature gate browserExtensions. Methods triggerExtensionAction, getExtensionActionMenuTarget, closeExtensionActionMenu and subscribeExtensionActionEvents; settings browser-extensions-toolbar-visible and electron-browser-extension-recently-used. Import schema requires allowUnverifiedExtensions=true when importExtensions and only supports Chrome sources.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:36867 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (zCe/FCe settings webview allowlist)",
+      "tmp/cxib/main.pretty.js:19156 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (importBrowserProfile checks)",
+      "tmp/cxib/src-CP7.pretty.js:900 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (chrome://extensions/ constant ga)",
+      "tmp/cxib/main.pretty.js:19106 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (extension action RPC)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Probably out of scope for Verevon; relevant only if enterprise users need password-manager or SSO extensions inside a hosted browser.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-046",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Password manager, autofill and contact info via embedded Chromium settings",
+    "what": "Saved passwords, addresses and contact details are managed through Chromium settings pages embedded in the app settings, separate from agent permissions.",
+    "how": "Settings webviews load chrome://password-manager/, chrome://settings/addresses and chrome://settings/contactInfo in isolated partitions, only on the settings route (attach rejected otherwise). A server endpoint /flora/browser/form-fill is excluded from the generic auth retry path, suggesting AI form fill (INF). Agent sign-in can save a login to Passwords (browserAuth remember).",
+    "evidence": [
+      "tmp/cxib/src-CP7.pretty.js [pretty copy of src-CP7XXlpZ.js] src-CP7XXlpZ xa, Sa, ya, ba constants",
+      "tmp/cxib/main.pretty.js:36867 [pretty copy of codex/.vite/build/main-BklS_2Y2.js]",
+      "tmp/cxib/main.pretty.js:15986 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (form-fill special-case in fetch wrapper)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n settings.browserUse.passwordManager.*, autofillAndPasswords.title)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has no credential vault; a Chromium-native manager plus a broker that fills without exposing values is the target design (see browserAuth records).",
+    "notes": "AI form-fill purpose is INF from the endpoint name; no caller located."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-047",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Browser profile import from Chrome and Atlas",
+    "what": "Users can import cookies, passwords, history and extensions from an installed Chrome or ChatGPT Atlas profile, optionally limited to chosen cookie domains, unless an admin disables it.",
+    "how": "Class Mb (macOS and Windows only): getImportSignals (hasCookies, hasPasswords, hasHistory, hasExtensions, hasCookiesOlderThanProfile), listImportableBrowserProfiles, importBrowserProfile with schema source atlas|chrome, importCookies/importPasswords/importHistory/importExtensions, cookieDomainAllowlist (requires cookie import), allowUnverifiedExtensions, allowElevatedChromeDecryption. Requires at least one data type. Disabled when config requirements inAppBrowser.allowExternalBrowserSettingsImport is false. Result counts discovered/canonicalized/imported/skippedExisting/skippedInvalid/failed.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:19133 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (class Mb)",
+      "tmp/cxib/main.pretty.js:19156 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (managed policy error)",
+      "tmp/cxib/src-CP7.pretty.js:900 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (import schemas aa, sa, ca)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Bringing a user logged-in state into an agent browser is the top onboarding friction for web agents; Verevon would need a consent-scoped import (cookie domain allowlist) into a user_private Quarry profile.",
+    "notes": "Sensitive: passwords and cookies decrypted from another browser. We did not inspect any profile data."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-048",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Site settings and Chromium page info dialog",
+    "what": "Per-site camera, microphone, location, notifications, JavaScript, images, pop-ups, cookies, clipboard and more are editable from embedded Chromium settings, and a padlock opens the native page info dialog.",
+    "how": "settings webviews for chrome://settings/content (site details by origin via Aa), privacy, handlers, cookies in partition persist:codex-site-settings; i18n breadcrumb list (camera, clipboard, cookies, javascript, location, microphone, notifications, popups, protected content, sound, usb). openSiteInfo calls webContents.showPageInfoDialog with anchor bounds converted to screen coordinates.",
+    "evidence": [
+      "tmp/cxib/src-CP7.pretty.js [pretty copy of src-CP7XXlpZ.js] src-CP7XXlpZ wa, Ta, Ea, Da",
+      "tmp/cxib/main.pretty.js:44366 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (fje openSiteInfo, showPageInfoDialog)",
+      "codex/webview/assets/browser-site-settings-subpages-8af74e646e3e.js"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Relevant if Verevon hosts user-visible browsers; for now only the profile popover exists.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-049",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Context menu with comment, attach image and link routing",
+    "what": "Right-click offers Back, Forward, Reload, Quick annotate, Annotate, Attach image to chat, open link in new tab, new window or external browser, copy link and Inspect.",
+    "how": "Lke builds the menu: annotation items only when comment mode is allowed for the page (Hq: web page and no commentModeDisabledReason); attach image only for image targets (XR); link items gated by lL (in-app navigable) and isDefaultBrowser; labels from browserSidebar.contextMenu.* (commentWithCodex, quickAnnotate, attachImage, copyLink, inspect, openInBrowser).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:42676 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Lke)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n browserSidebar.contextMenu.*)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Context-menu actions that push page elements into the chat are the cheapest path to page-context sharing for Verevon chat.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-050",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Link destination preference and external browser routing",
+    "what": "Users choose whether web links open in the in-app side panel (recommended) or the system browser, local dev URLs have their own default, and any link can be opened externally.",
+    "how": "Settings openLinkInTargetPreference (ChatGPT vs default browser), localUrlOpenTarget, linkDestinationPrompt; feature default defaultLinkOpenTargetPreference=external-browser; openBrowserExternalUrl and isDefaultBrowser (bundle id checks for Chromium-family default browsers); links of the form https://chatgpt.com/codex/deeplink?url= are intercepted by the session request filter for first-party handoff (twe).",
+    "evidence": [
+      "tmp/cxib/src-CP7.pretty.js:337 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (browserUrl query handling)",
+      "tmp/cxib/main.pretty.js:45392 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (openBrowserExternalUrl)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n linkDestinationPrompt.*, settings.browserUse.localUrlOpenTarget.*)",
+      "tmp/cxib/main.pretty.js:2327 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (defaultLinkOpenTargetPreference)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon chat should decide whether a cited URL opens in its Quarry live view or externally; a user-level preference is cheap.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-051",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Automatic port forwarding for localhost on remote task hosts",
+    "what": "When a task runs on a remote or SSH host, localhost:PORT links in the browser are transparently forwarded to a local port so the page opens.",
+    "how": "YJ resolves a navigation for hostId: local returns the URL; for configured remote hosts it calls connection.startRemoteLocalhostPortForward(port) and rewrites the URL to localhost with the forwarded port; durable hosts return null. Failure logged as browser_sidebar.remote_localhost_port_forward_failed.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:45529 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (YJ)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Directly relevant to Model Plane sandboxes: previewing a dev server running inside a sandbox needs the same port-forwarding step before any browser can show it.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-052",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Local development ergonomics (no background throttling, file and localhost targets)",
+    "what": "Local pages (localhost and local files) are not throttled when the tab is in the background, and the plugin treats localhost and file URLs as the default in-app browser target.",
+    "how": "When He(url) is true (localhost or local file) the guest webPreferences.backgroundThrottling=false. Plugin description routes localhost, 127.0.0.1, ::1 and file:// to the in-app browser; docs/local-web-development.md says to reload after changes without HMR; site-status checks skip localhost.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:36798 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (backgroundThrottling = false)",
+      "tmp/cxib/main.pretty.js:123 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (He)",
+      "PLUG/browser/.codex-plugin/plugin.json",
+      "PLUG/browser/docs/local-web-development.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Agent testing of local apps in hidden tabs is only reliable without throttling; worth setting for any Quarry local-test mode.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-053",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Screenshots to clipboard, tab thumbnails and annotation screenshots",
+    "what": "A screenshot button copies the page to the clipboard, tab hover cards use cropped thumbnails, and comments can include a screenshot (always, or only for drag selections).",
+    "how": "captureScreenshotToClipboard (wje); captureTabThumbnail uses capturePage(undefined,{stayHidden:true}) cropped to 608x320 ratio and cached per navigation version for 1 s. Setting browser-annotation-screenshots-mode (always include vs only on drag selection) with an explicit warning that screenshots increase plan usage; runtime messages prepare/clear-comment-screenshot with timeouts.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:44377 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (gje thumbnail)",
+      "tmp/cxib/main.pretty.js:45103 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (captureScreenshotToClipboard)",
+      "codex/webview/assets/browser-use-settings-aaf0938b1b1a.js (settings.browserUse.browser.annotationScreenshots.*)",
+      "codex/.vite/build/src-CP7XXlpZ.js setting key browser-annotation-screenshots-mode"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Make screenshot-on-comment an explicit cost/quality user setting in Verevon chat.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-054",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Responsive viewport and device toolbar",
+    "what": "The agent (and users via a device toolbar setting for new tabs) can force a viewport size for responsive testing and reset it afterwards.",
+    "how": "Viewport capability set/reset calls setViewportForBrowserUse, which sends Emulation.setDeviceMetricsOverride {deviceScaleFactor:1, mobile:false, width, height}; env CODEX_BROWSER_USE_DEFAULT_VIEWPORT_SIZE sets a default; setting browser-show-device-toolbar-in-new-tabs; viewport waits (waitForViewportSize with 1 s abort) before screenshots; docs require reset() after temporary override.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:35383 [pretty copy of codex/.vite/build/main-BklS_2Y2.js]",
+      "tmp/cxib/main.pretty.js:35337 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (HB env)",
+      "PLUG/browser/docs/capabilities/browser/viewport.md",
+      "tmp/cxib/main.pretty.js:19112 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (waitForViewportSize)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon forces 1280x800; a viewport capability with explicit reset gives agents deterministic responsive testing.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-055",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Page color scheme follows app theme",
+    "what": "Pages see the app light or dark theme through prefers-color-scheme.",
+    "how": "syncs emulated media color scheme per guest (failed to sync browser page color scheme; Timed out syncing browser page color scheme), applying Emulation.setEmulatedMedia.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:35369 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (color scheme sync warning)",
+      "main strings: failed to sync browser page color scheme"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Minor polish for embedded Verevon live views.",
+    "notes": "Mechanism inferred from log strings plus the setEmulatedMedia call count of 1."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-056",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Cloud-synced browser permission policy",
+    "what": "Agent permissions (approval modes and per-site rules) are stored in the account and synchronized across devices, with revision conflicts surfaced to the user.",
+    "how": "Local file browser/config.toml (preferences plus origins, downloads, uploads, full_cdp, webmcp rule tables) is projected to /wham/browser/settings (GET, PATCH with expected_revision) by BrowserSettingsSync, which polls every 60 s (eme) and reacts to local file changes with a 200 ms debounce (tme); feature gate browserSettingsCloudSync; conflict message in UI: settings changed elsewhere, review and retry.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:18238 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Fy = /wham/browser/settings)",
+      "tmp/cxib/main.pretty.js:18252 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (BrowserSettingsSync)",
+      "tmp/cxib/main.pretty.js:17975 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (preference schema)",
+      "codex/webview/assets/browser-use-policy-site-permissions-124f08931952.js (settings.chromeExtension.conflict)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon org-level browser policy (allowed domains, approval modes) should be a revisioned account/org document, editable in UI and by file.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-057",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Enterprise-managed controls inside the browser UI",
+    "what": "Admins can block profile import, disable global persistent approvals and lock site permissions; managed items are labeled in settings.",
+    "how": "config requirements inAppBrowser.allowExternalBrowserSettingsImport=false; assertBrowserUseGlobalPersistentApprovalAllowed throws Global persistent Browser Use approvals are disabled by enterprise policy; network policy (codex-network-policy) marks origins as Blocked by your network configuration; UI strings Managed by your organization and Managed by your enterprise admin; availability can be disabled by organization or region.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:19181 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (allowExternalBrowserSettingsImport)",
+      "tmp/cxib/main.pretty.js:34250 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (assertBrowserUseGlobalPersistentApprovalAllowed)",
+      "codex/webview/assets/browser-use-policy-site-permissions-124f08931952.js (managedLegend, networkBlocked)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (settings.browserPlugin.restrictedAvailabilityDescription)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon Control Plane org policy should flow into Quarry as read-only managed rules rendered distinctly from user rules.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-058",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Privacy lockdown of Chromium background networking when the browser is unavailable",
+    "what": "If the in-app browser is turned off, Chromium is relaunched with background networking, component updates, Aim, autofill server communication and network time queries disabled.",
+    "how": "Chromium switches disable-background-networking and disable-component-update plus disable-features AimEnabled, AutofillServerCommunication, NetworkTimeServiceQuerying; marker switch codex-browser-background-networking-disabled; Gae reads in_app_browser availability from the app server feature list and relaunches the app when the switch state differs.",
+    "evidence": [
+      "browser-background-switches-Zzmx0u5p.js (V, H, U constants)",
+      "tmp/cxib/main.pretty.js:7225 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Gae, fp relaunch args)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Not directly portable to hosted Quarry, but the pattern (policy-gated engine without background calls) matters for ZDR and data residency.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-059",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Tab mention in composer with fail-closed snapshot validation",
+    "what": "Users can @-mention an open browser tab in the composer; the agent only acts on it if the exact tab and URL still match what the user referenced.",
+    "how": "Mention link plugin://browser@openai-bundled?mention=tab-v1&browserId&tabId&title&url (size limited; extension source adds source=extension). Resolution: agent.browsers.list() picks the iab browser whose metadata.codexSessionId equals browserId, then tabs.list() must contain an exact match on providerTabId, title and url; otherwise report unavailable. Composer shows tabs with favicon and recency (browserTabMentions, onBrowserTabMentionsInvalidated).",
+    "evidence": [
+      "PLUG/browser/docs/tab-mentions-iab.md",
+      "tmp/cxib/src-CP7.pretty.js:1055 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (mention builders and serializer)",
+      "tmp/cxib/src-CP7.pretty.js:1212 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (zod mention schema with recency)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n composer.atMentionList.browserTab*)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Page-context sharing by explicit @tab reference with a staleness guard is the safest way to let Verevon chat act on a page the user is viewing.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-060",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Page-context capture through comments (element, text, region)",
+    "what": "Users annotate an element, selected text or a dragged region; the chat receives the comment with a rich description of the target instead of raw page text.",
+    "how": "Comment payload type comment with localBrowserContext: pageUrl, framePath, frameUrl, selectedText or targetDescription, targetImmediateText, targetRole, targetName, targetSelector, targetPath (elementPath), targetRect, nearbyText, elementName, elementMetadata, virtualTarget{surfaceId,targetId}, documentContext; additionalSelections for multi-select; localBrowserCommentMetadata (browserTabId, commentId, kind, markerViewportPoint, themeVariant, viewportSize); localBrowserAttachedImages; optional screenshot. Quick annotate versus batch Annotate are distinct flows (QUICK and BATCH annotation flows); quick appears to send immediately and batch to collect several comments (INF from the menu labels).",
+    "evidence": [
+      "tmp/cxib/src-CP7.pretty.js:953 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (La builds comment payload)",
+      "tmp/cxib/src-CP7.pretty.js:936 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (Pa path label browser:title)",
+      "tmp/cxib/main.pretty.js:42676 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (QUICK vs BATCH flows)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "This structured element-reference schema (role, name, selector, nearby text, frame path) is directly reusable as Verevon page-context attachment and maps onto Quarry AX refs.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-061",
+    "category": "In-app browser shell (user-facing)",
+    "name": "In-page comment overlay, markers and annotation modes",
+    "what": "A comment overlay is injected into pages with editor cards, markers that can be hidden, previews, text selection comments and multi-select with modifier keys.",
+    "how": "Preload lazily mounts mountBrowserCommentRuntime (a bundled UI framework, likely React) into the page; host and page exchange browser-sidebar-runtime-* messages over ipcRenderer.invoke(codex_desktop:browser-sidebar-runtime-message) and receive codex_desktop:message-for-view. Interaction modes browse vs comment; messages include open-editor, create-comment-at-point, create-comment-from-selection, select-comment, annotation-selection hover and modifier state, exit-comment-mode. Settings: browser-annotation-markers-visible; coachmarks for first use; annotation multi-select feature gate.",
+    "evidence": [
+      "tmp/cxib/preload.pretty.js:15062 [pretty copy of codex/.vite/build/browser-page-preload.js] (mountBrowserCommentRuntime)",
+      "tmp/cxib/preload.pretty.js:15850 [pretty copy of codex/.vite/build/browser-page-preload.js] (DS runtime wiring)",
+      "tmp/cxib/preload.pretty.js:3716 [pretty copy of codex/.vite/build/browser-page-preload.js] (channel names)",
+      "tmp/cxib/main.pretty.js:44759 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (setThreadAnnotationModeEnabled)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "The annotate-on-page loop (markers, batch review, send) is the missing \"comment/annotate\" feature in Verevon BrowserChrome, which only has a hard-coded stub anchor.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-062",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Visual design editor (tweaks) producing CSS diffs",
+    "what": "Users can select an element and adjust spacing, padding, margin, layout direction, alignment, typography, colors and border radius visually; the changes are sent to the chat as property before-to-after diffs.",
+    "how": "Design editor UI (browserSidebarDesignEditor.*) with scrub controls (design-scrub-changed), lock ratio, collapse/expand spacing, Original view toggle (setOriginalViewEnabled) and design overlay add/update/delete messages. Comment content is body plus lines like property: previous -> value and text: previous -> value; payload field designChange {group, screenshot}. Gated by tweaks feature flag (setTweaksEnabled).",
+    "evidence": [
+      "codex/webview/assets/annotation-editor-d1102c1cd0b0.js (i18n browserSidebarDesignEditor.*)",
+      "tmp/cxib/src-CP7.pretty.js:959 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (za builds property: previous -> value diff lines)",
+      "tmp/cxib/main.pretty.js:44815 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (setTweaksEnabled)",
+      "tmp/cxib/main.pretty.js:45295 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (handleDesignOverlayAdd)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Likely out of scope for Verevon now; the diff-as-prompt idea (computed style before and after) is a neat way to turn GUI edits into agent instructions.",
+    "notes": "Depth of the style provenance inspection not verified."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-063",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Site Annotation API for pages (document.oai.annotation)",
+    "what": "Web apps can opt in to annotation: mark containers with attributes, register custom surfaces such as canvas hit testing, offer custom controls, request an annotation for an element or range, or toggle annotation mode.",
+    "how": "Preload defines document.oai (non-enumerable) with annotation = {toggle, isActive, request(element|range,{initialComment,mode,enterAnnotationMode,metadata}), registerSurface({element,hitTest,renderSelection})} through contextBridge.executeInMainWorld, top frame and secure context only. Declarative attributes oai-annotation-container, oai-annotation-container-text, oai-annotatable, oai-annotation-metadata; events codex:open-annotation, codex:annotation-surface-request/response/remove/available, oaiannotationmodechange, oaiannotationcontrolchange. Input is sanitized (plain data only, prototype checks, key and byte limits, 16 KB controls limit), toggling requires user activation and not agent control, and a per-site permission dialog (Let this site start annotation mode?) with allow or block lists (browser-site-annotation-permission-answered-hostnames, browser-disabled-site-annotation-hostnames).",
+    "evidence": [
+      "tmp/cxib/preload.pretty.js:3984 [pretty copy of codex/.vite/build/browser-page-preload.js] (Reflect.defineProperty document.oai)",
+      "tmp/cxib/preload.pretty.js:3748 [pretty copy of codex/.vite/build/browser-page-preload.js] (registerSurface)",
+      "tmp/cxib/preload.pretty.js:3619 [pretty copy of codex/.vite/build/browser-page-preload.js] (codex:open-annotation)",
+      "tmp/cxib/preload.pretty.js:4198 [pretty copy of codex/.vite/build/browser-page-preload.js] (attribute names)",
+      "codex/webview/assets/site-annotation-permission-dialog-896c2b068dcb.js",
+      "tmp/cxib/main.pretty.js:36651 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (kCe policy)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "A page-side opt-in contract for agent-assistable surfaces (similar to WebMCP) is a differentiator Verevon could offer to its own first-party apps and sites.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-064",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Site annotation metadata and page-suggested prompts reviewed by the user",
+    "what": "Anything a page contributes (metadata or a suggested prompt) is shown to the user for review and labeled as coming from the webpage; the model only receives what the user submits.",
+    "how": "UI strings: annotationCommentEditor.metadata.sourceTooltip (metadata is provided by the webpage), browserSidebarCommentOverlay.pagePromptExplanation (webpage suggested the prompt; ChatGPT receives only the text you submit), reviewPromptAndMetadataBeforeSubmitting, annotationControls.previewSharingWithWebsiteDomain (selections are shared with the site as you adjust controls). Feature detections are reported as telemetry (features, detections, used).",
+    "evidence": [
+      "codex/webview/assets/annotation-editor-d1102c1cd0b0.js (messages)",
+      "tmp/cxib/preload.pretty.js:15853 [pretty copy of codex/.vite/build/browser-page-preload.js] (Md site_annotation_features_changed payload)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "This is a concrete prompt-injection control for page-originated content; Verevon should adopt the same user-review gate for anything a crawled page tries to hand to the model.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-065",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Server-side comment-mode site blocklist",
+    "what": "Annotation features can be disabled for specific sites by a server-managed status, so users get a clear reason instead of broken behavior.",
+    "how": "wR requests /aura/site_status?site_url=<url> and reads feature_status.agent; result cached per normalized hostname (www stripped) for 24 h with in-flight dedupe; failure is treated as not blocked; commentModeDisabledReason is stored in the tab snapshot.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:34626 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (wR)",
+      "tmp/cxib/main.pretty.js:34676 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (DR path)",
+      "tmp/cxib/main.pretty.js:38266 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (commentModeBlockCheck flow)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A managed per-site capability list (agent allowed, annotation allowed) is a policy lever for Verevon org admins and for abuse handling.",
+    "notes": "The same endpoint feeds the agent navigation check (see AI-browser control)."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-066",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Drag an image from the page into the composer",
+    "what": "Dragging or choosing an image in a page attaches it to the chat as an image.",
+    "how": "Preload captures dragstart and dragend on images, resolving currentSrc and sends browser-sidebar-runtime-image-drag-started with sourceUrl; main attachDraggedImageToThread fetches and attaches it; context menu Attach image to chat uses the same path.",
+    "evidence": [
+      "tmp/cxib/preload.pretty.js:15974 [pretty copy of codex/.vite/build/browser-page-preload.js] (zS dragstart)",
+      "tmp/cxib/main.pretty.js:45286 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (attachDraggedImageToThread)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Cheap way for Verevon chat to ingest visual context from a Quarry-rendered page.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-067",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Cloud Browser live view with click-to-take-control overlay",
+    "what": "For server-hosted browser sessions the app shows a live view with connecting and unavailable states and a Click anywhere to use the browser overlay for manual takeover.",
+    "how": "Renderer components cloud-browser-side-panel and cloud-browser-local-live-view (aria label Live cloud browser, Retry); cloud-browser-control-overlay renders a full-surface button with the takeover message; sign-in flows show Let me know when you are done signing in.",
+    "evidence": [
+      "codex/webview/assets/cloud-browser-control-overlay-7932105fb937.js",
+      "codex/webview/assets/cloud-browser-side-panel-95cd78a09af2.js",
+      "codex/webview/assets/cloud-browser-local-live-view-17a7b31039cc.js"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Closest analogue to Verevon BrowserChrome live frame with takeover: the overlay-click-to-take-control pattern and explicit unavailable/retry states.",
+    "notes": "Cloud Browser engine and hosting are not visible in the client."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-068",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Hidden agent tabs mounted as hidden webviews, revealed on demand",
+    "what": "Agent-created tabs live in the same renderer as hidden webviews and appear in the tab strip without stealing focus; the browser panel is shown only when requested.",
+    "how": "Component HiddenBrowserUseWebviewHost mounts a webview with hostKind hidden-browser-use, isVisible=false, initialUrl about:blank until the snapshot URL is known; openPageForBrowserUse({createPanelTab:true}) posts open-browser-tab with active:false; presented state (hasPresentedMount, isTabPresented) controls whether the hidden host stays mounted.",
+    "evidence": [
+      "codex/webview/assets/hidden-browser-use-webview-host-b6797e1e4891.js",
+      "tmp/cxib/main.pretty.js:41279 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (createTabForBrowserUse)",
+      "tmp/cxib/main.pretty.js:42419 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (openPageForBrowserUse)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Background browsing without a visible panel while keeping tabs discoverable is the right default for Quarry agent runs launched from chat.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-069",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Browser activity PiP preview of agent-controlled tabs",
+    "what": "A picture-in-picture style preview shows live screenshots of tabs the agent controls (including external Chrome tabs) and can focus the tab when clicked.",
+    "how": "Browser service sends internal MCP notifications with codex/toolSurface metadata {backend, browserId, openTabIds, screenshot{tabId,url}, sessionEnded}; main keeps presentationIDsByTabID per thread and browser, and creates native presentations (cuaPIP gate) with focus callback; ended sessions or closed tabs remove presentations.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:5574 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Wd schema kind browserUse)",
+      "tmp/cxib/main.pretty.js:5615 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (presentation handling)",
+      "plugins/browser/scripts/browser-service.mjs codex/toolSurface string",
+      "tmp/cxib/main.pretty.js:2327 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (cuaPIP gate)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "An ambient mini-view of what the agent is doing, outside the main panel, is a strong trust feature for long Verevon browser runs.",
+    "notes": "Gate cuaPIP default false; exact window chrome not verified."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-070",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Browser keyboard commands and customizable accelerators",
+    "what": "Browser actions have named commands and accelerators (focus address bar, find, zoom, reload, copy URL, toggle panel) that follow a command keymap.",
+    "how": "Command ids codex.command.toggleBrowserPanel, showWorkspaceTabView, stepWorkspaceLayout; refreshOwnerCommandAccelerators and getCommandKeymapState feed ownerCommandAccelerators; runFocusedVisiblePageCommand dispatches copy-url, find-next, find-previous, go-back, go-forward, open-find, reset-zoom, step-zoom only when the browser panel has focus; setting browser-link-shortcut.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:44896 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (runFocusedVisiblePageCommand)",
+      "tmp/cxib/main.pretty.js:44701 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (refreshOwnerCommandAccelerators)",
+      "codex/.vite/build/src-CP7XXlpZ.js codex.command.* ids"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "If Verevon adds a real browser surface, route accelerators through its existing command registry so they are remappable.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-071",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Settings surface for browser and agent permissions",
+    "what": "A Browser settings area groups General, Agent permissions (site matrix), Browsing history, Downloads, Extensions, Passwords, Contact info, Site settings and Import.",
+    "how": "Routes under /settings/browser-use/* (downloads, history, passwords) and nav ids settings.nav.browser-use, browser-extension, chatGptCloudBrowser; settings webviews with breadcrumbs and navigation back/forward inside embedded Chromium pages. Policy matrix columns Site or pattern, Browsing, Downloads, Uploads, Debug / CDP, Site tools with defaults Allow, Always allow, Requires approval, Block and add-site dialog accepting origins such as https://*.example.com.",
+    "evidence": [
+      "tmp/cxib/src-CP7.pretty.js:900 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (route constants ma, va, Ca with partitions and chrome:// pages)",
+      "codex/webview/assets/browser-use-policy-site-permissions-124f08931952.js",
+      "codex/webview/assets/browser-use-settings-aaf0938b1b1a.js"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Strongest UX reference for a Verevon Quarry browsing-policy page (per-site matrix with defaults and exceptions).",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-072",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Browser diagnostics for feedback and support",
+    "what": "Feedback reports can attach browser tab diagnostics, and an internal debug snapshot keeps the last 200 browser session events.",
+    "how": "getFeedbackDiagnostics returns a browser-tabs.json attachment included when includeBrowserTabs is chosen; BrowserSessionRegistry.recordDebugEvent keeps a ring of 200 events with sequence numbers and getDebugSnapshot lists session routes; openDebugTabOwner and toggleDebugModal commands exist.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:71536 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (browser-tabs.json feedback attachment)",
+      "tmp/cxib/main.pretty.js:42008 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (kq debugEvents pke=200)",
+      "tmp/cxib/main.pretty.js:44788 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (getFeedbackDiagnostics)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "A bounded per-run browser event ring buffer exposed to support is a low-cost debugging aid for Quarry sessions.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-073",
+    "category": "In-app browser shell (user-facing)",
+    "name": "New tab page with top sites, dismiss and restore",
+    "what": "A new tab shows top sites with favicons that can be dismissed or restored, alongside suggested side-panel tab types.",
+    "how": "Browser session topSites with changed events, dismissTopSite(url) and restoreTopSite(url) (blocked-URL list), favicons resolved asynchronously via faviconService; side panel New tab list (Suggested, Terminal, Desktop, New page); emptyBrowserTab tab type NEW_TAB_PAGE.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:19242 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (dismissTopSite, restoreTopSite)",
+      "tmp/cxib/main.pretty.js:19279 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (subscribeTopSites)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n thread.sidePanel.newTab.*)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "A start page of frequently used sites is a cheap way to launch common Verevon browse targets (org portals, docs).",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-074",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Web notifications routed back to the originating tab",
+    "what": "Notifications raised by a web page are shown by the OS and clicking one focuses the exact browser tab that raised it.",
+    "how": "Browser session handler web-notification-clicked calls onWebNotificationClicked, which finds the page state and focuses the owning window and tab (stealFocus); log tag embedded_browser_notification.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:36996 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (web-notification-clicked)",
+      "tmp/cxib/main.pretty.js:45427 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (onWebNotificationClicked focus)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Only relevant if Verevon hosts long-lived web apps in a user-visible browser.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-075",
+    "category": "AI-browser control",
+    "name": "Model-written JavaScript against a typed browser runtime (node_repl plus browser-client)",
+    "what": "The agent does not call fixed tools; it writes JavaScript in a persistent Node REPL that imports a browser-client module and drives agent.browsers, tabs and tab APIs.",
+    "how": "Plugin skill control-in-app-browser tells the model to import scripts/browser-client.mjs by absolute path, call setupBrowserRuntime(), select a browser (getDefault, getForUrl, get iab|chrome|edge|extension) and read the full documentation() once. REPL state persists across calls (const for stable handles). Per-thread node_repl MCP server is configured with env BROWSER_USE_AVAILABLE_BACKENDS, BROWSER_USE_DISABLE_API_MEMBERS, BROWSER_USE_DISABLE_BROWSER_CAPABILITIES, BROWSER_USE_DISABLE_TAB_CAPABILITIES, BROWSER_USE_SECURITY_MODE, BROWSER_USE_TINYSKY_ENABLED and a browser-service.mjs path. Turn-end hooks call node_repl turn_ended.",
+    "evidence": [
+      "PLUG/browser/skills/control-in-app-browser/SKILL.md",
+      "tmp/cxib/main.pretty.js:4235 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (ac builds node_repl env for browser-service)",
+      "tmp/cxib/main.pretty.js:1540 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (env constant names)",
+      "tmp/cxib/browser-client.pretty.js:3542 [pretty copy of plugins/browser/scripts/browser-client.mjs] (setupBrowserRuntime export)",
+      "PLUG/browser/.codex-plugin/plugin.json (Stop/Interrupt/SubagentStop hooks)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon browser.observe/browser.act are fixed tools; a code-execution runtime lets the model batch many actions per call, which cuts round trips on long web tasks, at the cost of a stricter sandbox.",
+    "notes": "Code execution gives power but needs the layered policy (see safety records). Quality 4: elegant batching, heavy bootstrap instructions."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-076",
+    "category": "AI-browser control",
+    "name": "Backend-agnostic typed command protocol (AtlasCommand, about 85 command types)",
+    "what": "All browser operations are typed commands with zod schemas, shared by the in-app browser, Chrome/Edge extension, raw CDP, MCP Apps and cloud browsers.",
+    "how": "browser-client defines class AtlasCommand(type, schema, payload) and a command catalogue: CreateTab, CloseTab, NavigateTab*, TabScreenshot, TabAxGetState, TabAxAction, Cua* (click, double_click, drag, keypress, move, scroll, type, download_media), DomCua* (get_visible_dom plus node actions), Playwright* (locator click/fill/press/select/wait/count/read_all, dom_snapshot, element_info, element_screenshot, evaluate, wait_for_*), TabClipboard*, TabContentExport*, TabDevLogs, TabGetJsDialog/TabHandleJsDialog, WebMcpListTools/WebMcpInvokeTool, ManualHandoff, MarkTab, NameSession, BrowserUser* (open tabs, claim tab, history), BrowserManagement*, BrowserViewport*, BrowserVisibility*. The naming (AtlasCommand) indicates the protocol predates the in-app browser and also serves the Atlas browser (INF).",
+    "evidence": [
+      "tmp/cxib/browser-client.pretty.js:131 [pretty copy of plugins/browser/scripts/browser-client.mjs] (AtlasCommand)",
+      "tmp/cxib/browser-client.pretty.js:133 [pretty copy of plugins/browser/scripts/browser-client.mjs] (command export list P)",
+      "tmp/cxib/browser-client.pretty.js:134 [pretty copy of plugins/browser/scripts/browser-client.mjs] (class i)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "A single versioned, schema-validated command set that every browser backend implements is the right contract for Quarry (hosted Chromium, remote desktop, MCP) so the model sees one API.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-077",
+    "category": "AI-browser control",
+    "name": "Per-backend API support matrix and capability discovery",
+    "what": "The runtime tells the model what each browser backend can do: members unsupported by default are listed per backend, and optional capabilities are discovered at runtime and documented on demand.",
+    "how": "api.json marks each member with unsupportedByDefaultIn for iab, extension, cdp, mcpapps (for example Tab.ax is off by default in iab, Browser.history off in iab/cdp/mcpapps, Tabs.content unsupported in iab, Browser.user unsupported in iab). getInfo returns apiSupportOverrides (Browser.user=false, Browser.history only when feature inAppBrowserUseHistory, Tab.markDeliverable and markHandoff true). browser.capabilities.list()/get(id) and tab.capabilities.list()/get(id) return advertised capabilities (visibility, viewport, management, cdp, botDetection, browserAuth, pageAssets, webmcp), each with documentation(). documents.json conditions inclusion by browserTypes, requiredApiMembers, requiredTabCapabilities.",
+    "evidence": [
+      "PLUG/browser/docs/api.json (unsupportedByDefaultIn)",
+      "PLUG/browser/docs/documents.json",
+      "tmp/cxib/main.pretty.js:41132 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (getInfo with apiSupportOverrides)",
+      "tmp/cxib/main.pretty.js:40917 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (EOe/DOe capability info arrays)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Capability negotiation plus conditional doc loading keeps the model prompt small and truthful per backend; Quarry already has many action kinds the gateway hides, so an explicit support matrix would expose them safely.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-078",
+    "category": "AI-browser control",
+    "name": "Local native pipe transport between REPL and desktop app",
+    "what": "The REPL talks to the app over a local named pipe with framed JSON, receives pushed CDP events, page events and download changes, and is cancelled cleanly on turn end.",
+    "how": "Pipe path \\\\.\\pipe\\codex-browser-use (win32) or /tmp/codex-browser-use; class _ae (net.createServer) with length-prefixed frames, max incoming 8 MB (oke) and outgoing 64 MB (ske), clientId routing; lke wires apiImpl (HOe) and forwards addCdpEventListener, addCdpDetachListener, addPageEventListener and download changes; oversized CDP events are skipped with a warning; WebMCP tool-invoked notifications and moveMouse errors are handled. Peer authorization via native addon browser-use-peer-authorization.node is only enabled on macOS: on other platforms cp() returns authorized:true.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:1887 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (br pipe path)",
+      "tmp/cxib/main.pretty.js:41891 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (lke native pipe server)",
+      "tmp/cxib/main.pretty.js:6897 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (np/_ae server)",
+      "tmp/cxib/main.pretty.js:7113 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (cp peer authorization, darwin only)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A local pipe is fine for desktop, but Verevon is server-side: use authenticated gRPC with per-run audience tokens (the existing BrowserBroker grant model) rather than a bearerless local endpoint.",
+    "notes": "Windows pipe DACL not inspected; with no peer authorization on win32, any process able to open the pipe could issue browser commands (open question, flagged as weakness)."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-079",
+    "category": "AI-browser control",
+    "name": "Raw CDP over the guest debugger with per-tab lease and emulated Target domain",
+    "what": "The in-app browser backend executes CDP commands through the guest webContents debugger, presenting each tab as a single emulated target and refusing most Target.* and Input.* methods.",
+    "how": "HOe.executeCdpForBrowserUse: resolve tab, assertCurrentPageAllowed, attachTab (debuggerLeases WeakMap, lease released on detach), waitForTabReadyForCdp, then webContents.debugger.sendCommand with timeout (default 20 s, cursor arrival 1.5 s, page ready 15 s). dq() rejects Target.* except setAutoAttach (Target.getTargetInfo, getTargets, closeTarget are emulated with id browser-use-iab-tab:<n>) and Input.* except dispatchMouseEvent, dispatchKeyEvent, insertText. Page.reload and navigation history commands are mapped to webContents calls. Child frame targets are attached with flatten sessions.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:40954 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (HOe fields and timeouts)",
+      "tmp/cxib/main.pretty.js:41308 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (executeCdpForBrowserUse)",
+      "tmp/cxib/main.pretty.js:41783 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (dq)",
+      "tmp/cxib/main.pretty.js:41694 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (executeEmulatedTargetCommand)",
+      "tmp/cxib/main.pretty.js:41620 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (attachTab lease)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry already uses chromiumoxide CDP; the emulated single-target model and per-method allowlist are good patterns when exposing CDP to a model.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-080",
+    "category": "AI-browser control",
+    "name": "Accessibility-tree-first observation with indexed elements and diffing",
+    "what": "The agent reads a compact accessibility text of the page with numbered elements, and later reads only what changed, then acts by element index.",
+    "how": "tab.ax.write() emits AX text (title and URL included); element_index is valid only for the latest state; default output is a diff against the previous revision (disableDiffing for a fresh tree); write(screenshot|both) adds visuals. Implementation: per frame CDP Accessibility.getFullAXTree plus DOMSnapshot metadata (bounds, backend node ids), frames merged via DOM.getFrameOwner, then a WASM engine (browser-accessibility.wasm.br exporting computer_use_browser_wasm_revision_*; shared with the computer-use stack, Rust origin inferred) builds revisions with text, identity-for-element and isValueSettable; a previous revision pointer enables the diff. In iab this member is marked unsupportedByDefaultIn iab; a browserUseTinysky gate and BROWSER_USE_TINYSKY_ENABLED env exist and probably enable it (INF).",
+    "evidence": [
+      "PLUG/browser/docs/accessibility.md",
+      "tmp/cxib/browser-service.pretty.js:5345 [pretty copy of plugins/browser/scripts/browser-service.mjs] (WASM revision wrapper Mf)",
+      "tmp/cxib/browser-service.pretty.js:18501 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Accessibility.getFullAXTree per frame)",
+      "tmp/cxib/browser-service.pretty.js:18441 [pretty copy of plugins/browser/scripts/browser-service.mjs] (DOMSnapshot)",
+      "PLUG/browser/docs/api.json (AXAPI)",
+      "tmp/cxib/main.pretty.js:1540 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (BROWSER_USE_TINYSKY_ENABLED)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry has AX snapshot refs (ref_id, snapshot_id, generation) that Verevon never surfaces; adopting indexed AX text with diff output for browser.observe is the highest-leverage token saver.",
+    "notes": "Wire format of the AX text not captured from a live run."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-081",
+    "category": "AI-browser control",
+    "name": "AX action set with held clicks, secondary actions and virtual clipboard paste",
+    "what": "Actions target AX indices (click, drag, paste, type, press key, scroll, select text, set value, perform secondary action such as Expand or Collapse) and can hold clicks or keys for a duration.",
+    "how": "AXAPI methods click(target,{clickCount,duration,key,mouseButton}), drag, paste(index,text,{format text|md|html}), pressKey(index|null,key,{duration}) with xdotool-style key names (Return, super+c, KP_0), scroll(target,direction,pages), selectText with prefix/suffix/selectionType, setValue, typeText, performSecondaryAction (only advertised action names). Held clicks require a visible hittable target; durations 0-30 s. Each action focuses the element first and the runtime waits automatically before the next state.",
+    "evidence": [
+      "PLUG/browser/docs/accessibility.md",
+      "PLUG/browser/docs/api.json (AXAPI, AXClickOptions, AXPressKeyOptions)",
+      "tmp/cxib/browser-service.pretty.js:17816 [pretty copy of plugins/browser/scripts/browser-service.mjs] (paste)",
+      "tmp/cxib/browser-service.pretty.js:17936 [pretty copy of plugins/browser/scripts/browser-service.mjs] (secondary action check)"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry browser.act ref actions (click_ref, type_ref, select_ref, wait_for_ref) are similar; add secondary actions, held modifiers and selection-range control.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-082",
+    "category": "AI-browser control",
+    "name": "Filtered DOM with node ids and coordinate (vision) actions as fallbacks",
+    "what": "When AX is not enough the agent can read a filtered visible DOM with node ids, or click and type by viewport coordinates from a screenshot.",
+    "how": "DomCUAAPI get_visible_dom returns a filtered DOM with node ids for interactable elements; click/double_click/scroll/type/keypress/downloadMedia by node_id. CUAAPI click, double_click, drag(path), move, scroll(x,y,scrollX,scrollY), type, keypress with modifier arrays and mouse buttons 1-5 (back and forward). Docs tell the model to prefer AX indices, then Playwright locators, then coordinates.",
+    "evidence": [
+      "PLUG/browser/docs/api.json (CUAAPI, DomCUAAPI)",
+      "PLUG/browser/docs/accessibility.md (preference order)",
+      "tmp/cxib/browser-service.pretty.js:23152 [pretty copy of plugins/browser/scripts/browser-service.mjs] (pointer dispatch with ui.moveMouse)"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "A tiered fallback ladder (AX, DOM node id, locator, coordinates) is a good model for Quarry action selection.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-083",
+    "category": "AI-browser control",
+    "name": "Playwright-compatible locators and waits with rich failure diagnostics",
+    "what": "The agent can use familiar Playwright locators (getByRole, getByText, frameLocator, filter, nth, and, or) and waits, and failed actions return counts and sample matches to help it retarget.",
+    "how": "tab.playwright exposes locator, getByRole/Text/Label/Placeholder/TestId, frameLocator, evaluate (read-only DOM scope, JSON-serializable args), elementInfo(x,y) with ranked selector candidates and frameSelectors, elementScreenshot with overlay, domSnapshot, waitForEvent(filechooser|download), waitForLoadState, waitForURL, expectNavigation. Selectors compile to Playwright internal engines (internal:role, internal:text, internal:label, internal:attr, >> nth=, internal:control=enter-frame, internal:and/or) executed by an embedded InjectedScript. On error, actionError runs evaluateAll and appends Locator diagnostics {kind, action, locator, matchCount, visibleCount, matches[5], truncated}. Reads of locator.all() share a collection read cache.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:40431 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (class pK PlaywrightLocator)",
+      "tmp/cxib/main.pretty.js:40559 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (actionError diagnostics)",
+      "tmp/cxib/browser-client.pretty.js:2468 [pretty copy of plugins/browser/scripts/browser-client.mjs] (Locator diagnostics in client)",
+      "tmp/cxib/browser-service.pretty.js:19012 [pretty copy of plugins/browser/scripts/browser-service.mjs] (InjectedScript)",
+      "PLUG/browser/docs/api.json (PlaywrightAPI, PlaywrightLocator)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Locator diagnostics on failure is a small, high-value feature for Quarry error payloads (why the click failed, how many matches, how many visible).",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-084",
+    "category": "AI-browser control",
+    "name": "Cross-frame and cross-origin iframe handling",
+    "what": "AX, DOM snapshots, locators and WebMCP see into iframes, including cross-origin ones.",
+    "how": "Target.setAutoAttach and Target.attachToTarget(flatten) per iframe target; frame tree and DOM.getFrameOwner map owner nodes; capture merges per-frame AX nodes with parent bounds; Playwright selectors use internal:control=enter-frame with chained frameLocator; credential and WebMCP flows record frameId and origin per frame.",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:18486 [pretty copy of plugins/browser/scripts/browser-service.mjs] (captureDocuments)",
+      "tmp/cxib/browser-service.pretty.js:12453 [pretty copy of plugins/browser/scripts/browser-service.mjs] (enter-frame)",
+      "tmp/cxib/main.pretty.js:41850 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (emulated Target frames)",
+      "tmp/cxib/main.pretty.js:43059 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (WebMCP per-frame discovery)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry has frame refs (frame_id) already; check parity on cross-origin iframes and shadow roots.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-085",
+    "category": "AI-browser control",
+    "name": "Animated agent cursor with arrival acknowledgement",
+    "what": "The app draws the agent cursor moving to each target before the click lands, so the user can follow the agent.",
+    "how": "Every pointer command calls ui.moveMouse(tabId,x,y) which sends moveMouse over the pipe; HOe.moveMouse allocates a moveSequence, calls host.setBrowserUseCursor({moveSequence, x, y}) and waits up to cursorArrivalTimeoutMs (1.5 s) for the renderer to ack with browser-use-cursor-arrived; then CDP Input.dispatchMouseEvent mouseMoved/mousePressed/mouseReleased follows. Renderer subscribes to browser-sidebar-browser-use-cursor-state.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:41164 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (moveMouse)",
+      "tmp/cxib/main.pretty.js:41257 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (waitForCursorArrival)",
+      "tmp/cxib/browser-service.pretty.js:23097 [pretty copy of plugins/browser/scripts/browser-service.mjs] (dispatchMouseMove)",
+      "tmp/cxib/browser-service.pretty.js:23919 [pretty copy of plugins/browser/scripts/browser-service.mjs] (ui.moveMouse)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon BrowserChrome only shows rationale bubbles and step badges; an agent cursor with arrival sync is the clearest trust feature to add.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-086",
+    "category": "AI-browser control",
+    "name": "Agent-active state, auto panel reveal and capture surface sizing",
+    "what": "When the agent starts using a tab the app marks it active, can open the browser panel, protects the tab from suspension, and sizes the capture surface for full-page screenshots.",
+    "how": "setBrowserUseActive(on, tabId) per route; pendingBrowserUsePanelOpen and openBrowserPanelWithoutAnimation; markBrowserUseCommandForTab activates the navigation restriction, acquires a page capture paint lease (setPageCapturePaintLeaseEnabled) so hidden pages keep painting for screenshots, and sets sessionControlled. For captureBeyondViewport screenshots the host temporarily resizes the capture surface (setCaptureSurfaceForBrowserUse) and waits on Page.getLayoutMetrics until the visual viewport is large enough (up to 1 s).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:41412 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (markBrowserUseCommandForTab)",
+      "tmp/cxib/main.pretty.js:41419 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (acquirePageCapturePaintLease)",
+      "tmp/cxib/main.pretty.js:41728 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (waitForCaptureSurface)",
+      "tmp/cxib/main.pretty.js:43650 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (setBrowserUseActiveForRoute)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Off-screen capture for background tabs needs an explicit paint lease; Quarry avoids this by always being headless, but any hybrid (visible plus hidden) needs the equivalent.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-087",
+    "category": "AI-browser control",
+    "name": "Visibility and viewport as agent-controlled capabilities with pending intents",
+    "what": "By default the agent browses in the background and must explicitly show the browser; viewport or visibility requested before a tab exists are applied when the tab is created.",
+    "how": "browser.capabilities visibility.set(true|false)/get and viewport.set({width,height})/reset; docs say keep browser work in the background unless the user wants to watch. When no controlled tab exists yet, executeUnhandledCommand stores a pending capability intent per route (pendingVisibilityRouteKeys, pendingViewportSizesByRouteKey) and applyPendingCapabilityIntents runs in createTabForBrowserUse.",
+    "evidence": [
+      "PLUG/browser/docs/visibility.md",
+      "PLUG/browser/docs/capabilities/browser/viewport.md",
+      "tmp/cxib/main.pretty.js:41335 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (setPendingCapabilityIntent)",
+      "tmp/cxib/main.pretty.js:41345 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (applyPendingCapabilityIntents)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Show-or-hide as an explicit agent decision with a user-facing rule (only show when the user wants to watch) is a good default for Verevon chat panels.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-088",
+    "category": "AI-browser control",
+    "name": "Turn-scoped tab lifecycle, marks and release of session control",
+    "what": "Tabs the agent opens are temporary and closed when the turn ends unless marked as a deliverable or handoff; tabs the user opened are released, not closed.",
+    "how": "Tab lifetime temporary vs persistent; markTab({status: handoff|deliverable, turn_id}); on turnEnded the host restores page clipboards, detaches the debugger, then closes unmarked temporary tabs, releases marked or persistent tabs (releasePageForBrowserUse), deactivates cursor and activity, and clears pending intents. Marks are turn-scoped and latest wins; a handoff-marked temporary tab is kept open but its mark is cleared at turn end, so it must be re-marked in later turns. Interrupt, SubagentStop and Stop hooks trigger turn_ended.",
+    "evidence": [
+      "PLUG/browser/docs/tab-cleanup-iab.md",
+      "tmp/cxib/main.pretty.js:41185 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (turnEnded)",
+      "tmp/cxib/main.pretty.js:41154 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (markTab)",
+      "PLUG/browser/.codex-plugin/plugin.json (hooks)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Explicit deliverable/handoff marks make the end-of-run browser state a first-class output; Quarry sessions currently have only step and runtime budgets.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-089",
+    "category": "AI-browser control",
+    "name": "Extension backend: claim user tabs, agent tab group, session naming",
+    "what": "With the Chrome/Edge extension the agent can list the user open tabs, claim a chosen one for control, and name its session; claimed tabs that are not marked are released and left open.",
+    "how": "BrowserUser.openTabs (ordered by lastOpened with tabGroup), claimTab(tab) returns a controllable Tab without moving it into an agent tab group; getTabContext (documented false) reads bounded text, library file or document context without claiming; browser.nameSession(name) required at start of Chrome tasks (emoji prefix); native messaging host com.openai.codexextension via extension-host.exe; extension ids for Chrome, Edge, Brave, Opera, Vivaldi; diagnostics scripts check install and manifest.",
+    "evidence": [
+      "PLUG/browser/docs/tab-claiming-chrome.md",
+      "PLUG/browser/docs/session-naming.md",
+      "PLUG/browser/docs/api.json (BrowserUser)",
+      "INSTALL/resources/plugins/openai-bundled/plugins/browser/scripts/extension-ids.json",
+      "INSTALL/resources/plugins/openai-bundled/plugins/chrome/extension-host/windows/x64/extension-host.exe"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A claim-this-tab-from-the-user flow with fail-closed identity matching is the pattern for letting Verevon agents take over a customer authenticated browser session via a browser extension.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-090",
+    "category": "AI-browser control",
+    "name": "User takeover and manual handoff",
+    "what": "The user can take over at any time: sign-in requests offer Take over, interruptions end the agent control cleanly, and cloud tabs can be handed to the user.",
+    "how": "Tab.requestManualHandoff() (cloud only) marks a tab for handoff and shows the live-view overlay; browserAuth returns declined with reason user_took_over (elicitation action decline with meta openai/user_took_over); browser-control-interruption doc tells the model to summarize interruptions naturally; recovery errors suggest requestManualHandoff when observation is blocked; preload disables annotation features while isAgentControllingBrowser. In the IAB the user can interact with the guest directly at any time (no input lock was found).",
+    "evidence": [
+      "PLUG/browser/docs/browser-control-interruption.md",
+      "tmp/cxib/browser-service.pretty.js:14656 [pretty copy of plugins/browser/scripts/browser-service.mjs] (JX = openai/user_took_over)",
+      "tmp/cxib/browser-service.pretty.js:14800 [pretty copy of plugins/browser/scripts/browser-service.mjs] (declined user_took_over)",
+      "tmp/cxib/browser-client.pretty.js:37 [pretty copy of plugins/browser/scripts/browser-client.mjs] (credential recovery error mentions requestManualHandoff)",
+      "tmp/cxib/preload.pretty.js:15856 [pretty copy of codex/.vite/build/browser-page-preload.js] (isAgentControllingBrowser gating)",
+      "codex/webview/assets/cloud-browser-control-overlay-7932105fb937.js"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon already has takeover mode with 409 on agent actions; add explicit declined-with-reason semantics so the model can recover gracefully.",
+    "notes": "No explicit in-app input lock for IAB found; co-browsing is implicit. Confidence medium on how takeover is detected in the IAB."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-091",
+    "category": "AI-browser control",
+    "name": "Layered, fail-closed safety decision taxonomy",
+    "what": "Every blocked browser action returns a typed reason from a fixed set that tells the model whether the block is retryable and forbids workarounds.",
+    "how": "BrowserUseSecurityError with 16 reasons grouped by decisionSource: approval (approval_cancelled, approval_failed_closed, approval_unavailable), browser (browser_capability_blocked/unavailable, browser_context_unavailable, browser_navigation_blocked, navigation_url_policy_blocked), enterprise (enterprise_policy_blocked/unavailable), guardian (guardian_denied, guardian_timed_out), user_persisted_setting (persisted_user_denied), site_status (site_status_blocked/unavailable), user_decision (user_declined). Non-retryable messages append: must not attempt the same outcome via workaround, indirect execution, raw CDP, alternate browser surfaces or policy circumvention; retryable ones say the failure may be temporary. Unavailable checks deny (fail closed).",
+    "evidence": [
+      "tmp/cxib/browser-client.pretty.js:7 [pretty copy of plugins/browser/scripts/browser-client.mjs] (zo taxonomy)",
+      "tmp/cxib/browser-client.pretty.js:11 [pretty copy of plugins/browser/scripts/browser-client.mjs] (Et class)",
+      "tmp/cxib/browser-service.pretty.js:1120 [pretty copy of plugins/browser/scripts/browser-service.mjs] (same in service)",
+      "tmp/cxib/browser-service.pretty.js:11387 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Oe throw with audit), BS:11391 (qt denial mapping), BS:11413 (sr result mapping)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry policy denials already surface to the UI; typed reasons with retryable flags and explicit no-workaround guidance should be added to browser.act errors.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-092",
+    "category": "AI-browser control",
+    "name": "Approval pipeline using MCP elicitation, auto-review (guardian) and per-origin approval cache",
+    "what": "When consent is needed the service asks via an elicitation that either the user or an automated reviewer answers; accepted automated approvals are cached briefly per origin.",
+    "how": "Wt() obtains createElicitation and treats accept/decline/cancel; meta approvals_reviewer guardian_subagent|auto_review marks automated reviewers; guardianMode v1/v2; Zt cache records an approval for threadId plus origin for 5 minutes (expiresAt now+3e5) and revokes pending reviews; messages set codex_approval_kind mcp_tool_call, codex_sensitive_action and for WebMCP codex_strict_auto_review. Decisions emit an audit record {backend, browserFamily, check, durationMs, outcome success|denied|error_fail_closed|bypassed, permissionSource, reason}. Env NODE_REPL_FORCE_STRICT_AUTO_REVIEW exists.",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:11376 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Yt audit emit)",
+      "tmp/cxib/browser-service.pretty.js:11416 [pretty copy of plugins/browser/scripts/browser-service.mjs] (ni guardian detection)",
+      "tmp/cxib/browser-service.pretty.js:11490 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Zt origin approval cache)",
+      "tmp/cxib/browser-service.pretty.js:11546 [pretty copy of plugins/browser/scripts/browser-service.mjs] ($R origin consent loop)",
+      "tmp/cxib/browser-service.pretty.js:25173 [pretty copy of plugins/browser/scripts/browser-service.mjs] ($ee decision schema)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon already has HITL approvals for browser risk categories; routing the same request to an automated reviewer first (with a short cache) would cut approval fatigue.",
+    "notes": "How the guardian subagent decides is outside this facet."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-093",
+    "category": "AI-browser control",
+    "name": "Per-origin consent for browsing, downloads, uploads, full CDP and site tools",
+    "what": "The agent needs consent per origin for each class of action, and users or admins can pre-allow or block origins with wildcard patterns.",
+    "how": "Checks: browser-origin-access (message Allow {browser} to access {origin}?), browser-history-read, file-download, file-upload, full-cdp, page-asset-download, page-asset-cross-origin-fetch, webmcp-tool-call, raw-cdp-destination-url. Persisted rules in browser/config.toml sections origins, downloads, uploads, full_cdp, webmcp each with allowed and denied arrays; patterns: exact host, *.host (subdomains only), **.host (apex and subdomains) with glob matching; enterprise network policy can deny origin access, downloads, uploads and full CDP. Preferences approval_mode, history_approval_mode, iab_history_approval_mode, download_approval_mode, upload_approval_mode (always_ask|never_ask, history also disabled), disable_auto_review, full_cdp_access_enabled=false, webmcp_enabled=true. File is atomically written (tmp file mode 0600 then rename).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:17975 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (schemas)",
+      "tmp/cxib/main.pretty.js:18014 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (defaults)",
+      "tmp/cxib/main.pretty.js:1541 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Ree host-pattern matching) and M:1561 (zee glob splitter)",
+      "tmp/cxib/browser-service.pretty.js:11546 [pretty copy of plugins/browser/scripts/browser-service.mjs] ($R)",
+      "tmp/cxib/browser-service.pretty.js:11634 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Zp transfers)",
+      "tmp/cxib/browser-service.pretty.js:11647 [pretty copy of plugins/browser/scripts/browser-service.mjs] (JR full-cdp)",
+      "codex/webview/assets/browser-use-policy-site-permissions-124f08931952.js"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon BrowserBroker has a host allowlist of at most 32 without wildcards; a per-capability matrix with wildcard patterns and managed overrides is the product-grade version.",
+    "notes": "Rule files and stores were not read; schema derived from code only."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-094",
+    "category": "AI-browser control",
+    "name": "Site-status safety check before navigation",
+    "what": "Before the agent visits a site, the service asks an OpenAI endpoint whether the site is blocked for agent use; results are cached and the check fails open only when the request itself fails.",
+    "how": "GET https://chatgpt.com/backend-api/aura/site_status?site_url=<origin+path>&url_request_source=<src>&conversation_id=&turn_id= ; blocked when feature_status.agent === true; 24 h cache per hostname (www stripped) with in-flight de-duplication; skipped for localhost, *.localhost, 127.0.0.1, ::1 and non-http(s) URLs; block throws site_status_blocked, endpoint failure returns without blocking (fetch errors are swallowed in throwIfBlocksUrl). The query sends the URL path (no query string or fragment) plus conversation and turn ids to OpenAI.",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:1130 [pretty copy of plugins/browser/scripts/browser-service.mjs] (xS builds endpoint)",
+      "tmp/cxib/browser-service.pretty.js:1145 [pretty copy of plugins/browser/scripts/browser-service.mjs] (J4 URL)",
+      "tmp/cxib/browser-service.pretty.js:11713 [pretty copy of plugins/browser/scripts/browser-service.mjs] (NV 24 h cache, class Zy throwIfBlocksUrl)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A managed site-risk list consulted per navigation is a policy lever; note the privacy cost (URL paths leave the device) and decide whether Quarry runs the list in-plane to honor ZDR.",
+    "notes": "Open question: whether a failed request failing open is intentional (code returns silently on catch). Privacy: sends full path to a third party."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-095",
+    "category": "AI-browser control",
+    "name": "Agent navigation URL policy and Page.navigationBlocked events",
+    "what": "Once the agent controls a tab, only http, https and about:blank are allowed; other schemes are blocked at request level and the model is told.",
+    "how": "Wre (BrowserUseNavigationRestriction): activate(pageKey) on first agent command; Gre returns Blocked browser navigation by Browser Use URL policy unless g.F(url) (http:, https:, about:blank) or dev flag allows chrome:; enforced on main and subframe requests via session webRequest cancel and will-navigate/will-redirect/will-frame-navigate listeners; blocked navigations emit CDP-style Page.navigationBlocked {errorText, resourceType, url} to the REPL; every Page.navigate/history navigation is pre-authorized by assertBrowserUseNavigationAllowed and tracked as pending until committed.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:5737 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Wre)",
+      "tmp/cxib/main.pretty.js:5766 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Gre)",
+      "tmp/cxib/bootstrap.pretty.js:10793 [pretty copy of codex/.vite/build/bootstrap-487kJHw_.js] (lE URL allowlist in bootstrap)",
+      "tmp/cxib/main.pretty.js:36998 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (webRequest cancel with isRestrictedBrowserNavigation)",
+      "tmp/cxib/main.pretty.js:41450 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (emitBrowserUseNavigationBlockedEvent)",
+      "tmp/cxib/main.pretty.js:43663 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (activateBrowserUseNavigationRestriction)",
+      "tmp/cxib/main.pretty.js:43270 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] and M:43301 (will-navigate style handlers call isRestrictedBrowserNavigation)",
+      "tmp/cxib/main.pretty.js:43414 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (window.open handler also denies restricted URLs)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon SSRF guard is syntactic only at the gateway; enforcing scheme and policy on every sub-request and redirect in the browser itself closes the redirect gap.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-096",
+    "category": "AI-browser control",
+    "name": "Raw CDP gating: domain allowlist, method denylist, parameter and origin checks",
+    "what": "Raw CDP is a development escape hatch behind explicit consent and a strict filter, scoped to the tab current origin.",
+    "how": "tab capability cdp (readEvents with cursor/afterSequence/limit<=1000/truncated flags, send) requires full_cdp_access_enabled=true plus per-origin full-cdp consent. rZ(): allowed domains set (Accessibility, Audits, Console, CSS, DOM, DOMDebugger, DOMSnapshot, Emulation, Fetch, IO, Input, Inspector, Log, Network, Overlay, Page, Performance, Profiler, Runtime, Target, Tracing, WebAudio...), blocked domains (CacheStorage, Database, Storage, Target, WebAuthn), blocked methods (DOM.setFileInputFiles, Input.dispatchKeyEvent, Network.getAllCookies, Network.clearBrowserCookies, Network.setExtraHTTPHeaders, Page.addScriptToEvaluateOnNewDocument, Page.setBypassCSP, Page.setDownloadBehavior, Page.setInterceptFileChooserDialog, Page.navigate, Page.reload ...), parameter checks (grantUniveralAccess, scriptToEvaluateOnLoad, binaryResponseHeaders), URL-bearing methods (Network.getCookies urls, setCookies, Fetch.continueRequest) must authorize every affected origin, Fetch.enable cannot cover Document responses (reserved for host). Error messages name the supported high-level API (for example Use tab.goto(url) instead).",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:18733 [pretty copy of plugins/browser/scripts/browser-service.mjs] (ZY, QY, eZ, tZ, QO policy sets)",
+      "tmp/cxib/browser-service.pretty.js:18734 [pretty copy of plugins/browser/scripts/browser-service.mjs] (rZ)",
+      "tmp/cxib/browser-service.pretty.js:11647 [pretty copy of plugins/browser/scripts/browser-service.mjs] (JR full-cdp consent)",
+      "PLUG/browser/docs/capabilities/tab/cdp.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "If Verevon ever exposes CDP to models it needs this exact structure (allow domains, deny methods, argument validators, remediation hints); Quarry evaluate is currently just denied.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-097",
+    "category": "AI-browser control",
+    "name": "WebMCP (Site tools): page-defined tools exposed to the agent",
+    "what": "Pages that publish tools through the browser WebMCP surface (document.modelContext) are discovered and offered to the agent as callable tools, with per-site permissions.",
+    "how": "Desktop discovers tools per tab by CDP: Page.enable and WebMCP.enable on every frame target, listens for WebMCP.toolsAdded/toolsRemoved and frame events, creates an isolated world (grantUniveralAccess false) and calls document.modelContext.getTools() in each secure frame; filters tools whose window and origin match; descriptors validated (maxTools default 100 from webMcpMaxTools, maxTotalDescriptorBytes 65536, maxRegistrationChanges 10; zod schema with annotations readOnlyHint, untrustedContentHint, consequentialHint); per-origin allow/deny from config (webmcp rules, default allowed unless webmcp_enabled false). Agent API: capability webmcp.fetchTools() returns document-bound handles (call_name, registration_id, input_schema); stale handles throw Call fetchTools() again; invoking needs a webmcp-tool-call approval with strict auto-review and sensitive-action meta, and tool arguments must be JSON-serializable. Page preload emits webmcp_changed when the toolchange event fires; UI shows tool activity and an inspector.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:43059 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (TAe discovery)",
+      "tmp/cxib/main.pretty.js:43037 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (xAe document.modelContext.getTools)",
+      "tmp/cxib/main.pretty.js:40222 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (eK schema, annotations)",
+      "tmp/cxib/browser-service.pretty.js:11684 [pretty copy of plugins/browser/scripts/browser-service.mjs] (ek approval)",
+      "tmp/cxib/preload.pretty.js:16001 [pretty copy of codex/.vite/build/browser-page-preload.js] (ZS toolchange listener)",
+      "PLUG/browser/docs/webmcp.md",
+      "tmp/cxib/main.pretty.js:19043 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (inspector data)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "WebMCP is the cleanest way for Verevon first-party apps to expose safe actions to Quarry-driven agents instead of the agent clicking UI; Quarry could implement the same discovery over CDP.",
+    "notes": "Depends on Chromium WebMCP support (WebMCP CDP domain); standard still evolving."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-098",
+    "category": "AI-browser control",
+    "name": "Agent downloads: explicit grants, blob origin binding and media download helpers",
+    "what": "The agent can only download files after a grant tied to the URL (and for blob URLs to the page origin); unsolicited downloads are cancelled.",
+    "how": "allowDownload({tabId,url}) records a grant per webContents id (10 s TTL, BOe=1e4) after assertCurrentPageAllowed; setBlobDownloadOrigin binds blob: downloads to the current document origin and frame, checked on Page.downloadWillBegin; consumeAllowedBrowserUseDownload matches the URL once. Page.setDownloadBehavior is blocked in raw CDP. API: waitForEvent(download).path, locator.downloadMedia (120 s default), cua.downloadMedia (not in iab by default). Policy: downloads are no-confirmation by default in the confirmation doc but still pass the file-download consent check unless approved.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:41059 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (allowDownload)",
+      "tmp/cxib/main.pretty.js:41067 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (setBlobDownloadOrigin)",
+      "tmp/cxib/main.pretty.js:38328 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Ywe)",
+      "PLUG/browser/docs/capabilities/tab/pageAssets.md",
+      "PLUG/browser/docs/api.json (PlaywrightDownload, LocatorDownloadMediaOptions)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry download_ref is approval-gated; add URL-bound short-lived grants and blob origin checks.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-099",
+    "category": "AI-browser control",
+    "name": "File upload through file-chooser interception with consent",
+    "what": "Uploads go through the browser file chooser: the agent waits for the chooser event, then sets absolute file paths; uploads need per-origin approval.",
+    "how": "tab.playwright.waitForEvent(filechooser) then chooser.setFiles(paths) (isMultiple for multi); implemented with internal Page.setInterceptFileChooserDialog and DOM.setFileInputFiles which are blocked in raw CDP; file-upload check with upload_approval_mode and uploads rules; docs forbid locator.setInputFiles and tell the model to try the chooser before native pickers.",
+    "evidence": [
+      "PLUG/browser/docs/file-uploads.md",
+      "tmp/cxib/browser-service.pretty.js:17235 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Page.setInterceptFileChooserDialog use)",
+      "tmp/cxib/browser-service.pretty.js:11634 [pretty copy of plugins/browser/scripts/browser-service.mjs] (Zp upload consent)",
+      "tmp/cxib/browser-service.pretty.js:18734 [pretty copy of plugins/browser/scripts/browser-service.mjs] (rZ blocks raw DOM.setFileInputFiles)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry upload_ref exists; copy the consent split (agent may not use raw file input APIs).",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-100",
+    "category": "AI-browser control",
+    "name": "Isolated virtual clipboard for agent copy and paste",
+    "what": "The agent has its own clipboard inside the page, so it can paste rich text without touching the user clipboard, and it is cleaned up at turn end.",
+    "how": "Service installs a page-side bridge (__browserUseClipboardBridge) via a Runtime binding that replaces navigator.clipboard with a virtual implementation (ClipboardItem blobs, base64 transport for binary, presentationStyle); tab.clipboard.read/readText/write/writeText; ax.paste uses it with text|md|html; on turn end HOe.restorePageClipboards runs globalThis.__browserUseClipboardBridge?.cleanup() in every attached session.",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:24418 [pretty copy of plugins/browser/scripts/browser-service.mjs] (yee bridge)",
+      "tmp/cxib/browser-service.pretty.js:24489 [pretty copy of plugins/browser/scripts/browser-service.mjs] (cleanup)",
+      "tmp/cxib/main.pretty.js:41533 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (restorePageClipboards)",
+      "PLUG/browser/docs/api.json (TabClipboardAPI)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Isolating clipboard state per agent run avoids leaking user clipboard data into tools; trivial to adopt in Quarry pages via an injected shim.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-101",
+    "category": "AI-browser control",
+    "name": "Secure credential handoff (browserAuth) that never exposes secrets to the model",
+    "what": "For sign-in the agent submits only selectors and labels; the app shows a secure form (or saved-login picker), fills the fields itself and returns only a status, never the values.",
+    "how": "tab capability browserAuth.request({origin, fields[{id,label,type,autocomplete,required,selector}], options[{id,label,selector|field_ids}], submit{selector,action click|press_enter}, qr_code}). Browser-client validates that every field is visible and enabled, the origin is current, frames are bound (cross-origin iframe recorded), then asks a broker (runtime.gaas.getBrowserAuthBrokerChallenge, env BROWSER_AUTH_BROKER_*) to collect credentials in a ChatGPT-hosted form and fills them without returning values; statuses submitted, locator_invalid, page_changed, origin_changed, declined (user_took_over), cancelled, expired, unavailable, submission_failed with non-secret diagnostics. Docs forbid chat entry, Playwright reading of credential fields, account creation, CAPTCHAs; unavailable must not fall back to chat.",
+    "evidence": [
+      "PLUG/browser/docs/capabilities/tab/browserAuth.md",
+      "tmp/cxib/browser-service.pretty.js:14656 [pretty copy of plugins/browser/scripts/browser-service.mjs] (sB handoff command)",
+      "tmp/cxib/browser-service.pretty.js:14715 [pretty copy of plugins/browser/scripts/browser-service.mjs] (getBrowserAuthBrokerChallenge)",
+      "tmp/cxib/main.pretty.js:40771 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (browserAuth capability)",
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n browserAuth.*)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon has no credential vault and Quarry login pages trigger HITL; this broker-fill design (model never sees secrets, status only) is the model for a Verevon credential broker.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-102",
+    "category": "AI-browser control",
+    "name": "Credential observation gate and recovery after native credential delivery",
+    "what": "After credentials are delivered natively, the model is blocked from observing the page until a new document loads, so secrets cannot leak through screenshots or AX text.",
+    "how": "credentialObservationGate.protect(tabId) blocks AX/screenshot/DOM commands (phases before_command, command, after_command, error_recheck); BrowserCredentialRecoveryError carries schema_version 1 with reasons credential_delivery_in_progress, credential_observation_restricted, retained_data_restricted, credential_state_unavailable, protected_command_failed and allowed next_action (retry_after_credential_delivery, navigate_to_new_document, create_new_tab, restart_browser_runtime, request_manual_handoff); underlying errors are withheld because they may contain protected data; protectBrowserAuthCredentialDiagnostics hides CDP diagnostics; closed shadow roots input is blocked (blockClosedShadowInput).",
+    "evidence": [
+      "tmp/cxib/browser-client.pretty.js:37 [pretty copy of plugins/browser/scripts/browser-client.mjs] (BrowserCredentialRecoveryError)",
+      "tmp/cxib/browser-client.pretty.js:45 [pretty copy of plugins/browser/scripts/browser-client.mjs] (fn recovery parser)",
+      "tmp/cxib/browser-service.pretty.js:14576 [pretty copy of plugins/browser/scripts/browser-service.mjs] (credentialObservationGate.observe)",
+      "tmp/cxib/browser-service.pretty.js:14695 [pretty copy of plugins/browser/scripts/browser-service.mjs] (protect calls)",
+      "tmp/cxib/browser-service.pretty.js:1198 [pretty copy of plugins/browser/scripts/browser-service.mjs] (recovery text)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "The observation-gate idea (deny model observation while secrets are on the page) should be a requirement for any Verevon credential feature, including screenshots saved to artifacts.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-103",
+    "category": "AI-browser control",
+    "name": "Saved-login picker, OTP, QR sign-in and number-matching flows",
+    "what": "The secure sign-in form can offer saved logins from the password manager, handle one-time codes (including split inputs), capture and decode sign-in QR codes, and relay number-matching cues.",
+    "how": "UI strings: Use saved account, Allow OpenAI to fill your {site} login with {provider}, Save this login to {provider}, Password hidden, QR code for secure browser sign-in, Waiting for the sign-in QR code, Enter verification code. Service: otp handle (otpHandle) restricted to https, single required non-password field; email OTP delivery; QR payload only trusted if https with no credentials; qr decoding via zxing_reader.wasm; manual credential saving after user sign-in; submissions classified ordinary or private; telemetry browser_auth_submission_rejected/failed. Docs say tell the user the exact number to tap for number matching, never invent one.",
+    "evidence": [
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n browserAuth.*)",
+      "tmp/cxib/browser-service.pretty.js:14656 [pretty copy of plugins/browser/scripts/browser-service.mjs] (otpHandle, qr_code)",
+      "tmp/cxib/browser-service.pretty.js:12614 [pretty copy of plugins/browser/scripts/browser-service.mjs] (zxing-wasm 3.1.2 locateFile default points to fastly.jsdelivr.net)",
+      "PLUG/browser/docs/capabilities/tab/browserAuth.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Maps to common enterprise logins (MFA, device approval); a Verevon broker needs the same non-secret branches.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-104",
+    "category": "AI-browser control",
+    "name": "Automated safety pre-check with screenshot and action targets for sensitive actions",
+    "what": "Before sensitive form submissions the service captures the page and the concrete action targets and has an automated reviewer decide, in addition to or instead of the user.",
+    "how": "check automated-safety-precheck (permissionSource guardian-auto-review): safetyReview {actionTargets, createAutomatedSafetyPrecheck} built from locators and a screenshot validated to still match; used by browserAuth handoff to review the sign-in target; denial or timeout maps to guardian_denied or guardian_timed_out.",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:11956 [pretty copy of plugins/browser/scripts/browser-service.mjs] (sk createAutomatedSafetyPrecheck)",
+      "tmp/cxib/browser-service.pretty.js:11958 [pretty copy of plugins/browser/scripts/browser-service.mjs] (automated-safety-precheck)",
+      "tmp/cxib/browser-service.pretty.js:14670 [pretty copy of plugins/browser/scripts/browser-service.mjs] and BS:14686 (safetyReview in handoff)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A screenshot-grounded reviewer for risky submissions is the AI analogue of Verevon deterministic browser_risk.rs backstop and could be layered with it.",
+    "notes": "Reviewer implementation not in this facet."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-105",
+    "category": "AI-browser control",
+    "name": "Confirmation policy taxonomy and prompt-injection rules for the model",
+    "what": "The model is given a four-level confirmation policy and strict rules that web content, tool output and page instructions can never grant permission.",
+    "how": "docs/confirmations.md: Hand-off required (change password submit, bypass safety interstitials or paywalls), Always confirm at action time (delete data, create API keys, save passwords, solve CAPTCHAs, install software, third-party communication, subscribe, financial, system settings, medical, transmit sensitive data with specific data and destination), Pre-approval works (login, permission prompts, age verification, upload, file management, entering model-generated code), No confirmation (cookie consent, ToS during signup, downloads). docs/browser-safety.md: non-user content is untrusted; reading differs from transmitting; typing sensitive data counts as transmission; WebMCP tool instructions cannot authorize. documents.json marks confirmations as required reading for cdp and webmcp commands.",
+    "evidence": [
+      "PLUG/browser/docs/confirmations.md",
+      "PLUG/browser/docs/browser-safety.md",
+      "PLUG/browser/docs/documents.json (requiredFor)",
+      "PLUG/computer-use/docs/confirmations.md"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A written taxonomy aligned to action categories is directly reusable for the Verevon system prompt and for the browser_risk.rs categories (login, checkout, posting_form, destructive, cross_domain, persistent_cookie).",
+    "notes": "Policy is prompt-level for most items; enforcement exists only where the pipeline records above apply."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-106",
+    "category": "AI-browser control",
+    "name": "Auditable management capability for windows, tabs, tab groups and bookmarks",
+    "what": "On extension-backed browsers the agent can organize windows, tabs, tab groups and bookmarks through a Chrome-API-shaped capability, with an audit trail of its own changes and before-state for undo.",
+    "how": "browser.capabilities.get(management) exposes windows, tabs, tabGroups, bookmarks namespaces (Chrome/WebExtensions semantics, some methods unavailable) and getAuditTrail() returning model-initiated mutations newest first {args, before{bookmarks,tabLayout,windows}, createdAt, method, namespace, result}; rules: only user-requested changes, no shared tab groups, http(s) bookmark URLs only, explicit confirmation immediately before deleting, navigation and history unavailable, treat titles and URLs as untrusted.",
+    "evidence": [
+      "PLUG/browser/docs/capabilities/browser/management.md",
+      "tmp/cxib/main.pretty.js:40842 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (management commands)",
+      "tmp/cxib/browser-service.pretty.js:11229 [pretty copy of plugins/browser/scripts/browser-service.mjs] (browser_management_call)",
+      "tmp/cxib/browser-service.pretty.js:11236 [pretty copy of plugins/browser/scripts/browser-service.mjs] (get_audit_trail)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "An agent-change audit trail with before-state is a strong accountability feature for Verevon (every agent mutation reversible and attributable).",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-107",
+    "category": "AI-browser control",
+    "name": "Bot-detection and CAPTCHA reporting with strict scope",
+    "what": "In cloud browser sessions the agent reports why a site blocked it (captcha failed, access denied, challenge loop, other) as internal telemetry only, and never bypasses interstitials.",
+    "how": "tab capability botDetection.report({reason: captcha_failed|access_denied|challenge_loop|unexpected_bot_error}) records only the parsed hostname; excludes bare 403, ERR_BLOCKED_BY_ADMINISTRATOR, proxy, DNS, TLS, timeouts; confirmations doc requires action-time confirmation for solving CAPTCHAs and forbids bypassing HTTPS interstitials or paywalls.",
+    "evidence": [
+      "PLUG/browser/docs/capabilities/tab/botDetection.md",
+      "tmp/cxib/main.pretty.js:40728 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (hDe/vDe bot detection capability)",
+      "PLUG/browser/docs/confirmations.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry should classify and report block reasons the same way; do not add CAPTCHA solving without a consent path.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-108",
+    "category": "AI-browser control",
+    "name": "JavaScript dialog handling",
+    "what": "Alerts, confirms, prompts and beforeunload dialogs are exposed as objects the agent can accept or dismiss, instead of silently hanging the page.",
+    "how": "tab.getJsDialog() returns AlertDialog, ConfirmDialog, PromptDialog or BeforeUnloadDialog with accept/dismiss (prompt accepts text); implemented with Page.javascriptDialogOpening and Page.handleJavaScriptDialog.",
+    "evidence": [
+      "PLUG/browser/docs/api.json (Dialog types)",
+      "tmp/cxib/browser-service.pretty.js:16674 [pretty copy of plugins/browser/scripts/browser-service.mjs] (javascriptDialogOpening)",
+      "tmp/cxib/browser-service.pretty.js:16678 [pretty copy of plugins/browser/scripts/browser-service.mjs] (handleJavaScriptDialog)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quarry has respond_dialog; parity check for beforeunload and prompt text.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-109",
+    "category": "AI-browser control",
+    "name": "Local-to-cloud agent bridge with signed browser-access attestation",
+    "what": "Cloud (Work) agents can use the local in-app browser through a local executor, but only when the account setting allows it, and the access answer is cryptographically signed so model JavaScript cannot forge it.",
+    "how": "App tools pipe server (Rae) answers browser/access with {domain codex.browserAccess.v1, request, allowed} signed (Ed25519) by a per-process key whose public key is passed to the REPL as BROWSER_USE_ACCESS_VERIFYING_IDENTITY; allowed is computed by readBrowserAccess = GET /wham/work/settings and settings.localBrowserUse !== false then prepareLocalWorkBrowserSession; local executor is a codex exec-server process spawned with environment id, BROWSER_USE_ACCESS_PIPE_PATH and executor id env vars and registered to /flora/cca/executor. Plugin mention deep links plugin://browser@openai-curated-remote address remote-hosted browsers.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:7191 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Vae browser/access signing)",
+      "tmp/cxib/main.pretty.js:15470 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (readBrowserAccess)",
+      "tmp/cxib/main.pretty.js:15556 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (executor spawn env)",
+      "tmp/cxib/main.pretty.js:1540 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (BROWSER_USE_ACCESS_* names)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "The same trust boundary exists for Verevon (Model Plane model proposes, Quarry executes): signed, short-scoped authorization answers from the control side are a cleaner pattern than bearer tokens passed through model-visible code.",
+    "notes": "Interpretation of the cloud-to-local flow is INF from code paths; the cloud side was not observed."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-110",
+    "category": "AI-browser control",
+    "name": "MCP Apps browser backend (control embedded app widgets)",
+    "what": "The agent can inspect and operate MCP App UIs shown in side-panel tabs, but cannot create or navigate tabs.",
+    "how": "Backend type mcpapps: tabs.list/get only; Playwright locators use synthetic events (no native pointer, no force/modifier/non-left clicks), frameLocator needs approval before entering each frame, navigation invalidates access; operations are serialized per turn and cancelled when the turn changes (MCP App browser operation was cancelled); app sandbox emits mcp_app_sandbox.* events for blocked navigation, permission, popup, download, redirect and request, and captures console messages with a limit.",
+    "evidence": [
+      "PLUG/browser/docs/mcp-apps.md",
+      "tmp/cxib/main.pretty.js:41930 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (dke MCP App browser session API)",
+      "tmp/cxib/main.pretty.js:8096 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (mcp_app_sandbox.navigation_blocked)",
+      "tmp/cxib/main.pretty.js:8385 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (mcp_app_sandbox.guest_attached)",
+      "tmp/cxib/main.pretty.js:8121 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (console_message capture)",
+      "tmp/cxib/main.pretty.js:8227 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (permission_blocked)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Relevant for Verevon app/space widgets: agents that can drive embedded first-party UIs without full browser access.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-111",
+    "category": "AI-browser control",
+    "name": "Desktop computer use (Windows) with observe-then-act loop",
+    "what": "A separate computer-use surface controls native Windows apps through UI Automation, SendInput and window captures, with windows chosen from returned lists only.",
+    "how": "@oai/sky API: list_apps, launch_app, list_windows, get_window, get_window_state(include_screenshot, include_text), click(element_index|x,y,screenshotId), press_key chords, type_text, scroll, set_value, drag, perform_secondary_action, activate_window; implemented with SendInput, UI Automation and Windows.Graphics.Capture (works when occluded); guidance requires a two-cell loop (observe then exactly one action then refresh), forbids guessing windows, invalidates indices on every observation; native pipe plus managed service in main; cuaPIP overlay; separate confirmations policy; plugin unified-computer-use (cua_repl MCP server) is disabled by default.",
+    "evidence": [
+      "PLUG/computer-use/docs/api.md",
+      "PLUG/computer-use/docs/guidance.md",
+      "PLUG/computer-use/skills/computer-use/SKILL.md",
+      "PLUG/unified-computer-use/.mcp.json",
+      "tmp/cxib/main.pretty.js:5830 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (plugin table mf)"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Beyond browser scope: Verevon remote-support (RustDesk) is the nearest surface; the window-targeted, observation-bound action discipline is reusable.",
+    "notes": "Out of focus; included for completeness of the computer-use side."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-112",
+    "category": "AI-browser control",
+    "name": "Plugin-signed delivery of the browser agent stack and surface-selection rule",
+    "what": "The browser, Chrome and computer-use agent stacks ship as signed bundled plugins, and a rule tells the model to prefer purpose-built connectors over browsing unless the user explicitly asks for the browser.",
+    "how": "resources/plugin-signatures/openai-bundled/receipt.json lists plugin archives (RSA PKCS1 SHA-256, production). Skill text: Explicit browser intent wins; otherwise a URL is context, query connectors/APIs/CLIs before browser use for semantic operations; read the skill before saying the browser is unavailable; never substitute OS open or shell for explicit @browser requests.",
+    "evidence": [
+      "INSTALL/resources/plugin-signatures/openai-bundled/receipt.json",
+      "PLUG/browser/skills/control-in-app-browser/SKILL.md",
+      "PLUG/browser/.codex-plugin/plugin.json"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry tools should come with a skill that says when not to browse (prefer Integration Plane providers) to cut cost and risk.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-113",
+    "category": "AI-browser control",
+    "name": "Task record and replay (gated, not observed in the browser path)",
+    "what": "The app has feature flags for record-and-replay and computer history, but no browser replay mechanism was found in the shipped code.",
+    "how": "Feature gate recordAndReplay (default false), plugin names record-and-replay and computer-history, skysight/chronicle status requests; CDP readEvents cursor pattern allows observing actions between cursors; no procedure compile or replay in browser-service or browser-client.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:2327 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (feature gates recordAndReplay, skysight)",
+      "tmp/cxib/src-CP7.pretty.js:49 [pretty copy of codex/.vite/build/src-CP7XXlpZ.js] (plugin name constants)",
+      "PLUG/browser/docs/capabilities/tab/cdp.md"
+    ],
+    "provenance": "INF",
+    "confidence": "low",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Quarry already has procedure compile and replay-check; Verevon does not call them, so this is an area where Verevon could lead.",
+    "notes": "Low confidence; included to record the absence in the browser path."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-114",
+    "category": "AI-browser control",
+    "name": "Read-only JavaScript evaluation in an isolated world with credential-field protection",
+    "what": "The agent may run JavaScript that reads the live page, but only through a wrapper that cannot mutate the DOM, hides protected credential fields, blocks module loading and caps result size.",
+    "how": "playwright.evaluate (command playwright_evaluate) runs in an isolated world named browser-use-readonly-js created with Page.createIsolatedWorld grantUniveralAccess:false; the script is wrapped by T0, which builds read-only wrappers for nodes, style declarations, CSS rules and sheets, ranges, selections, font faces and media queries (fixed non-writable bindings), applies protectedCredentialFieldPolicy via isProtectedCredentialField, and limits results (depth 8, arrays 2000, object keys 200, strings 200000 chars); import() is rejected (module loading is not available in playwright.evaluate); element-scoped evaluation resolves the locator backend node into the world; the execution context is cached and re-created on staleness; arguments must be JSON-serializable.",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:20116 [pretty copy of plugins/browser/scripts/browser-service.mjs] (limits, world name, CM command)",
+      "tmp/cxib/browser-service.pretty.js:20224 [pretty copy of plugins/browser/scripts/browser-service.mjs] (T0 read-only wrapper)",
+      "tmp/cxib/browser-service.pretty.js:22919 [pretty copy of plugins/browser/scripts/browser-service.mjs] (PM import guard)",
+      "PLUG/browser/docs/api.json (PlaywrightEvaluateOptions: read-only DOM scope)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Quarry browser action sanitizer denies evaluate entirely; a read-only, credential-aware evaluate would let agents extract data without opening an arbitrary-code hole.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-115",
+    "category": "AI-browser control",
+    "name": "Platform-aware keyboard synthesis with editing commands and input target binding",
+    "what": "Typing and shortcuts are synthesized as realistic key events with modifier state, platform differences, editing commands and a target token that keeps input on the intended frame.",
+    "how": "Class ul tracks pressedModifiers per platform, emits keyDown or rawKeyDown with windowsVirtualKeyCode, code, key, location, isKeypad, editing commands (copy, paste, selectAll style) from key chords, keyUp, and Input.insertText; every dispatch can carry an inputTargetToken and a deadline; optional blockClosedShadowInput refuses input when focus is inside a closed shadow root; key names follow xdotool-style syntax (Return, super+c, KP_0).",
+    "evidence": [
+      "tmp/cxib/browser-service.pretty.js:5815 [pretty copy of plugins/browser/scripts/browser-service.mjs] (class ul)",
+      "tmp/cxib/browser-service.pretty.js:5733 [pretty copy of plugins/browser/scripts/browser-service.mjs] (ul construction with inputTargetToken and blockClosedShadowInput)",
+      "PLUG/browser/docs/accessibility.md (key syntax)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Reliable keyboard handling (modifiers, shortcuts, IME-free text insertion) is a frequent failure source for headless agents; Quarry type and press actions should be checked against this model.",
+    "notes": "inputTargetToken semantics inferred from naming; it is not a public CDP parameter (custom Owl/Chromium extension, INF)."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-116",
+    "category": "AI-browser control",
+    "name": "Appshots: attach window screenshot plus accessibility text to the chat",
+    "what": "Users can attach an app window context to a chat as a screenshot with the underlying accessibility text, viewable either way.",
+    "how": "Attachment type appshot with i18n appshotAttachment.* (Show accessibility text, Show screenshot, View text); feature gate appshotsEnabled and a service that enables appshots, computer use and skysight together; screen-region screenshot hotkeys (regionScreenshotHotkeys) and feature screenshotSelection.",
+    "evidence": [
+      "codex/webview/assets/app-shared-737655e1fb23.js  (i18n appshotAttachment.*)",
+      "tmp/cxib/main.pretty.js:6239 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (appshotsEnabled service)",
+      "tmp/cxib/main.pretty.js:2327 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (appshotsEnabled, screenshotSelection gates)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Shows that pairing AX text with a screenshot is also the user-facing attachment format, which could be reused for Verevon page attachments.",
+    "notes": "Desktop-window oriented; included because it shares the AX plus screenshot representation."
+  },
+  {
+    "id": "codexbrowser-in-app-browser-117",
+    "category": "Integration-plane overlap",
+    "name": "First-party hosted-site sign-in via short-lived ID token header",
+    "what": "Opening a site hosted on OpenAI domains signs the user in automatically using a short-lived token sent only on that navigation.",
+    "how": "_Ae: for https hosts ending .chatgpt.site or .appgardenapps.dev without port or credentials, POST /codex/sites/session_bootstrap {target_url} returns {status issued, id_token, expires_in}; the page is loaded with extra header OAI-Sites-ID-Token; token lifetime capped at 120 s and the whole bootstrap has a 3 s budget; gated by autoAuthForSites; vAe aborts the load if the navigation is superseded.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:42967 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (_Ae)",
+      "tmp/cxib/main.pretty.js:42996 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (vAe loads with header)",
+      "tmp/cxib/main.pretty.js:2327 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (autoAuthForSites)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "The same pattern (exchange a Verevon session for a short-lived header on first navigation to first-party preview hosts) would remove sign-in friction for Verevon-hosted previews inside Quarry browsers.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-118",
+    "category": "Integration-plane overlap",
+    "name": "Authenticated ChatGPT webviews with account and residency routing",
+    "what": "Embedded ChatGPT pages are signed in with the app token and routed to the right account, workspace and data-residency region without the user logging in again.",
+    "how": "KV(): validates the target is ChatGPT, checks the token account against the requested account (including FedRAMP), clears and sets routing cookies _account, _account_residency_region, _account_is_fedramp, _account_routing_override, loads /api/auth/session or posts /api/auth/link-session with auth_token and header x-i-am-a-browser, and fetches accounts/check to read residency; cookies for first-party plugin webviews are cleared when the guest is destroyed and navigation off ChatGPT is blocked.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:35716 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (KV)",
+      "tmp/cxib/main.pretty.js:35821 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (first-party plugin authenticated ChatGPT webview navigation guard)",
+      "main strings: Blocked external navigation from first-party plugin authenticated ChatGPT webview"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Control Plane residency and org routing must propagate into any embedded browser view; this shows one way (cookie plus header routing) and its failure modes.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-119",
+    "category": "Integration-plane overlap",
+    "name": "MCP App UI rendered in a sandboxed origin and controllable by the agent",
+    "what": "Interactive MCP App views render in sandboxed webviews on a dedicated sandbox origin with request, navigation and permission blocking.",
+    "how": "Guest webviews use a codex-sandbox scheme and sandbox hosts web-sandbox.oaiusercontent.com (staging variant); session handlers allow only about, blob, data, https and wss (plus localhost http/ws when allowLocalDevelopment) and block everything else with mcp_app_sandbox.request_blocked; attach requests are queued with expiry; the agent mcpapps backend operates on these guests with locator actions only.",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:8047 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Zoe) and M:8051 (Qoe request scheme filters)",
+      "tmp/cxib/main.pretty.js:1582 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (web-sandbox hostnames)",
+      "tmp/cxib/main.pretty.js:8385 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (guest_attached)",
+      "PLUG/browser/docs/mcp-apps.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Relevant to Verevon app widgets rendered from Integration Plane results; a locked-down sandbox origin with agent-operable locators is a clean model.",
+    "notes": ""
+  },
+  {
+    "id": "codexbrowser-in-app-browser-120",
+    "category": "Integration-plane overlap",
+    "name": "App tools MCP pipe exposed to the local executor with signed responses",
+    "what": "The desktop app exposes task, workspace and browser-access tools to the local executor over a pipe and signs each response so the executor can trust it.",
+    "how": "Rae creates a pipe server with socketPeerAuthorizer; methods tools/list, tools/call, tools/cancel, browser/access, taskProject/list, taskProject/assign, taskWorkspace/prepare; responses carry {payload, signature} signed with a per-process Ed25519 key whose SPKI public key (verifyingIdentity) is given to the REPL; tool descriptions come from dynamic app tools (for example codex_app send_message_to_thread flagged destructive).",
+    "evidence": [
+      "tmp/cxib/main.pretty.js:7145 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Rae)",
+      "tmp/cxib/main.pretty.js:7191 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (Vae signed responses)",
+      "tmp/cxib/main.pretty.js:7159 [pretty copy of codex/.vite/build/main-BklS_2Y2.js] (verifyingIdentity export)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Signed tool responses from the host to a model-controlled runtime is a pattern Verevon Model Plane could use for browser grants instead of bearer tokens visible to model code.",
+    "notes": ""
+  }
+]

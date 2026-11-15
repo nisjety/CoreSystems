@@ -1,0 +1,637 @@
+{
+  "category": "Collaborative artifacts",
+  "items": [
+    {
+      "id": "R-t1-08-01",
+      "title": "Room canvas: a shared, revisioned Space document that humans and agents co-author",
+      "summary": "Add a Canvas tab to the Space cockpit backed by a Data Plane versioned page (Markdown first, block comments and live co-edit later). Every save is an append-only version stamped with the human or agent principal and an expected-head precondition checked in the same transaction, with history, diff and restore. Agents read and write it through a Model Plane document tool under the run's delegated Space decision.",
+      "whyItMatters": "Four of five references have a room document and Verevon has none, so agents must post plans, minutes and decisions as long chat messages and humans have no durable place to co-author with them. Head CAS is what stops an agent run from silently overwriting a human edit once both write to the same artifact.",
+      "referenceBestPractice": {
+        "bestSource": "Slack canvas (DOC) for the document model; Buzz (SRC) for append-only revisions with a server-side expected-head check",
+        "others": [
+          "Teams notes pane and Loop pages (REA)",
+          "Grok Bot room canvases plus file locks and tombstone undelete (SRC)"
+        ],
+        "prevalence": "canvas: 4 of 5 sources, table-stakes; write safety (CAS/locks): 2 of 5, differentiator",
+        "mechanism": "Room-scoped document {doc_id, space_ref, head_revision, body}; each save is a full revision with author principal and expected_head, applied as one INSERT ... WHERE current_head = expected_head that returns a typed conflict (missing, mismatched, not superseding); the losing text stays in history; restore writes a new revision copying an old body. History panel lists revisions newest first with a diff against head. Buzz replaces the whole body under CAS, which is enough for a first version; Slack and Teams add rich blocks, block-anchored comments and CRDT co-edit. Grok Bot adds lock/renew/release with fencing tokens and tombstone undelete with typed outcomes for agent leases."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:1-5",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:35",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:82-243",
+          "apps/Data Plane v2/services/wiki-store-go/internal/handler/wiki.go:87-114",
+          "apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go:359-398",
+          "apps/Data Plane v2/infra/postgres/init.sql:292-330",
+          "apps/Application Plane/convex-core/convex/plannerDocuments.ts:423-470",
+          "apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go:158-200"
+        ],
+        "gap": "No Space-authored document and no Canvas tab (the cockpit has six tabs: chat, work, knowledge, activity, agent, members). The Studio canvas is gateway-memory only and lost on restart. Data Plane wiki-store already has pages, append-only versions with proposed_by_user/proposed_by_agent, a diff route and a proposal/approve flow, but CreateVersion locks the page row and always advances the head (no expected-head precondition, no restore), pages are keyed by workspace_id not Space, and the gateway proxies wiki-store only for operating-map actions. The Convex planner document store keeps an opaque state blob with last-write-wins saveState and no v3 consumer."
+      },
+      "approach": "Data Plane: extend wiki-store-go as the canvas store (SRC: it already has versions, diff, proposals and RequireDurableWritesAllowed). Add an expected_version_id precondition to CreateVersion with a typed conflict, a restore operation that writes a new version, and a Space binding that resolves SpaceRef to the page workspace through space_retrieval_bindings and verifies a Control Space decision header the way documents-api verifies X-Space-Import-Decision (space_import.go:14-60). The adoption plan already assigns this ownership (S3.1 slice 2: Data owns revisioned Space knowledge documents with CAS, history, restore). Gateway: add /api/v1/spaces/{ref}/canvas routes. Frontend: Canvas tab in SpaceCockpit (extend SpaceTabId), Markdown editor first, history, diff and restore reusing the chat DiffView, conflict banner that shows the losing text. Application Plane: only the Space-to-canvas pointer and presence. Model Plane: a document read/write tool that writes under the run's delegated decision and stamps the agent principal; for human-authored sections route agent writes through the existing proposal/review path. Later phases: block comments, presence via Convex spacePresence, CRDT co-edit (the Convex planner state blob is a possible layer, not the system of record), and agent file leases with fencing tokens only if multi-step agent edits need them.",
+      "effort": "L",
+      "dependencies": [
+        "Control Space decision issuer for document writes in shared Spaces (adoption plan S1.2/S1.5 describe issuers that derive personal-Space membership today)",
+        "R-t1-08-04 phase 1: edit role and Space subject in resource_grants",
+        "Application Space-to-canvas pointer",
+        "Model Plane document tool"
+      ],
+      "planeOwner": "Data Plane (wiki-store-go versions); Frontend Plane UI; Application Plane pointer; Model Plane agent tool",
+      "risks": "Canvas text becomes prompt content, so it must be framed as untrusted data (R-t1-08-08). ZDR callers are rejected for every wiki mutation (authctx.go:226), so ZDR orgs get no canvas and the UI must say so. Version-per-save bloat needs debounce or coalescing. Live CRDT co-edit is a large step beyond CAS-with-reload. wiki_pages has no space_ref column, so correctness rests on the binding table.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1943-1948 (S3.1 slice 2: Data-owned revisioned Space knowledge documents with CAS, history, restore). Backend intent only; the S3.1-S3.6 block is still [~] and no room-visible canvas UI or agent write tool is planned."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-08-001",
+        "C-t1-08-002"
+      ]
+    },
+    {
+      "id": "R-t1-08-02",
+      "title": "Bring agent-produced artifacts and the shared viewer registry into the Space room",
+      "summary": "Mount the artifact panel that /chat already ships inside the Space room, with a room-level Artifacts list, and persist artifacts emitted by Space runs as shared, revisioned objects. Extract the per-kind viewers into one registry reused by the timeline, the artifacts panel and the Files view, adding lazy DOCX and XLSX preview. Add an artifact-first instruction to Space agent bindings so analyses and documents land as artifacts instead of long posts.",
+      "whyItMatters": "This is the visible proof of the human-plus-agent hybrid: agents deliver work as inspectable objects while the shared timeline stays short. It is mostly reuse of shipped chat code, so it has high impact for moderate effort.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (SRC): a packaged rule routes standalone analyses into a canvas, backed by canvas/document read and write tools; lazy viewers for PDF, DOCX, XLSX, code and Mermaid",
+        "others": [
+          "QM (SRC): validated self-contained HTML playgrounds as typed tool results, offered only to surfaces that can render them",
+          "Slack file previews (DOC)"
+        ],
+        "prevalence": "artifacts in room: 2 of 5; inline viewers: 2 of 5; both differentiators",
+        "mechanism": "Agent tool create_or_update_artifact {id, kind, title, content, version}; a system-prompt rule routes deliverables to it; the server validates HTML (no network, no external assets) before registering; the client shows a side panel with a revision stepper and a sandboxed iframe for HTML; the tool is withheld from surfaces without a renderer. Viewer registry keyed by mime/kind with lazy chunks (pdf worker, docx to HTML, sheet to table, per-language highlighter, Mermaid) and size thresholds that fall back to a download card."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:1-12",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts:1-16",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAttachmentCanvas.tsx",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx:782",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/index.ts",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43"
+        ],
+        "gap": "Shipped in /chat only: artifact panel with kind-based viewers, revision stepper, sandboxed HTML iframe, DOCX/PPTX/XLSX export. Artifacts arrive as inline SSE payloads {id, kind, title, content, version}, not as persisted objects. A grep of the Space components finds no artifact panel; the room renders Markdown only. In-browser DOCX/XLSX preview was not seen (INF, not exhaustively checked)."
+      },
+      "approach": "Frontend Plane: render ChatArtifactPanel (or its extracted core) in the Space room and add a room-level Artifacts list; move the per-kind viewers behind a shared registry used by the Space timeline, artifacts panel and the Files view in R-t1-08-03, lazy-loading DOCX/XLSX/PDF viewers and falling back to a download card by size. Model Plane: persist artifacts emitted by Space-bound runs as thread-owned revisions in Session Core under the same shared-read decision as the turn (same id with a higher version is an update, as chat-artifacts.ts already defines), and add an artifact-first rule to Space agent bindings. Add a Promote to canvas action that writes the artifact as a canvas version (R-t1-08-01), matching the plan's idea of promoting selected output through Data artifact APIs (S3.3). Under ZDR keep artifacts session-only and say so in the UI. Keep the existing HTML sandbox.",
+      "effort": "M",
+      "dependencies": [
+        "Shared read of Space turns (deny-by-default per-org space_effect_policies rows per the comparator; not re-verified)",
+        "Session Core artifact persistence",
+        "R-t1-08-01 for Promote to canvas"
+      ],
+      "planeOwner": "Frontend Plane (UI); Model Plane Session Core (persistence)",
+      "risks": "Persisted artifacts must follow the same shared-read decision as the turn or they become a read bypass. HTML and PDF artifacts are untrusted, so keep the sandboxed iframe and CSP. Bundle size from lazy viewers. Room turns may already render charts through ChatMarkdown (INF).",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-08-006",
+        "C-t1-08-013"
+      ]
+    },
+    {
+      "id": "R-t1-08-03",
+      "title": "Room file library: attach in the composer, a Files view, and Space provenance on every upload",
+      "summary": "Add an attach control to the Space composer and a Files view in the Knowledge tab. Each upload becomes a Data Plane document with created_in = the SpaceRef, a human or agent creator, mime, size and content hash, and is referenced from messages by id rather than embedded. Space-bound writes go through a Control-signed Space decision, not the legacy unscoped chat upload.",
+      "whyItMatters": "Attaching and finding files in a room is basic Teams and Slack behaviour and is how humans hand material to agents. Today the room has no way to add a file, and the legacy chat upload carries no Space scope.",
+      "referenceBestPractice": {
+        "bestSource": "QM (SRC) for the model; Teams (REA) as the product benchmark",
+        "others": [
+          "Buzz (SRC): thumbnails/blurhash and snapshot-based storage accounting",
+          "Slack (DOC)"
+        ],
+        "prevalence": "4 of 5 sources; table-stakes (some evidence sits in records clustered elsewhere, per the comparator)",
+        "mechanism": "Direct upload to object storage keyed by sha256, then register a FileArtifact {id, owner_scope, created_in_scope (the room), created_by (human or agent), path, mime, size, sha256}. The room library lists files created in or granted to the room. Teams makes the channel a folder with one storage authority for ACL and compliance; thumbnails are generated asynchronously and quota is counted by an off-path worker."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:82-243",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:14-33",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:54-110",
+          "apps/Data Plane v2/services/documents-api-go/internal/handler/space_import.go:14-60",
+          "apps/Data Plane v2/infra/postgres/migrations/20260907120000_document_space_ref.sql",
+          "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1660-1690"
+        ],
+        "gap": "The Knowledge tab lists documents with space_ref read-only and the composer has no attach, upload or file code (grep finds none). The /chat upload accepts only JSON {title, content} text, hard-codes zdr_classification internal and sends no space_ref, so it neither handles binary files nor carries Space authority. The ephemeral extract route (documents.rs:14-33) stores nothing. No raw-bytes object store was found in documents-api-go (grep for presign, PutObject, minio, blob found nothing; the Ingestion-plane imports service was not searched), so retaining original files is a gap to confirm."
+      },
+      "approach": "Data Plane documents-api owns bytes or extract plus metadata: space_ref, created_by principal (human|agent), mime, size, sha256, extraction status. Follow the already-built connector-import pattern (plan S1.5): browser sends only a spaceRef, the gateway asks Control for a Space decision, Imports Core runs extraction with a space_import_intent, and Documents API verifies the signed decision (space_import.go). Frontend: attach control in SpaceRoomComposer, Files view inside the Knowledge tab, attachments in messages as document-id pointers resolved under the viewer's own grant. Phase 1 stores the extract (Grok Bot style) and shows a download card only if bytes are retained; phase 2 adds an object store for originals, thumbnails, malware scan and quota. ZDR orgs: use only the ephemeral extract and mark the file session-only. Reuse the viewer registry from R-t1-08-02.",
+      "effort": "L",
+      "dependencies": [
+        "Control Space decision issuer for documents:write in shared Spaces (the plan's import issuer derives personal-Space membership and import_write_entitled is deny-by-default)",
+        "R-t1-08-04 phase 1 so a Space-attached file does not widen the uploader's ACL",
+        "Imports Core extraction path"
+      ],
+      "planeOwner": "Data Plane",
+      "risks": "The comparator estimated M assuming the chat upload could be reused; it is text-only and unscoped, so L is more honest. An attachment in a shared room must not grant access beyond the uploader's intent. Malware scanning and ZDR conflict with durable files. Binary storage may not exist yet (needs verification).",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1660-1690 (S1.5 slices 2-4: Data doc/file binding to Space and signed import decisions, source-wired for connector imports). Data side only; no room upload or attachment UI is planned."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-08-011"
+      ]
+    },
+    {
+      "id": "R-t1-08-04",
+      "title": "Artifact sharing: edit role, Space-as-subject grants, general access and access requests",
+      "summary": "Extend the single resource_grants authority in Control Plane user-core with an edit role, a Space subject type (evaluated as the Space decision intersected with the resource grant), a general-access setting that defaults off per org, and an access-request flow with a human-only approve action. Extend ShareDialog to cover canvases, files and artifacts, not just documents. Phase 1 (edit role plus Space subject) must land together with the canvas and file library.",
+      "whyItMatters": "Every artifact type in a room needs its own grants so sharing into a Space never widens the owner ACL, and the access-request loop routes the decision through a human owner. Without an edit role other members cannot co-author the canvas.",
+      "referenceBestPractice": {
+        "bestSource": "QM (SRC): Google-Docs-style dialog with request access and approve or decline from chat after an owner/manager check",
+        "others": [
+          "Slack canvas sharing (DOC): view/edit grants independent of conversation membership, mentions notify only people with access",
+          "Grok Bot visibility tiers PRIVATE|TEAM_VIEW|PUBLIC (SRC)",
+          "Teams delegates to SharePoint permissions (REA)"
+        ],
+        "prevalence": "4 of 5 sources; table-stakes",
+        "mechanism": "Grant rows {resource, subject (user|group|space), role (view|edit), granted_by}; a general_access enum on the resource; request_access creates a pending item delivered to the owner; the decide endpoint verifies the decider manages the resource's home scope, then grants (never downgrading an existing higher role) or sends a deduplicated decline notice; mentions inside an artifact notify only subjects with access."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:1-44",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:90-130",
+          "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:60-70"
+        ],
+        "gap": "Shares are view-only and user-only: create_share hard-codes role view and subject_type user (shares.rs:114-115), the list and revoke routes are keyed to documents, and the only other surface is a shared-with-me list. There is no edit role, no group or Space subject, no general access, no access-request or approval flow, and no sharing for non-document artifacts."
+      },
+      "approach": "Control Plane user-core: add role edit, subject_type space (grant effective only when the current Space decision also allows, per the ADR intersection rule at SPACE_AUTHORITY_ADR_2026-08-13.md:64-70), a general_access field defaulting to restricted, and an access_requests table whose approve action is human-only and not model-eligible. Gateway shares.rs: generalize routes from documents/{id}/shares to resource_type and resource_id. Frontend: extend ShareDialog and deliver requests through the activity inbox (category 05). Keep resource_grants as the only grant store.",
+      "effort": "M",
+      "dependencies": [
+        "Activity inbox (category 05) for request delivery",
+        "ADR-0001 intersection rule",
+        "Resource types for canvas and file artifacts (R-t1-08-01, R-t1-08-03)"
+      ],
+      "planeOwner": "Control Plane (user-core)",
+      "risks": "A Space-subject grant must not become an ACL-widening path. Link access conflicts with ZDR and data residency, so keep it off by default per org. Hidden dependency: R-t1-08-01 and R-t1-08-03 cannot safely ship without phase 1.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-08-009"
+      ]
+    },
+    {
+      "id": "R-t1-08-05",
+      "title": "Agent task tracker: Needs-input state, per-task threads and unread in the Work tab",
+      "summary": "Give each agent task a visible state (working, needs input, done) with a note, a task-scoped thread beside the room and per-task unread, and project it into the Space Work tab and the activity inbox. Extend the capability-core task registry with a space_ref, a thread_ref and a needs_input state, keeping agent-owned tasks distinct from human-owned list items but linkable.",
+      "whyItMatters": "A human should see exactly which agent task is waiting for them, which is the Grok Bot behaviour the vision asks for. Verevon already shows runs awaiting approval, but nothing says an agent is blocked on a question or lets a person answer in a task thread.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (SRC)",
+        "others": [],
+        "prevalence": "1 of 5 sources; unique",
+        "mechanism": "Task {id, title, state: working|needs_input|done, note, created_at, done_at, seen_done_at}; each task has a sub-thread id; a message sent with task_id routes to the agent about that task; a panel shows unread replies and done-but-unseen tasks, and the tasks panel is asynchronous."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:66-69",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:345-347",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:5341-5380",
+          "apps/Model Plane/go/services/capability-core/internal/tasks/types.go:1-30",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:122",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:1-40",
+          "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2220-2231"
+        ],
+        "gap": "Per-thread orchestration todos exist, and /v1/tasks proxies the capability-core task registry (org-scoped, status filter, create, patch, cancel) with states created, assigned, blocked and completed and an assignee, but types.go has no space or thread field (the handler may store more). The Work tab lists runs and shows awaiting_approval as a critical needs-a-human state. There is no free-form Needs-input state, no per-task thread or unread, and no room-level task list."
+      },
+      "approach": "Model Plane capability-core owns task state: add space_ref, thread_ref and a needs_input substate to the task registry and pass space_ref through the /v1/tasks proxy as the cron list already does. Application Plane projects task state into the Space Work tab and the activity inbox. Frontend renders task threads beside the room and per-task unread, and reuses the Activity grammar so a waiting task reads the same in Work and Activity. Messages posted in a task thread route to the task session.",
+      "effort": "M",
+      "dependencies": [
+        "Activity inbox (category 05)",
+        "Shared reply in Session Core",
+        "Adoption plan S4.5 unified Work cockpit"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Overlap with Lists (R-t1-08-06); keep agent-owned tasks separate from human-owned list items and link them by ref. The task registry semantics (types.go describes a seeded catalog) need confirming.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-08-025"
+      ]
+    },
+    {
+      "id": "R-t1-08-06",
+      "title": "Typed room records and Lists: one revisioned work-object substrate with a table view, assignees and item threads",
+      "summary": "Build a generic Space record primitive (stable id, namespaced type, body, prev-revision CAS, idempotent resubmit) in the Application Plane, then ship Lists on top of it: typed columns, a table view first (board later), assignees, saved views and an item thread. Agents create and update records through a Model Plane tool that proposes, with authority-bearing fields staying human-only.",
+      "whyItMatters": "Slack and Teams both give rooms lists, and a list is the natural place to assign work to humans and agents and see status, which is the core of humans and agents cooperating on work. One substrate avoids building tasks, decisions and checklists separately and keeps edits out of chat unread counts.",
+      "referenceBestPractice": {
+        "bestSource": "Slack Lists (DOC) for the user model; Buzz NIP-AR (SRC) for the record substrate",
+        "others": [
+          "Teams Lists, Planner and Wiki tabs (REA)",
+          "Buzz project issues (SRC); no board"
+        ],
+        "prevalence": "lists: 3 of 5, common; typed-record substrate: 1 of 5, unique",
+        "mechanism": "Record = full snapshot {id (stable UUID), home_space, type (namespaced), title, body JSON, op (create|update|move|delete|restore), prev revision, optional root thread}; tables heads(id to head) and revisions; head advance is an atomic CAS on prev; resubmitting an accepted revision is idempotent; revisions never count toward unread or notifications; read access equals the room decision. A list is a record collection with a column schema {name, type: text|select|people|date|checkbox}; views store filter, sort, group and an optional default flag; assignment emits an activity item to the assignee; add message to list copies a message ref into an item."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/schema.ts:277-304",
+          "apps/Application Plane/convex-core/convex/schema.ts:530-546",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:66-69",
+          "apps/Frontend Plane/verevonv3/src/app/App.tsx:183-188",
+          "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:84-85"
+        ],
+        "gap": "No Space-scoped record type, list or board. Planner documents in Convex are keyed by a legacy workspaceId (an ADR resource-local partition) and orchestration todos are per thread. Tickets are a separate route unlinked from Spaces. Humans cannot edit tasks in the room and there are no assignees, views or item threads."
+      },
+      "approach": "Application Plane (Convex) owns space_records and space_record_revisions keyed by spaceRef with a registered schema per record type and prev-CAS; Control read and write decisions gate every query and mutation. Do not create another generic project authority (ADR row 84 treats the Convex projects table as a migration candidate), so records hang off the Space aggregate. Frontend: Lists tab in SpaceCockpit, table view first, board later. Model Plane: list read and update tools calling the Application API under the run's delegated decision. Assignment events feed the planned activity inbox; allow linking a ticket ref into a list item.",
+      "effort": "L",
+      "dependencies": [
+        "ADR-0001 migration of planner documents",
+        "Activity inbox (category 05)",
+        "R-t1-08-04 phase 1"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Scope creep toward a full Planner; ship one table view and a few field types first. Generic schemas drift, so keep a registry of record types shared by UI and agent tools.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-08-003",
+        "C-t1-08-004"
+      ]
+    },
+    {
+      "id": "R-t1-08-07",
+      "title": "Room knowledge capture: uploads become agent knowledge with a summary, and agents propose pinned knowledge for human approval",
+      "summary": "After a room upload, extract content, generate a summary, index it into the Space retrieval binding and return typed refusal reasons (too large, unsupported, policy). Later, let an agent propose a distilled summary or decision that a human approves before it is pinned to the canvas or knowledge store, reusing the wiki proposal and review flow.",
+      "whyItMatters": "It turns the room into the agents' shared memory without a separate admin step, and the approval step fits the rule that a human authorizes what becomes durable. Extract-only storage is a privacy-friendly default that fits ZDR.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (DOC) for auto-summary, retention and source-stays-in-provider; Grok Bot (SRC) for extract-only storage and typed refusals",
+        "others": [
+          "Buzz (DOC, planned only): agent proposes durable knowledge, human approves and pins it"
+        ],
+        "prevalence": "files as knowledge: 2 of 5, differentiator; crystallization: 1 of 5, unique and unbuilt in Buzz",
+        "mechanism": "On upload completion enqueue extraction (text, tables) and an LLM summary; store extract and summary linked to the file id; index into the Space retrieval binding; return a refusal enum synchronously; a retention job deletes or tombstones per org setting. Crystallization: a proposal {summary, sources[]} awaits human approval and is written to the room canvas or knowledge store on approval."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:145-243",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:14-33",
+          "apps/Data Plane v2/infra/postgres/migrations/20260813130000_space_retrieval_bindings.sql",
+          "apps/Data Plane v2/services/wiki-store-go/internal/handler/wiki.go:87-114",
+          "apps/Data Plane v2/infra/postgres/init.sql:424-436",
+          "apps/Frontend Plane/verevonv3/src/features/knowledge/components/KnowledgePage.tsx:845-860"
+        ],
+        "gap": "Knowledge reaches room agents through the read-only Space retrieval binding and nobody can add knowledge from inside the room. There is no auto-summary, no typed upload refusal and no Space-level retention. The propose-then-approve mechanism exists in Data Plane (wiki_proposals with submit and review routes, scope wiki.approve) and in the Knowledge page Operating Map accept/reject UI, but nothing offers it in a room (INF: reuse, not verified end to end)."
+      },
+      "approach": "Data Plane: on room upload (R-t1-08-03) run extraction and index into the Space retrieval binding; a Model Plane job writes the summary back as a Data Plane field computed only within viewer-authorized scope; add a typed refusal enum to the upload response. For crystallization, reuse wiki-store SubmitProposal and ReviewProposal: a room agent submits a proposal against the canvas page or a knowledge page, Application holds the approval item, a human with wiki.approve accepts, and the result becomes a new version with source_refs provenance. Frontend: summary card on the file and a proposal review surface patterned on the Operating Map review. Under ZDR keep only a session extract.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-08-03 file library",
+        "R-t1-08-01 canvas for pinning",
+        "Approval surfaces in Application Plane"
+      ],
+      "planeOwner": "Data Plane",
+      "risks": "Summaries can leak content to members without the document grant, so compute and show them only within viewer-authorized scope. Crystallization is DOC-only in the reference (planned, not built in Buzz).",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-08-012",
+        "C-t1-08-022"
+      ]
+    },
+    {
+      "id": "R-t1-08-08",
+      "title": "Ask the agent about this: selected artifact context framed as untrusted data, with a pre-send preview",
+      "summary": "On the canvas, list, file and artifact views add an Ask agent about this action that attaches the selection as a typed context chip, shows the exact payload that will be appended before sending, and has Model Plane render the context as quoted, capped, untrusted data. A later phase adds point-and-annotate feedback on HTML artifacts (select an element, draw, send the screenshot and element reference).",
+      "whyItMatters": "Shared multi-author artifacts are a prompt-injection surface, and this grounds agent turns in the page being viewed while keeping the user in control of what the agent sees. It is a small change with high safety value once canvases and files exist.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz (SRC, highest-quality evidence in this category): context block capped at 100 items and 16,000 characters, control characters collapsed, values JSON-quoted, a fixed treat-as-data notice, and a byte-identical payload preview before signing",
+        "others": [
+          "QM (SRC) app bar with select, marker, draw and capture posting snapshots via postMessage",
+          "Grok Bot design mode (SRC)"
+        ],
+        "prevalence": "in-page context: 1 of 5, unique; annotate: 2 of 5, differentiator",
+        "mechanism": "buildContextBlock(selection) produces JSON-quoted values with caps; the prompt adds a fixed instruction that quoted values are data; the UI renders the exact string to be appended and the user confirms. Annotate: a bar script inside the sandboxed frame captures the selection (DOM path plus box) and an annotated screenshot and posts it to the parent with origin checks; the parent attaches it to the composer as typed context."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:181",
+          "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:263",
+          "apps/Model Plane/rust/services/model-gateway/src/author_guidance.rs:194",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+        ],
+        "gap": "Model Plane already applies injection defense and a treat-as-data notice to untrusted retrieved and tool content, but it was not verified that room artifacts or selected context pass through it. The Space composer has no context chip, no pre-send payload preview and no annotate feedback (grep of the spaces components finds none). The comparator left this status unknown."
+      },
+      "approach": "Frontend Plane: add Ask agent about this on canvas, list and file views producing a typed context chip with a byte-exact preview; for HTML artifacts add a selection overlay in the sandboxed viewer with origin-checked postMessage. Model Plane: render attached context as quoted untrusted blocks with caps, reusing the moderation injection_defense path, and bound what is attached by the viewer's own grants. Under ZDR drop screenshots from the payload.",
+      "effort": "S",
+      "dependencies": [
+        "R-t1-08-01 canvas",
+        "R-t1-08-03 file library",
+        "R-t1-08-02 HTML artifacts for the annotate phase"
+      ],
+      "planeOwner": "Frontend Plane (UI); Model Plane (framing)",
+      "risks": "Context bloat and screenshots may contain data the agent should not see under ZDR. postMessage origin validation. The annotate phase is polish and can slip.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-08-021",
+        "C-t1-08-008"
+      ]
+    },
+    {
+      "id": "R-t1-08-09",
+      "title": "Case and project Spaces bound to work objects, seeded from room templates",
+      "summary": "When a ticket, customer case or project is created, have the Application Plane create a bound Space (kind case or project) with a resource binding, membership from the assignees and seed artifacts (canvas, list, bound agents) from a declarative template instantiated in one transaction. Owner-plane ACLs stay authoritative and agent bindings still need human approval.",
+      "whyItMatters": "It makes rooms and artifacts follow the work and fits Verevon's support and sales flows, which already have tickets and inbox conversations outside any Space.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz (SRC): a resource event lists coordinates and binds a channel, and the project signer gets no authority over member resources",
+        "others": [
+          "Slack channel templates that pre-seed lists (DOC)"
+        ],
+        "prevalence": "resource-bound rooms: 1 of 5, unique; templates: 1 of 5, unique",
+        "mechanism": "Binding record {resource_ref, space_ref} created with the resource; a project is a list of resource refs plus a home space and only aggregates, since each resource's authorization still comes from its owner. A template is a declarative bundle {room settings, artifacts[], agents[]} instantiated in one transaction."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:82",
+          "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:84",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:1-40",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43"
+        ],
+        "gap": "Case and project Spaces are planned in the Space authority ADR (the support chat maps to a future case Space), but support tickets live in conversation-core and do not spawn Spaces. The only templates are three agent templates (Meeting Scribe, Status Agent, Knowledge Helper) in the create-agent dialog; no room template seeds artifacts."
+      },
+      "approach": "Application Plane: Space kinds case and project with resource bindings; conversation-core publishes a ticket-created event that the Application Plane consumes to create the bound Space; a template registry instantiates Space, bindings and seed artifacts, so templates land after the canvas and lists exist. Auto-archive the Space with the resource.",
+      "effort": "M",
+      "dependencies": [
+        "Case Space kind (ADR-0001)",
+        "Membership from ticket assignees",
+        "R-t1-08-01 and R-t1-08-06 for seed artifacts"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Room sprawl, so auto-archive with the resource. The template phase has DOC-only support and is only valuable once artifact types exist.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:82 (case Space) and :84 (Convex projects as a migration candidate). Seed templates are not planned."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-08-020",
+        "C-t1-08-018"
+      ]
+    },
+    {
+      "id": "R-t1-08-10",
+      "title": "Message embeds: artifact pointer cards and client-side provider link cards",
+      "summary": "Add an embed block to room messages that stores only a pointer {kind, id} to a canvas, list, record or file and renders it under the viewer's own grant, with a request-access stub when they lack it. Separately, classify pasted links (SharePoint, OneDrive, Google, Box, Dropbox and similar) into typed cards by host and path in the browser, with no server fetch.",
+      "whyItMatters": "The pointer-plus-own-ACL model is exactly the rule that Space access never widens an owner-plane ACL: a post can reference a document without granting access to it. Norwegian orgs live in SharePoint and OneDrive, and client-side cards are ZDR-safe polish.",
+      "referenceBestPractice": {
+        "bestSource": "Teams Loop (REA) for pointer embeds with their own ACL and a sharing warning; Grok Bot (SRC) for provider link-card classification",
+        "others": [
+          "Slack typed cloud pickers as hardened child windows (SRC)"
+        ],
+        "prevalence": "pointer embeds: 1 of 5, unique; provider cards and pickers: 2 of 5, differentiator",
+        "mechanism": "Message body contains an embed {artifact_kind, artifact_id}; the renderer fetches the artifact under the viewer's grant and subscribes to live updates; a viewer without access sees a request-access stub; pasting elsewhere reuses the same id; the share dialog warns when posting to an audience wider than the artifact ACL. Link cards use host-pattern to provider and path-pattern to kind tables and never fetch content."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:1-12",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+        ],
+        "gap": "Room posts cannot embed any artifact (chat artifacts are inline SSE payloads, not pointers to an independently authorized object). No link previews or provider cards in rooms; the baseline recorded attachments and link previews as absent in the room, and the integration-core provider actions are not offered as a picker (not re-verified)."
+      },
+      "approach": "Frontend Plane: an embed block type in room messages rendering canvas, list, record and file cards by id through the gateway under the viewer's decision; a pure client-side URL classifier for provider cards; pickers later through Ingestion integration-corev2 OAuth grants that never widen the owner ACL. Application Plane live updates reuse the existing realtime projection. Adopt the embed format inside the canvas and lists work, not as a separate product.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-08-01",
+        "R-t1-08-06",
+        "Rich message content (category 01)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "N+1 fetches on long timelines. A request-access stub must not leak titles or metadata to unauthorized viewers. Server-side unfurl would leak URLs, so keep classification client-side.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-08-005",
+        "C-t1-08-014"
+      ]
+    },
+    {
+      "id": "R-t1-08-11",
+      "title": "Read-only snapshot share of a room or thread with an allowlisted projection",
+      "summary": "Let a user share an immutable snapshot of a room outcome (org or link scope) that contains only user messages, final replies and copied attachments, never reasoning, tool output or raw payloads, behind an unguessable token. Revalidate that the creator can still read the source on every view and serve it from a session-less, no-store, noindex route with a strict CSP. Disallow under ZDR.",
+      "whyItMatters": "It is a safe way to hand a case outcome to a customer or auditor without exposing agent traces, matching Verevon's ZDR and audit posture. It is not a table-stakes room feature and matters mainly for case Spaces with external parties.",
+      "referenceBestPractice": {
+        "bestSource": "QM (SRC)",
+        "others": [],
+        "prevalence": "1 of 5 sources; unique",
+        "mechanism": "share_snapshots {token, created_by, scope (org|link), entries[] (allowlisted projection), file_copies[]}; the render path loads no session; every read re-checks that the creator is still an internal member with access to the source thread, else 404; file ids are share-specific copies."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/privacy.rs:36-41"
+        ],
+        "gap": "No thread or Space share or export; only the user GDPR export and erase routes exist."
+      },
+      "approach": "Model Plane Session Core produces the allowlisted projection; Data Plane copies attachments under share-specific ids; the Frontend serves a session-less read-only route with the hardened headers. Refuse creation under ZDR and honour revocation and retention.",
+      "effort": "M",
+      "dependencies": [
+        "Shared-read decision for Space turns",
+        "Attachments in rooms (R-t1-08-03)"
+      ],
+      "planeOwner": "Model Plane (Session Core)",
+      "risks": "Leaking internal content through links, so enforce retention, revocation and the creator re-check.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-08-010"
+      ]
+    },
+    {
+      "id": "R-t1-08-12",
+      "title": "Versioned publish lifecycle for agent-built apps and shared agent definitions",
+      "summary": "Follow the adoption plan's S5.4 slice for governed internal app build and publish: the Model builds in a credential-brokered Space workspace, emits an immutable build artifact and manifest, and Application stores app and version metadata with rollback as a pointer flip and private-until-shared visibility. In the same lifecycle, give shared agent definitions draft and published revisions with a Publish changes action, pinned by Space bindings.",
+      "whyItMatters": "It lets agents ship durable internal tools for a team, a strong Grok-Bot-style differentiator, and gives shared agents the human-authorized publish step the authority model requires. It is expensive and not core to the chat room.",
+      "referenceBestPractice": {
+        "bestSource": "QM (SRC) for deployments; Grok Bot (SRC) for pages and agent draft/publish",
+        "others": [],
+        "prevalence": "publish apps: 2 of 5, differentiator; agent definition lifecycle: 1 of 5, unique",
+        "mechanism": "publish(dir) produces an immutable version blob and manifest; the deployment row points at current_version; rollback is a CAS pointer flip; a DeployProvider interface (apply, reconcile, destroy, resolveEndpoint, logs); the owner scope decides access and the created-in scope is provenance; per-deployment credentials limit data replication to its own prefix. Agent definitions keep draft and published revisions, the UI flags draft differing from published, and a visibility enum controls audience with typed outcomes (PUBLISHED, ALREADY_PUBLISHED, NOT_SHARED, BUSY)."
+      },
+      "verevonToday": {
+        "status": "stub",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:1-5",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:35",
+          "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2263-2272",
+          "apps/Frontend Plane/verevonv3/src/features/agents/lib/verevon-agent-blueprints.tsx:337"
+        ],
+        "gap": "Studio is a gateway-local, ephemeral canvas of layout blocks with social-draft export, with no publish, versioning, hosting or visibility model. Governed app build and publish is a deliberately post-foundation plan item (S5.4). Whether shared agent definitions have draft versus published revisions was not verified; the agent blueprint UI lists Draft, Published and Rollback as a label only."
+      },
+      "approach": "Follow S5.4 ownership: Model builds in the sandbox, Application owns app, version and share metadata and the Space projection, Infra owns sandboxed hosting and routing on an isolated origin, Control owns human grants, and Data stores versioned bundles. For agent definitions add draft and published revisions in the Model Plane agent registry with a Control decision to publish to the org, and have Space bindings pin a published revision.",
+      "effort": "XL",
+      "dependencies": [
+        "R-t1-08-02 room artifacts",
+        "Isolated hosting origin",
+        "resource_grants for apps (R-t1-08-04)"
+      ],
+      "planeOwner": "Application Plane (with Model Plane, Infra and Control)",
+      "risks": "Hosting untrusted generated code (isolation, CSP, egress), cost and data residency. Revision pinning across many bindings. Heavy for the current stage.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2263-2272 (S5.4 governed internal app build/publish, status [~]; apps only). Agent definition draft/publish is not planned."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-08-007",
+        "C-t1-08-024"
+      ]
+    }
+  ],
+  "dropped": [],
+  "strengthsToKeep": [
+    "Single grant authority: resource_grants in user-core is the only store that retrieval and documents-api enforce, and org_id and granted_by are set server-side from the session (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:1-12, :90-96). Extend it rather than adding per-feature ACLs.",
+    "Space access is an intersection, not a grant: the ADR states that Space decision AND recipient audience AND owner-plane resource authorization must all hold (apps/SPACE_AUTHORITY_ADR_2026-08-13.md:64-70). The reference clusters describe per-feature permission checks, so this explicit rule is a cleaner basis for embeds and cross-room artifacts (INF).",
+    "Signed Space decisions on Data writes: documents-api verifies a Control Ed25519 decision with audience, action, payload digest, idempotency, ZDR, retention and residency claims (apps/Data Plane v2/services/documents-api-go/internal/handler/space_import.go:14-60), stronger than the ACL checks in the references. Reuse for canvas and file writes.",
+    "Atomic CAS promote in the Space workspace: base-hash compare-and-swap in one CTE statement with conflict reporting, hardened after an adversarial review found a lost update (apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go:158-200). Use it as the template for canvas and record heads.",
+    "Data Plane wiki-store already ships append-only page versions with human and agent author columns, a diff route and a propose-then-approve flow gated by wiki.approve and a ZDR durable-write guard (apps/Data Plane v2/services/wiki-store-go/internal/handler/wiki.go:87-114, apps/Data Plane v2/infra/postgres/init.sql:312-330). That is most of a revisioned canvas backend and the agent-proposes, human-approves pattern Buzz only planned.",
+    "Chat artifact contract and viewer: the same id re-emitted with a higher version is an update with history kept, with a revision stepper, sandboxed HTML and client-side DOCX/PPTX/XLSX export (apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts:1-16, ChatArtifactPanel.tsx:1-12). Equal to Grok Bot and QM for a single user.",
+    "Honest ephemeral and empty states: Studio is labelled ephemeral in its API (studio.rs:35), cockpit tabs name the owner plane that has not published a projection (SpaceCockpit.tsx:12-35), and the Knowledge tab shows non-completed documents and truncation (SpaceKnowledgePanel.tsx:145-243). Keep this discipline as artifacts are added.",
+    "Ephemeral document extraction that stores nothing, a ZDR-friendly equivalent of Grok Bot's extract-only handling (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:14-33).",
+    "Human review queue for AI-drafted support replies: the inbox gateway proxies conversation-core's HITL ai-actions queue (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:1-8), and the comparator (cluster C-t1-08-023, not live here) reports persisted drafts, a claim/release lease and AI reply proposals that equal or beat QM's review queue. Generalize that lease to Space drafts."
+  ]
+}

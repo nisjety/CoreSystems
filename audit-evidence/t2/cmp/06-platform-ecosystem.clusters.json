@@ -1,0 +1,1987 @@
+{
+  "category": "Platform & ecosystem",
+  "excluded": [
+    {
+      "id": "firecrawl-api-surface-088",
+      "reason": "Support-agent proxy endpoint (q2): product support plumbing, unrelated to web access or browser capability."
+    },
+    {
+      "id": "firecrawl-api-surface-089",
+      "reason": "Business-model context (open-core vs hosted split), not a capability. Used as a caveat: Firecrawl differentiators (fire-engine, agent, browser fleet) are closed source, so parity is measured against documented behaviour."
+    },
+    {
+      "id": "aside-browser-product-100",
+      "reason": "Internal daemon tRPC router decomposition: architecture reference with no user-facing capability of its own; relevant pieces are covered by other clusters/categories."
+    }
+  ],
+  "clusters": [
+    {
+      "id": "C-t2-06-001",
+      "name": "Packaged capability unit with declarative manifest (Actor / plugin bundle)",
+      "description": "A crawler, scraper or agent tool is packaged as one deployable unit (code + manifest + input/output schemas + default storages + metadata) that can be run from UI, API, schedule or another unit, and installed/gated per environment.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "codexbrowser"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "apify-platform-001",
+        "apify-platform-002",
+        "codexbrowser-in-app-browser-019"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-001",
+          "apify-platform-002"
+        ],
+        "why": "q5/q4: one manifest (.actor/actor.json) declares name, version, buildTag, env vars, Dockerfile, README, input schema, storages and an MCP path; every entry point (Console, REST, CLI, scheduler, other Actors) runs the same unit. Codex (019) adds availability-gated auto-install and migration of bundled plugins, which is the in-app counterpart."
+      },
+      "mechanism": "Manifest file per unit (JSON): {spec_version, name, version MAJOR.MINOR, build_tag, env, image/entrypoint, readme, input_schema, output_schema, storages}. The platform resolves a run request to (unit, version/tag) -> immutable build, injects input + storage ids as env, runs it in an isolated container, and exposes run status and outputs. Codex variant: a plugin table entry with isAvailable(gates), autoInstallOptOutKey and a migrate() hook decides whether the bundle is installed for this user/org.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-087",
+          "v-browser-app-047",
+          "v-quarry-088",
+          "v-quarry-089"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:150-194",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/navacancies/navacancies.go:1-30",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/procurement/procurement.go:1-12",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:26-60"
+        ],
+        "gap": "No packaged unit abstraction. Domain collectors (NAV vacancies, TED/Doffin procurement, official stats) exist as Go library packages with no importer; presets exist on quarry-control but are not exposed via edge. Nothing ties code + schema + output map + version into a runnable, catalogued unit.",
+        "strengths": ""
+      },
+      "benefit": "A \"Quarry pack\" (collector or browser procedure + typed input/output schema + preset + skill text) would let the Model Plane discover and propose well-defined jobs instead of free-form crawls, and would give the domain collectors already written a way to ship. Quarry keeps execution authority: the Model proposes (pack id, input), Quarry validates against the schema and executes.",
+      "approach": "Ingestion Plane: define a QuarryPack manifest (YAML/JSON) in quarry-core with schema-validated input/output, required driver capabilities, ZDR compatibility flag and cost class; register packs in quarry-control (Postgres) and expose GET /v1/packs + POST /v1/packs/{id}/runs on edge. Start with first-party packs only (wire the existing navacancies/procurement/officialseries collectors). Model Plane registers each pack as a capability in capability-core so tool selection and scoring work unchanged.",
+      "effort": "L",
+      "dependencies": [
+        "Typed input schema (C-t2-06-002)",
+        "Run result storage (C-t2-06-017)",
+        "capability-core registry"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Scope creep toward a third-party marketplace; executing arbitrary user code would need sandbox-manager isolation (absent for browsers, v-browser-app-057). Keep packs first-party/declarative initially.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Turns dormant collectors and presets into agent-usable tools and is the foundation for presets, schemas and procedures; not urgent for the core browser experience.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-002",
+      "name": "Typed input schema driving auto-generated forms and validation",
+      "description": "A JSON input schema per tool/job renders a parameter form automatically (with domain editors such as URL lists, globs, proxy, resource picker) and validates API and UI input identically.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-003"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-003"
+        ],
+        "why": "q5: one schema (types, editors, prefill/default/example, enum titles, isSecret, section captions, resourcePicker) is both the UI contract and the API validator, and is mandatory for publishing."
+      },
+      "mechanism": "Store a JSON Schema subset plus UI hints (editor, sectionCaption, prefill, enumTitles, isSecret, resourceType) per unit. Frontend renders a generic SchemaForm component by walking properties and mapping editor -> widget; backend validates with the same schema before enqueueing. The Model Plane receives the same schema as the tool parameter schema, so human and agent fill the same contract.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1"
+        ],
+        "gap": "No baseline record. The SPA action registry uses zod schemas shared by UI and AI actions (SRC, light read), but no schema-driven form generation for Quarry crawl/extract/schedule parameters was found in baseline. Check: whether any SchemaForm/zod-to-form renderer exists in verevonv3 and whether Quarry routes publish JSON Schemas (openapi.yaml covers only 46 of ~75 routes, v-quarry-019).",
+        "strengths": "Zod-typed action registry shared by human UI and AI agents is the right foundation."
+      },
+      "benefit": "One schema per Quarry job/pack would give users a consistent configuration UI and give the Model Plane exact tool parameters, reducing malformed proposals that Quarry must reject.",
+      "approach": "Ingestion Plane publishes JSON Schemas for job inputs (generated from Rust types with schemars) via /v1/schemas; Frontend Plane adds a Solid SchemaForm that renders from JSON Schema + UI hints; Model Plane reuses the schema as the tool definition.",
+      "effort": "M",
+      "dependencies": [
+        "OpenAPI completeness (v-quarry-019)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Divergence between zod (SPA) and Rust schemas if both are hand-written; generate one from the other.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Useful once packs/presets exist; current forms are hand-built and work.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-003",
+      "name": "Secret inputs encrypted per (user, tool) and decrypted only inside the run",
+      "description": "Input fields flagged secret are encrypted end-to-end so only the executing run can read them; storage and UI never see plaintext.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-004"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-004"
+        ],
+        "why": "q4: hybrid encryption with a per-(user, Actor) RSA key and decryption only inside the container is a clean blast-radius limiter."
+      },
+      "mechanism": "On save: generate random AES-256-GCM key, encrypt value, wrap the AES key with an RSA-2048 public key unique to (user, tool); persist as ENCRYPTED_VALUE:<wrapped>:<ciphertext>. At run start the runtime receives the private key via a mounted file/env and decrypts in-process; logs and stored input keep ciphertext.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-153",
+          "v-quarry-056",
+          "v-quarry-055"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/integration-corev2/internal/crypto/vault.go:16-20",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:551-600"
+        ],
+        "gap": "integration-corev2 has an AES-GCM token vault and short-lived token broker (shipped), but Quarry browser profile cookie/storage snapshots have no at-rest encryption (v-quarry-056) and there is no secret-field concept for Quarry job inputs (e.g. login credentials for a procedure).",
+        "strengths": "Connector tokens are already vaulted and brokered short-lived (v-quarry-153)."
+      },
+      "benefit": "Browser profiles hold live session cookies; encrypting them per (org, owner) closes the largest secret-at-rest gap in Quarry and keeps Space access from exposing them.",
+      "approach": "Ingestion Plane: envelope-encrypt profile snapshots and any secret job inputs with a per-(org, owner) data key from a KMS-like key service (reuse integration-corev2 vault pattern); decrypt only in the quarry-browser lease when restoring the context. Mark schema fields isSecret so gateway and logs redact them.",
+      "effort": "M",
+      "dependencies": [
+        "Key management (Control Plane or integration-corev2 vault)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Key rotation and GDPR erasure must cover wrapped keys (v-quarry-101 purge consumer).",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Security hygiene for persisted logins; users will not notice it until a leak, but it is cheap relative to risk.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-004",
+      "name": "Output and dataset schema with display views",
+      "description": "A run declares where its outputs live (URL templates) and a dataset schema both validates result items and configures table views and field metadata for agents.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-005",
+        "apify-platform-006",
+        "apify-platform-031"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-006",
+          "apify-platform-005"
+        ],
+        "why": "q4: fields (JSON Schema with titles/descriptions/examples) plus views (transformation: fields/unwind/flatten/omit; display: table properties) serve both the Console table and agent understanding; KV collections let the Output tab link screenshots or inline an HTML report."
+      },
+      "mechanism": "Per unit: output_schema {id: {title, template}} where template interpolates run links; dataset schema {fields: JSONSchema, views: [{transformation, display}]}. UI renders Output tab from templates and dataset views; agents read field descriptions as metadata.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-browser-app-048",
+          "v-quarry-092"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293"
+        ],
+        "gap": "No dataset/result-set concept, no output map and no dataset views in VerevonIngestionsPage (views are runs/schedules/monitoring/sources/evidence/profiles).",
+        "strengths": ""
+      },
+      "benefit": "Typed output maps let the Data Plane and Model Plane consume Quarry results uniformly (what was produced, where, with which fields) instead of route-specific shapes.",
+      "approach": "Fold into the pack manifest (C-t2-06-001) and result-set API (C-t2-06-017): output_schema with field descriptions; Frontend renders a generic table view.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-06-001",
+        "C-t2-06-017"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Low.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Only valuable after result sets exist; DOC-only evidence.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-005",
+      "name": "Versioned immutable builds with tags, pinning and build cache",
+      "description": "Each tool version is built into an immutable image with a build number; tags (latest/beta) move between builds and callers can pin exact builds.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-007",
+        "apify-platform-008",
+        "apify-platform-009"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-007",
+          "apify-platform-008"
+        ],
+        "why": "q4: MAJOR.MINOR.BUILD numbering, tag->build mapping, pinning for stability, best-effort layer cache with clean-build override."
+      },
+      "mechanism": "Build pipeline produces image digest per (version, build#); tag table maps tag -> build; run resolves tag at start and records the resolved build on the run for reproducibility; untagged unused builds GC after N days.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No packaged units, so no per-unit build/version model. Quarry itself ships as service images; procedures (v-quarry-143) have no store or version.",
+        "strengths": ""
+      },
+      "benefit": "Only relevant if packs/procedures become versioned artifacts: recording the resolved version on each run makes agent replays reproducible.",
+      "approach": "When adding a procedure/pack store, give each record an immutable version and tags; no container build system needed for declarative packs.",
+      "effort": "S",
+      "dependencies": [
+        "C-t2-06-001",
+        "C-t2-06-020"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Low.",
+      "tier": "nice-to-have",
+      "significance": 1,
+      "rationale": "Developer-platform plumbing; adopt only the version+tag field on packs/procedures.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-006",
+      "name": "Source hosting and CI deployment (Web IDE, Git, auto-build on push, GitHub Action)",
+      "description": "Tool source can be edited in a browser IDE or pulled from Git/zip/gist; pushes rebuild automatically; an official CI action deploys tagged builds.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-010",
+        "apify-platform-011",
+        "apify-platform-012"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-011",
+          "apify-platform-012"
+        ],
+        "why": "q4: GitHub App webhook auto-build and push-actor GitHub Action with branch->tag mapping."
+      },
+      "mechanism": "Webhook on push -> build API (version, tag); CI action with token deploys and tags beta from develop.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not applicable to Verevon's current model (first-party internal Quarry, no third-party developer platform).",
+        "strengths": ""
+      },
+      "benefit": "Minimal for Verevon: users are not expected to author scrapers as code.",
+      "approach": "Skip. If first-party packs are added they ship through the monorepo CI.",
+      "effort": "L",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Building a developer platform diverts from the AI-first product.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Developer-marketplace capability that does not fit an internal, AI-first web layer.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-007",
+      "name": "Starter templates and saved run presets (tasks)",
+      "description": "A catalogue of starter templates and named, saved input + run-option presets that can be run on demand, scheduled and shared.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-013",
+        "apify-platform-014"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-014",
+          "apify-platform-013"
+        ],
+        "why": "q4-5: tasks are a saved input + timeout/memory preset per Actor (up to 5,000 per user) runnable from UI/API/schedule; templates cover crawlers, stealth browsers, agents and MCP servers."
+      },
+      "mechanism": "Preset table {id, unit_id, name, input JSON, run_options, owner, visibility}; run endpoint merges preset input with overrides; schedules reference presets.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-089",
+          "v-browser-app-041",
+          "v-quarry-080"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:26-60",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/presets.rs:1-60",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:47"
+        ],
+        "gap": "RunPolicy preset catalog exists on quarry-control but /v1/presets is not exposed via edge; Rust domain preset bundles are unused; schedules only execute change_monitor (scrape/crawl/batch schedules never run). The durable sources registry with monitor presets is the only user-facing preset surface.",
+        "strengths": "Durable, org-scoped sources registry with monitor presets is shipped."
+      },
+      "benefit": "Per-Space saved crawl/extract presets let users and agents re-run known-good configurations, and give the Model Plane a safe menu of pre-approved jobs.",
+      "approach": "Ingestion Plane: expose control /v1/presets through edge with org/Space scoping; make scrape/crawl/batch schedules actually execute; Frontend: \"save as preset\" on ingestion runs.",
+      "effort": "M",
+      "dependencies": [
+        "Schedules execution fix (v-quarry-080)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Space-shared presets must not widen owner-plane ACLs (presets reference sources the viewer may not own).",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Code already exists but is unwired; modest effort for visible value.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-008",
+      "name": "Public marketplace, publishing and third-party monetization",
+      "description": "A public store where third parties publish tools/data providers with listings, ratings, badges, pricing models, tier discounts, personalized search, payouts and publishing norms.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "apify-platform-015",
+        "apify-platform-016",
+        "apify-platform-018",
+        "apify-platform-019",
+        "apify-platform-021",
+        "apify-platform-109",
+        "apify-platform-110",
+        "firecrawl-api-surface-087"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-015",
+          "apify-platform-016"
+        ],
+        "why": "q5: 86,000+ Actors, public search API with categories (incl. MCP_SERVERS), pay-per-event pricing, payouts and quality-ranked search are Apify's moat; Firecrawl Exchange (087) is a smaller two-sided data-provider market."
+      },
+      "mechanism": "Listing records with README, input form, pricing model, permission badge and run stats; GET /v2/store search with sortBy popularity; revenue share and monthly payouts.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-087",
+          "v-browser-app-047"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:150-194"
+        ],
+        "gap": "No marketplace; none planned.",
+        "strengths": ""
+      },
+      "benefit": "Low for building; moderate for consuming: Verevon could let the Model Plane call Apify Store Actors as a third-party MCP/provider action when an org opts in.",
+      "approach": "Do not build. Optionally add Apify (or similar) as an integration-corev2 provider so its Actors are reachable as provider actions with approval gates, cost caps and ZDR refusal.",
+      "effort": "XL",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Third-party code and data egress conflict with ZDR and the authority model; legal/payment overhead.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Marketplace economics do not fit an AI-first workspace; consuming one via integration-corev2 is the most that makes sense.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 7,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-009",
+      "name": "Tool quality/trust score for ranking and selection",
+      "description": "A computed 0-100 score per tool (reliability, popularity, feedback, permissions, pricing transparency, developer history) that ranks search results and agent tool selection.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-020"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-020"
+        ],
+        "why": "q4: eight-factor score used by both Store and MCP search."
+      },
+      "mechanism": "Periodic job computes normalized factor scores per tool and a weighted composite; search and agent tool-routing sort by it.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/go/services/capability-core/internal/scoring/scoring.go:1-15"
+        ],
+        "gap": "No baseline record; found in code during this comparison (SRC, light read): capability-core computes a deterministic composite rank from success_rate, schema_fail_rate, p95 latency, mean cost, approval_rate, incident_count, operator_rating and rollout_state. Not verified whether Quarry web tools (web_search/web_fetch/browser) feed health columns into it.",
+        "strengths": "Pure, unit-testable composite score with per-call weight overrides, already oriented to agent tool selection rather than marketplace popularity."
+      },
+      "benefit": "Already present; keep and feed Quarry outcomes into it.",
+      "approach": "Keep. Verify Quarry tool runs report success/latency/cost into capability-core so web tools are ranked like other capabilities.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "If web tools are not wired, the score is blind to Quarry quality.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon has an equivalent mechanism aimed at agents.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-010",
+      "name": "Usage pricing function and metering (credits/CU, failures free, feature surcharges)",
+      "description": "One pure pricing function turns a request + outcome into billable units: base unit per page, surcharges for LLM/security features, discounted reuse, free failures; reads of results after a run are also metered.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl",
+          "apify"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "firecrawl-api-surface-074",
+        "firecrawl-engine-and-infra-101",
+        "apify-platform-111"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-074",
+          "firecrawl-engine-and-infra-101"
+        ],
+        "why": "q5 SRC: calculateCreditsToBeBilled(options, internalOptions, document, costTracking, flags, error, ...) is a single function; failures cost 0 (with explicit exceptions), json/redactPII/lockdown/injection-check +4, threat scan +2, PDF per page, deterministic extractor 10 vs 3 on reuse, ZDR surcharge; cost tracking records LLM calls for margin analysis."
+      },
+      "mechanism": "Pure function price(request_options, outcome, cost_tracking, org_flags) -> units, unit-tested per feature; called once at job end; result written to a ledger with idempotency key; separate cost tracker records real provider costs for margin. Apify meters CU = GB-RAM-hours at 1 s granularity plus storage ops.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-098",
+          "v-quarry-099",
+          "v-quarry-100",
+          "v-browser-app-049"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs:1-93",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:451-458",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:836-975",
+          "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:155",
+          "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go:1-40"
+        ],
+        "gap": "Quarry emits raw usage events (org_id, metric, quantity, source=quarry-edge) to billing-core over NATS, but there is no pricing function mapping features (LLM formats, browser minutes, paid search providers, ZDR) to billable units, no \"failure is free\" rule, and no user-visible usage for web acquisition (SPA client is dead code). Model Plane cost-core has a ledger for model cost.",
+        "strengths": "Metering transport (NATS usage.> with idempotency) and org aggregates exist; Model Plane has a cost ledger."
+      },
+      "benefit": "Lets Verevon price and show web acquisition separately from reasoning cost (Model Plane cost vs Ingestion usage), and gives the Model Plane a cost estimate per proposed web action.",
+      "approach": "Control Plane (billing-core) owns a pure price(metric, attributes, outcome) table keyed by Quarry usage metrics; Quarry adds outcome + feature attributes to UsageEvent (success/failure, llm_format, driver, paid_provider, zdr). Frontend shows per-run usage in the ingestion run view.",
+      "effort": "M",
+      "dependencies": [
+        "billing-core",
+        "Quarry usage event attributes"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Pricing inside Quarry would violate plane ownership; keep pricing in billing-core and only attributes in Quarry.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Needed for cost transparency and for enforcing budgets (C-t2-06-011), but not user-blocking today.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-011",
+      "name": "Budget caps enforced by the executor (reserve, charge, abort gracefully)",
+      "description": "The executor checks remaining budget before each billable step, reserves for expensive phases (e.g. LLM-driven browser time) and stops gracefully when the user-set cap is reached.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "apify-platform-017",
+        "firecrawl-api-surface-075"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-017"
+        ],
+        "why": "q5: Actor.charge/pushData return ChargeResult {eventChargeLimitReached, chargeableWithinLimit, chargedCount}; ChargingManager exposes max total charge and remaining event count so code can shut down cleanly. Firecrawl (075, SRC) complements with reserve-then-settle: reserves the full TTL at the interact rate before the first prompt (402 if short), re-rates sessions that used prompts, settles on stop with ceil-to-minute rounding."
+      },
+      "mechanism": "Per run: max_total_cost from the caller; executor keeps charged_so_far; before each billable step call charge(event, count) which returns allowed count within limit; if limit reached, finish current step, persist partial results, and end with status BUDGET_EXHAUSTED. For time-billed sessions reserve credits for TTL at start, settle actual duration at stop, release remainder.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-083",
+          "v-browser-app-044",
+          "v-browser-app-049"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:433-440",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:485",
+          "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go:26-31"
+        ],
+        "gap": "Agent runs accept max_steps, max_cost_usd and max_runtime_s, but only max_steps is enforced on HTTP/WS steps; AgentLoop enforcement is unused and defaults are unbounded. cost-core has ErrBudgetExceededCost/Tokens for model spend, but nothing reserves or enforces browser/crawl spend in Quarry; crawls have page caps only.",
+        "strengths": "Budget fields already exist in the contract; step budgets (12 steps/120 s user session, 5-step AI loop) are enforced."
+      },
+      "benefit": "Prevents runaway agent browsing/crawl cost, which users and finance would notice immediately; fits the authority model (the Model proposes a budget, Quarry enforces it as executor).",
+      "approach": "Ingestion Plane: enforce max_cost_usd and max_runtime_s in the step path using per-step cost estimates (browser seconds, LLM calls reported by Model Plane, paid provider calls); emit BUDGET_EXHAUSTED events; set safe defaults per org from Control Plane. Model Plane cost-core remains the source for reasoning cost and passes a remaining-budget figure with each browser grant.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-06-010 pricing attributes",
+        "BrowserBroker grant issuance (v-browser-app-083)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Double counting between cost-core (model) and Quarry (execution); define one ledger key per run.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Budget fields are already in the contract but unenforced; an agent-driven browser without enforced spend/time caps is a product and cost risk.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-012",
+      "name": "Explainable resource sizing and tenant-isolated warm runtime pools",
+      "description": "A single memory knob sets CPU and disk for a run; warm (standby) runtimes serve low-latency requests and are never shared across users.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-023",
+        "apify-platform-112"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-023",
+          "apify-platform-112"
+        ],
+        "why": "q4: 4096 MB = 1 core, disk = 2x memory, powers of two; standby runs are per-user, billed while idle until timeout."
+      },
+      "mechanism": "Run spec {memory_mb}; scheduler derives cpu = memory/4096 and disk = 2x memory; per-user memory cap; standby pool keyed by (user, unit) with idle timeout.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-085",
+          "v-quarry-048",
+          "v-browser-app-057"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:331-340",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:116-272"
+        ],
+        "gap": "Single shared Chromium per edge process with a lease pool of 2 and one CDP context per session; agent runs live in an in-process map, not horizontally shareable; no sizing knob; browser isolation is per-context, not per-tenant process.",
+        "strengths": "Per-session browser contexts and fixed cross-session cookie leak (v-browser-app-028)."
+      },
+      "benefit": "Per-tenant warm browser pools would cut session start latency and harden isolation between orgs.",
+      "approach": "Ingestion Plane: move to a browser worker pool keyed by org with per-org caps and idle TTL; expose a coarse size class (small/large) rather than raw memory.",
+      "effort": "L",
+      "dependencies": [
+        "Distributed browser workers (v-quarry-085)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Cost of idle warm pools; capacity planning.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Scaling/isolation topic owned by the infra category; platform-level sizing knob is minor here.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-013",
+      "name": "Agentic payments for tool runs (x402 / MPP / Skyfire)",
+      "description": "Agents without an account pay per request with crypto or agent-payment protocols using a temporary spend-capped token.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-024"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-024"
+        ],
+        "why": "q4 DOC: only source; limited to pay-per-event Actors."
+      },
+      "mechanism": "Issue temporary capped API token on payment; per-request payment headers (x402 PAYMENT-SIGNATURE, skyfire-pay-id) verified before run.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No external agent commerce surface; Verevon has no public Quarry API (v-browser-app-020).",
+        "strengths": ""
+      },
+      "benefit": "None near-term.",
+      "approach": "Skip; revisit only if Quarry becomes a public API.",
+      "effort": "L",
+      "dependencies": [],
+      "planeOwner": "Control Plane",
+      "risks": "Payments/compliance overhead.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Outside Verevon's internal, org-scoped product.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-014",
+      "name": "Organization accounts with member permissions and central billing",
+      "description": "Teams share an org account with per-member permissions (manage org, tokens, billing) and centralized billing.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-025"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-025"
+        ],
+        "why": "q3: minimal viable permission set for a scraping platform."
+      },
+      "mechanism": "Org entity with member roles/permissions; resources owned by org; billing at org level.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-browser-app-050",
+          "v-quarry-107"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/mod.rs:1",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3813",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:59-140"
+        ],
+        "gap": "Minor: quarry-control webhooks are not org-scoped (v-quarry-107 note).",
+        "strengths": "Control Plane orgs/identity/billing; every web/browser route derives org from the verified session; Quarry enforces JWT org, actor-scoped runs and tenant-stamped artifacts."
+      },
+      "benefit": "Already ahead of Apify (org from verified session on every route, owner-plane ACLs).",
+      "approach": "Keep; fix org scoping of control webhooks.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Control Plane",
+      "risks": "None.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon equal or ahead.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-015",
+      "name": "Sharing runs and results (access rights, links, pre-signed URLs, published sessions)",
+      "description": "Runs, results and storages can be shared by explicit access, link or time-limited pre-signed URL; an agent task transcript can be published as a shareable session.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "aside"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "apify-platform-026",
+        "apify-platform-034",
+        "aside-browser-product-096"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-browser-product-096"
+        ],
+        "why": "q3 SRC: published shared sessions include tool outputs and up to 20 images per tool result with explicit size caps, the closest to a shareable browser-agent run. Apify (026/034, q4 DOC) adds pre-signed URLs and scoped READ/WRITE grants on chosen storages via resourcePicker."
+      },
+      "mechanism": "Publish = snapshot transcript + selected artifacts into an immutable share record with caps; share link resolves to read-only view; pre-signed URLs carry expiry + signature for single objects; scoped grants list resource ids and permission.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-browser-app-023",
+          "v-quarry-120"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1466",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:2090"
+        ],
+        "gap": "Artifacts are served only through an owner-gated gateway check; the timeline/evidence replay viewer is read-only for the owner; no share-run, link or pre-signed URL mechanism.",
+        "strengths": "Owner-gated artifact serving and a read-only replay viewer already exist to build on."
+      },
+      "benefit": "Sharing an agent run with evidence to a teammate in a Space is a natural collaborative feature; must respect \"Space access never widens an owner-plane ACL\" and ZDR (ZDR runs have no durable receipts to share).",
+      "approach": "Application Plane projects a share record into a Space; the owner plane (Ingestion for receipts/artifacts) keeps ACL and issues short-lived signed artifact URLs per viewer after checking owner-plane grants. No public anonymous links by default.",
+      "effort": "M",
+      "dependencies": [
+        "Owner-plane ACL check API",
+        "Application Plane projections"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Link sharing is ACL-widening by design in Apify; must not be copied. Screenshots may contain secrets.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Collaborative value, but the core browser loop is not yet production-wired; do after.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-016",
+      "name": "Natural-language tool runner (AI finds tool, fills inputs, confirms, runs)",
+      "description": "User describes a goal; the AI finds a matching tool, fills its input, asks for confirmation before paid runs, runs it and summarizes the results.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-027"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-027"
+        ],
+        "why": "q3 DOC: explicit confirmation step before running; excludes full-permission and rental Actors."
+      },
+      "mechanism": "Intent -> search tool catalog (quality-ranked) -> fill schema -> show confirmation with estimated cost -> run -> summarize dataset.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-browser-app-016",
+          "v-browser-app-094",
+          "v-browser-app-081",
+          "v-browser-app-079"
+        ],
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:133",
+          "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:14",
+          "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1263"
+        ],
+        "gap": "The chat agent has web_search/web_fetch and approval-gated provider actions, and risk-classified HITL approvals exist, but crawl/batch/extract/presets are not offered as agent tools with a cost estimate, and the multi-step browser run is likely broken in production (gateway does not send browser grants).",
+        "strengths": "Fail-closed risk-classified approvals (login/checkout/posting/destructive/cross-domain) are stronger than Apify's single confirmation."
+      },
+      "benefit": "The product vision is exactly \"AI proposes, Quarry executes\"; exposing more Quarry jobs as approval-gated tools makes it real.",
+      "approach": "Model Plane: register Quarry crawl/extract/preset runs as capabilities with cost estimate in the approval card; Quarry executes after grant validation.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-06-011",
+        "BrowserBroker grant issuance"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Unbounded crawls proposed by the model; require budget + approval.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Mostly wiring of existing pieces; the approval model is already a strength.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-017",
+      "name": "Per-run result storage primitives (dataset, key-value store, request queue) with exports",
+      "description": "Every run gets a default append-only result table, a blob/state store and a URL frontier; results export server-side to JSON/JSONL/CSV/XLSX/XML/RSS with field projection; storages are addressable by id or name with rate limits and retention by name.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-028",
+        "apify-platform-029",
+        "apify-platform-030",
+        "apify-platform-035"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-028",
+          "apify-platform-029"
+        ],
+        "why": "q5: a clean trio (results / blobs+state / frontier) with ids injected into the run, named storages kept indefinitely vs unnamed expiring (7 days), hidden #-prefixed debug fields and server-side export projections."
+      },
+      "mechanism": "Run creation allocates dataset_id, kv_id, queue_id; dataset is append-only items (<=9 MB each) with GET items?format=csv&fields=&omit=&clean=; KV store is content-typed records keyed <=256 chars; retention policy by named vs unnamed; per-object rate limit 60 rps returning 429.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-092",
+          "v-browser-app-048",
+          "v-quarry-090",
+          "v-quarry-078",
+          "v-quarry-094"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs:171",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_queue.rs:74",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ingest_client.rs"
+        ],
+        "gap": "Artifact storage (memory/FS/S3 + CAS) and a durable URL frontier exist, and results can be ingested into the Data Plane, but there is no dataset/KV API, no per-run result set, no export formats and no dataset browser in the UI.",
+        "strengths": "Artifact store with CAS, durable Postgres frontier and Data Plane ingest with per-user ownership."
+      },
+      "benefit": "Users extracting structured data (prices, listings, procurement notices) need a table they can inspect and export without forcing everything into the Data Plane; ZDR runs need a live-only variant.",
+      "approach": "Ingestion Plane: add a per-run result set (append-only JSONL in the artifact store, indexed by run) with GET /v1/runs/{id}/items?format=csv|jsonl|xlsx&fields=; retention policy per org; ZDR runs stream items only. Frontend: dataset table view in Ingestions. Ingest to Data Plane stays the selective-ingest decision (v-browser-app-042).",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-06-004 (optional schema)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Must not become a second Data Plane (no retrieval/graph); keep it a working set with retention.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Structured extraction without a place to view/export results is a visible gap; moderate effort on existing artifact store.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 4,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-018",
+      "name": "Skills / playbooks extension mechanism with keyword and URL auto-injection",
+      "description": "Task knowledge ships as markdown skill packages (built-in, account and project) that the model reads on demand; site-specific skills auto-inject when the user message or current URL matches and carry canonical URLs, snapshot selectors and shortcuts; users can create, import, enable and override skills.",
+      "prevalence": {
+        "sourcesWith": [
+          "aside"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "aside-agent-control-architecture-044",
+        "aside-browser-product-079"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-agent-control-architecture-044",
+          "aside-browser-product-079"
+        ],
+        "why": "q4 SRC: SKILL.md frontmatter {name, description, icon, autoInject.keywords, autoInject.url, siteSpecific}; 32 built-ins incl. 16 site-specific folders (GitHub, Jira, Notion, LinkedIn, Google apps) with scoped snapshot selectors to keep page snapshots small; progressive disclosure in the system prompt."
+      },
+      "mechanism": "Skill store with frontmatter; at each turn match user text against keywords and current tab URL against URL patterns; inject matched site skill bodies (bounded), list the rest by name+description and let the model open them; site skills may define snapshot-scope selectors the observation layer applies.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1009-1066",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/skill_budget.rs:23-35",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:86-92",
+          "apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go:1-10"
+        ],
+        "gap": "No baseline record; found in code (SRC, light read): org agent skills live in session-core (ListAgentSkills), are matched by keyword overlap and injected under an 8,000-char budget with truncation and a reattach_skill tool; capability-core learns skill candidates from sessions. Missing vs Aside: URL-pattern auto-injection tied to the browser tab, site-specific skills with snapshot-scope selectors, built-in site playbooks, user import/override UX (not verified).",
+        "strengths": "Server-side org skills with a size budget, explicit drop reporting, reattach tool and a learning loop that proposes skills from sessions are ahead of Aside's file-based approach for teams."
+      },
+      "benefit": "URL-triggered site playbooks are a cheap, code-free way to raise browser-agent reliability on the sites customers use most, and fit the authority model (skills inform the Model; Quarry still executes).",
+      "approach": "Model Plane: add url_patterns to the agent skill record and match against the current Quarry session URL in browser.observe; allow an optional snapshot_scope (selectors) that the Model passes in observe requests to Quarry. Ship a few first-party site skills for top business sites.",
+      "effort": "S",
+      "dependencies": [
+        "Browser loop production wiring (v-browser-app-079/082)"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Skill text is operator-authored prompt content; keep it out of untrusted-web channels and respect the skill budget.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Small extension of an existing system with direct reliability gains for browser tasks.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-019",
+      "name": "Agent-facing integration guidance: endpoint-selection skills, agent source-of-truth docs, workflow skills",
+      "description": "Skills shipped as product surface teach coding agents which endpoint to use (narrowest first), freshness vs liveness, and point to machine-oriented per-language reference pages; outcome-shaped workflow skills (e.g. competitor brief) sit on top.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-086",
+        "firecrawl-api-surface-114",
+        "firecrawl-api-surface-115"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-086",
+          "firecrawl-api-surface-114"
+        ],
+        "why": "q4: routing guidance (scrape for a known URL, search for a query, interact when clicks are needed) is kept separate from generated parameter docs; a verification reference requires a smoke test."
+      },
+      "mechanism": "Umbrella skill + per-endpoint skills with references (project intake, endpoint selection, integration patterns, verification); CI syncs a skills catalog; parameter details live in generated per-language pages.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-021",
+          "v-quarry-019"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md",
+          "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml",
+          "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:133"
+        ],
+        "gap": "Quarry has no skills or agent docs; OpenAPI covers 46 of ~75 routes. Model Plane web tool descriptions exist but no documented routing rules across search/fetch/extract/crawl/browser were verified.",
+        "strengths": ""
+      },
+      "benefit": "Better tool descriptions directly improve how the Model chooses between web_search, web_fetch, extract and browser runs (cheapest sufficient tool first), reducing cost and Quarry rejections.",
+      "approach": "Model Plane: write a \"web access\" org skill and tool descriptions with narrowest-tool-first routing and freshness guidance; Ingestion Plane: complete OpenAPI to generate parameter docs.",
+      "effort": "S",
+      "dependencies": [
+        "OpenAPI completeness"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Low.",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Cheap, measurable improvement in agent tool choice.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-020",
+      "name": "Successful agent run exported as a reusable skill/workflow",
+      "description": "A finished web-agent run is distilled into a SKILL.md, a schema and a script/workflow that reproduces it through the API.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-085"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-085"
+        ],
+        "why": "q4 SRC (medium conf): GET /v2/agent/:id/skill returns {name, spec, skillMd, workflow, schema, blueprint}; the generator itself is upstream/closed."
+      },
+      "mechanism": "After a run, an LLM summarizes the trajectory into a parameterized procedure (steps + selectors/refs + input schema) and a natural-language skill; store with version; replay executes deterministic steps and falls back to the agent on drift.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-143",
+          "v-browser-app-090",
+          "v-browser-app-055"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_procedure.rs:61-200",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2466-2538",
+          "apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go:1-10"
+        ],
+        "gap": "Quarry compiles procedures and runs replay/quality/impact checks, but has no procedure store and no execute-procedure endpoint; Verevon UI does not call them. capability-core can persist learned skill candidates, but not from browser trajectories (not verified).",
+        "strengths": "Procedure compile + replay checks already exist in Quarry, which is beyond what Firecrawl exposes in open source."
+      },
+      "benefit": "Turning a one-off agent browsing session into a repeatable, schedulable procedure is the key step from \"agent browses\" to \"automation\", and cheaper per run than re-planning.",
+      "approach": "Ingestion Plane: add a procedure store (versioned, org/owner-scoped) and POST /v1/procedures/{id}/runs; Model Plane: offer \"save as procedure\" after a successful run and register procedures as capabilities; Frontend: show saved procedures with replay check status.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-06-005 versions",
+        "Receipts (v-quarry-142)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Replaying stored procedures with logged-in profiles must re-check grants/approvals each run; ZDR runs cannot be saved.",
+      "tier": "recommended",
+      "significance": 4,
+      "rationale": "High user value and most building blocks exist; overlaps the automation category, so coordinate there.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-021",
+      "name": "Agent memory and context recall (history, memory files, proactive site discovery)",
+      "description": "The browser agent keeps a user profile, episodic notes and consolidated memories, can search browsing history and captured activity as untrusted context, and can infer which web tools the user relies on from history; tools are reduced in incognito/headless sessions.",
+      "prevalence": {
+        "sourcesWith": [
+          "aside"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "aside-agent-control-architecture-048",
+        "aside-browser-product-095",
+        "aside-agent-control-architecture-079"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-browser-product-095",
+          "aside-agent-control-architecture-048"
+        ],
+        "why": "q3-4 SRC: memory settings (episodic retention, consolidation after 24 h and 5 sessions), per-task memory-extraction off switch, recall injected as an <untrusted_context> message, history tools only when context awareness is readable."
+      },
+      "mechanism": "Memory store with profile + episodic + consolidated layers; background consolidation job on thresholds; recall hook searches history/memory and injects results labeled untrusted; availability matrix disables recall in private sessions.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-browser-app-071",
+          "v-quarry-148"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts:10",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_memory.rs:14",
+          "apps/Model Plane/go/services/letta-bridge"
+        ],
+        "gap": "Web history is browser-local only (max 10 entries, purged under ZDR); Quarry agent scratchpad/redaction is unwired; Model Plane has a letta-bridge memory service (directory observed, behaviour not verified) but no browser-history recall tool.",
+        "strengths": "ZDR purge of local history and ZDR-aware design already match Aside's incognito pairing."
+      },
+      "benefit": "Recall of where the user has been and what they prefer reduces clarifying questions in browser tasks; must be ZDR-aware and labeled untrusted.",
+      "approach": "Model Plane: expose Data Plane / letta memory as a read-only recall tool to browser runs, labeled untrusted, disabled under ZDR. Skip proactive history scoring (079) unless explicit consent UX exists.",
+      "effort": "M",
+      "dependencies": [
+        "Server-side web history (consent)",
+        "Data Plane retrieval"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Privacy: history/vault-title mining (079) is invasive; must be opt-in per org and user; memory must not cross Space ACLs.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Useful polish; privacy cost is high and core loop is not production-wired yet.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-022",
+      "name": "Agent configuration sync across devices with conflict resolution",
+      "description": "Agent files (instructions, memory) sync between devices; conflicts are resolved by choosing local, remote or an edited version.",
+      "prevalence": {
+        "sourcesWith": [
+          "aside"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "aside-browser-product-099"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-browser-product-099"
+        ],
+        "why": "q3 SRC: experimental, off by default; compact three-way conflict UX."
+      },
+      "mechanism": "Sync router status {etag, conflicts} and resolveConflict {path, choice local|remote|edited, content}.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2027-2073"
+        ],
+        "gap": "Not needed by architecture: Verevon agent skills/config are server-side (session-core) and therefore identical on every device (INF from server-side skill storage). Concurrent-edit conflict UX for shared skills not verified.",
+        "strengths": "Server-side org/user agent configuration avoids device sync entirely."
+      },
+      "benefit": "None beyond current design.",
+      "approach": "Keep server-side; optionally add optimistic-concurrency (etag) on skill edits.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Model Plane",
+      "risks": "None.",
+      "tier": "n/a",
+      "significance": 1,
+      "rationale": "Verevon equal or ahead by architecture.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-023",
+      "name": "Plans, limits and plan-gated browser features",
+      "description": "Published plans with included usage, concurrency and rate limits; premium browser features (remote control, context capture, routines, concurrent browsers) gated by plan.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl",
+          "aside"
+        ],
+        "n": 3,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "apify-platform-022",
+        "firecrawl-api-surface-076",
+        "aside-browser-product-078"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-076"
+        ],
+        "why": "q4: two clear units (pages/credits and concurrent browsers) with separate submission vs status rate limits; Aside (078, SRC) shows per-feature plan allowlists (CHANNELS/REMOTE_CONTROL [pro,max], CONTEXT_AWARENESS [max])."
+      },
+      "mechanism": "Plan -> entitlements map (feature keys, numeric limits); limits enforced at gateway (rate) and executor (concurrency); UI reads entitlements to lock/upsell.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-browser-app-038"
+        ],
+        "evidence": [
+          "apps/Control Plane/org-core/internal/org/types.go:28",
+          "apps/Control Plane/org-core/internal/org/types.go:266-279",
+          "apps/Control Plane/billing-core/internal/billing/service.go:85-147",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:448"
+        ],
+        "gap": "org-core has an entitlements model with defaults and a computed plan-gated ZDR entitlement (feature.zero_data_retention), and billing-core seeds plan/entitlements from org-core (SRC, light read). Browser/web features (agent loop, persistent profiles, schedules, concurrent sessions) are not plan-gated, and there is no rate limiting on browser/search/knowledge/ingestion gateway routes.",
+        "strengths": "Entitlement plumbing between org-core and billing-core exists; ZDR is already a plan-gated entitlement."
+      },
+      "benefit": "Concurrency and rate limits protect shared Quarry capacity; plan keys allow packaging browser agent features.",
+      "approach": "Control Plane: add entitlement keys (browser.agent_loop, browser.persistent_profiles, quarry.concurrent_sessions, quarry.schedules); Frontend gateway enforces rate limits per org; Quarry enforces concurrency from a signed entitlement claim.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-06-024"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Entitlement claims must flow through tokens, not cross-plane DB reads.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Rate limiting is a real gap (abuse/cost); plan packaging is secondary.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-024",
+      "name": "Server-evaluated feature gates and tri-state org entitlements (disabled / allowed / forced)",
+      "description": "Each risky or premium capability is a named gate evaluated server-side (default off, dev override); org policy can force a posture (e.g. ZDR forced) that a request cannot weaken.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-119",
+        "codexbrowser-in-app-browser-020",
+        "firecrawl-api-surface-083"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-083"
+        ],
+        "why": "q4 SRC: TeamFlags with tri-state ZDR for scrape and search (disabled|allowed|forced, plus forced-anon), ignoreRobots, threatProtection, safeMode, ipWhitelist; checkPermissions converts a request option into an entitlement check. Codex (020/119, SRC) contributes the fine-grained gate list (browserUse, full CDP access, webMcp, recordAndReplay, autoAuthForSites, multiWindow) defaulting off with an env override."
+      },
+      "mechanism": "Org policy record {capability: disabled|allowed|forced}; request option resolution: effective = forced ? on : (allowed ? request : off), rejecting requests that ask for a disabled capability with a typed error; gates cached with short TTL and invalidated on change; dev override via env only in non-prod.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-108",
+          "v-quarry-137",
+          "v-browser-app-091",
+          "v-quarry-133"
+        ],
+        "evidence": [
+          "apps/Control Plane/org-core/internal/org/types.go:273-315",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:1-38",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:269-290",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:243-260"
+        ],
+        "gap": "Org ZDR posture exists (RetentionPosture: effective = ZDRIntent && Entitled) and ZDR propagates to browser runs; Quarry has a cross-plane token manifest gate and fail-closed driver capability gating. Missing: per-org gates for risky browser capabilities (raw JS evaluate is available on normal Quarry runs without approval, v-quarry-133; upload/download; persistent profiles; paid search providers; ignore-robots) with a forced/allowed/disabled model; gates are env/manifest-level, not org policy.",
+        "strengths": "ZDR posture is computed from intent and entitlement in Control Plane; Quarry gates fail closed; ZDR refuses browser_run in model-gateway."
+      },
+      "benefit": "Lets admins tighten agent browser capabilities per org without redeploys and makes \"ZDR must propagate\" enforceable as a forced posture rather than a per-request flag; directly supports the authority model.",
+      "approach": "Control Plane (org-core) owns a capability policy map per org; it is carried as signed claims in the tokens/grants Quarry receives (no cross-plane DB reads); Quarry resolves request options against the claims and rejects with a typed error; BrowserBroker grants include the allowed action classes.",
+      "effort": "M",
+      "dependencies": [
+        "BrowserBroker grant issuance (v-browser-app-083)",
+        "org-core entitlements"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Claim staleness when policy changes mid-run; use short grant TTL (15 min already).",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Closes a real safety gap (ungated raw evaluate) and formalizes ZDR forcing; builds on existing entitlement and gate code.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-025",
+      "name": "Capability registry and per-backend support matrix for browser tooling",
+      "description": "Optional browser abilities are advertised per backend through a registry (list, then fetch documentation on demand); one API schema marks members unsupported by default per backend; the agent runtime is transport/backend-agnostic.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-050",
+        "codexbrowser-automation-and-safety-051",
+        "codexbrowser-in-app-browser-022"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-051",
+          "codexbrowser-automation-and-safety-050"
+        ],
+        "why": "q4 SRC/REA: api.json members carry unsupportedByDefaultIn [iab, extension, cdp, mcpapps] with runtime overrides; capabilities.list() then get(id).documentation() keeps prompts small; env switches can disable any id; the runtime is plain Node/ESM with no Electron code (REA: 0 browser windows/IPC in 9 parsed scripts)."
+      },
+      "mechanism": "Static API description with per-member backend support flags; at session start compute disabled set = defaults(backend) minus host overrides minus env/org disables; expose list_capabilities() to the agent returning {id, one-line description}; full documentation only on request; tools for disabled members are not registered.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-137",
+          "v-browser-app-028",
+          "v-browser-app-070"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:269-290",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1131-1268",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2700"
+        ],
+        "gap": "Quarry drivers declare capabilities and actions are gated fail-closed, and the gateway advertises capability strings; alternate drivers (browserbase/browserless/kernel) exist. Missing: a published driver x capability matrix the Model Plane reads to build its tool list, and documentation-on-demand for capabilities (planner prompts do not adapt per driver, not verified).",
+        "strengths": "Backend-agnostic Rust driver trait with fail-closed capability gating is the same shape as Codex's design."
+      },
+      "benefit": "Model proposals that the driver cannot execute are avoided up front (fewer Quarry rejections), and prompts stay small.",
+      "approach": "Ingestion Plane: expose GET /v1/drivers/{id}/capabilities with descriptions; Model Plane: build browser tool schema from it at grant time and add a describe_capability tool.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Low.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Small change on existing gating with direct agent reliability benefit.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-026",
+      "name": "Browser/computer tooling packaged as an MCP server",
+      "description": "The agent browser runtime is wrapped as a small MCP server with explicit surface flags, output-token caps and a disabled-by-default switch so it can be plugged into any agent host.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-075"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-075"
+        ],
+        "why": "q4 SRC: cua_repl {enabled false, tools js/js_reset/turn_ended, tools.js.output_token_limit 25000, startup timeout 120 s}; CUA_REPL_ENABLED_SURFACES must be browser|computer|both or startup fails; same archive as desktop runtime."
+      },
+      "mechanism": "MCP server process exposing a minimal tool set; environment selects surfaces and backend; host config caps output tokens per tool and keeps it disabled until the host enables it.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-021",
+          "v-quarry-160",
+          "v-browser-app-017",
+          "v-browser-app-096"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:44",
+          "apps/Model Plane/bridges/mcp-bridge/server.js:1"
+        ],
+        "gap": "Verevon consumes MCP servers (registry + OAuth + mcp-bridge) but does not expose Quarry or connectors as an MCP server; MCP for Quarry is explicitly deferred.",
+        "strengths": "MCP consumer side and a reference stdio/HTTP bridge already exist."
+      },
+      "benefit": "Would let Model Plane sandboxes and external coding agents (with org grants) use Quarry through a standard protocol; but every call must still pass BrowserBroker grants and ZDR rules.",
+      "approach": "Model Plane mcp-bridge: add a Quarry MCP facade (search, fetch, extract, browser.observe/act) that obtains BrowserBroker grants per session and caps output tokens; off by default, org-gated.",
+      "effort": "M",
+      "dependencies": [
+        "BrowserBroker grant issuance",
+        "C-t2-06-024"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Bypassing the gateway authority path if the MCP server talks to Quarry directly with broad tokens.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Ecosystem reach is secondary to wiring the in-product loop; deferral in backlog is reasonable.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-027",
+      "name": "Same browser runtime for evals/training and production",
+      "description": "The production browser/computer runtime and tool contract are reused unchanged in evaluation/RL environments.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-093"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-093"
+        ],
+        "why": "q4 DOC only: README states training uses the same CI-published archives and keeps its CDP browser service."
+      },
+      "mechanism": "Eval harness installs the same runtime version as production and drives the same tool contract against a training browser service; results are comparable across releases.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-109"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/lab/evals/src/main.rs",
+          "apps/Ingestion Plane/Quarry-v2/lab/evals/src/browser_benchmark.rs"
+        ],
+        "gap": "An eval harness and browser benchmark exist in Quarry lab, but the scoreboard is all pending and it is not established that evals drive the Model Plane browser.observe/act contract end to end.",
+        "strengths": "Harness exists in-repo."
+      },
+      "benefit": "Agent quality regressions are caught before release when evals use the production Quarry driver and Model Plane tool contract.",
+      "approach": "Run lab/evals against quarry-edge agent routes via the same Model Plane tool protocol; publish scores per release in CI.",
+      "effort": "M",
+      "dependencies": [
+        "Browser loop production wiring"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Flaky live-site benchmarks; use recorded fixtures.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Supported by DOC only on the reference side, but the practice is sound and Verevon already has the harness.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-028",
+      "name": "Signed tool bundles with CI provenance",
+      "description": "Bundled agent plugins ship with a signed receipt listing each archive hash/size and the CI run that built it, verified before enabling.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-117"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-117"
+        ],
+        "why": "q4 SRC: RSA_PKCS1_SHA256 receipt with key_id, per-plugin sha256, source_sha, workflow_ref; per-plugin signature.json and public key."
+      },
+      "mechanism": "CI signs a manifest of artifact hashes; runtime verifies signature and hashes before loading a plugin/driver.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No baseline record. Check: whether Model Plane sandbox images, mcp-bridge and Quarry browser images are signed (cosign/Sigstore) or verified at deploy; integration-corev2 has signed write attestations (IC/internal/attestation/verifier.go per baseline narrative) but that is a different concern.",
+        "strengths": ""
+      },
+      "benefit": "Supply-chain integrity for browser and sandbox images that handle user sessions.",
+      "approach": "Support/infra: sign container images and MCP bundles in CI (cosign) and verify on deploy/admission.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Support Plane",
+      "risks": "Low.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Good hygiene; not user-visible.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-029",
+      "name": "Browser extension distribution with beta/stable channels",
+      "description": "A companion extension distributed via Chrome Web Store and Edge Add-ons with separate dev/internal/prod ids and beta/stable channels.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-in-app-browser-021"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-in-app-browser-021"
+        ],
+        "why": "q4 SRC: extension descriptors with distribution, extension ids per channel and store URLs."
+      },
+      "mechanism": "Descriptor table per browser and channel; app detects installed extension id and channel.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-browser-app-076"
+        ],
+        "evidence": [],
+        "gap": "Verevon has no browser extension; its browser is server-side Chromium streamed to the SPA.",
+        "strengths": ""
+      },
+      "benefit": "Only relevant if Verevon adds a \"use my own Chrome\" mode.",
+      "approach": "Skip until a local-browser mode is decided.",
+      "effort": "L",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Extension permissions and store review.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Does not fit the server-side Quarry execution model today.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-030",
+      "name": "Result feedback loop (rate a result, report missing content)",
+      "description": "Callers rate finished search/scrape/map jobs (good/partial/bad) with valuable sources and missing content, feeding quality signals (and credit refunds under a versioned policy).",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-077"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-077"
+        ],
+        "why": "q4 SRC: POST /v2/search/:jobId/feedback and /v2/feedback with substantive-feedback validation, short window (120 s), versioned refund policy snapshot and daily caps."
+      },
+      "mechanism": "Feedback endpoint keyed by job id within a window; validates that negative ratings include specifics; stores policy version with the refund decision; aggregates per source/domain for quality.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/"
+        ],
+        "gap": "No baseline record; grep for \"feedback\" in quarry-edge src returned no matches (SRC). capability-core has an operator_rating input to scoring, but no per-result feedback from agents or users to Quarry was found.",
+        "strengths": ""
+      },
+      "benefit": "A machine-readable \"was this useful\" signal from the Model Plane after each web call would improve source ranking and capability scoring at near-zero cost.",
+      "approach": "Model Plane emits a usefulness event per web tool result (used in answer / ignored / failed); Ingestion Plane aggregates per domain/provider; feeds capability-core scoring. No refunds needed.",
+      "effort": "S",
+      "dependencies": [
+        "C-t2-06-009 scoring wiring"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Must not log content under ZDR; aggregate only ids/domains.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Cheap quality signal; benefit accrues over time.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-031",
+      "name": "Keyless free tier and agent-led credential onboarding (device flow)",
+      "description": "Agents can call core endpoints without a key under per-IP caps; a coding agent can obtain an API key through a PKCE-style device flow the human approves in the browser.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-078",
+        "firecrawl-api-surface-079"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-079"
+        ],
+        "why": "q4 SRC: session id + PKCE verifier/challenge, human opens sign-in URL, agent polls status with verifier and receives the key; no pasted secrets."
+      },
+      "mechanism": "Device-authorization grant: agent creates session + code_challenge; user signs in and approves; agent polls with code_verifier; server issues scoped token.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-browser-app-020"
+        ],
+        "evidence": [],
+        "gap": "No customer API keys or public Quarry API; no device flow for agent clients (not verified in auth-core).",
+        "strengths": ""
+      },
+      "benefit": "Only relevant if Verevon exposes Quarry/MCP to external agents (C-t2-06-026); then device flow is the right credential path.",
+      "approach": "Control Plane auth-core: OAuth device authorization grant when an external MCP surface exists. Skip keyless tier.",
+      "effort": "M",
+      "dependencies": [
+        "C-t2-06-026"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Keyless access conflicts with org-scoped tenancy and ZDR.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Public-API growth tactics; not applicable to an org-scoped internal layer.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-032",
+      "name": "API versioning with adapters and a machine-readable deprecation/sunset protocol",
+      "description": "Old API generations stay mounted and are translated into one internal model by adapters; deprecated endpoints return Deprecation, Sunset, Link (successor) and Warning headers plus body notices; retired features are tracked in a typed registry.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-080",
+        "firecrawl-api-surface-081",
+        "firecrawl-api-surface-113"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-080",
+          "firecrawl-api-surface-081"
+        ],
+        "why": "q5/q4 SRC: lib/deprecations.ts typed registry; applyNotice appends warnings[]/replacement; notices attached before auth so rejected calls see them; fromV0/fromV1 adapters feed one worker pipeline."
+      },
+      "mechanism": "Registry {id, route matcher, deprecated_at, sunset_at, successor, message}; middleware sets Deprecation (RFC 9745), Sunset, Link rel=successor-version, Warning 299 and JSON warnings; per-version request adapters map into the canonical internal request type.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-019"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293"
+        ],
+        "gap": "Quarry exposes /v1 only; the Firecrawl-compat adapter was deleted; no Deprecation/Sunset header handling found in Quarry crates (grep, SRC). Gateway and generated SDKs (0.1.0, unpublished) lag edge routes.",
+        "strengths": ""
+      },
+      "benefit": "Quarry contracts are evolving quickly while gateway and Model Plane clients lag; machine-readable notices let CI and agents detect breakage before it ships.",
+      "approach": "Ingestion Plane: add a deprecation registry + tower middleware in quarry-edge; contract tests in CI fail on calls to deprecated routes from gateway/Model Plane.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Low.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Internal API with few consumers; cheap insurance rather than a user-facing gap.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-033",
+      "name": "Per-credential restrictions: endpoint groups, formats/actions, IP allow-lists",
+      "description": "API keys can be limited to endpoint groups and to allowed output formats/action types, and pinned to IP allow-lists, with fast propagation.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-082"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-082"
+        ],
+        "why": "q4 SRC: key_restriction_config {allowedFormats, allowedEndpoints} cached 60 s; checkKeyFormatRestriction checks format and action types; ENDPOINT_GROUPS map routes; separate per-key spend limits."
+      },
+      "mechanism": "Credential record carries allowed endpoint groups, formats, action classes, IPs and spend cap; middleware maps request to (group, formats, actions) and checks; cache with explicit invalidation.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-022",
+          "v-browser-app-083"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545",
+          "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62",
+          "apps/Model Plane/go/services/browser-broker/internal/server/server.go:42"
+        ],
+        "gap": "Service-principal tokens are limited to scrape/search/extract/artifacts/agent routes, and BrowserBroker grants carry a domain allowlist, TTL and org/owner scope, but grants do not restrict action classes or output formats, are stored in memory and have no production issuer.",
+        "strengths": "Route scopes for service principals and domain-allowlisted, single-use sensitive child grants are a stronger model than API keys."
+      },
+      "benefit": "Action/format-level scopes in grants let the Model Plane request exactly \"read-only observe on these domains\" and let Quarry reject anything else, which is the authority model in code.",
+      "approach": "Model Plane browser-broker: add allowed_action_classes and allowed_formats to grants, persist grants (Postgres/Redis), issue them from the gateway/Model Plane run start; Quarry validates per step.",
+      "effort": "M",
+      "dependencies": [
+        "Grant issuance in production"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Overly narrow grants causing mid-run failures; support grant escalation via approval.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Extends an existing differentiating design; overlaps safety category.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-034",
+      "name": "Request origin and integration attribution",
+      "description": "Every request carries its origin (api, SDK version, MCP, website) and an optional integration tag from a closed list, used for analytics, cost attribution and gating.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-084"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-084"
+        ],
+        "why": "q3 SRC: integrationSchema enum; SDKs inject origin; logged on requests and MCP actions."
+      },
+      "mechanism": "Closed enum of caller surfaces; middleware validates and records it on request logs and usage events.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-098"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs:48-78"
+        ],
+        "gap": "Usage events carry org_id, metric and a fixed source=\"quarry-edge\"; no caller-surface tag (chat agent, browser UI, import, monitor, onboarding) was found on events (SRC, light read).",
+        "strengths": "Idempotent usage events already exist to carry the attribute."
+      },
+      "benefit": "Cost and quality attribution per product surface (chat vs browser vs monitors) for Control Plane analytics.",
+      "approach": "Gateway and Model Plane set an x-verevon-surface header from a closed enum; Quarry copies it into usage events and receipts.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "None.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Cheap and useful for cost analysis.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-06-035",
+      "name": "Tenant-registered search corpora and saved search configurations",
+      "description": "Teams register their own search data sources (sites, documents, pages), refresh them, enable provider packs and save named search configurations.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-090"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-090"
+        ],
+        "why": "q2 SRC: /labs proxy to a closed upstream service; only the route shape is visible."
+      },
+      "mechanism": "Per-tenant source registry + index refresh + named search configs referencing providers.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-browser-app-041",
+          "v-quarry-091",
+          "v-quarry-093",
+          "v-quarry-095",
+          "v-quarry-096"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:47",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:382-731",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/local_index.rs:166",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/hybrid.rs:26",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/serp.rs:372"
+        ],
+        "gap": "Saved named search configurations (provider mix per Space) are not a distinct object; tension noted between Quarry local Tantivy index and the no-retrieval-plane rule (v-quarry-093 INF).",
+        "strengths": "Durable org-scoped sources registry, local org-scoped corpus index skipped under ZDR, hybrid search with Data Plane vectors + rerank (RRF), and four SERP providers with paid-provider and ZDR switches go beyond the visible Firecrawl Labs surface."
+      },
+      "benefit": "Already ahead; keep.",
+      "approach": "Keep; resolve the local-index vs Data Plane ownership question.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Plane-ownership drift for retrieval.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon equal or ahead.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    }
+  ]
+}

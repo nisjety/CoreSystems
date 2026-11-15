@@ -1,0 +1,1831 @@
+[
+ {
+  "finalId": "F-t1-070",
+  "title": "Room header and pulse rail extras: live counts, pinned posts first, user-pinned resource tabs and a budget meter; PWA share target and MCP apps later",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 1,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Keep the six cockpit tabs as default, add header counts (open approvals, running work, documents) from existing projections, show pinned posts first, and allow user-pinnable extra tabs (link, document, later canvas) stored as Space metadata with view-only grants controlling access. Add a usage meter once per-Space cost attribution and non-zero token counts exist. Later add a PWA share target so a file or text can be sent to a room agent from any…",
+  "whyItMatters": "QM's scope page and Slack's tabs make a room's resources one click away; useful polish once canvas, cost and PWA exist.",
+  "reference": {
+   "bestSource": "QM (scope-centred page and top-bar tool buttons with 60 s cached counts); Slack for user-added tabs and bookmarks; Grok Bot for the usage meter; teams",
+   "others": [
+    "Slack (Pins tab auto-created on first pin, bookmark folders)",
+    "grokbot"
+   ],
+   "prevalence": "[R-t1-12-09] header shelf 2 of 5 (Slack, QM; differentiator); usage meter 1 of 5 (Grok Bot; unique) [R-t1-06-12] Each capability appears in 1 of 5 sources (unique)",
+   "mechanism": "[R-t1-12-09] Scope model {personal|project|channel|group} drives contextMeta(scope) panels with manage actions; the top bar shows breadcrumb plus tool buttons whose counts are cached per scope for 60 s, and opening a tool keeps the session scope. Slack lists tabs per conversation with \"show by default\". Grok Bot: usage policy {thresholds:[75,90]} feeding a meter component and a limit-hit state with upgrade or credit…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Pin state is half shipped: Session Core already lists pinned threads first (session-core grpc.rs:5590) and the room renders a Pinned flag and an author-only Pin/Unpin control, but SpaceRoomTimeline.tsx:137 re-sorts every post by updated_at, so pinned posts are marked rather than first. The cockpit has six hard-coded tabs with no counts on the labels (SpaceCockpit.tsx:43,61,189), only the side-rail SpacePulse shows two counts (conversations and t…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:137-141,237-246,270-278,396-410",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43,61-110,189-205,208-230",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1253-1320,408-486"
+   ],
+   "reuse": [
+    "Session Core pinned-first ordering and the pinned flag already relayed by the Space threads route",
+    "SpacePulse stats block and the Work, Knowledge and Activity panels (mounted eagerly in SpaceCockpit) as the source of header counts",
+    "gateway shares.rs plus user-core resource_grants (view-only) for pinned document tabs"
+   ],
+   "constraints": "Tab and pinned-tab metadata belong in Application Plane (spaces table), while document access stays decided per viewer by Control resource grants so a pinned tab never widens an owner-plane ACL or leaks a title to a viewer without a grant. Embeds are limited …",
+   "approachAdjustment": "Split the item. Ship now: pinned-first (sort pinned before the chronological tail or render a Pinned strip above the timeline) and header counts lifted from the Work and approval projections, with unknown shown as unknown. Next: user-pinned tabs limited to internal routes and Knowledge documents, s…",
+   "verdict": "reword",
+   "verdictReason": "Pinned-first is a client sort defect rather than missing infrastructure and counts partly exist in SpacePulse, while the meter, PWA and MCP parts are blocked on other work, so the item should be split and the first two …",
+   "effort": "M"
+  },
+  "approachOriginal": "[R-t1-12-09] Frontend Plane: header counts from existing Work, Activity and Knowledge projections, with unknown rendered as unknown; a user-pinnable tab type stored as Space metadata in Application Plane (link and document first, canvas after category 08); pinned posts first. The meter is last: Model Plane cost service publishes per-org and per-Space usage summaries and Session Core must return real token counts bef…",
+  "planeOwner": "Frontend Plane (meter data from Model Plane)",
+  "dependencies": [
+   "Collaborative artifacts and canvas (category 08)",
+   "S3.x skills/connectors/memory room panels",
+   "Per-Space cost attribution in Model Plane and non-zero token counts from Session Core (meter only)",
+   "Document sharing grants (baseline v-space-backend-083)",
+   "F-t1-026 (R-t1-06-04) cards",
+   "F-t1-037 (R-t1-06-02) Space tool cockpit (for MCP apps)"
+  ],
+  "risks": "[R-t1-12-09] Tab sprawl; counts and meter must show unknown, never zero, when a projection is unavailable; the meter must not expose another member's spend. [R-t1-06-12] Arbitrary-site embedding (clickjacking); sandbox escape and data exfiltration f…",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 8,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-12-09] apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md section 17 (The later tier, about lines 1595-1625) records per-room spend as blocked, and S3.x covers room skills/connectors/memory panels (about lines 253-257)."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-071",
+  "title": "Shareable, versioned agent templates with an export policy, and an internal catalogue of org agents and skills",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 2,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Replace the three hard-coded agent templates with user-published templates (immutable versions, active-version pointer, org or team visibility, share link, an export policy that never copies credentials, memory or grants; import re-runs roster confirmation), and build an internal 'agents in this org' catalogue as a read model over the agent registry with admin approval before listing. Defer public third-party marketplace listings.",
+  "whyItMatters": "Grok Bot shows templates and a catalogue make good agents spread inside an org; it matters after personal agents exist.",
+  "reference": {
+   "bestSource": "grokbot",
+   "others": [
+    "buzz"
+   ],
+   "prevalence": "[R-t1-06-09] 2 of 5 sources; differentiator [R-t1-04-11] 1 of 5 sources; unique",
+   "mechanism": "[R-t1-06-09] Grok Bot templates have CRUD with visibility (PUBLIC|TEAM), an active version, an export policy, chat-link import and creator attribution; a template record {share_id, active_version, visibility, owner_type, blob_object_key} points at immutable version blobs, and the export policy strips secrets, memory and connections. Buzz persona packs and snapshots are a file-based variant. [R-t1-04-11] Listing obje…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Agent creation offers three hard-coded client-side templates that only copy text into the form (SpaceCreateAgentDialog AGENT_TEMPLATES); there are no user-published templates, immutable versions, share links or export policy, and the Convex agents table has no version field. The internal catalogue half is partly shipped: an org-wide agent registry (/api/v1/agents/installations, ADR-0002) and a per-room installable-agents list with bind-existing …",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:20-60,95-118,204-206 (three static templates, applyTemplate copies text, createSpaceAgent)",
+    "apps/Application Plane/convex-core/convex/spaceAgents.ts:159-200 (projectAgentInstallationsForOrg)",
+    "apps/Application Plane/convex-core/convex/spaceAgents.ts:486-515,529-560 (listInstallableSpaceAgentsForGateway; bindExistingSpaceAgentForGateway born pending, room-only, mention-only, no tools, never inherits Studio config)"
+   ],
+   "reuse": [
+    "listInstallableSpaceAgentsForGateway and the org agent registry as the catalogue read model (add listing status and approval)",
+    "bindExistingSpaceAgentForGateway born-with policy (pending, room-only, mention-only, no tools) as the import behaviour",
+    "SpaceCreateAgentDialog template list as the seed for system templates"
+   ],
+   "constraints": "Application Plane (Convex) owns agent definitions, so templates and versions belong there; Control only decides roster/role and any team-level visibility. The registry answers presence, not authority, so the catalogue must not imply that a listed agent can be…",
+   "approachAdjustment": "Shrink the catalogue half to an incremental extension of the existing installable-agents read model (listing status, admin approval, include skills) rather than a new read model. Build templates as a new Convex agentTemplates table with immutable version rows, an active-version pointer, org visibil…",
+   "verdict": "reword",
+   "verdictReason": "Templates, versions and export policy are absent, but the org agent registry and installable-agents bind flow already deliver most of the internal catalogue, and the personal-agent dependency is unnecessary for org temp…",
+   "effort": "M"
+  },
+  "approachOriginal": "[R-t1-06-09] Application Plane: agent definitions gain immutable versions and a template record (visibility, active version, share id). Control Plane governs visibility (org or team) and the export policy, which never copies credentials, memory, grants or connector references. Import re-runs roster confirmation and binding policy. Frontend: publish and import actions in the Create Agent dialog and the Agent tab. [R-…",
+  "planeOwner": "Application Plane (definitions, versions, catalogue read model) with Control Plane (visibility, export policy)",
+  "dependencies": [
+   "Personal agents (baseline v-space-backend-070)",
+   "Agent definition versioning",
+   "F-t1-065 (R-t1-06-07) skills (templates reference skills)",
+   "Plugin/MCP governance",
+   "Agent definition sharing model"
+  ],
+  "risks": "[R-t1-06-09] Leaking instructions or connector references through a template; imported templates carrying prompt-injection payloads; import must not inherit the author's grants. [R-t1-04-11] Third-party plugins bypassing ZDR or the rule that the Mod…",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-072",
+  "title": "Scoped agent context and promotion path: team layer, setup manifests, publish to team, service accounts",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 3,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Extend ResolvedSpaceContext with a team layer (included only when the actor is on the team and the room is configured for it), add explicit scope-to-scope grants that stay with the resource-owning plane, and add scoped setup manifests (org, team, user) for agent computers. Once personal agents exist, add a publish-to-team flow with a step-by-step carry-over proposal (never secrets) and agent-owned service credentials scoped per binding.",
+  "whyItMatters": "Verevon already has the stricter half (decisions bound to audience and owner-plane ACL, authored instruction hierarchy). The missing half is how agents and their computers are configured at team level and promoted from a person's own agent to a team's, which GrokBot's vision of personal agents needs.",
+  "reference": {
+   "bestSource": "qm (scope layering), grokbot (publish, manifests, service accounts)",
+   "others": [],
+   "prevalence": "each 1 of 5 (qm or grokbot only); unique",
+   "mechanism": "QM resolve(actor, scope, audience) mounts org (read-only), each applicable team (read-only) and the active scope (read-write) and composes instructions, policies and granted handles; handlesForAudience returns only what every participant is entitled to. GrokBot: PublishToTeam builds a carry-over proposal (skills, plugins, memories, automations) the owner confirms item by item and never copies personal chats; setup_m…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "No team layer, no scope-to-scope grants for Space resources, no setup manifests and no publish-to-team exist, and ResolvedSpaceContext has zero code hits (docs only): the real context assembly is the gateway's inject_authored_instructions plus fetch_org/space_instructions and the agent persona, composed in model-gateway. Control has team and team_member tables in auth-core but nothing links teams to Spaces, instructions or policy, and agent defi…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3700-3780 (Space instruction role floor editor/manager/owner; read by any member)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4225-4300 (fetch_org_instructions, fetch_space_instructions, inject_authored_instructions: org and Space layers resolved server-side)",
+    "apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md:1-60 (ADR-0003 implemented; platform+org+Space+agent persona; QM's own mechanism is two layers)"
+   ],
+   "reuse": [
+    "ADR-0003 authored-instruction composition (gateway inject_authored_instructions, Convex instructionsForGateway queries, model-gateway composition) as the place to add a team layer",
+    "Control auth-core team/team_member tables as the team source once Teams (F-t1-054) land",
+    "capability-core scope-grant store as the Model Plane precedent for skill grants (add kinds only after a controlled Space resolver exists)"
+   ],
+   "constraints": "Space membership never widens a resource ACL, so team-layer instructions (authored text) are fine but team-layer resource handles must pass the Space decision intersected with the owner-plane check; grants stay in the owning plane, never a central table (no c…",
+   "approachAdjustment": "Name the real seam: there is no ResolvedSpaceContext struct to extend, so the team layer is an addition to the ADR-0003 authored-instruction composition (a teams-aware Convex instructions query, the gateway injector, model-gateway composition), blocked on Control Teams being linked to Spaces. Split…",
+   "verdict": "reword",
+   "verdictReason": "The instruction hierarchy already exists and is mis-framed as a missing ResolvedSpaceContext; the genuinely missing parts (team layer, manifests, promotion, agent credentials) are correctly absent but should be split by…",
+   "effort": "XL"
+  },
+  "approachOriginal": "Phase A (after teams): add a team layer to ResolvedSpaceContext; resource grants live with the owner plane (Data Plane for files, Model Plane for skills) and are referenced by Control, never in a central table. Phase B (Model Plane sandboxes): setup manifests per org, then team and user, restricted to an allowlisted package registry. Phase C (after personal agents and agent access list): publish-to-team in the Model…",
+  "planeOwner": "Model Plane (agent definitions, sandboxes) with Control Plane decisions",
+  "dependencies": [
+   "Teams (F-t1-054 (R-t1-02-07))",
+   "Agent access list (F-t1-011 (R-t1-02-03))",
+   "Personal agents (agents category)",
+   "integration-corev2 credential ownership"
+  ],
+  "risks": "A central grants table would be cross-plane DB access. Carrying credentials would break agents not sharing credentials; memory carry-over can leak personal data. Packages in manifests are a supply-chain risk. Single-source, partly medium-confidence …",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 7,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-073",
+  "title": "Tauri desktop shell around the gateway origin: narrow bridge, system-browser sign-in, protocol links, signed updater",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 4,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "After the PWA, build a Tauri 2 shell that loads the existing gateway origin with a locked CSP and no local tokens, exposes a versioned, schema-validated bridge of at most about 15 capability commands (notify, badge, open-external, deep-link, window state, updater status), and signs users in through the system browser with a single-use PKCE handoff that mints the same HttpOnly BFF session in an isolated webview profile. Register a native verevon:…",
+  "whyItMatters": "All five references ship a native shell, and it is the only route to tray presence, OS protocol links from mail and Office, and global hotkeys. Verevon can capture most value with the PWA first, but enterprise rollout (IT-managed installers, \"chat with\" links) eventually needs this.",
+  "reference": {
+   "bestSource": "teams (thin native shell around a web UI with a versioned RPC over capability modules); buzz (Tauri 2, Rust-owned state) is the closest stack fit",
+   "others": [
+    "slack (one URL grammar on every OS, should-i-update server decision, Joi-validated bridge channels)",
+    "qm (PKCE desktop handoff, locked-down minimal Electron shell)",
+    "grokbot (never install while an agent is working)"
+   ],
+   "prevalence": "Shell 5 of 5, protocol handler 5 of 5, bridge 4 of 5, updater 4 of 5, signed packaging 4 of 5 = table-stakes; system-browser sign-in 3 of 5 = common.",
+   "mechanism": "Shell loads the remote web app in a system WebView; renderer sandboxed with a narrow typed bridge (single envelope, per-capability schemas, sender-origin check, validation-failure telemetry); native side owns badge, notifications, deep links, updates. Tauri 2 plugins: single-instance, deep-link, window-state, updater, notification. PKCE: app creates verifier and state, opens /auth/desktop?challenge, the portal retur…"
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No desktop shell of any kind exists: the Frontend Plane is a Vite SPA with no manifest or service worker, no Tauri, Electron or MSIX files exist outside node_modules, the gateway has no desktop sign-in, protocol-link or updater endpoint, and auth-core has no PKCE or code-challenge route. The only native code in the monorepo is Endpoint Plane's verevon-agent, a Rust remote-desktop host whose own docs list packaging and installer as out of scope, …",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/index.html:1-16",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:95-106,191-192",
+    "apps/Endpoint Plane/Cargo.toml:1-60"
+   ],
+   "reuse": [
+    "BFF cookie session: auth-core Better Auth proxied by gateway upstream.rs with tokens held only in HttpOnly cookies",
+    "existing in-app deep links (SpaceCockpit tabFromHash, chat thread deep-link parser) as the route table the protocol handler must feed",
+    "Endpoint Plane Rust workspace conventions (forbid unsafe, rfd consent prompt) and a future shared signing and update pipeline"
+   ],
+   "constraints": "Frontend Plane owns the shell, but the desktop sign-in handoff is Control Plane (auth-core) work because the session is a Better Auth HttpOnly cookie minted behind the gateway and no PKCE endpoint exists. The shell must keep no local agent runtime or offline …",
+   "approachAdjustment": "Keep as written, with two additions: the installer, signing and update pipeline is fully greenfield (Endpoint Plane's verevon-agent also lacks packaging, so one pipeline could serve both), and the PKCE handoff needs a new auth-core endpoint rather than a gateway-only change.",
+   "verdict": "keep",
+   "verdictReason": "The shell is accurately described as absent, nothing in the repo already covers it, and the proposed plane placement matches the session and CSP constraints.",
+   "effort": "XL"
+  },
+  "approachOriginal": "Frontend Plane: new desktop workspace in verevonv3 (Tauri 2, Rust to match the gateway stack) with a capability ACL file and a shared TS/Rust bridge schema in packages/; native protocol and single-instance handling that parse into the same route table as F-t1-039 (R-t1-11-03) with an allowlist of commands. Control Plane identity plus the gateway: /auth/desktop PKCE endpoint minting a sealed single-use short-TTL code…",
+  "planeOwner": "Frontend Plane (sign-in handoff: Control Plane)",
+  "dependencies": [
+   "F-t1-035 (R-t1-11-01) (PWA first)",
+   "F-t1-039 (R-t1-11-03) (route table)",
+   "F-t1-024 (R-t1-11-04) (version gating, update-required hints)",
+   "Control Plane desktop sign-in endpoint",
+   "Release pipeline with signing certificates"
+  ],
+  "risks": "Code-signing and notarisation custody and cost; a second client to test; bridge sprawl enlarges the attack surface (Slack has 122 channels, Teams about 545 methods), so keep it minimal; link parsing is an injection surface; a broken update channel s…",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 3,
+   "SRC": 47,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-074",
+  "title": "Provenance footer on relayed and automated messages and notifications; optional system voice",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 5,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Carry {sender_agent, on_behalf_of, trigger: reply, cron or relay, schedule_ref} on posts and notification payloads, and render a footer such as 'sent for @person' or the schedule name with a link back to the schedule settings. As an optional second phase, give platform notices (policy changes, new Space features) one system sender identity with a per-user cap and opt-out.",
+  "whyItMatters": "It prevents confusion about who an automated message speaks for and fits Verevon's authority model, where owner effect receipts and authorising grants are already recorded. In a room full of agents and scheduled runs, a user needs to know whether a ping came from a person, an agent acting for a person, or a cron.",
+  "reference": {
+   "bestSource": "QM (provenance); Grok Bot for system-voice announcements",
+   "others": [
+    "Slack (Slackbot as single voice for notices and reminders)"
+   ],
+   "prevalence": "Provenance: 1 of 5 sources, unique; system voice: 2 of 5, differentiator",
+   "mechanism": "QM sets a relaySender field when attributeAs differs from the sender, renders a footer, and records the trigger in delivery provenance. Grok Bot delivers changelog items through the bot with relevance guidance, delivery windows, eligibility gates, a minimum client version and a maximum number of offers; the agent decides whether to mention them in a relevant conversation."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Server-recorded provenance already exists but is not projected to the room: each message stores author_subject_id and agent_name, threads relay an origin field, and scheduled runs record source scheduled_run, schedule_id, fire_key and the creating human's subject_id in run metadata plus cron_schedules.creator_subject_id; however SpaceThread has no origin, schedule or on-behalf-of fields, schedule threads are owned by service:orchestrator-core an…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:36-47,60-100,193-215 (turn attribution fields; resolveAuthorName roster-only)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:36-65 (SpaceThread type: owner_subject_id, status, pin; no origin or schedule)",
+    "apps/Model Plane/rust/services/session-core/migrations/0030_message_agent_attribution.sql:1-10 and 0035_message_author_attribution.sql:1-20 (server-recorded agent_name and author_subject_id)"
+   ],
+   "reuse": [
+    "run metadata {source, schedule_id, fire_key, subject_id} already written for scheduled runs",
+    "ThreadSummary.origin relay through model-gateway and the existing gateway thread passthrough",
+    "SpaceWorkPanel schedules list and the /settings/cron link for the 'open schedule' target"
+   ],
+   "constraints": "Posts and messages live in Session Core (Model Plane), not the Application Plane, so the item's plane assignment for the post part is wrong; notifications are Application Plane (notification-core). Provenance must be server-derived from recorded metadata, nev…",
+   "approachAdjustment": "Derive the footer from data already recorded: have Session Core expose the latest run's source, schedule_id and creator subject on the thread summary (model-gateway relays it, the gateway passes it through), and render 'Scheduled run: <schedule name> for <creator>' in SpaceRoomTimeline with a link …",
+   "verdict": "reword",
+   "verdictReason": "Partially real and cheaper than stated: the provenance already exists in run metadata and thread origin and only needs projecting to the room, the post model is in Session Core not the Application Plane, and the relay a…",
+   "effort": "S"
+  },
+  "approachOriginal": "Application Plane: add on_behalf_of and trigger to the post model and to the F-t1-008 (R-t1-05-01) notification payload; reuse the grants and receipts already in Activity as the source. Frontend Plane: render the provenance footer on timeline posts, inbox items and toasts. Phase 2 (Model Plane plus Control): an announcement store the user's agent can consult, gated by Control eligibility and capped per user, only af…",
+  "planeOwner": "Application Plane (provenance); Model Plane and Control (system voice, phase 2)",
+  "dependencies": [
+   "F-t1-008 (R-t1-05-01) payload",
+   "Schedule-run post attribution check in conversation-core"
+  ],
+  "risks": "System-voice announcements can feel like ads inside an agent, so cap and allow opt-out; attribution fields must come from the server, never from the browser.",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 2,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-075",
+  "title": "Agent external channels: per-agent email first, then Slack and Teams apps",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 6,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Phase 1: finish the mail-task pipeline into a per-agent address. Inbound mail is verified and deduped in Ingestion Plane, then wakes the agent as an untrusted unattended turn; outbound send is an approval-gated integration action. Phase 2 (after the durable delivery ledger and a real Channel Plane): publish an agent into Slack or Teams as its own app with an install-state machine, external messages entering under the installing user's authority.",
+  "whyItMatters": "Gives personal agents a human-like identity and an async intake, and meets users where they already chat, a strong adoption lever for Teams-heavy companies. The email front half is already built, and the unblocking steps are documented in code, so phase 1 is a finishing job rather than a new system.",
+  "reference": {
+   "bestSource": "grokbot",
+   "others": [
+    "qm"
+   ],
+   "prevalence": "Slack/Teams agent apps: 2 of 5 (grokbot, qm; differentiator); per-agent email: Grok Bot only (unique)",
+   "mechanism": "Grok Bot creates a Slack app per bot through the manifest API (scopes for mentions, DMs, files, reactions, interactivity), installs it through OAuth with a typed outcome INSTALLED|PENDING_ADMIN_APPROVAL|WORKSPACE_REQUIRED|INSUFFICIENT_SCOPES|INSTALL_CONFLICT|RATELIMITED, and uses a per-tenant package for Teams. Outbound channels are typed addresses (email, Slack, Teams, SMS). Email: a dedicated domain per bot, mail …"
+  },
+  "verevon": {
+   "status": "stub",
+   "exactGap": "Inbound self-forward mail-to-task is built through Ingestion Plane verification (Postmark, HMAC delegation, per-user alias in user-core) and gateway rate-limit and dedup, but AppState.mail_task_pipeline is None in production, so every call answers 503 mail_task_pipeline_not_configured. The thread-preparation seam is built on the Control and Model side (Control mail-task-v1 decision, session-core PrepareUserOwnedThread verifier, model-gateway /v1…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs:1-110 (what it does today; owner ruling Postmark inbound, self-forward only; 503 until a pipeline is wired)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs:395-440 (rate limit, then pipeline None gives 503 mail_task_pipeline_not_configured)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task_thread_bridge.rs:1-40 (built, tested, deliberately not wired into AppState)"
+   ],
+   "reuse": [
+    "integration-corev2 mailtask verify, dedup and alias resolver; user-core mail_task_addresses as the alias store",
+    "Control mail-task-v1 decision, session-core PrepareUserOwnedThread, model-gateway prepare-thread route and mail_task_bridge_auth principal",
+    "gateway mail_task_thread_bridge ThreadBridgeClient (needs Auth Core principal provisioning for verevon-gateway with audience model-gateway)"
+   ],
+   "constraints": "The mail-task design is an owner ruling of self-forward only (sender must be the verified owner), so a per-agent address that wakes an agent from arbitrary senders reverses that ruling and opens a prompt-injection surface; the existing Control decision is pur…",
+   "approachAdjustment": "Reorder phase 1. 1a is a finishing job: wire the existing self-forward pipeline (Auth Core principal, the thread bridge, first turn plus one unattended turn shared with F-t1-047), owner-only sender. 1b, the per-agent address, is NOT a finishing job: it is a new alias subject kind in user-core mail_…",
+   "verdict": "reword",
+   "verdictReason": "The stub status is right, but 'a finishing job' is only true for the existing per-user self-forward flow; the per-agent address conflicts with the self-forward-only ruling and needs its own authority design, and several…",
+   "effort": "XL"
+  },
+  "approachOriginal": "Phase 1 (Ingestion Plane plus Model Plane): reuse the mailtask verify, dedup and resolver path; wire the existing thread bridge (Auth Core service principal for the gateway, model-gateway internal route) and, sharing the unattended-turn plumbing with F-t1-047 (R-t1-06-03), post the synthesized first turn as untrusted input under the owner's authority; add a per-agent address claim; outbound send is a Model-proposed,…",
+  "planeOwner": "Ingestion Plane (inbound email); Application Plane (delivery targets and mapping); Control Plane (identity links); Channel Plane (future adapters)",
+  "dependencies": [
+   "Unattended no-live-user turn (shared with F-t1-047 (R-t1-06-03))",
+   "Auth Core service principal for model-gateway",
+   "S4.4 durable delivery ledger",
+   "S4.3 watches",
+   "Channel Plane service (phase 2)",
+   "Control external-identity link graph (S5.1)"
+  ],
+  "risks": "Spam and phishing reaching agents (prompt injection through mail bodies); deliverability; ZDR violations when content leaves the boundary; platform review and admin-approval friction; identity mapping between external users and Verevon principals.",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 11,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (S5.1 ADR adopted, S5.3 first external adapter); apps/Channel Plane/docs/vision.md (docs-only). Per-agent email is not in the plan."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-076",
+  "title": "Public developer API with scoped tokens and rate limits (events, external bots and a curated catalogue later)",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 7,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Phase 1: publish an OpenAPI description generated from the typed action registry and serve it with org-issued, scoped, revocable API tokens minted by Control Plane (scope = action ids plus an optional Space allowlist, never wider than the issuing user's ACL), per-token token-bucket limits with Retry-After, and generated TS and Rust clients. Later phases, only on customer demand: signed event subscriptions from Application Plane outboxes, externa…",
+  "whyItMatters": "Lets customers, CI and partner agents automate Spaces without screen-scraping, and one typed contract also feeds the agent self-API (F-t1-019 (R-t1-06-01)). It is table stakes in Teams, Slack and buzz, but it is not visible to most users at launch, so it follows the in-room work.",
+  "reference": {
+   "bestSource": "teams",
+   "others": [
+    "slack",
+    "buzz"
+   ],
+   "prevalence": "Public API: 3 of 5 (table-stakes); event subscriptions: Slack only (DOC); external bots: 2 of 5; app store: 2 of 5 (common)",
+   "mechanism": "Teams Graph is the broadest parity surface (teams, channels, chats, messages, tabs, installed apps) over the same handlers as first-party clients, with OAuth2 app and user tokens, scopes and SDKs in several languages. Slack contributes the clearest rate-limit contract (tiered per-app token buckets, per-channel pacing of about 1 message/s, 429 with Retry-After) and the Events API (signed envelopes, 3 s ack, retries a…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Much of phase 1's plumbing exists: org-scoped API keys are already minted, listed and revoked end to end (auth-core better-auth apiKey plugin behind API_KEY_ENABLED with per-key rate limits and a validate RPC, gateway settings/api_keys.rs, action ids settings.create_api_key and settings.delete_api_key), and the action registry already builds a deterministic JSON-Schema catalog (catalog-manifest.ts) behind /api/v1/actions/catalog and /execute. Wh…",
+   "evidence": [
+    "apps/Control Plane/auth-core/src/auth/auth.ts:1112-1150",
+    "apps/Control Plane/auth-core/src/auth/orpc-router.ts:2428-2445,2559-2562,2717-2790",
+    "apps/Control Plane/user-core/internal/http/handlers.go:699-760"
+   ],
+   "reuse": [
+    "auth-core apiKey plugin with its user-keys and org-keys configs, per-key rate limit, and the validate RPC (orpc-router.ts:2717-2790)",
+    "gateway settings/api_keys.rs and the settings.create_api_key and settings.delete_api_key actions for issuance and revocation UI",
+    "buildActionCatalogManifest (zod to JSON Schema, sorted, hashable) as the source for an OpenAPI document"
+   ],
+   "constraints": "Space authority (ADR-0001) binds every Control decision to an authenticated subject, so scoped tokens must be user-bound (auth-core user-keys, which exists) or a Control-registered service principal with explicit Space grants; the org-keys the gateway mints t…",
+   "approachAdjustment": "Reword phase 1 as extend, not build: issue user-bound keys with real scopes (action ids plus an optional Space allowlist) instead of the hard-coded org read scope; add an x-api-key branch to require_session that calls the auth-core validate RPC, builds an AuthenticatedUser and keys rate_limit_key b…",
+   "verdict": "reword",
+   "verdictReason": "The item reads as if token minting and a typed schema export are new, but both exist in part; the real gap is gateway-side token authentication with Space-safe scopes, and the registry alone does not cover reading or po…",
+   "effort": "L"
+  },
+  "approachOriginal": "Frontend Plane gateway: generate and publish OpenAPI from the action registry; Control Plane issues and revokes scoped tokens; per-token rate limits with Retry-After; all writes keep flowing through the existing action dispatcher so audit and authority checks match the UI; generate TS and Rust clients. Phase 2 (Application Plane): publish Space events from the transactional outboxes to a per-app subscription table, …",
+  "planeOwner": "Frontend Plane (API surface); Control Plane (tokens); Application Plane (events, bindings)",
+  "dependencies": [
+   "Control Plane token issuance and revocation",
+   "Action registry as single source of truth",
+   "Audit receipts for token-originated actions",
+   "S4.4 durable delivery ledger (phase 2)"
+  ],
+  "risks": "Token leakage widening access; API drift from the UI; ZDR content leaving through the API or subscriptions; supply-chain and review burden for any third-party catalogue.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 3,
+   "SRC": 2,
+   "DOC": 7,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-077",
+  "title": "Compliance export, custodian legal hold, information barriers and audited admin break-glass",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 8,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Create a compliance principal in Control whose org-wide read is granted only by signed, audited decisions: export of room messages, agent turns with provenance and attachments by reference (by custodian, Space, time or keyword); custodian-level legal hold that pins items from retention and keeps originals on edit or delete; later, pairwise information barriers applied at membership and delivery. Add admin break-glass for agent computers and tran…",
+  "whyItMatters": "Regulated buyers (finance, public sector, Nordic municipalities) cannot adopt a room product that holds agent output without hold and export. Operating personal agents with their own computers also needs a way to stop or inspect a stuck or abusive agent without widening anyone's ACL.",
+  "reference": {
+   "bestSource": "teams",
+   "others": [
+    "slack (Discovery API: read-only export apps versus read-write DLP apps)",
+    "grokbot (41 team-scoped admin RPCs including break-glass delete)",
+    "qm (audit on read, impersonation banner)"
+   ],
+   "prevalence": "eDiscovery, hold and barriers: 2 of 5 (teams, slack; DOC); admin break-glass: 2 of 5 (grokbot, qm SRC). Differentiator.",
+   "mechanism": "A compliance principal with org-wide read scope queries an export API by custodian, space, time and keyword; a hold pins items so retention sweepers skip them and edits or deletes keep originals in a hidden store; information barriers are pairwise segment-deny rules evaluated at membership add and message delivery. Break-glass uses a separate admin RPC namespace authorised by the admin role, every content read write…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Control user-core already has Space-keyed legal holds (space_legal_holds table, PUT and DELETE /spaces/:space_ref/legal-hold, operator audit events) but they only block the personal-Space deletion saga, and no message retention sweeper exists for a hold to pin (the retention schedule marks conversation and audit sweeps as TBC). There is no compliance principal or decision class, room export or search, custodian hold, information barrier, nor any…",
+   "evidence": [
+    "apps/Control Plane/user-core/migrations/022_space_deletion_authority.up.sql:14-19",
+    "apps/Control Plane/user-core/migrations/023_space_deletion_operator_audit.up.sql:18",
+    "apps/Control Plane/user-core/internal/spaces/deletion_authorization.go:28-40"
+   ],
+   "reuse": [
+    "user-core decision.go SignDecision and VerifyDecision plus the shared_thread_read_decision.go pattern (own action id, schema hash and permission so a member read token can never be replayed as a compliance read)",
+    "space_legal_holds and space_deletion_operator_events as the base to generalise into custodian or scoped holds",
+    "Application Plane spaceDeletionReceipts per-owner receipt aggregation for export or hold propagation across planes"
+   ],
+   "constraints": "Room conversation content is owned by Model Plane session-core (threads carry space_id and per-row audience revisions) and is readable only with a Control-signed per-member thread:read decision; Application Plane holds membership, presence, read-marker and bi…",
+   "approachAdjustment": "Move room-content export from \"Application Plane projections\" to Model Plane session-core behind a new Control-signed compliance-export decision (reason, scope, expiry, approver) verified the way verify_thread_read_space_decision is; Application contributes membership metadata only, and Data Plane …",
+   "verdict": "reword",
+   "verdictReason": "Status partial is right and the Control hold is a real asset, but the item places room export in the Application Plane when session-core owns the transcript, and it understates that holds have no retention sweeper to ac…",
+   "effort": "XL"
+  },
+  "approachOriginal": "Control Plane: a compliance principal and a signed compliance decision (reason, scope, expiry) reusing decision.go, and custodian holds generalised from the deletion-saga hold. Application Plane: a server-to-server export of room projections gated by that decision. Data Plane: search over rooms. Model Plane sandbox-manager: admin RPCs for hibernate, snapshot and kill, honoured only with a signed break-glass decision…",
+  "planeOwner": "Control Plane with Application Plane, Data Plane and Model Plane (sandbox-manager)",
+  "dependencies": [
+   "F-t1-051 (R-t1-10-06) (retention and hold)",
+   "F-t1-031 (R-t1-10-05) (audit export)",
+   "Data Plane search over rooms",
+   "sandbox-manager lifecycle API"
+  ],
+  "risks": "ZDR rooms have nothing to export, which must be stated. Export is a mass exfiltration path and must be heavily audited. EU consent and works-council rules for reading people's agent transcripts; the affected user must be notified.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 7,
+   "DOC": 2,
+   "INF": 2
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-078",
+  "title": "Perceived-latency observability: W3C traceparent on every send and stream, and performance budgets under simulated agent load",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 9,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Add a traceparent header and client timestamps (Enter pressed, composed) to Space sends and stream subscriptions, propagate them through the gateway into Control and Model Plane calls, and emit named client events for enter-to-ack, ack-to-first-frame, missing rows and resyncs. Add a Playwright performance project that floods a room with simulated agent output and asserts typing and scroll latency budgets using the Event Timing API.",
+  "whyItMatters": "An agent-first room is only usable if typing stays fast while agents stream, and today nobody measures it. Three references trace sends end to end; only Buzz and Grok Bot test latency under agent load, which makes a budget in CI a real differentiator for Verevon.",
+  "reference": {
+   "bestSource": "Grok Bot (traceparent plus enter_epoch_ms and composed_at_ms on every send, 114 named perceived-quality events); Buzz (Playwright typing and scroll budgets under simulated agent load)",
+   "others": [
+    "Slack (batched telemetry, startup phase timings)"
+   ],
+   "prevalence": "3 of 5; common",
+   "mechanism": "Client adds a W3C traceparent to send requests and stream subscriptions; the gateway propagates it; the client emits spans for enter to ack and ack to first frame; a perf CI project measures Event Timing under agent-typing floods with explicit budgets."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "The server half already ships: Model Plane model-gateway emits a turn_timing SSE event (phases, first-token and other marks, ids and durations only) before the terminal frame, and chat-client.ts parses it and hands it to an onTurnTiming handler; browser-clock phase marks exist only as a test helper (tests/e2e/product-phase-timing.ts). Missing: no traceparent or client enter, ack, first-frame or resync events in the SPA (requestJson in http.ts an…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:390-420",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:659-660",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1645-1650"
+   ],
+   "reuse": [
+    "model-gateway turn_timing clock and SSE event (server phases and first-token mark) and chat-client parseTurnTiming/onTurnTiming for the server side",
+    "tests/e2e/product-phase-timing.ts browser performance.now stamping of stream reads as the base for client marks and a perf spec",
+    "gateway observability.rs track_metrics middleware to extend with a request-id or trace label"
+   ],
+   "constraints": "Telemetry must carry ids and timings only (ZDR); turn_timing already follows this and its doc forbids mixing gateway and browser clocks, so a Grok-style enter_epoch_ms wall-clock subtraction conflicts with the existing design and should be replaced by client …",
+   "approachAdjustment": "Reword as the client half: add traceparent plus performance.now marks (enter, ack, first frame, missing row, resync) in http.ts and streamChat, forward the header in the gateway, correlate with the existing turn_timing by request id, and add a Playwright perf project using the Event Timing API. Tre…",
+   "verdict": "reword",
+   "verdictReason": "Partial is right, but the gap text must credit the shipped server turn_timing and the existing test-side browser phase timing, and the wall-clock enter_epoch_ms approach conflicts with the repo own same-clock rule.",
+   "effort": "M"
+  },
+  "approachOriginal": "SPA shared http layer (src/shared/api) adds traceparent and enter_epoch_ms to sends and stream opens; gateway middleware propagates and forwards to user-core and model-gateway (the gateway already has an observability.rs metrics middleware to extend); client emits a small set of named timing events; add a Playwright perf project with a simulated agent flood fed through the room stream once F-t1-003 (R-t1-09-01) exis…",
+  "planeOwner": "Frontend Plane",
+  "dependencies": [
+   "F-t1-003 (R-t1-09-01) for stream timing and agent-flood fixture"
+  ],
+  "risks": "Telemetry must not carry content (ZDR). Perf budgets need a stable CI environment to avoid flakiness.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 8,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-079",
+  "title": "Ids-only \"report this\" flow and hardened error-code registry",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 10,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Add a Report dialog in the Space, the run console and the error card that sends only ids (Space, run, thread, request ids, build id, error code, client error class) and an optional free-text note to a Support Plane ticket through the gateway, with no message bodies or screenshots by default. Extend the error catalogue with domain and retryable fields and add a gateway test that every emitted error code has a catalogue entry.",
+  "whyItMatters": "Agent-heavy collaboration produces hard-to-reproduce problems. Ids-only reports let support reconstruct a run without private content and fit Zero-Data-Retention; retryable flags let the UI and agents decide between retry and ask-the-user.",
+  "reference": {
+   "bestSource": "slack (self-service diagnostics kit, rotating logs with zipped upload, installation id) and teams (report-a-problem with screenshots and chunked upload); grokbot for the coded error registry",
+   "others": [
+    "grokbot (108 coded errors grouped by domain with retryable flags and the raising location)"
+   ],
+   "prevalence": "Report/diagnostics 2 of 5 (differentiator); coded registry 1 of 5 (unique).",
+   "mechanism": "One action bundles recent request and trace ids, state and error code into a support upload; registry {code: {name, domain, retryable, summary, payload}} that UI, telemetry and retry logic all key on."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "A persistent shell report control already exists: FeedbackWidget (rendered in CoreShell) posts free text, name, email and page path to /api/v1/inbox/feedback, which conversation-core-go SubmitFeedback stores as a pilot-feedback conversation in the org's Inbox and mirrors to the team's monitored org; it carries no Space, run, thread, request or build ids, is not offered from the run console or error cards, and the gateway handler applies no ZDR c…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/core/components/FeedbackWidget.tsx:17-120 (Report friction dialog: note, name, email, pageUrl)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx:135 (FeedbackWidget mounted in the shell)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/inbox-client.ts:650-680 (submitFeedback to /api/v1/inbox/feedback with idempotency key)"
+   ],
+   "reuse": [
+    "FeedbackWidget, inbox-client submitFeedback and conversation-core SubmitFeedback with an optional diagnostics payload instead of a new dialog and route",
+    "gateway /version (revision, build_date) as the build id",
+    "RUN_ERROR fields (code, retryable, runId, requestId) as the run-side registry shape"
+   ],
+   "constraints": "The ticket and Inbox owner is Application Plane (conversation-core-go, gateway tickets.rs and inbox.rs); Support Plane owns no tickets or users, so the item's Support Plane ticket intake is the wrong target. The current feedback lands in the customer org's ow…",
+   "approachAdjustment": "Do not build a new Support Plane route. Extend the existing FeedbackWidget and SubmitFeedback with an optional structured diagnostics object (space ref, thread and run ids, request id, error code, client error class, build id from /version) and add entry points on the error card, run console and Sp…",
+   "verdict": "reword",
+   "verdictReason": "A report-friction flow already exists and the ticket intake already exists in Application Plane, so the item should extend them with ids-only diagnostics rather than add a dialog and a Support Plane route; the error-reg…",
+   "effort": "M"
+  },
+  "approachOriginal": "Frontend Plane: report dialog component reused by the error card (F-t1-024 (R-t1-11-02)), Space and run console, posting through a new gateway route to Support Plane; extend ERROR_COPY entries with domain and retryable and surface \"retry\" only when retryable. Gateway: a test that enumerates envelope error call sites against the catalogue and exposes the request id header consistently. Default to ids only; any conten…",
+  "planeOwner": "Support Plane (client dialog and error catalogue: Frontend Plane)",
+  "dependencies": [
+   "Request id propagation in the gateway",
+   "Support Plane ticket intake endpoint",
+   "F-t1-024 (R-t1-11-02) (error card hosts the action)"
+  ],
+  "risks": "Uploading content from ZDR Spaces (default to ids only); catalogue drift without the coverage test.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-080",
+  "title": "ZDR-safe client persistence: Space drafts, per-user Space state synced across devices, cache hygiene, and an optional intent-only offline queue",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 11,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Stage it by risk. First persist non-content and low-risk state: Space composer drafts for non-ZDR organizations (reusing the existing client-storage helpers and sign-out purge) and per-user Space state (mutes, sidebar sections, per-thread read markers) stored server-side with last-writer-wins by updated_at. Later and only if wanted, add a head-page cache for non-ZDR orgs with a schema version and wipe, and an offline queue that stores user inten…",
+  "whyItMatters": "Most desktop references keep a local replica and sync per-user state across devices, but Verevon deliberately does not cache content in the browser because Zero-Data-Retention must propagate. Push plus paging gives most of the speed benefit, so the useful part now is losing no drafts and syncing state that is not content, without breaking ZDR.",
+  "reference": {
+   "bestSource": "Buzz (bounded, versioned paint-accelerator cache always replaced by authoritative data; per-field last-writer-wins preference registers); Teams for the offline queue (ordered resolvers, 48 h expiry, 10 cross-session retries); Slack for sign-out cleanup",
+   "others": [
+    "Grok Bot (named local replicas, transcript write-ahead journal)",
+    "QM (server key/value UI-state API with LWW and future-skew clamp; deliberately no local cache)"
+   ],
+   "prevalence": "4 of 5 for a local replica (table-stakes in desktop clients); 2 of 5 each for offline queue, cache hygiene and cross-device per-user state",
+   "mechanism": "Per (user, server) scope: last N room head pages, roster, selection and drafts hydrated before subscribing and replaced on the first authoritative page; schema version with wipe on mismatch; size caps. Server store keyed (user, key) with value up to 64 KB and updated_at, writes rejected if older than stored, client clocks clamped. Offline actions persisted with idempotency key, ordering key and expiry, replayed in o…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Server-side per-room read markers (spaceReadMarkers, one lastReadAt per member per room, deliberately not per thread), server-side user-core preferences and Inbox pins/read, and a complete ZDR-gated session-only Home draft pattern (useHomeDraft, client-storage, chat-retention gate, sign-out purge) already exist. Missing: any draft persistence in SpaceRoomComposer (no draft, retention or zdr reference in the file), per-user Space state (mute, sid…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/session/client-storage.ts:1-90 (guarded local+session helpers; sessionOnly helpers at 71-90 never touch localStorage)",
+    "apps/Frontend Plane/verevonv3/src/shared/session/home-draft-storage.ts:9-77 (text-only, sessionStorage, keyed org+user, cleared at sign-out)",
+    "apps/Frontend Plane/verevonv3/src/shared/session/session-store.ts:69-76,105-112,133-135 (clearHomeDrafts on sign-out and user switch)"
+   ],
+   "reuse": [
+    "useHomeDraft pattern (features/dashboard/home/home-draft.ts) re-keyed by org+user+space(+reply target)",
+    "client-storage.ts readSessionValue/writeSessionValue/removeSessionValuesWithPrefix",
+    "chat-retention.ts isLocalRetentionAllowed + subscribeLocalRetention, and sign-out purge via clearHomeDrafts"
+   ],
+   "constraints": "ZDR must propagate: a Space draft is content, so it must be tab-lifetime sessionStorage and gated by the org posture; the posture today is module state that only chat-client's thread listing feeds (default ALLOWED), and the Space page has no reader of it, so …",
+   "approachAdjustment": "Split. (a) Space composer draft: use sessionStorage only (the item's 'org+user-keyed localStorage' option breaks the established 'ends with the tab' rule in home-draft-storage), key by org+user+space, gate on isLocalRetentionAllowed plus the Space's own privacy.zero_data_retention, purge with the e…",
+   "verdict": "reword",
+   "verdictReason": "A real part already exists (room-level read markers, user-core preferences, a Home draft with full ZDR handling), the per-thread marker ask contradicts a recorded decision, the localStorage suggestion contradicts the es…",
+   "effort": "M"
+  },
+  "approachOriginal": "Frontend Plane: extend src/shared/session/client-storage.ts and a Space draft store (sessionStorage or org+user-keyed localStorage, text only, never for ZDR orgs, purged at sign-out). Application Plane: per-user Space state table alongside spaceReadMarkers (mutes, sections, per-thread read markers) with updated_at LWW and a future-skew clamp; profile-level settings stay in user-core preferences. Offline queue and co…",
+  "planeOwner": "Frontend Plane with Application Plane for synced per-user state",
+  "dependencies": [
+   "F-t1-033 (R-t1-09-06) idempotency key",
+   "F-t1-009 (R-t1-09-05) aggregates for unread",
+   "Org ZDR posture available in the client"
+  ],
+  "risks": "ZDR conflict if content is ever persisted on the device; a stale cache could show revoked rooms, so re-authorize before render. Plane split between Control preferences and Application per-Space state must be explicit. Global presence and per-thread …",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 18,
+   "DOC": 2,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-081",
+  "title": "Long-tail polish: role-aware agent templates and persona library, owner-reviewed config proposals, catch-up summaries, external MCP surface",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 12,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Small, independent improvements once the core is in place: job-first agent creation with role/tool-tagged templates and a self-introduction; a persona library with agent teams and an export format built from an explicit field allowlist so secrets cannot be serialized; agent-proposed configuration changes that the owner reviews in a prefilled dialog; assistive AI in the room (time-windowed catch-up summaries with decisions and action items, rewri…",
+  "whyItMatters": "Each of these appears in only one or two references and adds modest value, but they make the product feel finished: faster agent setup, safer reuse of agent definitions, and the AI helpers people expect in a chat product.",
+  "reference": {
+   "bestSource": "grokbot (templates); buzz (allowlist snapshot, config proposals); teams (assistive AI); slack (hosted MCP server)",
+   "others": [
+    "qm"
+   ],
+   "prevalence": "Each is 1 or 2 of 5 (unique or differentiator)",
+   "mechanism": "Grok Bot: 74 eligibility-tagged templates (universal, job-role, selected-tools), onboarding answers injected as short system fragments, idempotent creation via a client-generated id with an optional kickstart introduction. Buzz: versioned manifest where only explicit fields are copied (asserted by tests), memory export levels none|core|all through the owner-gated path, definitions private unless marked shared; agent…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Only fragments exist: three static agent templates carry a name, description and instructions with no role or tool tags (SpaceCreateAgentDialog.tsx:43), the Meeting Scribe template gives an on-mention catch-up as minutes text, and org agent definitions can be re-bound into other rooms (AgentInstallationsPage, SpaceBindAgentDialog), which is the reuse half of a persona library. Missing are a self-introduction, definition export or import and agen…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:15-75,190-215",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx:1-40",
+    "apps/Frontend Plane/verevonv3/src/features/agents/lib/agent-roles.ts:1-8"
+   ],
+   "reuse": [
+    "AGENT_TEMPLATES and SpaceCreateAgentDialog applyTemplate for a role-tagged catalogue",
+    "Application Plane agent definitions (agents.systemPrompt) plus spaceAgents persona injection and the org-wide installations registry (ADR-0002)",
+    "operating_map.review_proposal and inbox create_ai_text_proposal as the review-dialog pattern"
+   ],
+   "constraints": "Agent definitions and any proposal object are Application Plane data, summaries and rewrites must call Model Plane under the room read decision and must not leak across the audience or persist under ZDR, and an agent may only propose configuration, never appl…",
+   "approachAdjustment": "Split the bundle: role-tagged templates plus an optional self-introduction (S), a catch-up summary action with time windows that calls Model Plane under the room read decision (M), owner-reviewed config proposals as an Application proposal object with a prefilled owner dialog (M), definition export…",
+   "verdict": "reword",
+   "verdictReason": "Templates, definition re-binding and a scribe-style catch-up partly exist, the proposal pattern exists in other domains, and the MCP surface is much larger than the other slices, so the item should be split and its stat…",
+   "effort": "L"
+  },
+  "approachOriginal": "Frontend: template catalogue with eligibility tags stored as a template id on the definition; owner review dialog fed by an Application proposal object; catch-up and summary panel that calls the Model Plane with the room read decision (not stored under ZDR). Application: definition export with an explicit field allowlist covered by a leak test, and an agent team as a list of definition ids bound together. Gateway: a…",
+  "planeOwner": "Frontend Plane (templates, summaries, MCP endpoint); Application Plane (definitions, proposals)",
+  "dependencies": [
+   "Item F-t1-044 (R-t1-07-09) (agent-callable classification) for the MCP surface",
+   "Item F-t1-012 (R-t1-07-08) (summaries must not leak across the audience)"
+  ],
+  "risks": "Secret leakage if the export allowlist is not test-enforced; summaries leaking across audiences; external agents holding user tokens must be narrowly scoped.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 4,
+   "SRC": 11,
+   "DOC": 3,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-082",
+  "title": "Long-tail polish: voice and video clips with transcripts, image markup, per-viewer translation, room lenses",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 13,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "After the attachment pipeline exists, add short voice and video clips with inline playback and transcripts, a canvas markup step before sending an image, an on-demand per-viewer translation of a message that is not stored for others, and a per-room layout lens (threads versus posts, plus an announcement mode that restricts who may reply).",
+  "whyItMatters": "Voice clips suit mobile and pair with agents summarizing them; translation fits mixed Norwegian and English teams and agent output; markup helps screenshot feedback to agents; an announcement lens suits project and case Spaces. None blocks the core room.",
+  "reference": {
+   "bestSource": "grokbot (voice notes with streaming STT and word-level transcript jump); teams (translation, Posts versus Threads lens); buzz (image markup)",
+   "others": [
+    "slack"
+   ],
+   "prevalence": "Voice/video clips 4 of 5 sources (table-stakes in the references); translation 2 of 5; room lenses 2 of 5; image markup 1 of 5",
+   "mechanism": "Clips: recorder feeds the attachment pipeline, a transcription job stores the transcript as derived content linked to the clip, the player maps word timestamps to seek and offers speed control. Translation: Translate(entry_id, target_lang) runs inference with source hints and the result is shown only to the viewer (Slack states viewer-only; Teams has an admin policy flag). Lens: a room attribute layout=threads|posts…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "None of the four features exists in the Space UI: SpaceRoomComposer has no attachment, voice or image control, SpaceRoomTimeline renders every thread as an inline post with no layout or announcement flag, and SpaceActivityPanel's 'lens' is only an activity filter. Building blocks exist elsewhere: createVoiceRecorder plus transcribeAudioBlob and /api/v1/ai/transcribe (Home dictation, batch only), the Chat attachment pipeline (prepareChatAttachmen…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:108-140 (props and component; grep for attach/voice/dictat/audio/image/markup: no hits)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:21-26,320-340 (every thread rendered as an inline post, Teams channel model; no layout flag)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx:56-66 (ActivityLens is an activity filter)"
+   ],
+   "reuse": [
+    "src/features/voice/voice-recorder.ts and the Home dictation flow (transcribeAudioBlob, /api/v1/ai/transcribe, /api/v1/ai/dictate)",
+    "Chat attachment pipeline (prepareChatAttachments, uploadChatDocument, ChatAttachmentCanvas)",
+    "model-gateway /v1/ai/translate (+detect, languages) and inference-core TranslateText: only the BFF proxy and UI are missing"
+   ],
+   "constraints": "ZDR: inference-core rejects translation and other content modalities under ZDR unless attested, and attachments are a refused ZDR feature, so translation, clips and transcripts must refuse or degrade for ZDR orgs; a stored clip transcript is derived persisted…",
+   "approachAdjustment": "Split the bundle and reorder. 1) Per-viewer translation first (small, backend exists): add a gateway route proxying model-gateway /v1/ai/translate with the ZDR posture raise, keyed by turn reference. 2) Voice: start with dictation into the Space composer (reuse Home), then clips only after Space at…",
+   "verdict": "reword",
+   "verdictReason": "The item hides that the translation and batch transcription backends and the recorder already exist, bundles four unrelated features with different owners, and proposes two (markup, layout lens) that add little over wha…",
+   "effort": "L"
+  },
+  "approachOriginal": "Frontend Plane: reuse src/features/voice recorder and the F-t1-013 (R-t1-01-04) pipeline for clips; transcript through Model Plane inference inheriting room ACL and ZDR retention; image markup as a canvas editor before upload. Translation: a gateway route that calls Model Plane inference on demand, shown only to the requester, never persisted under ZDR, behind an org policy flag. Lens: a layout flag on the Space (Ap…",
+  "planeOwner": "Frontend Plane with Model Plane inference and Control role policy",
+  "dependencies": [
+   "F-t1-013 (R-t1-01-04) attachments",
+   "F-t1-052 (R-t1-01-10) system entries (lens change notice)",
+   "Model Plane transcription and translation inference"
+  ],
+  "risks": "Transcript and translation retention under ZDR; cost of per-view translation; lens switching must not hide entries a viewer is entitled to see. Overlaps category 03 (agent voice participants).",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 3,
+   "SRC": 5,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-083",
+  "title": "Federated search across connected providers under the asker's authority",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 14,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Extend the gateway fan-out from F-t1-069 (R-t1-04-08) with an integration-corev2 provider backend so a Space can search connected systems (for example Google, Microsoft, Salesforce content) as the asking user. Each backend gets its own Control decision, results are never cached or stored, and the UI shows which sources failed or were limited.",
+  "whyItMatters": "Connected-provider search makes a Space an \"ask the whole company\" surface, and the owner-plane fan-out fits the no-cross-plane-DB rule. It is a later differentiator that needs message search and populated Space knowledge first.",
+  "reference": {
+   "bestSource": "qm",
+   "others": [
+    "slack"
+   ],
+   "prevalence": "2 of 5 sources; differentiator",
+   "mechanism": "qm createCoreSearch(backends) runs a SearchBackend {name, search} registry concurrently with per-backend timeouts, tags hits by backend and type (message|conversation|file|page|external), and pushes failed or truncated backends into failed[] and limited[] arrays. Slack shows the product outcome (Enterprise+ search over Google, Microsoft and Salesforce) but the evidence is DOC only."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "The pieces exist but are not joined: integration-corev2 already implements search-shaped provider reads (Outlook $search/KQL and Gmail q via mail.messages and gmail.messages, calendar query, drive.files search, Slack messages.list) and the gateway exposes a read-only per-connection browse proxy as the signed-in user (integrations/browse.rs READ_ONLY_BROWSE_OPS), but only the home composer's connector-attach picker calls it. There is no Space sea…",
+   "evidence": [
+    "apps/Ingestion Plane/integration-corev2/README.md:262-297",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/mail_read.go:23-47,129,376-420",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:239-266,279-300"
+   ],
+   "reuse": [
+    "integration-corev2 mail, calendar, drive and Slack read actions with their validated query params",
+    "gateway integrations/browse.rs allowlist and proxy_for_user as the provider backend transport",
+    "retrieval-engine /v1/knowledge/search under x-space-decision plus proxy_data_plane_json_with_space_decision"
+   ],
+   "constraints": "Each backend must run as the asking user with its own Control decision, and Space access must never widen an owner-plane ACL, so provider search may use only connections the asker may use (user versus org-shared connection ownership was not verified). Provide…",
+   "approachAdjustment": "Replace the unverified-existence dependency with verified primitives and build the orchestrator as the F-t1-069 fan-out in order of readiness: Data Plane documents and wiki under the Space decision (exists), then provider mail, files and calendar through the existing browse allowlist, then Session …",
+   "verdict": "reword",
+   "verdictReason": "Provider-level search and a per-connection browse proxy already ship, and the item still lists their existence as unverified; the recommendation is valid but should be scoped to the missing orchestrator and Space-bound …",
+   "effort": "L"
+  },
+  "approachOriginal": "Gateway (Frontend Plane BFF) orchestrator backends: Session Core messages, Data Plane documents and wiki, integration-corev2 provider search actions called as the asking user (per-backend Control decision, as in F-t1-038 (R-t1-04-03)). Response contract {hits, failed[], limited[]}. Never cache third-party results (provider terms and ZDR).",
+  "planeOwner": "Frontend Plane (gateway orchestrator); Ingestion Plane (integration-corev2) for provider actions",
+  "dependencies": [
+   "F-t1-018 (R-t1-04-01)",
+   "F-t1-069 (R-t1-04-08) fan-out contract",
+   "integration-corev2 provider search actions (existence unverified)",
+   "Populated Space documents"
+  ],
+  "risks": "Latency of the slowest backend; third-party retention rules (Slack forbids storing results); heterogeneous ranking scores.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 1,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-084",
+  "title": "Meeting recording to governed object storage with a state machine, a mandatory recording indicator and expiry (defer behind transcripts)",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 15,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "After calls and transcripts exist, add optional recording: SFU egress writes to object storage under the Space data owner, a recording record tracks started, processing, saved, failed and expired with size and expiry, every participant sees a recording indicator while it runs, an expiry job deletes the media, and access follows the meeting record. Recording stays off unless the meeting AI and recording policy allows it.",
+  "whyItMatters": "Some organisations need replay and compliance evidence, but for an agent-first product the transcript and recap carry most of the value with far less sensitive data, so recording should follow, not lead.",
+  "reference": {
+   "bestSource": "Teams (REA): complete state machine started, stopped, processing, saved to cloud storage, expires in N days, upload errors by cause, duration and size limits",
+   "others": [
+    "Slack (SRC): tray recording indicator only"
+   ],
+   "prevalence": "2 of 5 (Teams, Slack); differentiator.",
+   "mechanism": "SFU egress (composite or per-track) to object storage; recording record {id, meeting id, state, storage ref, expires_at, size}; mandatory banner or badge for all participants; expiry job deletes media; access follows the meeting ACL."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No call, SFU, WebRTC or meeting-record code exists in the audited apps (search for livekit, mediasoup, RTCPeerConnection, jitsi and huddle hit only documents), so there is nothing to record. The only MediaRecorder is the dictation recorder in voice-recorder.ts, the only raw-AV storage is a docs-only Channel Plane plan (MinIO, uploaded files first), and the MinIO CAS bucket is a page-image bucket that Data Plane can only delete from. The Space pr…",
+   "evidence": [
+    "apps/Channel Plane/docs/meeting-intelligence.md:3-10",
+    "apps/Channel Plane/docs/meeting-intelligence.md:40-66",
+    "apps/Frontend Plane/verevonv3/docs/space-defenition.md:24-28"
+   ],
+   "reuse": [
+    "Channel Plane meeting-intelligence ownership table (capture to Quarry evidence, MinIO raw AV, ASR in Model Plane, storage through Data Plane contracts)",
+    "spaceDeletionReceipts.ts per-owner receipt states as the pattern for an expiry or purge receipt",
+    "Control space_legal_holds as the retention fence for recordings"
+   ],
+   "constraints": "The item depends on F-t1-029 first-party calls, which do not exist, and the Space definition (updated 2026-08-16) says Verevon will not run a chat-feature parity race on huddles. Recordings are persistent raw media and must be refused for ZDR orgs and honour …",
+   "approachAdjustment": "The proposed \"SFU egress under an Application Plane call record\" presumes a first-party call stack that is not planned. If recording is wanted before calls, the only aligned near-term shape is uploaded recordings registered as Data Plane documents (the meeting-intelligence MVP); first-party egress …",
+   "verdict": "demote",
+   "verdictReason": "Absent status is right, but it is entirely conditional on a call feature that does not exist and that the product definition lists as a non-goal; it should be demoted behind transcripts and any call ADR rather than carr…",
+   "effort": "L"
+  },
+  "approachOriginal": "Data Plane registers the recording artifact in MinIO; SFU egress runs under the Application Plane call record; Control Plane policy decides whether recording is allowed under the org ZDR posture and requires explicit recording consent in the F-t1-050 (R-t1-03-03) policy; Frontend shows the indicator in the call bar and announces start to all participants. An expiry job in the Data Plane owner deletes media and recor…",
+  "planeOwner": "Data Plane",
+  "dependencies": [
+   "F-t1-029 (R-t1-03-01)",
+   "F-t1-029 (R-t1-03-05)",
+   "F-t1-050 (R-t1-03-03)",
+   "Object storage with retention and deletion receipts",
+   "Control Plane recording policy"
+  ],
+  "risks": "Raw media is high-sensitivity and conflicts with ZDR tenants. Consent law varies by jurisdiction. Retention must interoperate with Space deletion receipts.",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 2,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-085",
+  "title": "Live in-meeting AI layer: captions, an optional interpreter agent and a facilitator agent (agenda, timers, live context)",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 16,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Once live ASR exists for F-t1-050 (R-t1-03-02), publish caption events to the call with language auto-detect, add an interpreter as an agent participant that translates and publishes a TTS track per target language, and add a Facilitator agent template beside Meeting Scribe that tracks an agenda posted by a human, nudges on time and goal, and surfaces Data Plane context when an entity is mentioned. Everything is opt-in, ephemeral and gated by th…",
+  "whyItMatters": "Accessibility and multilingual teams (the UI is already Norwegian and English), and a visible agent-in-the-room moment that human-only call tools cannot copy. It reuses the live transcript, Space agents and Data Plane retrieval instead of adding stores.",
+  "reference": {
+   "bestSource": "Teams (REA): captions with spoken-language auto-detect, AI interpreter with a named roster identity, agenda and timer smart actions",
+   "others": [
+    "Slack (DOC, low confidence): meeting-aware Slackbot"
+   ],
+   "prevalence": "Captions and interpretation 1 of 5 (Teams, unique); facilitator behaviours 2 of 5 (Teams, Slack), differentiator.",
+   "mechanism": "Streaming ASR per active speaker emits caption events on the realtime channel; the interpreter is an agent participant that subscribes to audio, translates and publishes per-language audio; a facilitator bound to the meeting reads live transcript and chat, triggers on an agenda message, elapsed-time checkpoints and entity mentions, and posts suggestions as drafts or ephemeral messages."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No captions, interpreter or facilitator exists, and there is no call or meeting infrastructure at all (grep for WebRTC, LiveKit, mediasoup or Jitsi finds nothing in Frontend src, Application Plane, Model Plane or Infra Plane), so nothing live exists to caption. Only batch speech-to-text (TranscribeSpeech, one recorded blob), governed TTS (speech-client.ts, Azure Speech) and the text-only Meeting Scribe template in SpaceCreateAgentDialog exist, a…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts:1-30,85-100 (governed TTS only, Azure Speech)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts:14 (transcribeAudioBlob: batch)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs:30-80 (routes: speech, transcribe, dictate; none for realtime)"
+   ],
+   "reuse": [
+    "model-gateway /v1/ai/realtime and inference-core CreateRealtimeSession for streaming voice sessions",
+    "TranscribeSpeech, TranslateText and governed TTS for post-hoc and near-live pipelines",
+    "Meeting Scribe template and the Space agent binding model for the facilitator"
+   ],
+   "constraints": "ZDR: live captions, translation and interpreter audio send content to providers; model-gateway decides per modality and inference-core refuses unattested ZDR modalities, so the layer must be opt-in per meeting and refused for ZDR orgs. Meeting AI policy and p…",
+   "approachAdjustment": "Fix the plane owner to Application Plane (call presence and caption fan-out) plus Model Plane (ASR, translation, TTS inference), not Model Plane alone. Sequence strictly after the call stack exists; the cheap first step is a post-hoc scribe or facilitator over a recorded and transcribed meeting usi…",
+   "verdict": "demote",
+   "verdictReason": "Confirmed absent and blocked behind three unbuilt prerequisites (calls, live ASR, agent participants); it is a late differentiator that should be shown as a dependent long-tail item, not as a standalone M.",
+   "effort": "L"
+  },
+  "approachOriginal": "Model Plane: streaming ASR variant of the F-t1-050 (R-t1-03-02) job that emits partial segments; Application Plane fans out caption events to the call; the interpreter is a case of the agent participant from F-t1-067 (R-t1-03-06) phase B; the Facilitator is a new template in SpaceCreateAgentDialog whose agent subscribes to transcript events of the meeting record under the F-t1-050 (R-t1-03-03) policy and posts sugge…",
+  "planeOwner": "Model Plane",
+  "dependencies": [
+   "F-t1-029 (R-t1-03-01)",
+   "F-t1-050 (R-t1-03-02) live ASR",
+   "F-t1-050 (R-t1-03-03)",
+   "F-t1-067 (R-t1-03-06) phase B for the interpreter",
+   "Push transport for caption latency"
+  ],
+  "risks": "Latency and cost of streaming ASR per call. Interruption noise from facilitator nudges, so keep them opt-in and ephemeral. Slack evidence is marketing-level and low confidence.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 2,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-086",
+  "title": "Call polish and operability: call-health feedback, browser audio and video processing, in-tab push-to-talk and mute keys, wake lock and busy guard, call sounds and Join notifications",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 17,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "A bundle of small web-native follow-ups to F-t1-029 (R-t1-03-01). Use browser audio constraints and SDK-provided noise filters instead of custom ML. Sample WebRTC getStats into a call-health panel and a short reason-code feedback prompt when thresholds are crossed. Add in-tab push-to-talk and mute keys. Acquire the Screen Wake Lock during calls and register busy reasons (call, upload, pending approval) that guard beforeunload. Add join, leave an…",
+  "whyItMatters": "These make calls reliable and pleasant without building any desktop shell. The reason-code feedback pattern also suits rating agent runs, and the busy-reason registry protects long agent runs and approvals watched in a tab.",
+  "reference": {
+   "bestSource": "Slack (SRC): push-to-talk with separate press and release, restart veto with reason codes, port-bound keep-awake lease, sound pack; Teams (REA and SRC): metric-triggered feedback and cloud-delivered audio DSP",
+   "others": [
+    "Buzz (SRC): global push-to-talk in its desktop engine",
+    "Teams (SRC): most OS entry points for joining meetings"
+   ],
+   "prevalence": "Per capability 1 to 2 of 5 (A/V enhancement Teams, call health Teams, hotkeys Slack and Buzz, restart veto Slack, sounds and entry points Slack and Teams); differentiator or unique.",
+   "mechanism": "Web equivalents: getUserMedia noiseSuppression, echoCancellation and autoGainControl constraints; getStats sampling for RTT, jitter and loss; keydown and keyup push-to-talk while the tab is focused; navigator.wakeLock during calls; a busy registry consulted before any app version swap or navigation; short audio cues; Web Notifications with a Join action and a web+verevon protocol handler for deep links."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Browser echo cancellation, noise suppression and auto gain are enabled only for the dictation recorder (VOICE_AUDIO_CONSTRAINTS); voice mode is tap-to-talk dictation plus read-aloud with only an Enter-to-send keydown handler on its transcript textarea, so there is no push-to-talk. There is no call media to measure, and the Frontend src has no wakeLock, beforeunload, Notification, service worker or protocol-handler code and no PWA manifest. Run f…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts:36-41",
+    "apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx:54-64",
+    "apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx:509-516"
+   ],
+   "reuse": [
+    "VOICE_AUDIO_CONSTRAINTS and the voice-recorder/VoiceModeDialog pair for in-tab push-to-talk",
+    "Convex agentRuns.rate mutation, agentRuns rating fields and orchestrator-core feedback_ratings for a reason-code feedback record on agent runs",
+    "SpaceApprovalPanel and space-live-work own-stream state as the source for a busy-reason registry"
+   ],
+   "constraints": "Every call-specific part (getStats health panel, call sounds, Join notification, A/V enhancement on call tracks) depends on F-t1-029 first-party calls, which do not exist, and the Space definition lists huddles and notification polish as a non-goal. Call and …",
+   "approachAdjustment": "Split the bundle. Keep the call-independent slices that help the agent-first room now: a busy-reason registry with a beforeunload guard (shared with the web-first part of F-t1-090), reason codes added to the existing run rating, a hold-to-talk key in VoiceModeDialog, and Wake Lock while a long run …",
+   "verdict": "demote",
+   "verdictReason": "Most of the bundle presupposes non-existent calls and cuts against a stated non-goal; only the call-independent slices (busy guard, run feedback reason codes, hold-to-talk, wake lock) are worth carrying and they should …",
+   "effort": "M"
+  },
+  "approachOriginal": "Frontend Plane only, after F-t1-029 (R-t1-03-01): add noise-filter options to the media-devices module, a getStats sampler feeding a health panel and an Application Plane feedback record that is reused for agent-run feedback, in-tab key handlers (space to talk, M to mute) that do not collide with the composer, a small busy-reason registry plus Wake Lock, sound cues behind a user setting, and notification Join action…",
+  "planeOwner": "Frontend Plane",
+  "dependencies": [
+   "F-t1-029 (R-t1-03-01)",
+   "Space notifications (notifications category) for Join actions"
+  ],
+  "risks": "Wake Lock is not supported everywhere and must always be released. Notification permission fatigue. Call telemetry must stay aggregate for privacy. Shortcut conflicts with the room composer.",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 14,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-087",
+  "title": "Read-only snapshot share of a room or thread with an allowlisted projection",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 18,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Let a user share an immutable snapshot of a room outcome (org or link scope) that contains only user messages, final replies and copied attachments, never reasoning, tool output or raw payloads, behind an unguessable token. Revalidate that the creator can still read the source on every view and serve it from a session-less, no-store, noindex route with a strict CSP. Disallow under ZDR.",
+  "whyItMatters": "It is a safe way to hand a case outcome to a customer or auditor without exposing agent traces, matching Verevon's ZDR and audit posture. It is not a table-stakes room feature and matters mainly for case Spaces with external parties.",
+  "reference": {
+   "bestSource": "QM (SRC)",
+   "others": [],
+   "prevalence": "1 of 5 sources; unique",
+   "mechanism": "share_snapshots {token, created_by, scope (org|link), entries[] (allowlisted projection), file_copies[]}; the render path loads no session; every read re-checks that the creator is still an internal member with access to the source thread, else 404; file ids are share-specific copies."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No snapshot or link share of a room or thread exists: gateway shares.rs only grants per-user view access to documents, the Space route table has no share or export route, privacy.rs only exposes user GDPR export and erase, and the Space transcript handler forwards Model Gateway messages as-is with no allowlisted projection. There is no share token, no session-less route and no snapshot store, and nginx sends no noindex header even though public/…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:35-44 (document shares and shared-with-me only)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:652-732 (Space route table: members, instructions, agents, threads, transcript, presentation, read, presence, deletion-requests; no share/export)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2690-2735 (transcript returns messages unchanged; Control decision ref and token travel in the upstream URL)"
+   ],
+   "reuse": [
+    "Space transcript route and its Control shared-thread-read decision as the authorized read of the source",
+    "Session Core message roles (user/assistant) for the allowlisted projection",
+    "Space deletion-request saga and privacy erase fan-out for purging snapshots"
+   ],
+   "constraints": "A snapshot copies content out of the Space's authority into a new audience (org or link), so it needs a new Control decision class (creator authority, audience, purpose, retention, ZDR) and never widens an owner-plane ACL; every plane holding the copy must jo…",
+   "approachAdjustment": "Change the plane owner: Application Plane owns the snapshot record (token hash, creator, scope, expiry, revocation, frozen allowlisted entries) with a Control decision for the audience; Session Core only produces the allowlisted projection at creation (user turns and final assistant text, never rea…",
+   "verdict": "reword",
+   "verdictReason": "Confirmed absent and genuinely unique to QM, but the item puts the share object in Model Plane Session Core against the plan's own S5.4 ownership split, understates the effort, and starts with link scope, the riskiest v…",
+   "effort": "L"
+  },
+  "approachOriginal": "Model Plane Session Core produces the allowlisted projection; Data Plane copies attachments under share-specific ids; the Frontend serves a session-less read-only route with the hardened headers. Refuse creation under ZDR and honour revocation and retention.",
+  "planeOwner": "Model Plane (Session Core)",
+  "dependencies": [
+   "Shared-read decision for Space turns",
+   "Attachments in rooms (F-t1-013 (R-t1-08-03))"
+  ],
+  "risks": "Leaking internal content through links, so enforce retention, revocation and the creator re-check.",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 1,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-088",
+  "title": "Versioned publish lifecycle for agent-built apps and shared agent definitions",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 19,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Follow the adoption plan's S5.4 slice for governed internal app build and publish: the Model builds in a credential-brokered Space workspace, emits an immutable build artifact and manifest, and Application stores app and version metadata with rollback as a pointer flip and private-until-shared visibility. In the same lifecycle, give shared agent definitions draft and published revisions with a Publish changes action, pinned by Space bindings.",
+  "whyItMatters": "It lets agents ship durable internal tools for a team, a strong Grok-Bot-style differentiator, and gives shared agents the human-authorized publish step the authority model requires. It is expensive and not core to the chat room.",
+  "reference": {
+   "bestSource": "QM (SRC) for deployments; Grok Bot (SRC) for pages and agent draft/publish",
+   "others": [],
+   "prevalence": "publish apps: 2 of 5, differentiator; agent definition lifecycle: 1 of 5, unique",
+   "mechanism": "publish(dir) produces an immutable version blob and manifest; the deployment row points at current_version; rollback is a CAS pointer flip; a DeployProvider interface (apply, reconcile, destroy, resolveEndpoint, logs); the owner scope decides access and the created-in scope is provenance; per-deployment credentials limit data replication to its own prefix. Agent definitions keep draft and published revisions, the UI…"
+  },
+  "verevon": {
+   "status": "planned",
+   "exactGap": "Governed app build/publish exists only as plan item S5.4 (a separate post-foundation slice); the only code near it is gateway studio.rs, an explicitly ephemeral canvas with no hosting, versioning or visibility, and the blueprint Draft/Published/Rollback card is static copy. Agent definitions are mutable in place in Application Plane Convex (agents.update; status active/inactive/draft is a flag, not a revision), spaceAgentBindings.agentId carries…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:1-5",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:35",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2263-2268"
+   ],
+   "reuse": [
+    "Application Plane Convex agents + spaceAgentBindings + agentPersonaForGateway as the single place to add revisions and pin them",
+    "Data Plane wiki_page_versions / wiki_proposals draft-review-publish model as the precedent for propose, approve, publish and rollback",
+    "operating-map-client currentVersion pointer plus proposals as a UI precedent for a pointer-flip publish"
+   ],
+   "constraints": "Application Plane owns agent definitions and the cross-Space registry (ADR-0002), so revisions cannot live in a Model Plane agent registry; Model only receives persona and profile per invoke. The binding schema states a stored-but-unenforced policy is a false…",
+   "approachAdjustment": "Split the item. (1) Shared agent definition draft/published revisions: put them in Application Plane Convex (revision rows or draft fields on agents, a publishedRevision pointer, a revision pin on spaceAgentBindings, resolution inside agentPersonaForGateway), NOT in a Model Plane agent registry, wh…",
+   "verdict": "reword",
+   "verdictReason": "Placement of the agent-definition half is wrong (Application Plane, not Model Plane) and the item bundles a docs-only XL apps lifecycle with a separable M revision feature; the current status \"stub\" overstates what exis…",
+   "effort": "XL"
+  },
+  "approachOriginal": "Follow S5.4 ownership: Model builds in the sandbox, Application owns app, version and share metadata and the Space projection, Infra owns sandboxed hosting and routing on an isolated origin, Control owns human grants, and Data stores versioned bundles. For agent definitions add draft and published revisions in the Model Plane agent registry with a Control decision to publish to the org, and have Space bindings pin a…",
+  "planeOwner": "Application Plane (with Model Plane, Infra and Control)",
+  "dependencies": [
+   "F-t1-014 (R-t1-08-02) room artifacts",
+   "Isolated hosting origin",
+   "resource_grants for apps (F-t1-057 (R-t1-08-04))"
+  ],
+  "risks": "Hosting untrusted generated code (isolation, CSP, egress), cost and data residency. Revision pinning across many bindings. Heavy for the current stage.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2263-2272 (S5.4 governed internal app build/publish, status [~]; apps only). Agent definition draft/publish is not planned."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-089",
+  "title": "Multi-window coordination: pop-out run console, cross-org unread counts, idle presence signal",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 20,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Open the agent run console and a Space thread as compact pop-out routes (?popout=1) via window.open, coordinate tabs and windows with one SharedWorker or BroadcastChannel leader that owns the SSE connection and the presence heartbeat, derive an active/away signal from visibility plus input idle time (Idle Detection API where permitted), and add a per-org unread-count endpoint so the org switcher can show badges without switching.",
+  "whyItMatters": "Watching an agent work in a side window while chatting in the Space is a natural cooperation pattern, and guests from partner companies need to see activity in both orgs. Routing approvals to a present human needs a trustworthy presence signal. Several windows must not multiply SSE connections.",
+  "reference": {
+   "bestSource": "teams (window manager with tagged windows, per-type placement, pop-out chats and calls; multi-tenant isolated instances with shared notifications)",
+   "others": [
+    "slack (rail with Ctrl/Cmd+1..9 switching and tray badge; safe child-window option allowlist)",
+    "buzz (community rail)"
+   ],
+   "prevalence": "Pop-out 2 of 5 (differentiator); multi-workspace unread 3 of 5 (common); OS idle/lock signals 1 of 5 (unique).",
+   "mechanism": "Window tags opened through a bridge with allowlisted options, each loading the same SPA route in a compact layout with shared state via the server stream; an aggregator streams unread per account; native idle/lock events forwarded as host events (web substitute: visibility plus idle timers)."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "None of the three proposals exists, only foundations: presence is already gated on tab visibility with a 6 s beat (SpacePage.tsx:206-250, Convex presence TTL 30 s and typing 8 s) but has no input-idle or away state, navbar and notification unread counts are computed for the active organization only (notifications.rs unread_count, navbar.rs unreadCount), and the org switcher lists organizations without counts (CoreNavbar.tsx:685-735). There is no…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:78-87,200-250",
+    "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:211-245",
+    "apps/Application Plane/convex-core/convex/spacePresence.ts:39-92"
+   ],
+   "reuse": [
+    "streamRunEvents with lastEventId resume and the run-event rendering in AgentRunConsole as the pop-out body once extracted",
+    "Space transcript route and SpaceRoomPost for a pop-out thread view",
+    "the beat() presence path in SpacePage.tsx and spaces.record_presence, extended with an away state"
+   ],
+   "constraints": "Active org is session state, so a pop-out cannot show a different org than the main window, and per-org unread must be computed server-side by the gateway for each of the user's Control memberships under that org's own authorization (counts only, never Space …",
+   "approachAdjustment": "Build in this order: pop-out routes (extract a props-driven run view and add a compact layout flag with run or thread id params), an idle or away presence signal derived from visibility plus input idle in beat(), then a gateway per-org unread-count endpoint feeding the switcher. Defer the SharedWor…",
+   "verdict": "reword",
+   "verdictReason": "The proposal is accurate that these are missing, but it should drop the SSE multiplexer until a push stream exists, note the shared active-org constraint, and recognise that visibility-gated presence already exists.",
+   "effort": "M"
+  },
+  "approachOriginal": "Frontend Plane: compact route variants for AgentRunConsole and the Space thread plus a SharedWorker/BroadcastChannel multiplexer in front of shared/api/sse.ts and the presence heartbeat. Application Plane: presence heartbeat consumer (see F-t1-042 (R-t1-01-09); personal data, org-scoped and optional) and a per-org unread projection returning counts only, each computed under that org's own ACL (see F-t1-055 (R-t1-02-…",
+  "planeOwner": "Frontend Plane (unread and presence projections: Application Plane)",
+  "dependencies": [
+   "F-t1-039 (R-t1-11-03) (routes)",
+   "F-t1-042 (R-t1-01-09) (presence model)",
+   "F-t1-055 (R-t1-02-12) (org switcher badges)",
+   "Control Plane membership list"
+  ],
+  "risks": "Multiple SSE connections per user raise gateway load without the multiplexer; the org switcher must never leak another org's Space names into the current org context; presence is personal data and must be optional.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 10,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-090",
+  "title": "Shell-only conveniences: quick composer, global hotkey and push-to-talk, window state, close guard",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 21,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Once the Tauri shell exists, add an always-on-top mini composer window that posts to the same gateway run endpoint as the Space composer (landing in the user's personal Space so it stays auditable), a validated global shortcut with key-up events for push-to-talk to the voice feature, and window-state memory. Ship the web-first part now: a beforeunload guard when the Space composer holds unsent text or a run is awaiting approval.",
+  "whyItMatters": "A personal agent one keystroke away is the Grok Bot half of the Space vision, and push-to-talk suits the existing voice feature. These need OS-level hooks a browser tab cannot provide.",
+  "reference": {
+   "bestSource": "grokbot (transparent always-on-top mini composer that sends to the selected Bot, switchable from a menu)",
+   "others": [
+    "slack (flag-gated tray-click overlay; validated global-shortcut API with key-down/key-up; bounds clamped to a live display)",
+    "teams (close prompts for unsent messages and calls)",
+    "buzz (push-to-talk binding, INF)"
+   ],
+   "prevalence": "Window management 3 of 5 (common); quick composer 2 of 5 (differentiator); global shortcuts 1 of 5 (unique).",
+   "mechanism": "Frameless transparent window loading a minimal composer route with its own capability set and a typed call that submits a prompt to the selected agent; native global-shortcut registration with validation and key-up events; persisted bounds per window type validated against live displays; close policy with prompt cases."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No native shell exists: index.html is a plain web entry, the parity audit confirms no Electron or Tauri app and no PWA manifest, Endpoint Plane is a native Rust remote-desktop host agent rather than a chat shell, and apps/remote-dev is a dev harness. The web-first close guard is also absent, since verevonv3 has no beforeunload or pagehide handler and SpaceRoomComposer neither persists drafts nor warns on unsent text or a running own stream. The …",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/index.html:1-14",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:192",
+    "apps/Endpoint Plane/docs/architecture.md:1-12"
+   ],
+   "reuse": [
+    "SpaceRoomComposer streamChat path through gateway chat/streams.rs and ag_ui.rs, which already inject Control-issued Space decisions from a space_ref alone",
+    "space-live-work ownStream and Space approval state to decide when a close guard is warranted",
+    "voice-recorder and VoiceModeDialog for push-to-talk once a key-up event is available"
+   ],
+   "constraints": "The browser may choose only space_ref and the gateway strips every forged authority field (FORGED_SPACE_AUTHORITY_FIELDS), so a quick composer must go through the same Space-injection path and land in the personal Space, never a separate run API with client-a…",
+   "approachAdjustment": "Split into (1) a web-first guard, S: beforeunload when the Space composer holds unsent text or an own stream is running, optionally with draft persistence, shippable now; and (2) the shell-only quick composer, global shortcut and window state, which wait for F-t1-073 and should target the chat stre…",
+   "verdict": "reword",
+   "verdictReason": "Absent is right for the shell part, but the item misses that the web-first guard is also unbuilt, and its implied endpoint (the scan pointed at the browser-agent run route) is wrong; split the cheap web slice from the s…",
+   "effort": "M"
+  },
+  "approachOriginal": "Frontend Plane inside the F-t1-073 (R-t1-11-09) workspace: secondary window plus tauri-plugin-global-shortcut and tauri-plugin-window-state; the mini composer route posts through the existing run endpoint with org and ZDR context carried; push-to-talk reuses src/features/voice. Web-first guard is a small beforeunload handler on the Space composer. Overlaps in-tab push-to-talk keys in F-t1-086 (R-t1-03-11).",
+  "planeOwner": "Frontend Plane",
+  "dependencies": [
+   "F-t1-073 (R-t1-11-09) (desktop shell)",
+   "F-t1-086 (R-t1-03-11) (in-tab voice keys)"
+  ],
+  "risks": "Prompts typed outside a Space must still carry ZDR and org context; shortcut collisions with other apps; over-eager beforeunload prompts annoy users.",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 11,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-091",
+  "title": "Realtime and media operability after push ships: shared connection per browser, drain on deploy, capability discovery, stream-stall self-test, perf marks, media cache policy",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 22,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Once the push stream exists: share one connection across tabs (leader tab via Web Locks and BroadcastChannel, or SharedWorker) with frame batching; autoscale on active connections and drain with a close frame plus client resume; advertise capabilities and limits in the connected frame; add a diagnostics stream with timed heartbeats so the client detects SSE buffering by customer proxies and shows IT guidance; report web vitals and a space_open m…",
+  "whyItMatters": "Operational hardening that matters only after the substrate ships; Verevon's own nginx tier is already stream-friendly, so the risk sits in customer networks.",
+  "reference": {
+   "bestSource": "Buzz (shared socket with frame coalescing, HPA on active-websocket gauge, NIP-11 capability document); Slack for drain (cell and AZ drain in about 5 minutes; DOC); QM for ack-after-durable ingress (AckGate, 2.5 s cap, durable staging, redelivery on failure) and single background-owner record; grokbot (in-app Network Debugger with IT guidance for SSE and HTTP/2) for network diagnostics; teams (shared scenario marks and INP-style telemetry) for performance; buzz (media grants with range requests) for media",
+   "others": [
+    "Teams (shared workers, BroadcastChannel and Web Locks across windows; published limits with feature degradation by room size)",
+    "Grok Bot (about 260 typed dynamic configs with client fallbacks; utility-process coordinator over MessagePort)",
+    "slack",
+    "buzz (Playwright suite and E2E bridge that mocks transport)"
+   ],
+   "prevalence": "[R-t1-09-11] 3 of 5 for off-thread/shared sync, scale-out and protocol evolution (common); 2 of 5 for load shaping and ack-after-durable ingress (differentiator); 1 of 5 for server-driven tuning [R-t1-11-12] Network diagnostics 2 of 5, startup performance 2 of 5, authenticated media 2 of 5 = differentiators.",
+   "mechanism": "[R-t1-09-11] Web equivalent: a leader tab elected via Web Locks owns the single SSE and posts coalesced batches to other tabs over BroadcastChannel. HPA on the active-connection gauge; on deploy the old build stops claiming and sends close frames so clients reconnect with resume. GET capabilities or a connected-frame field lists supported features and limits and absence means unsupported. A registry maps config name…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Server-side operability is further along than the item assumes: model-gateway already drains on SIGTERM (drain.rs, 120 s default, readyz 503), exports a gateway_active_streams gauge, emits 15 s keep-alive comment frames and a content-free turn_timing event, so the missing pieces are on the client and the Frontend Plane gateway. The SPA reader skips comment frames (sse.ts:106) so there is no stall or buffering detection, nothing shares a connecti…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/sse.ts:29-80,106",
+    "apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts:668-676",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:684-692"
+   ],
+   "reuse": [
+    "model-gateway drain.rs pattern (readyz 503, wait for registered streams, bounded window) for the Frontend gateway",
+    "server keep-alive comment frames (sse.rs with_keep_alive, ag_ui.rs KeepAlive) as the liveness signal for a client watchdog",
+    "gateway observability.rs Prometheus recorder for vitals and space_open counters and histograms"
+   ],
+   "constraints": "New SSE events or connected-frame fields are CI-gated: the SPA chat-client.ts and the taxonomy doc must agree with sse_events.rs (sse-taxonomy.yml). Capability advertisement belongs to Model Plane's connected frame, telemetry to the Frontend gateway observabi…",
+   "approachAdjustment": "Split into build-now and after-push. Build now: make readSseStream surface comment frames as a liveness tick and arm a stall watchdog (the server already sends the heartbeats, so no new diagnostics stream is needed except for an optional IT self-test); add graceful shutdown and a stream gauge to th…",
+   "verdict": "reword",
+   "verdictReason": "Heartbeats, drain and an active-stream gauge already exist in model-gateway, the named vitals target is the wrong domain, and the media and leader-tab slices have no substrate yet, so the item needs rewording and splitt…",
+   "effort": "M"
+  },
+  "approachOriginal": "[R-t1-09-11] After F-t1-003 (R-t1-09-01): (1) leader-tab connection manager in the SPA (SharedWorker is limited on iOS Safari, so prefer Web Locks); (2) check gateway deployment manifests for replicas and HPA metric and add an active-connection gauge, drain with close frame and jittered resume; (3) add features and limits to the stream connected frame, with an ignore-unknown-kinds rule in the client; (4) move poll a…",
+  "planeOwner": "Frontend Plane (gateway and SPA) with Application Plane (load shaping)",
+  "dependencies": [
+   "F-t1-003 (R-t1-09-01)",
+   "F-t1-003 (R-t1-09-03)",
+   "F-t1-006 (R-t1-02-05) feature flags",
+   "Channel Plane design (docs-only today)",
+   "F-t1-035 (R-t1-11-01) (service-worker shell cache, if perf marks compare cached and cold opens)"
+  ],
+  "risks": "[R-t1-09-11] Reconnect storms after drain need jitter. Config sprawl if the registry is not kept small. SharedWorker support gaps on some browsers. [R-t1-11-12] Stale service-worker caches skew perf data; caching private media on shared machines; mo…",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 30,
+   "DOC": 7,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-092",
+  "title": "Delivery health: channel failover and a 'why am I not notified' diagnosis",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 23,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Track per-device and per-channel health {consecutive_failures, failover_at} in the S4.4 ledger and fall back along an order such as push, then in-app, then email digest, retrying the primary after a TTL. Pair it with a Settings and bell banner that lists typed reasons notifications are not arriving (DND active, browser permission denied, push subscription expired, room muted, channel failing), computed client-side for browser state and server-si…",
+  "whyItMatters": "Cuts support load and builds trust that agent alerts will arrive. Silent channel switching confuses users unless it is paired with a diagnosis, which is why the two belong together. Only worthwhile after push and email exist.",
+  "reference": {
+   "bestSource": "Slack (only source)",
+   "others": [],
+   "prevalence": "1 of 5 sources; unique",
+   "mechanism": "Slack keeps a consecutive-failure counter (5 triggers telemetry), records a failover timestamp for a week and clears it at the next start so the native path is retried, and policy can force native. Its warning call returns typed reason codes, cached 30 s when warnings exist and 1 h when clean."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No failover, channel-health or diagnostics code exists: notification-core's delivery ledger (pending, claimed, sent_unconfirmed, acknowledged, failed, unknown, with a worker behind DeliveryWorkerEnabled) tracks Novu provider submissions per notification, not per-device or per-channel health, and its HTTP routes expose only feed, preferences and channel configs. The frontend has no browser push, permission or service-worker code, so push-expired …",
+   "evidence": [
+    "apps/Application Plane/notification-core/internal/notification/delivery_state.go:1-60 (per-attempt status enum and queue; ambiguous outcomes not retried blindly)",
+    "apps/Application Plane/notification-core/cmd/server/main.go:179-224 (delivery worker and feed projection worker behind DeliveryWorkerEnabled)",
+    "apps/Application Plane/notification-core/internal/http/server.go:55-100 (routes: feed, preferences, channel configs, provider callback; no delivery-status or diagnostics route)"
+   ],
+   "reuse": [
+    "notification-core DeliveryAttempt ledger and worker as the base for per-channel failure counts",
+    "notification-core preferences and channel-config routes",
+    "gateway notifications proxy routes for a future read-only diagnostics endpoint"
+   ],
+   "constraints": "Notification-core is Application Plane and delivery runs through Novu, which owns channel mechanics, so failover order is more naturally a Novu workflow concern than custom Verevon logic (INF). ZDR: ledger rows must stay content-free (already true of Delivery…",
+   "approachAdjustment": "Do not build this before web push, a Space notification producer and quiet-hours enforcement exist; none do. When they do, ship the diagnosis banner first (client-computed permission and subscription state plus a server read of preferences, DND and last failed attempt) and treat automatic channel f…",
+   "verdict": "demote",
+   "verdictReason": "Absent, single-source (Slack only), and premature: it presupposes browser push, enforced quiet hours and Space notification producers that do not exist, and the Space definition treats notification polish as a non-goal.…",
+   "effort": "M"
+  },
+  "approachOriginal": "Application Plane: add channel health and fallback order to the ledger from F-t1-060 (R-t1-05-10), plus a read endpoint exposing server-side reasons (preferences, DND, last failed attempt). Frontend Plane: compute browser-side reasons (permission, subscription) and show a banner in Settings and next to the bell.",
+  "planeOwner": "Application Plane (health state); Frontend Plane (banner)",
+  "dependencies": [
+   "F-t1-060 (R-t1-05-10) ledger",
+   "F-t1-035 (R-t1-05-05) push",
+   "F-t1-008 (R-t1-05-04) preferences"
+  ],
+  "risks": "Low; silent failover without the diagnosis would confuse users. The Space definition treats notification polish as a non-goal (docs/space-defenition.md:352-353).",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-093",
+  "title": "Multi-org and external collaboration horizon: org archive and transfer, shared cross-org rooms, managed external chat connections",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 24,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Do the cheap part first: org lifecycle states (archived, owner transfer) in org-core. Later, after guests, add org-to-org links with host-org-owned shared rooms and external trust cues, with QM's rule that an external audience restricts agents to a context without org memory or keys. External chat workspace connections belong to the future Channel Plane, not to be built elsewhere.",
+  "whyItMatters": "Slack Connect and Teams shared channels are enterprise differentiators, and a parent org over several orgs matters for managed-service customers. Verevon's customers are single companies today, so this is a long-horizon investment; org archive and transfer are the useful cheap slice.",
+  "reference": {
+   "bestSource": "slack (Enterprise Grid, Slack Connect), buzz (operator lifecycle), qm (external audience isolation, managed Slack connections)",
+   "others": [
+    "teams (external banner and consent pane)"
+   ],
+   "prevalence": "tenant hierarchy 2 of 5, shared channels 3 of 5 (common), external connections 1 of 5; differentiator",
+   "mechanism": "Two-level tenancy org -> workspaces with policy resolving org then workspace; operator lifecycle as a state machine on the tenant row (active, archived, deleting with fence generation, deleted) with transfer as an owner swap. Shared rooms: shared_room(host_org, room_id) plus org_link(host_org, guest_org, status); the host org's policy governs posting and apps, members authenticate in their own org, and the client sh…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "org-core has single-level orgs with only active versus soft-deleted state (organizations.status default, deleted_at, RestoreOrganization) and no archive or owner-transfer, which the gateway and settings UI explicitly defer. A parent-like construct already exists in Control: auth-core org_group (host-org anchored) with per-org data_access and billing_consolidation grants, mirrored into billing-core billing_group_memberships and consumed by the ac…",
+   "evidence": [
+    "apps/Control Plane/org-core/migrations/001_init.up.sql:8-12",
+    "apps/Control Plane/org-core/internal/org/deletion_ledger.go:199-215",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs:428"
+   ],
+   "reuse": [
+    "auth-core org_group and org_group_grant (host-org account above orgs) instead of a new parent-org table",
+    "billing-core billing_group_memberships (plan inheritance mirror) and the account.data.read decision path",
+    "org-core deletion_ledger lifecycle (soft delete, restore, reminders) as the template for an archived and transfer_pending state machine"
+   ],
+   "constraints": "Control is the only external-link authority and Application owns conversation mapping and delivery receipts per the adopted S5.1 surface-neutral ingress ADR (known only through the adoption plan; the ADR file lives outside the repo and was not read). Space me…",
+   "approachAdjustment": "Replace \"defer a parent-org table\" with \"reuse the shipped org_group and add UI plus lifecycle\". Drop the blanket claim that external chat workspace connections must wait for Channel Plane: Channel Plane vision targets widgets, Shopify, WooCommerce and WordPress, and S5.1 left open whether the adap…",
+   "verdict": "reword",
+   "verdictReason": "Status partial is right, but the item misses the existing org_group parent construct and mislabels where external chat connections belong; it should be reworded and split into org lifecycle (M), org_group UI (S to M) an…",
+   "effort": "XL"
+  },
+  "approachOriginal": "Control Plane: org-core lifecycle (archived, transfer_pending) and owner-transfer flow first; defer a parent-org table until a customer needs it. After guests exist, org-to-org links and host-org-owned rooms with decisions that carry both orgs' policies, plus agent audience isolation as soon as any external participant can exist. External chat connections: wait for the Channel Plane; do not build adapters elsewhere.",
+  "planeOwner": "Control Plane",
+  "dependencies": [
+   "Guests (F-t1-053 (R-t1-02-08))",
+   "Linked identities (F-t1-023 (R-t1-02-09))",
+   "Channel Plane",
+   "billing-core seat model"
+  ],
+  "risks": "ZDR, residency and retention differ per org and one org's ZDR must hold for content its members post, which is hard to fit under per-org deny-by-default policies. Hierarchical policy resolution interacts with deny-by-default effect policies. The Cha…",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 6,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "External chat connections: apps/Channel Plane/docs/vision.md (docs-only); QM adoption plan S5.1 ADR adopted, S5.3 blocked"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-094",
+  "title": "Assurance long tail: hash-chained audit, formal decision model, supply-chain gates, EU-posture pinning, credential expiry states",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 25,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Five independent assurance items for regulated buyers, taken after the audit export exists. (1) Chain audit rows (entry_hash over seq, actor, action, metadata, prev_hash) with a signed daily head checkpoint and a verify endpoint. (2) Model Space decision issuance in TLA+ or PlusCal, checking 'Space access never widens an owner ACL' and 'no effect without a fresh decision'. (3) Add supply-chain gates: dependency cooldown, cargo-deny and govulnche…",
+  "whyItMatters": "None of these block the Space, but they answer the questions enterprise security questionnaires ask and make Verevon's signed-authority design verifiable. Each facet is small and independent.",
+  "reference": {
+   "bestSource": "buzz",
+   "others": [
+    "teams (residency and sovereign clouds)",
+    "qm (supply-chain and release integrity)",
+    "grokbot (credential lifecycle)"
+   ],
+   "prevalence": "Hash chain and formal specs: 1 of 5 each (buzz); supply chain: 2 of 5 (buzz, qm); residency: 2 of 5 (slack, teams); credential lifecycle: 1 of 5 (grokbot).",
+   "mechanism": "Audit: entry hash over the tenant id, sequence, time, event, actor, action, canonical metadata and previous hash, with an external signed anchor. Formal: spec the multi-party protocol, mutate the spec to prove the invariants are not vacuous, replay service traces against the model. Supply chain: 7-day package cooldown, prod dependency audit, signed images with digest pins. Residency: per-org home region in Control t…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Per facet: audit-core keeps only a per-event sha256 payload_hash used for idempotent conflict detection (no prev_hash, entry_hash, checkpoint or verify route; only GET and POST /v1/audit), and no TLA+, Alloy or Tamarin artefacts exist under apps. Supply-chain gates are partial and uneven: blocking pnpm audit (high) and gitleaks for the frontend and repo, weekly Dependabot only for frontend npm, gateway cargo and actions, Quarry-only cargo audit …",
+   "evidence": [
+    "apps/Control Plane/audit-core/internal/store/schema.sql:11-33",
+    "apps/Control Plane/audit-core/internal/store/store.go:92",
+    "apps/Control Plane/audit-core/internal/store/store.go:120-135"
+   ],
+   "reuse": [
+    "audit-core payload_hash, source_stream_sequence and ON CONFLICT dedupe as the starting point for an entry hash",
+    "user-core decision.go Ed25519 SigningKey and VerifyDecision for signing daily audit head checkpoints",
+    "inference-core EU_AZURE_REGIONS, deny-by-default non-EU embedding gate and Space EffectPolicy.Residency as the residency foundation"
+   ],
+   "constraints": "audit-core is Control-owned and ingests at-least-once from NATS with ON CONFLICT DO NOTHING, so a hash chain needs per-org serialised append in insert order and will limit throughput; audit events must stay ids and hashes only (audit is not a shadow store, re…",
+   "approachAdjustment": "Treat as five independent rows rather than one L item: (1) audit hash chain, (2) formal decision model, (3) supply-chain gates, (4) per-org residency, (5) credential expiry. Start supply chain by tightening what exists (make Quarry govulncheck blocking, add cargo audit and govulncheck to Model, Con…",
+   "verdict": "reword",
+   "verdictReason": "Status partial is right, but three facets are further along than the item implies (supply-chain checks, residency label and gates, credential status) and the bundle hides five unrelated owners; split it and correct the …",
+   "effort": "L"
+  },
+  "approachOriginal": "audit-core: add prev_hash and entry_hash with per-org serialised append and a signed checkpoint using existing key infrastructure. Repo CI: min-release-age, cargo-deny and govulncheck for every service, image signing in the deploy pipeline. Model Plane inference routing: per-org provider-region pinning plus a documented EU-only deployment statement (full multi-region stacks are out of scope). integration-corev2 and …",
+  "planeOwner": "Control Plane (audit-core) with Support Plane (CI), Model Plane (routing) and Ingestion Plane (credentials)",
+  "dependencies": [
+   "F-t1-031 (R-t1-10-05) (audit export)",
+   "stable Space authority ADR",
+   "CI pipeline",
+   "Model provider regional endpoints"
+  ],
+  "risks": "Append serialisation limits audit throughput; checkpoint key management; formal models drift from code unless trace-checked; CI friction; sub-processor residency (Novu, Convex) limits what 'EU-only' can claim.",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 18,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Credential expiry and revocation are in apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md S3.4; the other facets are not planned."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-095",
+  "title": "Long-tail Space UX, build on demand: multiview tiling, agent-led first-run welcome, What's New and admin notices, non-web link interstitial",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 26,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Four independent slices, none of which blocks the vision. (a) Multiview: tile several rooms or agent sessions with a dockview-style layout once AuxPane and run components are self-contained. (b) Welcome: seed the org room with an agent introduction and role/tools questions that feed the three agent templates. (c) What's New panel and admin-only notices for policy rollout. (d) Route non-http(s) links in agent-posted content through a confirmation…",
+  "whyItMatters": "Multiview is a real edge for operators supervising several agents (QM only); a welcome post where an agent introduces itself removes the empty-room first impression; admin notices help owners learn which deny-by-default agent policies to enable; and a link gate reduces risk from model-generated links.",
+  "reference": {
+   "bestSource": "QM (multiview with tile limits and per-pane density); Grok Bot (onboarding flow and fail-open gate); Teams (feedback, What's New, admin campaigns); Slack (protocol interstitial with per-host allowlist)",
+   "others": [
+    "Buzz (agent-led welcome channel)"
+   ],
+   "prevalence": "multiview 1 of 5 (QM); onboarding 2 of 5 (Grok Bot, Buzz); What's New 1 of 5 (Teams); link interstitial 1 of 5 (Slack); differentiator to unique",
+   "mechanism": "Multiview: dockview-core layout with MAX_TILES = 16, per-pane drag payloads and a serialised layout synced per user. Onboarding: gate state machine checking -> probe -> landed | onboarding | shell with a saved seen flag that fails open for returning users. What's New: feed items with an index and campaigns targeted by role and flag. Interstitial: intercept non-http(s) schemes, show a modal, store an allowlist of {pr…"
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "None of the four slices exists: SpacePage mounts one room per route (App.tsx:182) and AgentRunConsole is a prop-less page route with local state rather than a tile (AgentRunConsole.tsx:168); the only first-run content is the static SpaceRoomIntro (SpaceRoomTimeline.tsx:433), shown when a room has no posts, plus three static name-and-instructions templates (SpaceCreateAgentDialog.tsx:43), and there is no What's New or admin-notice surface (notifi…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/app/App.tsx:181-182,215",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:168-186,329",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:150,334,433-480"
+   ],
+   "reuse": [
+    "SpaceRoomIntro plus the three AGENT_TEMPLATES for a human-confirmed welcome",
+    "ensure_organization_room action and the SpacesIndexPage org-room self-heal as the first-run hook",
+    "notification-core and gateway notifications.rs for admin notices (needs a new org-targeted event)"
+   ],
+   "constraints": "Frontend Plane owns all four slices, but admin notices need an Application Plane (notification-core) org-targeted event plus Control role targeting, and the welcome must stay human-confirmed because agents may not create bindings and Space authority is Contro…",
+   "approachAdjustment": "Split the item: pull the link slice out of build-on-demand and ship a scheme allowlist (http, https, mailto) in parseInline now, covering both the [text](url) and bare-URL branches and rendering other schemes as plain text; add the per-host interstitial only if non-web schemes are later wanted. Bui…",
+   "verdict": "reword",
+   "verdictReason": "Nothing proposed exists, so it stays build-on-demand, but the link slice is a missing safeguard rather than polish and AgentRunConsole is not a reusable tile today, so the item should say both.",
+   "effort": "L"
+  },
+  "approachOriginal": "Frontend Plane for all four. Multiview after AuxPane (F-t1-001 (R-t1-12-01)), push realtime (a 6 s poll per tile multiplies polling cost) and self-contained room and run components. Welcome: seed a post and template agent proposals that a human confirms (agents may not create bindings themselves), with claims derived from observed facts, not timers. What's New from a static release feed, admin notices through Contro…",
+  "planeOwner": "Frontend Plane",
+  "dependencies": [
+   "AuxPane shell (F-t1-001 (R-t1-12-01)) and push realtime (category 09) for multiview",
+   "Human-only post path (category 01) and existing agent templates for the welcome",
+   "Notifications (category 05) for admin notices"
+  ],
+  "risks": "Tile polling cost; agents must not self-create bindings; notice noise. Verify the link-rendering and feedback surfaces before scoping slices (c) and (d).",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 5,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-096",
+  "title": "Reverse channel so a user's own computer can run agent tool requests without inbound ports (later; cloud browser first)",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 27,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "If the \"agent has its own PC\" vision extends to the user's machine, add a local executor daemon that keeps an outbound SSE open through the gateway, receives Model-proposed tool requests, checks them against a local policy, executes, and posts results back with the request id, with heartbeat, a polling fallback and supervised restart. Do this only after the cloud sandbox and browser path is solid, and keep the rule that the Model proposes and th…",
+  "whyItMatters": "It is the one reference capability that makes an agent act on the real desktop and the most distinctive part of the Grok Bot half of the vision, but it adds a large local-execution attack surface and only Grok Bot ships it. The gateway already streams live browser frames and supports human takeover for cloud browser runs, which covers most needs f…",
+  "reference": {
+   "bestSource": "Grok Bot (daemon opens GET /local-exec/requests as SSE, POSTs results back; one daemon serves several accounts; discovery record with pid and generation; respawn limits)",
+   "others": [],
+   "prevalence": "1 of 5; unique",
+   "mechanism": "Daemon keeps an outbound SSE with heartbeat; on a request frame it executes under local policy and POSTs the result with the request id; if the stream fails it polls a pending endpoint; the app adopts or replaces the daemon via a discovery record."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "No agent tool-request executor on a user machine exists: nothing opens an outbound SSE or polling channel to receive Model-proposed tool requests, and there is no Control-signed grant or receipt protocol for local execution. A native installable host agent already exists, though (apps/Endpoint Plane, Verevon Agent, Rust): it registers outbound with hbbs/hbbr, captures the screen, injects input and gates control with a native consent prompt, but …",
+   "evidence": [
+    "apps/Endpoint Plane/docs/architecture.md:1-20 (native Verevon Agent, host side of the RustDesk protocol)",
+    "apps/Endpoint Plane/docs/architecture.md:305-318 (Control-Plane identity contract for the agent, file transfer, installer out of scope)",
+    "apps/Endpoint Plane/docs/architecture.md:480-500 (consent policy hardcoded; no mid-session revoke; audio and file transfer unbuilt)"
+   ],
+   "reuse": [
+    "apps/Endpoint Plane Verevon Agent (outbound registration in va-net, consent.rs, va-capture, va-input) as the daemon to extend",
+    "Support Plane hbbs/hbbr rendezvous for device presence",
+    "gateway browser live-frame channel and AgentControl/HumanTakeover control modes for viewing and takeover"
+   ],
+   "constraints": "Model proposes, an executor decides and executes: for a user machine the executor would be the Endpoint agent, a new executor class beyond Quarry (browser) and Model Plane sandboxes (tools). Endpoint Plane is absent from CLAUDE.md's plane list, and grep finds…",
+   "approachAdjustment": "Do not add an Ingestion Plane Quarry-style executor for this. Register Endpoint Plane ownership, then extend the Verevon Agent with a second policy-gated channel for agent tool requests (outbound stream plus polling fallback), driven by Control-signed grants and receipts, with a per-capability loca…",
+   "verdict": "reword",
+   "verdictReason": "The capability is still absent, but the item misdescribes the baseline (a native host agent exists) and mis-places the executor in the Ingestion Plane; keep it as a late nice-to-have with the corrected foundation.",
+   "effort": "XL"
+  },
+  "approachOriginal": "Ingestion Plane executor (Quarry-style) that only executes Model-proposed actions after a local policy check, with an outbound SSE through the gateway and a request/response contract using Control-signed grants and receipts; reuse the browser live-frame channel for viewing. Decide first whether a Space agent should ever reach a user machine, then design the policy model.",
+  "planeOwner": "Ingestion Plane",
+  "dependencies": [
+   "Executor policy model",
+   "Model proposes, Quarry executes contract",
+   "F-t1-004 (R-t1-09-04) live viewing",
+   "Control-signed grants for local execution"
+  ],
+  "risks": "Large security surface (local code execution and credential exposure); must preserve the Model-proposes, executor-decides split and ZDR for anything captured locally.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-029",
+  "title": "Room calls on a bought SFU with Control-authorized join and a navigation-persistent call bar, modelled as a meeting record that belongs to the Space",
+  "originalTier": "recommended",
+  "finalTier": "nice-to-have",
+  "rank": 5,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Add a Call button that starts or joins the single live call of a room. Run media on a self-hostable SFU plus TURN (LiveKit OSS or equivalent) and keep Verevon code to authority and signalling: a call/meeting record in the Application Plane (state, start and end, server-derived attendees, links to AI policy, transcript and recap), a gateway route that mints a short-lived SFU join token only after a Control decision for a new space.call.join effec…",
+  "whyItMatters": "Calls are table stakes in every human-chat reference (Teams, Slack, buzz) and the brief names Teams. They are not first because the Space definition lists huddles as a non-goal (a product decision is needed), media is a buy rather than a build, and a live badge needs the push substrate first.",
+  "reference": {
+   "bestSource": "Slack (huddles, DOC) for the product model; Grok Bot (SRC) for the client call state machine; Teams SlimCore (SRC) for lifecycle depth; Buzz (SRC): the data model; Teams (REA): the UX",
+   "others": [
+    "Teams (ring members individually or all, roster-size cap; REA)",
+    "Buzz (audio-only WebSocket relay of Opus frames, O(n^2) fan-out; SRC)",
+    "Teams: live participant count and Join in the channel header, Meet now, scheduled channel meetings"
+   ],
+   "prevalence": "[R-t1-03-01] Calls started from a room: 3 of 5 (Slack, Teams, Buzz), table-stakes. Explicit call lifecycle and reconnect: 3 of 5, common. Device enumeration and permission probing: 2 of 5 (Slack, Teams), common. [R-t1-03-05] 2 of 5 (Buzz, Teams); differentiator.",
+   "mechanism": "[R-t1-03-01] The call is an attachment of the room: one click from any room, optional video, ends when the last person leaves. Server side: POST creates or returns the live call for the room, checks membership, and mints a short-lived SFU token (room = call id, identity = actor id, publish/subscribe grants); media flows browser to SFU over WebRTC (Opus audio, simulcast video); roster and speaking state come from the…"
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No call, huddle, SFU or WebRTC code exists in the frontend, gateway, Application, Model, Support or Endpoint planes (grep for livekit, mediasoup, RTCPeerConnection, webrtc, coturn, janus, jitsi matched only a Model Plane proto comment, and its generated Go, about an ephemeral realtime-session client secret for AI voice; the Support Plane runs a RustDesk relay for remote support, which is not an SFU). The Space header (SpacePage.tsx:358-377) has …",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:87",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:298",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:358-377"
+   ],
+   "reuse": [
+    "Control effect pattern for space.call.join: a deny-by-default *_entitled column on space_effect_policies plus a decision issuer in user-core/internal/spaces (migrations 018-028)",
+    "Convex spacePresence.ts heartbeat-with-TTL pattern and the lifecycle outbox/lease pattern for a spaceCalls projection fed by signed SFU webhooks",
+    "voice-recorder.ts mic error classification and the voice-mode-state.ts reducer discipline (the mic is never reopened silently)"
+   ],
+   "constraints": "Join must be minted by the gateway only after a Control decision for a new deny-by-default space.call.join effect (the policy table is per organisation) bound to the Control subject, never client-supplied identity. The call or meeting record belongs to the Ap…",
+   "approachAdjustment": "Make the product-decision gate explicit and sequence calls after the human-only post path and a push or webhook-driven presence update, accepting a poll-based call card (6 s) for a first slice. Keep the Application-side record minimal (spaceCalls with state, started_by, server-derived attendees, po…",
+   "verdict": "demote",
+   "verdictReason": "Nothing exists today, the product doc lists huddles as a non-goal, and the feature rests on three absent substrates, so it should not sit in the top ranks; keep it as a later-wave, decision-gated item rather than drop i…",
+   "effort": "L"
+  },
+  "approachOriginal": "[R-t1-03-01] Application Plane (apps/Application Plane/convex-core/convex, next to spacePresence.ts): a spaceCalls record {call_id, space_id, org_id, state live|ended, started_by (server-derived), started_at, ended_at, participant_count} fed by signed SFU webhooks; this is the minimal form of the meeting aggregate in this item (R-t1-03-05). Gateway (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs): …",
+  "planeOwner": "Application Plane (call and meeting record); Frontend Plane (gateway token route, call UI); Control Plane (join decision); Infra Plane (SFU/TURN)",
+  "dependencies": [
+   "Product decision reversing the huddle non-goal in docs/space-defenition.md",
+   "SFU and TURN deployment (Infra Plane), self-hostable",
+   "Control effect space.call.join plus space_effect_policies rows",
+   "Push transport for Space liveness (realtime and sync category) for a sub-6 s live badge",
+   "Space notifications for ring-others (notifications category)",
+   "Human-only post path (messaging category) for a companion chat",
+   "ADR-0001 amendment only if a child Space kind is chosen"
+  ],
+  "risks": "[R-t1-03-01] Reverses a documented non-goal. Media infra cost and operations. ZDR posture must state that media is relayed but never stored unless recording (F-t1-084 (R-t1-03-09)) is enabled. Building a custom media engine would be XL, so stay on t…",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 15,
+   "DOC": 4,
+   "INF": 2
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-066",
+  "title": "Agents attend Zoom, Meet and Teams meetings as visible guests through an Ingestion capture worker, with approval-gated chat drafts",
+  "originalTier": "recommended",
+  "finalTier": "nice-to-have",
+  "rank": 42,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Let a user hand an agent a meeting link, or let it pick one up from the user calendar. A capture worker joins as a clearly labelled guest after per-meeting or standing consent, feeds the transcript into the F-t1-050 (R-t1-03-02) pipeline, and leaves. The agent may post to the meeting chat only through drafts that a human approves, with an internal-meeting mark respected. Start after F-t1-050 (R-t1-03-02) and F-t1-050 (R-t1-03-03); it does not de…",
+  "whyItMatters": "Gives Verevon meeting coverage on day one for customers who live in Teams, Zoom or Meet, without building a conferencing stack, and it feeds Space knowledge. It follows the rule that the Model proposes and Quarry executes: the bot is an Ingestion capture worker and the agent only proposes chat posts.",
+  "reference": {
+   "bestSource": "Grok Bot (SRC, medium confidence from RPC names and strings)",
+   "others": [],
+   "prevalence": "1 of 5 (Grok Bot only); unique.",
+   "mechanism": "Tools JoinMeeting(link), LeaveMeeting, ListMeetings, ReadMeetingTranscript, RespondInMeeting; a server-side bot joins as a guest named after the agent; chat posts go through a MeetingChatDraft {meeting_id, body, mark_internal} that a human approves; per-meeting or blanket consent card; versioned summaries per meeting; admin setting for who can see meeting records; meetings addressed as meeting:{id} like other channe…"
+  },
+  "verevon": {
+   "status": "planned",
+   "exactGap": "Docs only: Channel Plane meeting-intelligence.md phase 4 names Teams/Zoom/Meet connector bots, and there is no code for guest join, live audio capture, meeting-link agent tools, a consent record or a meeting-chat draft path. integration-corev2 calendar_read.go only selects onlineMeeting/webLink and hangoutLink, so meeting links are discoverable but nothing consumes them. The doc puts capture in the Channel Plane adapter (docs-only) while the ite…",
+   "evidence": [
+    "apps/Channel Plane/docs/meeting-intelligence.md:3 (status docs-only)",
+    "apps/Channel Plane/docs/meeting-intelligence.md:38-58 (ownership table: capture in Channel Plane adapter then Quarry evidence submission)",
+    "apps/Channel Plane/docs/meeting-intelligence.md:61 (capture connector is one of three genuinely new components)"
+   ],
+   "reuse": [
+    "integration-corev2 calendar.events read for meeting-link discovery",
+    "human_approved_ai_action write attestation and approval outbox for approval-gated meeting-chat posts (execution-core approval_delivery_worker is limited to three resumable action kinds)",
+    "SpaceApprovalPanel for the consent card"
+   ],
+   "constraints": "Channel Plane is docs-only and S5.1 leaves its runtime status open, so capture ownership needs an ADR before code. Model proposes, Quarry executes applies to Model-proposed browser actions; a deterministic join bot is not one, so do not describe the join as a…",
+   "approachAdjustment": "Decide ownership by ADR first. Prefer a vendor meeting-bot API or the platforms' own transcript/recording export through integration-corev2 connectors under the user's delegated consent as the first adapter, and treat a Quarry headless-browser guest as a research spike only. Remove the claim that Q…",
+   "verdict": "demote",
+   "verdictReason": "Correctly described as absent, but it depends on F-t1-050 (which itself lacks a shared-room authority path), on an unresolved Channel versus Ingestion ownership decision and on external ToS and consent risk. It belongs …",
+   "effort": "L"
+  },
+  "approachOriginal": "Ingestion Plane: a meeting-capture worker (headless browser guest through Quarry, or a vendor meeting-bot API) authorised through integration-corev2 and Quarry browser grants; Quarry executes or rejects the join and any chat post. Transcript or audio goes to the F-t1-050 (R-t1-03-02) pipeline and Data Plane. Model Plane: Space agent tools ListMeetings, ReadMeetingTranscript, DraftMeetingChat that only propose. Space…",
+  "planeOwner": "Ingestion Plane",
+  "dependencies": [
+   "F-t1-050 (R-t1-03-02) ASR pipeline",
+   "F-t1-050 (R-t1-03-03) consent policy",
+   "Quarry browser execution and grants",
+   "integration-corev2 meeting and calendar connectors",
+   "Decision on Channel Plane versus Ingestion ownership of the capture worker"
+  ],
+  "risks": "Platform terms of service and bot detection on Zoom, Meet and Teams. Recording-consent law varies by jurisdiction. Channel Plane is docs-only, so ownership must be confirmed. Evidence for the reference behaviour is medium confidence.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 4,
+   "DOC": 2,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "apps/Channel Plane/docs/meeting-intelligence.md:136-150 (phase 4; no code)"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-068",
+  "title": "Screen sharing in calls with a sharing indicator, sensitive-surface redaction, and the same cue for agents acting in a room",
+  "originalTier": "recommended",
+  "finalTier": "nice-to-have",
+  "rank": 44,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Publish a getDisplayMedia track to the call as a second SFU track, show a persistent \"you are sharing\" bar with Stop, and switch the app into a redacted mode while sharing so approval cards, secrets and token-like fields are masked (a web page cannot exclude its own windows from capture). Reuse the border and indicator design for the agent run live view and the Quarry browser view so humans see when an agent is acting.",
+  "whyItMatters": "Screen share is the main reason people start work calls, and it is cheap once an SFU exists. The agent-acting cue gives one consistent trust signal for the Model proposes, Quarry executes browser model, where the baseline shows agent work is opaque inside the room.",
+  "reference": {
+   "bestSource": "Slack (SRC): a native border overlay follows the shared window and the picker excludes the app own sensitive windows",
+   "others": [
+    "Teams (SRC): deeper capture pipeline, annotation and single-controller remote control"
+   ],
+   "prevalence": "2 of 5 (Slack, Teams); common.",
+   "mechanism": "Picker with thumbnails clamped to 480 px that filters excluded windows; an overlay with border width and colour that tracks the window bounds; share published as its own track. Web equivalent: navigator.mediaDevices.getDisplayMedia, an in-app sharing bar, and a redact-sensitive-surfaces mode."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No call, huddle or live screen-share code exists in Spaces or anywhere under apps/ (git grep finds no RTCPeerConnection, SFU, livekit or mediasoup use; getDisplayMedia appears once, as a one-frame screenshot capture in DashboardComposer.tsx:1915-1950), so this item cannot start before the call stack it depends on (F-t1-029), which is also absent. The agent-acting cue is only partly present as an 'is working...' row per post and a composer line (…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1915-1950",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/remote_support.rs:1-30",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:105-140"
+   ],
+   "reuse": [
+    "DashboardComposer.addScreenshotFile getDisplayMedia handling (stop all tracks, cancel is a no-op) as the capture starting point",
+    "Space working row and composer line plus space-live-work.ts live-run projection as the agent-acting cue that already exists in text form",
+    "BrowserChrome controlMode/human_takeover chip and approval bubble as the design source for an agent-acting border once a Space browser view exists"
+   ],
+   "constraints": "No plane owns a media/SFU service today, so human screen share is not a Frontend-only change: a call needs a media service (Application Plane realtime or Infra) with join authorization from a Control Space-membership decision, and ZDR requires that no recordi…",
+   "approachAdjustment": "Split the item. Keep the agent-acting cue as its own small item built on the existing run-status projection (S, Frontend only, extends the 'is working' row with the current tool or browser step). Move human screen share behind an explicit call decision as an optional later item and drop the claim t…",
+   "verdict": "demote",
+   "verdictReason": "Absent, hard-dependent on a call stack that also does not exist, and contrary to the documented Space non-goal on huddles; only the agent-acting cue half deserves to stay as a small separate item.",
+   "effort": "XL"
+  },
+  "approachOriginal": "Frontend Plane: after F-t1-029 (R-t1-03-01), add getDisplayMedia publishing to the call store with a sharing state; a sharing banner; a global redact mode that masks SpaceApprovalPanel content, secrets and credential-like inputs while sharing; extract the border and indicator component and mount it on the agent run live view and, once Space-scoped browser runs exist, on the Quarry browser view in the room. No annota…",
+  "planeOwner": "Frontend Plane",
+  "dependencies": [
+   "F-t1-029 (R-t1-03-01)",
+   "Space-scoped agent browser view (agents-in-the-room category) for the agent cue"
+  ],
+  "risks": "Leaking approval cards or secrets during a share, since the web cannot exclude its own windows. Browser support for display capture constraints varies.",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 9,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t1-069",
+  "title": "Search operators with Verevon-native filters, typed result tabs and recent-search history",
+  "originalTier": "recommended",
+  "finalTier": "nice-to-have",
+  "rank": 45,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Port buzz's operator parser (from:, in:, with:, is:, has:, before:/after:/on:, quoted phrases, exclusion, trailing *) as a pure TS module, add Verevon-specific operators (agent:, has:approval, has:run, has:artifact, is:thread), and render results in tabs (threads, agents, runs, approvals, artifacts, documents) with counts. The gateway fans out to owner-plane APIs in parallel and returns {hits, counts, failed[], limited[]}; recent searches stay i…",
+  "whyItMatters": "Power users and agents (which can emit structured filters directly) get precise recall, and one search covers Verevon objects that Slack and Teams do not have. Agent- and run-aware operators would be a differentiator no reference has. The failed[]/limited[] contract keeps an empty result distinguishable from a gap.",
+  "reference": {
+   "bestSource": "slack (grammar, DOC) with buzz parser (SRC) and teams result domains (REA)",
+   "others": [
+    "buzz",
+    "teams",
+    "qm"
+   ],
+   "prevalence": "operators 3 of 5 (table-stakes); result domains 3 of 5 (common)",
+   "mechanism": "buzz parseSearchOperators splits on whitespace, recognises an operator only at token start, leaves malformed values (e.g. invalid dates) in the free text, resolves names to ids at the call site and converts dates to since/until with an exclusive \"before\"; filters {authors[], spaces[], since, until, is[], has[]} go to the server as SQL predicates before ranking. Teams fans one query out to per-domain resolvers (messa…"
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No search over Space messages, threads, runs, approvals or artifacts exists: gateway search routes cover only web, similar, suggest, images, videos and answer (search.rs:39-45), the Cmd/Ctrl+K overlay is knowledge retrieval plus a client-side title filter over local chat history (navbar.rs:262-283, CoreNavbar.tsx:403-409), and the Space Knowledge tab is a read-only list with no search box (SpaceKnowledgePanel.tsx:82-110). Session Core has no sea…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:39-45",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs:262-283",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:403-409"
+   ],
+   "reuse": [
+    "buzz parseSearchOperators as the pure TS parser to port (ships with tests)",
+    "Session Core message columns that operators can map onto: author_subject_id (from:), agent_name (agent:), thread/space id (in:), created_at (before/after), per-message audience columns (migration 0025)",
+    "The Space activity route (GET /spaces/:ref/activity) which already composes threads, runs, approvals, receipts and grants, so run and approval tabs can start as a filter over that per-room projection"
+   ],
+   "constraints": "Message search must be a Session Core (Model Plane) read under the same Control shared-read decision and audience filtering as the transcript; the gateway may fan out and compose but must not join across planes, and each backend needs its own Control decision…",
+   "approachAdjustment": "Sequence it behind F-t1-018. The operator parser is an S module that can land with the search UI, mapping to a structured filter {authors, spaces, since, until, is, has, agent}. Typed tabs for runs, approvals and artifacts should first be a client-side filter over the per-room activity projection (…",
+   "verdict": "demote",
+   "verdictReason": "Nothing exists and the item is blocked on message search that does not exist; operators are a refinement of search, not a first-order Space need, so it should follow F-t1-018 rather than lead.",
+   "effort": "L"
+  },
+  "approachOriginal": "Frontend Plane: pure TS parser module plus Solid search view with tabs; name resolution against the Space roster and org members. Share the filter struct with the agent history tool (F-t1-038 (R-t1-04-03)) so humans and agents use one grammar. Gateway BFF composes per-domain calls to owner planes (Session Core messages, Data Plane documents, Application Plane activity/run projections) in parallel with a per-backend …",
+  "planeOwner": "Frontend Plane (parser, UI, gateway fan-out); owner planes expose per-domain search",
+  "dependencies": [
+   "F-t1-018 (R-t1-04-01)",
+   "F-t1-018 (R-t1-04-02) (search UI shell)",
+   "Roster and org member lookup",
+   "Owner-plane search endpoints for runs, approvals and artifacts (not confirmed to exist)"
+  ],
+  "risks": "Name resolution must not reveal people the viewer cannot see; date timezone ambiguity; gateway fan-out must not drift into a cross-plane DB join; slowest backend sets latency; scores from different backends are not comparable.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 1,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ }
+]

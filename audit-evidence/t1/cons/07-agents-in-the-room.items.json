@@ -1,0 +1,705 @@
+{
+  "category": "Agents in the room",
+  "items": [
+    {
+      "id": "R-t1-07-01",
+      "title": "Human-only room posts, per-agent addressing and trigger policy, then ambient participation",
+      "summary": "Stop treating every room post as a model turn. Add a human-only post path, then let a message wake an agent only when it is addressed (one or several agents, with an address lock in the composer) or matches a binding trigger rule, with per-binding respond_to (owner|allowlist|anyone|nobody) and subscribe (mentions|all|rules) fields and an offer-to-add dialog for an unbound agent. Later add an optional cheap ambient judge with standing orders and an auditable ledger, and a room tool so an agent may stay silent.",
+      "whyItMatters": "A Space is meant to feel like Slack/Teams for people first, with agents joining on demand. Today the composer sends every post through the chat stream, so people cannot simply talk to each other and an agent cannot be silent. This is the single change that makes a Space a room instead of a chat with a bot, and every other agent feature (cards, multi-agent, personal agents) builds on addressed-only wake-up.",
+      "referenceBestPractice": {
+        "bestSource": "buzz (addressing/trigger policy); qm (ambient participation)",
+        "others": [
+          "teams (channel agent keywords, proactive-help toggle)",
+          "grokbot (mention-to-wake)",
+          "slack (app mentions)"
+        ],
+        "prevalence": "Addressing/trigger policy 3 of 5 sources (common); ambient judge 1 of 5 (unique, QM); explicit room I/O 2 of 5 (differentiator)",
+        "mechanism": "Buzz binding fields respond_to owner|allowlist|anyone|nobody (fails closed) and subscribe mentions|all|rules; rules are first-match-wins over (content, author, kind, channel) with a timeout and length cap; the composer keeps a persistent per-composer set of addressed agents and records implicit mentions as provenance so edits can strip them; unaddressed messages reach agents only as overheard context. Mention of an agent the author owns but the room lacks opens an Invite+send vs send-as-reference dialog with a fresh authorization per destination; wake publishes the message first, then starts the agent with a replay floor. QM ambient: per-room cursor, a cheap judge prompt (identity + standing orders + do-not-act backdrop + new batch) returns {act, reason, asked_by}; every judgment is stored for admins; ChannelPolicy {orders, bots: ignore|rollup|action|user, ambientEnabled} edited with compare-and-swap and history. QM room tool: post/reach/react/edit/read_thread actions where post rejects destination arguments and a turn that ends without a post is silent."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-421 (every send calls streamChat; single mentionedAgentRef)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:149",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4483-4573 (trigger_modes enforced on mention)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:651-732 (route table has no human message-post route)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:143-146 (default 'Verevon' agent name when not exactly one active agent)"
+        ],
+        "gap": "trigger_modes is enforced at the gateway but there is no author gate, no rule triggers, no policy editor, one agent per message, no address lock, no offer-to-add for unbound or paused agents, and no human-only post (the default assistant answers everything). No ambient judge, standing orders or ledger; no room tool for silence. Control decisions carry no turn-origin (direct|ambient|automation) field."
+      },
+      "approach": "Gateway (Frontend Plane): add a human-only post route under /api/v1/spaces/{ref}/ that stores the message in the Application Plane and does not call the Model Plane unless the addressed-agent set is non-empty or a binding rule matches (the route itself is expected to land with the category-01 human messaging work). Replace the single mentionedAgentRef with an addressed-agent list and keep apply_mention_binding_policy (spaces.rs:4483-4573) as the enforcement point for every addressed agent. Application Plane (convex-core spaceAgents): add respond_to, subscribe and bounded rule fields to the binding. Frontend: policy editor in the Agent tab, composer address lock, offer-to-add dialog that binds and invokes in one Control-decided step. Control: add a turn_origin enum to space decisions and pin human-only walls with negative tests. Phase 3 (optional, default off): a small judge-model service in the Model Plane over Application room events with a room policy object that can only tighten org policy, every judgment stored for admins; a typed `space` room tool (post, react, read_thread) backed by Application room APIs under the turn decision so silence is allowed.",
+      "effort": "L",
+      "dependencies": [
+        "Human-only message route (category 01)",
+        "Control turn_origin on Space decisions",
+        "Application binding schema change (spaceAgents)",
+        "Item R-t1-07-02 (ledger and reason cards)"
+      ],
+      "planeOwner": "Frontend Plane (gateway + composer); Application Plane (binding schema); Model Plane (ambient judge, room tool); Control Plane (turn_origin)",
+      "risks": "People used to the always-on assistant may miss it: make the default room agent an explicit binding. Ambient judge cost and false positives: ship default-off with stored judgments. Agents may stay silent when they should answer: keep a rule that an addressed human always gets a reply.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Offer-to-add is planned in apps/Frontend Plane/verevonv3/docs/space-defenition.md (per cluster evidence, not re-read); standing orders are item S5.2 in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (still unimplemented: needs a Control-owned versioned policy floor with kill switch)."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-07-010",
+        "C-t1-07-009",
+        "C-t1-07-011",
+        "C-t1-07-016"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 20,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-07-02",
+      "title": "In-room activity, plan and tool-call cards with live agent state and steer/cancel controls",
+      "summary": "Render agent work inside the room as semantic cards (one card per tool call, mutated while running, completed work collapsed into one timed disclosure, plan/task states pending|in_progress|completed|error) instead of plain text plus a status row. Replace the 6 s poll with a pushed live-state projection (activity, awaiting reason, stale-after) and add Stop, Steer and Skip on the working row and Work tab, then a typed card envelope and an owner-only run drawer.",
+      "whyItMatters": "Showing what an agent is doing is the one capability all five references share. In a room with several people, a card is how everyone understands why an agent is slow, what it changed, and where to intervene. Verevon already has the rich run telemetry (AgentRunConsole, ChatLiveRunPanel) but only outside Spaces, so the room looks less capable than the product underneath it.",
+      "referenceBestPractice": {
+        "bestSource": "buzz (render classes); slack (stream wire contract); grokbot (live state); buzz (steer/interrupt policies)",
+        "others": [
+          "qm",
+          "teams"
+        ],
+        "prevalence": "Activity/plan cards 5 of 5 (table-stakes); presence/live state 4 of 5 (table-stakes); steer/interrupt 2 of 5 (differentiator); owner-only observer 1 of 5",
+        "mechanism": "Buzz classifies each tool call into render classes (message, file-edit, file-read, shell, plan, permission, error, thought) over a raw-event floor; one card per call mutated in place with verb-object-outcome summaries ('Ran tests: 1248 passed'); completed work collapses into one timed disclosure. Slack's chat.startStream/appendStream/stopStream with task_update and plan blocks is the vendor-neutral wire contract. Grok Bot pushes AgentLiveState {is_running, is_composing, is_retrying, activity{kind,tool,target}, awaiting{reason,since}, stale_after_ms, has_running_subagents}; clients treat anything past stale_after as unknown (Buzz: unknown is never offline) and feed one derived working signal to sidebar, composer and card. Buzz steer policy enum queue|steer|interrupt|owner-interrupt with explicit prompt framing ('new message arrived while you were working' / 'new request supersedes previous'); Grok Bot adds skip-this-step without failing the run."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:305-341 (turns are plain text/markdown; no tool or plan cards)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:551-569 (rich run console exists outside Spaces)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:87 (SPACE_TIMELINE_POLL_MS = 6000, presence rides a poll)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:491-509 (sender can cancel own live stream via cancelInvocation)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:36-43 (cancel and queue routes exist for chat invocations)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx (read-only runs, schedules, processes; no stop/steer controls found)",
+          "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:57 (Work tab shipped; cancel/steer/reconcile actions of S4.5 still open)"
+        ],
+        "gap": "No activity, plan or tool cards in the room; run event SSE is owner-only so other members cannot read it; no liveness lease or unknown state; steer exists only on the chat path (queue route), the room has no steer, skip, owner-interrupt or per-agent interrupt policy; no link from a room turn to the owner's run view; no typed card envelope."
+      },
+      "approach": "Frontend: reuse AgentRunConsole/ChatLiveRunPanel building blocks inside SpaceRoomTimeline; classify events into render classes in the Model Plane event stream and render from AG-UI/run-event replay. Gateway: a room-audience read decision for run events (Control-decided, audience hash/revision bound) so every member can read cards, with tool output filtered by audience (item R-t1-07-08); keep the raw-owner stream owner-only. Application Plane: a realtime projection of run live state from Model Plane run events (coalesced), replacing the poll, with stale_after semantics. Controls: Stop/Steer/Skip on the working row and Work tab; add an interrupt-policy field to the agent binding (queue|steer|interrupt|owner-interrupt); Model Plane steer vs supersede framing and interrupted-effect markers so cancel never races an effect. Later: versioned typed card envelope with fallback text for unsupported kinds (sandboxed iframe only, never raw HTML) and an owner-only run drawer linked from each room turn, frames ephemeral under ZDR.",
+      "effort": "L",
+      "dependencies": [
+        "Room-audience read decision for run events",
+        "Model Plane run events to Application projection",
+        "Item R-t1-07-08 (audience labels on tool output)"
+      ],
+      "planeOwner": "Frontend Plane (cards, controls); Application Plane (live-state projection); Model Plane (render-class tags, steer framing)",
+      "risks": "Tool output leaking to members who lack access: filter by audience and show a 'withheld' state. Event volume: coalesce updates. Races between cancel and in-flight effects: use interrupted-effect markers. Arbitrary card HTML is an XSS risk.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "S2.5 Space Activity integration and S4.5 unified Work cockpit (cancel/steer/reconcile) in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md; S5.2 web presence."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-07-018",
+        "C-t1-07-017",
+        "C-t1-07-012",
+        "C-t1-07-019",
+        "C-t1-07-020"
+      ],
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 28,
+        "DOC": 5,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-07-03",
+      "title": "Multi-agent rooms: turn-taking, governed delegation, agent-to-agent messages and background child work",
+      "summary": "Let several agents live in one room and cooperate: a room coordinator fans out per-member turn requests (nonce, deadline, parent/root ids, outcome sent|pass|skipped|timeout|cancelled), a hop limit and loop detector (shadow first), and an agent-to-agent message contract with typed delivery outcomes. A delegate must re-resolve its own authority through Control, and the whole chain renders as one collapsed unit with an openable transcript. Child sessions carry space_id and audience.",
+      "whyItMatters": "Humans plus several agents working in the same room is the core of the Space vision and the main gap relative to Grok Bot. Verevon's Control model (agents as their own subjects) is a better base for this than any reference, but today only one agent can be addressed per message and delegation is unbuilt.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (turn protocol); qm (orchestrator spine, subagent inheritance)",
+        "others": [
+          "buzz (failure mode without a breaker)",
+          "slack (agent messaging docs)"
+        ],
+        "prevalence": "Multi-agent turn-taking 2 of 5 (differentiator); agent-to-agent messaging 3 of 5 (common); subagents/swarms 2 of 5 (differentiator)",
+        "mechanism": "Grok Bot coordinator fans out RequestMemberTurn{nonce, member, peers, new_messages, is_winding_down, deadline_ms, parent_request_id, root_parent_request_id}; members answer with outcome SENT|PASS|SKIPPED|TIMEOUT|CANCELLED; idempotency by nonce; hop limit via root-id depth; wind-down mode; loop detector off|shadow|on; UI shows each member's reading/typing/working phase. Agent messages: SendAgentMessage{from,to,message_id,text,reply_to} with outcomes FORBIDDEN|TARGET_NOT_FOUND|DUPLICATE, a collapsed 'messaged N agents' summary with openable transcript and a separate cost flow. QM spine: the coordinator cannot run tools, posts an early ack, delegates to child sessions (inherit caller scope+audience, durable mailbox that is data and never human authorization, tree caps, cycle checks) and is re-woken on completion."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:149 (single mentionedAgentRef per message)",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/subagent_results.rs:1-30 (generic subagent machinery, no Space context)",
+          "apps/Frontend Plane/verevonv3/docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md:552-590 (UI-2c delegation: not started; existing subagent mechanism keeps the same identity at depth 1; execution-core has no network path to the gateway; no safe partial slice)",
+          "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:55,256 (still not started; collapsed chain rendering noted as a differentiator)"
+        ],
+        "gap": "No room coordinator, no per-member turn protocol, no loop guard, no agent-to-agent path in Spaces (Chief/Core routing view is read-only), no delegate re-resolution primitive, children carry no Space or audience and nothing is visible in the room."
+      },
+      "approach": "Follow the constraints in SPACE_AGENT_SCOPE_PLAN UI-2c: delegation is a side effect so it lives only in execution-core's governed loop, never in model-gateway's plain chat loop; the delegate gets a Control decision for its own subject in the same Space, bound to the initiating human's turn (re-resolved, never inherited). Add a room coordinator in the Model Plane driven by Application room events with bounded fan-out, depth and per-room caps, the nonce/deadline/outcome protocol above, loop detection in shadow mode first, and per-member phases for the UI. Add the execution-core to gateway (or Application) path the plan says is missing. Child sessions propagate space_id and audience; mailbox content is treated as data. Render a delegation as one collapsed card (item R-t1-07-02). Tag agent-to-agent cost as its own flow (item R-t1-07-11).",
+      "effort": "XL",
+      "dependencies": [
+        "Item R-t1-07-01 (multi-agent addressing)",
+        "Item R-t1-07-02 (cards)",
+        "Item R-t1-07-11 (cost attribution and per-room caps)",
+        "Item R-t1-07-05 (permissions)",
+        "execution-core to gateway network path"
+      ],
+      "planeOwner": "Model Plane (coordinator, execution-core delegation); Control Plane (delegate decisions); Frontend Plane (per-member phases, collapsed chain)",
+      "risks": "Cost blow-up and loops (Buzz shows the failure): ship with shadow loop detection and hard per-room caps. Authority laundering between agents: delegate must re-resolve and recipient checks must use the initiating human's decision. Scope widening in children.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Phase UI-2c in apps/Frontend Plane/verevonv3/docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md (scoped narrowly to same room, one hop, human present; not started)."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-07-013",
+        "C-t1-07-014",
+        "C-t1-07-015"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 23,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-07-04",
+      "title": "Personal agents, a private assistant beside the room, and a configurable agent binding",
+      "summary": "Let each person own a personal agent (visibility owner|org|room, a primary-agent setting, per-user sessions) that can be invited into a room with the owner's consent and is revoked with its owner, plus a private assistant side panel inside a Space with a reviewed 'share to room' escalation. Make shared room agents configurable per binding (model preference validated against the org-approved list, language, proactivity, stored thread policy) and derive one session key per (agent, room, user|room). Offer a clone-to-team conversion with allowlisted fields only.",
+      "whyItMatters": "Personal agents that act like a colleague are the Grok Bot half of the vision, and they are the largest functional hole: personal Spaces cannot bind agents at all. Without a private side surface people either leak drafts into the room or leave the Space to use /chat.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (personal/team agents, primary bot, clone-to-team); teams and slack (private-vs-group assistant panel with escalation)",
+        "others": [
+          "buzz (personal agents as supervised local processes)",
+          "qm (session scope derived once at admission)"
+        ],
+        "prevalence": "Personal agents 3 of 5 (common); shared room agent 3 of 5 (common); private assistant panel 2 of 5 (differentiator); personal-to-team conversion 1 of 5 (unique)",
+        "mechanism": "Grok Bot agent record with visibility OWNER|TEAM and a user MAIN_AGENT setting; the primary agent coordinates the owner's other agents and runs a proactive check-in routine; sessions keyed by (agent, user, surface); Team Bots share setup (plugins, routines, memory, computer) with isolated per-teammate sessions and per-person connector accounts; CloneAgentToTeam(personal_secret_names) -> CLONED|UNSUPPORTED|NO_TEAM excludes personal secret names and triages memory promotion. Teams channel agent config: keywords, model preference, default language, proactive help on/off, knowledge sources. Slack/Teams side panel is bound to the current context with a private session and an escalate-to-group dialog that posts a reviewed copy into the room. QM/Buzz derive SessionScope once at admission and use it as the single key for sessions, queues and cancel."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/user-core/internal/spaces/repository.go:660-673 (a personal Space has exactly one subject by construction; membership replacement refused)",
+          "apps/Application Plane/convex-core/convex/spaceMembers.ts:31-44",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3261-3405 (create-in-room and bind flows for room agents)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:20-132",
+          "apps/Application Plane/convex-core/convex/schema.ts:620-634 (default_thread_policy and knowledge_scope deliberately not stored on the binding)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:143-146 (per-message model picker with privacy-tier resolver)"
+        ],
+        "gap": "Personal agents absent: no per-user agent, no primary agent, no 'bring my agent into this room', no private panel inside a Space. Room agents are partial: no per-person sessions inside an agent, no per-agent model/language/proactivity configuration, thread policy not stored so room-vs-thread context cannot be chosen, Studio configuration not inherited on bind."
+      },
+      "approach": "Control: do not widen the personal-Space roster (the code comment says that would turn private storage into shared storage); instead model the personal agent as an owner-derived subject whose admission is derived from the owner and revoked with the owner, and let the owner bind it into a shared room through the same Control-decided bind flow used for room agents. Application: agent definition visibility owner|org|room, a MAIN_AGENT user setting, and extra binding fields (model preference, language, proactivity flag, thread policy). Model Plane: derive one session key (agent, room, user|room) at admission and use it for provider sessions, queues and cancel; validate model choice against the org-approved list. Frontend: personal agent home, 'invite my agent' dialog, side panel reusing /chat with Space context whose 'Share to room' goes through review-then-share (item R-t1-07-08). Later: clone-to-team copying only allowlisted fields and requiring per-item confirmation for any memory promotion.",
+      "effort": "L",
+      "dependencies": [
+        "Item R-t1-07-08 (audience-safe disclosure and memory)",
+        "Item R-t1-07-07 (agent computer) for a full personal agent",
+        "Control owner-derived admission for service subjects",
+        "Item R-t1-07-01 (addressing)"
+      ],
+      "planeOwner": "Control Plane (owner-derived admission); Application Plane (definition and binding schema); Model Plane (session key, model validation); Frontend Plane (agent home, side panel)",
+      "risks": "A personal agent in a shared room could leak owner-private context: every outbound path must go through audience-safe disclosure and personal memory must never auto-copy into a room. Configuration sprawl: keep safe defaults (mention-only, no tools, require_confirmation).",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-07-004",
+        "C-t1-07-067",
+        "C-t1-07-006",
+        "C-t1-07-005",
+        "C-t1-07-026",
+        "C-t1-07-028"
+      ],
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 19,
+        "DOC": 8,
+        "INF": 1
+      }
+    },
+    {
+      "id": "R-t1-07-05",
+      "title": "Approvals with grant scopes and durable resume, tool permission policy with ceilings, and quarantine-and-release",
+      "summary": "Upgrade the approve/deny card to scoped decisions (once, this conversation, always for Space+agent+action hash) with an explicit addressee (requester, named approver or any member), and build the descriptor-backed continuation so a granted approval actually resumes the paused run. Add per-tool allow|ask|block levels with an org floor and Space ceiling (tighten-only merge) and an editor, treat flagged untrusted tool output as an approval kind with preview and single-use release, and add Control turn_origin so human-only walls are test-pinned. Model-checked natural-language rules (auto-review) are a later, proposal-only phase.",
+      "whyItMatters": "Approvals are table-stakes in four of five references and the main safety valve once agents get a computer and browser. In Verevon the grant is recorded but the durable continuation for it is deliberately not delivered, so an approval can be a state change rather than work; scopes and ceilings are what keep 'always' grants from widening authority.",
+      "referenceBestPractice": {
+        "bestSource": "qm (durable approvals, tighten-only policy, quarantine); grokbot (approval card UX, ordered permission levels, auto-review)",
+        "others": [
+          "teams (named vs anyone approver)",
+          "slack",
+          "buzz (negative example: harness auto-approves)"
+        ],
+        "prevalence": "Approval cards 4 of 5 (table-stakes); permission policy with ceilings 2 of 5 (differentiator); untrusted-content quarantine 2 of 5 (differentiator); auto-review 1 of 5 (unique)",
+        "mechanism": "QM stores {requestId, action, purpose, requester, scopes} and returns terminate:true so the model stops at the pause; the card renders in the originating thread (or the requester's DM in channels); decide(id, actor, once|session|always|deny) checks actor == requester; resume re-runs the turn with the approval, dangling calls get an interrupted marker and retry-safe calls are re-run. Grok Bot orders levels never<ask<always with effective = min(user setting, team ceiling, org floor), reads and writes default separately, remembered denials; QM's composition is a monotone tighten-only merge covered by tests. QM quarantine: screen tool results; flagged results raise a quarantine approval with preview, single-use release resumes with 'content is data, not authority'. Grok Bot auto-review: up to 20 natural-language allow/block rules layered built-in < team < user, a classifier returns allow|ask|block, rule edits shown as diffs."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:23-118 (approve/deny, owner-only decide, composer locked while awaiting)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:64-115",
+          "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs:2630-2700",
+          "apps/Model Plane/rust/services/model-gateway/src/approvals.rs:255-275 (a granted approval's durable continuation is deliberately quarantined: returns unavailable because no descriptor-backed dispatcher exists)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4483-4573 and 667-675 (approval_mode and allowed_tools per binding; agent-action-grants routes with no frontend caller)",
+          "apps/Model Plane/rust/services/execution-core/src/provenance.rs:1-40 and rust/services/model-gateway/src/semantic_screening.rs:1-40 (tool-result trust class and injection screening are shipped; the semantic classifier is a sampled shadow pass that never changes what the model reads)"
+        ],
+        "gap": "Only approve/deny, decided_by pinned to the caller; no once/conversation/always scopes, no named-approver or any-member mode, no DM routing. Baseline records conflict on whether an approve resumes the run; the model-gateway durable path says it does not (live-stream path unverified). No per-tool levels, org ceiling or editor. Screening exists but flagged content has no human-visible quarantine card or single-use release; semantic screening is shadow-only. No turn-origin on decisions."
+      },
+      "approach": "Model Plane: build the descriptor-backed continuation dispatcher that approvals.rs says is missing (approval carries action hash and purpose, generation ends at the pause, resume re-runs with the approval, interrupted-effect handling). Control: grant records scoped once|session|always bound to Space+agent+action hash, revocable and re-checked at use; policy object effective = min(binding level, Space ceiling, org floor) with only three levels (allow, ask, block) and separate read/write defaults, tighten-only merge test-covered; add turn_origin (direct|ambient|automation) to decisions with negative tests. Frontend: scoped buttons and an addressee line on SpaceApprovalPanel, policy editor in the Agent tab (the existing grant routes already lack a caller). Quarantine as an approval kind fed by the existing provenance trust class, failing closed if the screener is down. Auto-review only as a Model Plane proposal that Control still signs, never for irreversible or credential actions.",
+      "effort": "L",
+      "dependencies": [
+        "Item R-t1-07-02 (card surface)",
+        "Control grant records",
+        "Descriptor-backed continuation in session-core/execution-core"
+      ],
+      "planeOwner": "Model Plane (continuation, screening, auto-review proposal); Control Plane (grants, ceilings, turn_origin); Frontend Plane (cards, policy editor)",
+      "risks": "'Always' grants widening authority: bind to Space, agent and action hash, make revocable. Model-judged authorisation can be fooled: proposal only. Policy complexity: keep three levels.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "S2.7 cross-plane provenance and screening envelope and S3.6 human-only grant mutation in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (screening code is partly built; scoped grants and continuation are not)."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-07-035",
+        "C-t1-07-036",
+        "C-t1-07-037",
+        "C-t1-07-038"
+      ],
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 24,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-07-06",
+      "title": "Room-scoped agent browser with live view, hand-off and take-over",
+      "summary": "Carry the Space into browser-agent runs: add a space_ref to the browser run start request, authorize it with a Control decision for the room audience, show browser steps and evidence as room cards, and let the room watch the session live with a hand-off request (id plus instruction), Take control and I'm done. Add bot-wall detection that hands off instead of retrying. Teach-by-demonstration is a later phase built on recorded action traces.",
+      "whyItMatters": "An agent with its own browser is the Grok Bot half of the vision, and Verevon already has the hard parts (Quarry executes under grants, Model proposes, dashboard BrowserChrome takeover). The missing link is that browser runs know nothing about Spaces, so nothing is attributable, audience-checked or visible in the room.",
+      "referenceBestPractice": {
+        "bestSource": "qm (browser model grant); grokbot (hosted browser, live takeover, bot-wall detection)",
+        "others": [],
+        "prevalence": "Agent browser 2 of 5 (differentiator); live view and take-over 1 of 5 (unique); teach by demonstration 1 of 5 (unique)",
+        "mechanism": "QM core mints a capability token {browserModel, browserAccount, aud browser-model}; the browser runner calls an OpenAI-style completions endpoint at core, so it never holds a provider key; 409 if the person's account or model changed; sign-in profiles are held as credentials and shown only in DMs. Grok Bot classifies bot-check walls from URL/title and hands off instead of retrying; LiveState carries box_handoff_request_id plus an instruction; EndHandoff trigger BUTTON|VIEWER_CLOSED|DISMISSED; the live view is an embedded noVNC page with token-to-header injection, phase reporting and pause when hidden. Grok Bot teach mode: recording START|SAVE|DISCARD, the saved recording is sent as a message with initiator TEACH_RECORDING so a skill is authored in chat."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:425-441 (space_id is always an empty string; BrowserRunStartRequest has no Space field; comment names this as a known follow-up)",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497,624 (takeover exists only on the dashboard)"
+        ],
+        "gap": "Browser-agent runs are not Space-scoped, so no room audience decision, no cost or activity attribution to the room, no browser cards and no live session reachable from a Space. No hand-off request primitive and no bot-wall classification."
+      },
+      "approach": "Model Plane model-gateway: add space_ref to BrowserRunStartRequest and thread it into the run's Space context (the chat/invoke path already does this via ThreadSpaceContext). Control: a browser-run decision bound to the room audience hash/revision; Model proposes browser actions and Quarry-v2 executes or rejects them under the grant (architecture rule). Ingestion/Quarry: expose the live session stream to authorized room members; classify bot-check walls into a hand-off event. Model Plane raises hand-off requests {id, instruction}. Frontend: mount BrowserChrome in the room with Take control / Done and show evidence screenshots in cards (item R-t1-07-02); restrict takeover to the requester or owner. Sign-in sessions stay DM/owner-only and are never shared into a room. Phase 3: Quarry records action traces that the Model converts into a skill (teach by demonstration), excluding secrets and honoring ZDR.",
+      "effort": "L",
+      "dependencies": [
+        "Item R-t1-07-02 (cards)",
+        "Item R-t1-07-08 (audience-safe disclosure)",
+        "Item R-t1-07-05 (approvals before effectful browser steps)",
+        "Quarry live session stream"
+      ],
+      "planeOwner": "Ingestion Plane (Quarry live view, bot-wall classification); Model Plane (space_ref, hand-off requests); Control Plane (room-audience decision); Frontend Plane (room browser card)",
+      "risks": "Browsing with one member's session in a shared room; recordings may capture secrets (ZDR); who in the room may take control.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Named as the next step in the code comment at apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:430-441 (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md section 3.5); teach-by-demonstration is an intent in VEREVON_UI_COWORK_RESEARCH_2026-08-13.md per cluster evidence."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-07-049",
+        "C-t1-07-047",
+        "C-t1-07-048"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 14,
+        "DOC": 0,
+        "INF": 1
+      }
+    },
+    {
+      "id": "R-t1-07-07",
+      "title": "Persistent per-agent computer with lifecycle UX and a governed egress boundary",
+      "summary": "Grow the credential-free, network-less, run-scoped code_interpreter workspace into a per-(Space, agent) computer: a resource record with lifecycle states (absent, hibernated, starting, running), a durable home that survives runs, hibernate and pre-thaw on presence intent, and a room view of its files and processes with stop/kill. Route its network through Quarry with per-turn capability tokens and an audience egress floor (intersection of allowed hosts, union of denied), and add pattern-triggered process watches. Design the execute target so the user's own machine can be added later.",
+      "whyItMatters": "An agent that works like a colleague with its own PC is the other half of the Grok Bot vision. Today the sandbox is deliberately hermetic, so agents cannot reach anything, and inline runs lose their edits, so there is no durable workplace to show in the room.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (lifecycle and cost-aware wake); qm (resource records, durable home snapshots, capability tokens plus authorising egress proxy)",
+        "others": [
+          "buzz (agents as supervised local processes, pluggable computer backends)"
+        ],
+        "prevalence": "Persistent agent computer 3 of 5 (common); lifecycle UX 1 of 5; sandbox security boundary 2 of 5 (differentiator); pluggable backends 2 of 5; own machine 2 of 5 (differentiator)",
+        "mechanism": "QM sandbox resource record {owning scope, provider, identity, lifecycle} with an explicit default per scope ('no default -> no execution'); home snapshots via provider checkpoints plus throttled tar to object storage, a pending marker before create and never adopting a blank home over a saved one. QM egress: HMAC/Ed25519 token {aud, scopeId, actorId, members, egress, credentials, runId, runLease}; an Envoy filter calls the authz check, resolves DNS, rejects private ranges and dials the checked IP; allowed egress hosts = intersection over the audience, denied = union; backend profile egressEnforcement none|ip_port|domain with refusal of substitutes. Grok Bot: ReportClientPresence{agent, viewing, surface, intent: APP_FOREGROUND|CHAT_OPEN|COMPOSER_FOCUS|TYPING|UPLOAD_START} yields NONE|IN_FLIGHT|PRETHAW|REFUSED, calls tagged background never wake, and a pure wake|hold|follow function; pattern-triggered wake-ups use an output observer with batching and notification limits."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-45 (Space-scoped lease for code_interpreter only: credential-free SCRATCH by default, read-only rootfs, no network; inline ExecuteStep runs lose edits and rely on the lease TTL)",
+          "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go (process registry shipped)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:106-169 (processes listed read-only)",
+          "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1954-1968 (S3.2 capability profile reports ephemeral persistence, bounded one-shot processes, no backup, egress off)"
+        ],
+        "gap": "No per-agent computer, no lifecycle states or hibernation, no durable home beyond run end, no room-visible computer view, no signal/kill or watches from the room, no network path for the sandbox, no per-turn capability token with an audience egress floor, no backend capability contract beyond the published profile."
+      },
+      "approach": "Model Plane sandbox-manager: per-(Space, agent) lease with a durable home, a resource record and lifecycle states, snapshots on run end and periodic checkpoints, and the 'no default -> no execution' rule; publish a typed backend capability profile {persistence, processSessions, egressEnforcement} and refuse unsupported routes (keep few backends). Egress: send sandbox traffic through Quarry (reuse its SSRF guards) with a per-turn capability token bound to the run lease and the Space decision audience floor, never direct internet. Frontend: Work tab computer section (state, files, processes, stop/kill) and presence intents (typing, composer focus) to pre-thaw. Add pattern-triggered watches on process output using the S4.3 Watch primitive. ZDR orgs get ephemeral homes. Keep the execute target abstract (scoped|scratch|owner-machine) so a typed exec protocol to the user's own device can be added later without redesign.",
+      "effort": "XL",
+      "dependencies": [
+        "Item R-t1-07-11 (per-computer cost attribution)",
+        "Item R-t1-07-09 (credentials broker for authenticated egress)",
+        "Item R-t1-07-08 (audience labels)",
+        "Quarry egress route"
+      ],
+      "planeOwner": "Model Plane (sandbox-manager, execution-core); Ingestion Plane (Quarry egress); Frontend Plane (Work tab)",
+      "risks": "Cost and data residency of persistent homes; ZDR conflict; Quarry latency and capacity as an egress path; maintenance cost of many backends; a desktop/own-machine agent is a large attack surface and should stay deferred.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "S3.2 sandbox capability profile and Space lease, S3.3 durable Space workspace, S4.2 process registry and S4.3 Watch in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (S3.2 last checkbox, signed profile and backend-pinned lease, is still open)."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-07-042",
+        "C-t1-07-044",
+        "C-t1-07-043",
+        "C-t1-07-056",
+        "C-t1-07-045",
+        "C-t1-07-041"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 42,
+        "DOC": 4,
+        "INF": 4
+      }
+    },
+    {
+      "id": "R-t1-07-08",
+      "title": "Audience-safe context: source labels, review-then-share, and room/team memory and knowledge scopes",
+      "summary": "Make 'the agent only uses what everyone in the room may see' enforceable end to end: stamp a source scope label on every tool result, retrieval chunk and memory record, fold context against the decision's audience, make compaction summaries inherit the label and cut context when the audience hash changes, evaluate retrieval entitlement for the whole audience, and answer as a private draft with a Share-to-room button when someone lacks access. Add Space/team memory and an explicit per-room knowledge list with sensitivity, provenance, revision history and delete-on-removal.",
+      "whyItMatters": "Mixed rooms with personal agents, browsers and computers only work if a person can trust that private context does not leak to the room. Verevon's Control decisions already bind the recipient audience, which is a better foundation than any reference, but the labels, audience-wide retrieval and memory scopes that make it real are not confirmed. Memory is also what lets agents behave like colleagues over time.",
+      "referenceBestPractice": {
+        "bestSource": "qm (labels, audience fold, context boundary, memory notebook); teams (review-then-share UX, explicit knowledge list)",
+        "others": [
+          "grokbot (personal-to-team memory promotion)",
+          "buzz (owner-readable core/cold memory split)",
+          "slack"
+        ],
+        "prevalence": "Audience-safe disclosure 4 of 5 (table-stakes); context assembly/compaction 4 of 5 (table-stakes); memory 3 of 5 (common); per-room knowledge scope 1 of 5 (unique, Teams)",
+        "mechanism": "QM stores a scopeLabel on every transcript entry; filterHistoryForAudience keeps an entry only if all audience members are entitled; a context snapshot fingerprints scope plus sorted audience ids and when it changes throughSeq moves to the latest seq and older entries are dropped from replay; resource handles only if every member is entitled; compaction summaries record throughSeq, scope label and a tainted flag so they cannot leak to a narrower audience. Teams: if entitlement cannot be verified for all recipients the answer is a private draft to the requester with a warning and an 'Allow to send to the group' button; knowledge_resources[] requires membership in the source, removal deletes derived knowledge and re-add starts from zero. QM memory: per-scope revisioned notebook with records {id, text, sensitivity ordinary|unknown|sensitive|restricted, source scope/session}, a helper model classifies and the strictest label wins, recall filtered by audience disclosure policy, editor with compare-and-swap and restore."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:39-41,173-175,287-289 (decisions bind recipient_audience_ref, revision and hash)",
+          "apps/Control Plane/user-core/internal/spaces/decision.go:4-60 (Ed25519 signed, effect-bound, short-lived decisions)",
+          "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:70 (memory scope enums are run, thread, workspace, session, user; no space scope)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4291-4390",
+          "apps/Application Plane/convex-core/convex/schema.ts:620-634 (knowledge_scope deliberately not stored on the binding)",
+          "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1943-1952 (S3.1: Data owns authored personal/Space memory documents with CAS, history, restore, provenance and explicit shared-to-personal promotion; Model owns learned memory and the resolver)"
+        ],
+        "gap": "Audience binding and the transcript read filter by audience revision are in place (baseline narrative). Not confirmed or missing: per-entry source labels on tool results and retrieval chunks, audience-intersection of tool and egress grants, summary labels on compaction, a review-then-share private draft, and any Space/team memory scope or per-room knowledge list. The cited session-core line range did not match the audience logic when spot-checked, so the Session Core and Data v2 retrieval paths still need a code check."
+      },
+      "approach": "Model Plane Session Core: stamp the source scope on every tool result, retrieval chunk and memory record; filter replay by the decision audience (entry kept only if all members entitled); compaction summary inherits the label and a tainted flag; move throughSeq when the audience hash changes. Data v2 retrieval: evaluate entitlement for the whole audience (intersection) and return handles only if every member is entitled. Frontend: private 'only you can see this' draft with Share to room and a visible 'withheld because a member lacks access' state. Memory and knowledge: follow the S3.1 split (Data v2 owns authored Space/personal memory documents with revision history and explicit shared-to-personal promotion; Model owns learned memory and the resolver) and settle that ADR first because the existing memory enum lives in capability-core; add a space scope keyed by the Control space_ref, records with sensitivity and provenance, a memory tab with restore, a binding knowledge_scope referencing Data v2 collections with a deletion saga on removal. ZDR orgs get no durable memory. Never auto-copy room facts into personal memory.",
+      "effort": "L",
+      "dependencies": [
+        "Data v2 retrieval ACL per principal and per audience",
+        "Session Core entry labels",
+        "Plane-ownership ADR for memory (S3.1)",
+        "Control decision audience hash/revision (exists)"
+      ],
+      "planeOwner": "Model Plane (labels, compaction, memory resolver); Data Plane v2 (retrieval entitlement, authored memory/knowledge); Application Plane (binding knowledge_scope); Frontend Plane (draft, memory tab)",
+      "risks": "Over-filtering can make answers useless: needs a clear withheld state. Cross-room leakage and ZDR conflict for memory. Must never widen an owner-plane ACL.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "S3.1 authored context with split ownership in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1943-1952; knowledge_scope is explicitly deferred in the Application binding schema."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-07-003",
+        "C-t1-07-029",
+        "C-t1-07-030",
+        "C-t1-07-031"
+      ],
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 25,
+        "DOC": 8,
+        "INF": 1
+      }
+    },
+    {
+      "id": "R-t1-07-09",
+      "title": "Credential custody and outward actions: secrets broker, per-person connectors, draft-first sends, bounded cross-room reach",
+      "summary": "Give room agents the ability to use credentials without ever seeing them: a broker in the Ingestion Plane that attaches secrets server-side with host/method/path pinning, https only and no redirects, a one-time secret-drop form that bypasses chat and the model, and Control grants (once|session|standing) bound to the Space audience. On top of that: per-person connector accounts for room agents, draft-first outbound messages where the human stays the sender, bounded cross-room posts under the initiating human's membership, and classification of gateway actions as human-only or agent-callable with a parity test.",
+      "whyItMatters": "A computer or browser without credentials cannot do real work, and with raw credentials it is a leak risk. Verevon has already decided the design (reuse Control grants and existing connector stores, broker server-side) but none of it is built, so agents cannot yet act on behalf of a person in mail, calendar or SaaS tools from a room.",
+      "referenceBestPractice": {
+        "bestSource": "qm (broker, secret drop, cross-person asks, reach, route classification); grokbot (shared plugin with per-person OAuth, vault UX, draft cards)",
+        "others": [
+          "buzz (agent-callable CLI as tool)",
+          "teams (configuration agent)"
+        ],
+        "prevalence": "Secrets custody 3 of 5 (common); connectors/plugins for room agents 3 of 5 (common); agent operates product via same API 3 of 5 (common); draft-first outbound 2 of 5 (differentiator); cross-room reach 1 of 5 (unique); credential asks 1 of 5 (unique)",
+        "mechanism": "QM broker: the sandbox sends {credential slug, method, url}; the broker checks capability claims, host, method and decoded path prefix, uses redirect:manual, caps responses at 5 MB and writes an audit receipt; secret drop is a platform-styled one-time form with a random drop id, peek/redeem once and 7-day expiry; KeychainAsk/Grant {mode once|standing, audienceScopeId, expiry, revokedAt}. Grok Bot plugin {mcp_config, skills, variable_names, connector_type USER|TEAM} with per-person OAuth accounts and install modes OPTIONAL|DEFAULT|REQUIRED. Drafts: Draft {from,to,cc,subject,body} or {workspace,target,thread,body}, SendDraft/DiscardDraft, setting always|needs-approval|disabled. QM reach: resolveReachTarget(recipient|channel|participants) -> not_a_member|identity_unverified|ambiguous|group_too_large with at most 5 cross-conversation posts per turn. QM route table: agentApiMatches() gates paths per capability token and a parity test pins which routes an agent token can call."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1979-1986,2000-2006 (S3.4 credential grants and broker, S3.6 MCP/plugin/connector cockpit: planned, not built)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4483-4573 (bindings carry only an allowed_tools filter)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs:5427-5482 (typed spaces.* actions already shared by the UI and the AI/JSON path; some actions marked human-only, e.g. dispatchers.rs:632)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1-30 (MCP server registry with user/org scope and sharing; not linked to Spaces)"
+        ],
+        "gap": "No Space credential grants, no broker (sandbox is credential-free), no secret-drop form, no per-room connectors or per-person connector accounts for a room agent, no skill management at binding level, no draft object, no agent-initiated DM or cross-room post route, and no route-level human-only versus agent-callable classification or parity test beyond individual dispatchers."
+      },
+      "approach": "Control and integration-corev2 keep credentials (reuse existing OAuth/MCP/plugin/connector stores, no new keychain, per S3.4). Ingestion Plane: a broker that executes {credential slug, method, url} with host/method/path-prefix pinning, https only, redirect:manual, response cap and a usage receipt without secret material, reusing Quarry SSRF guards; the Model only proposes. Control: grant records once|session|standing bound to Space, actor/run, purpose and expiry, rechecked at use and at every scheduled fire; a one-time secret-drop form in the Frontend that never enters chat or logs. Connectors: bindings reference connectors and the Model Plane uses the invoking person's own account (a shared account would break the owner-plane ACL rule). Application Plane: a Draft object (agent setting always|needs-approval|disabled) sent by integration-corev2 on approval so the human remains the sender. Gateway: agent posts to another Space through a Control decision for the target Space with the initiating human as actor, typed refusals and a per-turn cap; classify gateway actions in domains/actions as human-only or agent-callable and add a parity test.",
+      "effort": "XL",
+      "dependencies": [
+        "Item R-t1-07-07 (sandbox egress boundary)",
+        "Item R-t1-07-05 (grant records and approvals)",
+        "Control grant records",
+        "integration-corev2 connector accounts"
+      ],
+      "planeOwner": "Ingestion Plane (broker, integration-corev2); Control Plane (grants); Application Plane (drafts); Frontend Plane (secret drop, route classification)",
+      "risks": "The broker can become an SSRF vector; standing grants outliving membership (recheck at use); spam from cross-room posts (caps and audit); privilege escalation if route classification is wrong (pin it with a test).",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "S3.4 Space credential grants and broker and S3.6 Space MCP/plugin/connector cockpit in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-07-039",
+        "C-t1-07-040",
+        "C-t1-07-033",
+        "C-t1-07-052",
+        "C-t1-07-053",
+        "C-t1-07-024"
+      ],
+      "provenanceMix": {
+        "REA": 3,
+        "SRC": 36,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-07-10",
+      "title": "Scheduled and event-triggered agent work from the room, with fire outcomes, consent, goals and reviewed reports",
+      "summary": "The backend already re-authorizes every schedule fire through Control, so finish the product around it: create, pause and test-run schedules from the room, a fire-log outcome vocabulary (ok, silent, deferred, failed, refused) with a silence sentinel, stored recipient acceptance, skip-with-note when a member has left, pause-while-nobody-reads, Watch events as triggers, and optional goal runs with an independent verifier. Scheduled status reports go to reviewers for approval before they are shared to the room.",
+      "whyItMatters": "Routines and heartbeats are in four of five references and are how an agent becomes a standing colleague. Verevon's substrate (Control-decided create, per-fire reauthorization, fire keys, Watch) is stronger than the references, but people cannot yet operate it from a room.",
+      "referenceBestPractice": {
+        "bestSource": "qm (fire keys, outcomes, loops with gates, runAs and recipient rules, goals governor); grokbot (routine panel, pause-while-away); teams (reports with reviewers)",
+        "others": [
+          "buzz (heartbeats)",
+          "slack"
+        ],
+        "prevalence": "Scheduled/event-triggered work 4 of 5 (table-stakes); per-fire reauthorization and consent 2 of 5 (differentiator); goals with verifier 1 of 5 (unique); reviewed reports 1 of 5 (unique)",
+        "mechanism": "QM: deterministic fireKey per (cron, scheduled time), a thread per fire, outcomes running|ok|silent|deferred|failed|refused, a stranded-fire sweep, webhook ingest acked after durable store, Loop items with gates auto|hold; runAs owner|scopeFloor|scopeShared with membership skip notes at fire time, audience built from the current members and recipient acceptance stored. Grok Bot pauses routines whose output is unread and asks on return. QM goals: GoalRecord{objective, floor, capTokens, governor} with a governor every 3 rounds or 30 min returning continue|complete|step_back|pause. Teams reports: schedule {once|daily|weekly|monthly, approvers}, draft -> reviewers edit/approve -> share to room."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go:20-33 (each schedule slot is reauthorized with the scheduler credential and the signed decision is verified before task creation)",
+          "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:148-152 (fire key = next fire time, idempotency key = schedule id + fire key)",
+          "apps/Model Plane/go/services/orchestrator-core/cmd/activities/scheduled_run_authorizer.go:17-60 (execution intent bound to template digest, fresh Control authority per run)",
+          "apps/Model Plane/go/services/capability-core/internal/watch/watch.go:1-40 (Watch: a standing intent bound to one resource, one Space, one member's authority, cursor-based)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:421-590 (Control-decided schedule creation inside a personal Space)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:171-189 (Work tab lists schedules and their run threads)"
+        ],
+        "gap": "Per-fire reauthorization, fire keys and a Watch primitive are shipped (SRC). Missing or unconfirmed: create/pause/test-run from the room UI, an outcome vocabulary and silence sentinel visible to people, stored recipient consent, pause-while-unread, event triggers wired from Watch to runs, goal governor, scheduled reports with reviewers."
+      },
+      "approach": "Frontend: create/pause/test-run in the Work tab by extending the existing Control-decided create path (spaces.rs inject_personal_schedule_create_context) from personal Spaces to room Spaces. Model Plane capability-core: a fire-log outcome enum and silence sentinel, recipient acceptance stored per schedule, skip with a note when a member is gone (audience from current members at fire time), pause schedules whose output stays unread and ask on return, and Watch events as triggers that reuse the same per-fire reauthorization with turn_origin=automation. Optional goal record {objective, token cap, governor every N rounds: continue|complete|step_back|pause} with an independent verifier. Reports: a schedule whose output is an approval card for reviewers and then a share-to-room step (builds on item R-t1-07-05).",
+      "effort": "M",
+      "dependencies": [
+        "Control turn_origin (item R-t1-07-05)",
+        "Item R-t1-07-11 (cost caps for unattended runs)",
+        "S4.4 delivery outbox for completion delivery"
+      ],
+      "planeOwner": "Model Plane (capability-core scheduler, Watch, goals); Control Plane (per-fire decisions, recipient consent); Frontend Plane (Work tab controls)",
+      "risks": "Spam and cost from unattended runs: silence sentinel, caps, pause-while-away. Goal loops can spend a lot: token cap and verifier.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "S4.1 Space-scoped cron, S4.3 Watch, S4.4 delivery and S4.5 Work cockpit in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (S4.1 and S4.3 are visible in code; room-side controls are not)."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-07-054",
+        "C-t1-07-055",
+        "C-t1-07-057",
+        "C-t1-07-058"
+      ],
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 22,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-07-11",
+      "title": "Agent operations: per-room and per-agent cost and budgets, admin allow/block, answer-quality surface, and room-behaviour evals",
+      "summary": "Attribute usage to Space and agent binding by flow (chat, scheduled, agent-to-agent, browser, computer) in cost-core, add a per-Space allowance with warnings and a hard stop plus a room spend panel, and let admins allow or block agent definitions with a reason shown to users. On the answer itself add an AI label, citation chips and the thumbs-plus-reason feedback that /chat already has, a closed vocabulary of typed turn failures, and a room-behaviour eval suite that replays scripted multi-person scenarios against the gateway and Model Plane.",
+      "whyItMatters": "Per-agent and per-room cost is table-stakes in four of five references, and it is the safeguard that makes multi-agent rooms, browsers and computers affordable to ship. Admins need to govern which agents may exist, and a room-behaviour eval is how Buzz keeps agents from becoming noisy or silent regressions.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (cost by flow and bot, hard limits); teams (AI label, citations, admin allow/block); buzz (room-behaviour evals)",
+        "others": [
+          "qm (rolling-window admission check, multiplayer scenarios on real Slack)",
+          "slack"
+        ],
+        "prevalence": "Cost and usage attribution 4 of 5 (table-stakes); AI labelling/citations/feedback 3 of 5 (common); admin governance 2 of 5; turn resilience and typed failures 2 of 5; room-behaviour evals 2 of 5 (differentiator)",
+        "mechanism": "Buzz per-turn usage record {turn usage, cumulative, null for unknown, deltaReliable, session/turn seq}; Grok Bot series centsByFlow and centsByBotId, hard limits, prepaid top-up and usage warnings; QM admission check of rolling-window spend per person and org. Teams: a disclaimer label per agent message, citation chips that open the source, feedback {thumb, reason: not asked|inaccurate|low quality|too slow, comment}, explicit allow/block per agent app with reasons. Grok Bot: closed vocabulary of system-event kinds covering every resume path, typed result unions per tool, first-token and idle deadlines with server-paced retry. Buzz evals: task containers run the real product process tree with a roster manifest, scripted human actors, assertions on thread placement, notifications and silence plus an LLM judge, used as release regression."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/go/services/cost-core (no Space or agent reference anywhere in its Go or SQL files; migrations 0001-0010 only)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:541-567 (only an org budget_exceeded refusal is surfaced in the room)",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:410-509 (thumbs plus reason feedback exists in /chat)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx (no feedback, citation or AI-label controls beyond the isAgent header)",
+          "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs:1-25 (implicit dissatisfaction signal)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/eval.rs:1-20 (run success/drift rollup only, not room-behaviour scenarios)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx:22 (org installations registry; presence, not authority)"
+        ],
+        "gap": "Cost: no space_ref or agent dimension in cost-core and token figures are suppressed; only an org hard stop. Quality surface: /chat has feedback but Spaces has none, no citations, no typed failure vocabulary (status unknown in Model Plane). Governance: no per-definition allow/block policy. Evals: only a generic run success/drift rollup exists."
+      },
+      "approach": "Model Plane cost-core: tag USAGE_ENVELOPE with space_ref, agent binding and flow; expose series by flow and by agent; add an admission check against a per-Space allowance with warnings and a hard stop; under ZDR keep only aggregates. Frontend: room spend panel; reuse the ChatMessages feedback control with reasons in SpaceRoomTimeline, citation chips fed by Data v2 retrieval, a visible AI label per agent turn, and a system-event grammar in Activity backed by a typed tool-result envelope. Control: org policy allow/block per agent definition with a reason string surfaced in the bind and create dialogs. Evals: a harness that runs the gateway plus Model Plane with synthetic members and scripted human actors and asserts thread placement, notifications, approvals and silence, starting with the scenarios of items R-t1-07-01 and R-t1-07-03.",
+      "effort": "L",
+      "dependencies": [
+        "Item R-t1-07-03 (cost caps needed before multi-agent)",
+        "Data v2 retrieval citations"
+      ],
+      "planeOwner": "Model Plane (cost-core, typed failures, evals); Control Plane (agent allow/block policy); Frontend Plane (spend panel, labels, feedback)",
+      "risks": "ZDR conflicts with usage detail: keep only aggregates. Over-notification from warnings. Eval flakiness: pin prompts and use deterministic actors.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-07-061",
+        "C-t1-07-062",
+        "C-t1-07-063",
+        "C-t1-07-021",
+        "C-t1-07-064"
+      ],
+      "provenanceMix": {
+        "REA": 4,
+        "SRC": 19,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-07-12",
+      "title": "Long-tail polish: role-aware agent templates and persona library, owner-reviewed config proposals, catch-up summaries, external MCP surface",
+      "summary": "Small, independent improvements once the core is in place: job-first agent creation with role/tool-tagged templates and a self-introduction; a persona library with agent teams and an export format built from an explicit field allowlist so secrets cannot be serialized; agent-proposed configuration changes that the owner reviews in a prefilled dialog; assistive AI in the room (time-windowed catch-up summaries with decisions and action items, rewrite, suggested actions); and an MCP server exposing Space tools to external agents with per-tool scopes.",
+      "whyItMatters": "Each of these appears in only one or two references and adds modest value, but they make the product feel finished: faster agent setup, safer reuse of agent definitions, and the AI helpers people expect in a chat product.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (templates); buzz (allowlist snapshot, config proposals); teams (assistive AI); slack (hosted MCP server)",
+        "others": [
+          "qm"
+        ],
+        "prevalence": "Each is 1 or 2 of 5 (unique or differentiator)",
+        "mechanism": "Grok Bot: 74 eligibility-tagged templates (universal, job-role, selected-tools), onboarding answers injected as short system fragments, idempotent creation via a client-generated id with an optional kickstart introduction. Buzz: versioned manifest where only explicit fields are copied (asserted by tests), memory export levels none|core|all through the owner-gated path, definitions private unless marked shared; agent CLI emits typed config requests that the client parses with an allowlist schema into an owner dialog, deduped and bounded. Teams: summaries over 1/7/30-day windows with decisions and action items, rewrite with tones, suggested action chips. Slack: streamable-HTTP MCP endpoint with OAuth user tokens per tool scope, admin approval of clients and per-call audit."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:20-132 (three static templates: Meeting Scribe, Status Agent, Knowledge Helper)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3913-4055 and src/features/spaces/components/SpaceBindAgentDialog.tsx:26-153 (org definitions can be re-bound into rooms)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1-30 (MCP client-side registry only; no MCP server for Space tools found)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces (no catch-up or summarise UI found by search)"
+        ],
+        "gap": "No role-aware template catalogue or self-introduction, no persona library, agent teams or export/import, no owner-reviewed proposal flow, no catch-up summaries, rewrite or suggested actions in rooms, and no hosted MCP surface for external agents."
+      },
+      "approach": "Frontend: template catalogue with eligibility tags stored as a template id on the definition; owner review dialog fed by an Application proposal object; catch-up and summary panel that calls the Model Plane with the room read decision (not stored under ZDR). Application: definition export with an explicit field allowlist covered by a leak test, and an agent team as a list of definition ids bound together. Gateway: an MCP endpoint mapping tools onto the agent-callable action classification from item R-t1-07-09, with per-tool scopes and admin client approval.",
+      "effort": "M",
+      "dependencies": [
+        "Item R-t1-07-09 (agent-callable classification) for the MCP surface",
+        "Item R-t1-07-08 (summaries must not leak across the audience)"
+      ],
+      "planeOwner": "Frontend Plane (templates, summaries, MCP endpoint); Application Plane (definitions, proposals)",
+      "risks": "Secret leakage if the export allowlist is not test-enforced; summaries leaking across audiences; external agents holding user tokens must be narrowly scoped.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-07-007",
+        "C-t1-07-008",
+        "C-t1-07-066",
+        "C-t1-07-059",
+        "C-t1-07-034"
+      ],
+      "provenanceMix": {
+        "REA": 4,
+        "SRC": 11,
+        "DOC": 3,
+        "INF": 0
+      }
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t1-07-022",
+      "reason": "Implementation trivia: shell-state snapshots, output caps and image normalisation are Model Plane/execution-core hygiene with unknown Verevon status; track as engineering work inside the computer item (R-t1-07-07), not a Space-facing recommendation."
+    },
+    {
+      "cluster": "C-t1-07-023",
+      "reason": "Implementation detail of how tools are presented to the model (MCP-as-files, lazy discovery); Verevon already has a governed MCP registry (gateway mcp.rs) and capability-core catalogue, and the room-visible parts are covered by item R-t1-07-09."
+    },
+    {
+      "cluster": "C-t1-07-025",
+      "reason": "Not a fit for Verevon's architecture: Verevon runs its own Model Plane runtime, S2.6 of the adoption plan explicitly defers hosting extra harnesses until a concrete use case, and harness-native tools would bypass Quarry and approvals. The Slack count in the prevalence is from docs only."
+    },
+    {
+      "cluster": "C-t1-07-065",
+      "reason": "Trivia: a headless one-shot task runner duplicates existing run-start APIs (chat invocations, browser runs, scheduled runs) and has significance 1."
+    }
+  ],
+  "strengthsToKeep": [
+    "Agents are Control service subjects on the same roster as people, joined Control-first, with an honest third state 'access granted, identity not published' and server-recorded turn attribution (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3116-3188; src/features/spaces/components/SpacePage.tsx:845-1066). At least equal to Buzz and ahead of Slack/Teams client-side bots.",
+    "Authority model: Control-signed Ed25519 decisions that are short-lived, effect-bound and bound to the recipient audience ref, revision and hash, privacy policy and resource authorization, with revocation propagated to the Model Plane and the rule that Space access never widens an owner-plane ACL (apps/Control Plane/user-core/internal/spaces/decision.go; apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:39-41,173-175). Ahead of QM's act-as-the-human model.",
+    "Per-fire reauthorization of scheduled work: every cron slot gets a fresh Control decision with a deterministic fire key and template digest, so a stored schedule is never authority by itself (apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go; sweeper.go:148-152; orchestrator-core/cmd/activities/scheduled_run_authorizer.go). Matches or beats QM and Grok Bot.",
+    "Watch primitive bound to exactly one resource in one Space under one member's authority, cursor-committed with the event (apps/Model Plane/go/services/capability-core/internal/watch/watch.go:1-40).",
+    "Layered instruction hierarchy platform > org > Space > user > agent composed on the server with client values stripped (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3720-3888,4231-4398). Equal or ahead of QM.",
+    "Binding policy (trigger_modes, approval_mode, allowed_tools) is enforced at the gateway and re-resolved at invocation, with safe create-in-room defaults of mention-only, no tools and require_confirmation (spaces.rs:4483-4573; SpaceCreateAgentDialog.tsx:20-132).",
+    "Tool-result provenance with trust classes and a fail-closed injection screen at both execution-core and model-gateway, plus a sampled semantic shadow pass, already align with the cross-plane envelope the adoption plan calls for (apps/Model Plane/rust/services/execution-core/src/provenance.rs; model-gateway/src/semantic_screening.rs).",
+    "Honest-status UI culture: unavailable work rows are labelled rather than faked, and the org hard stop surfaces as an explicit refusal (SpaceRoomComposer.tsx:541-567; docs S4.5 execution evidence)."
+  ]
+}

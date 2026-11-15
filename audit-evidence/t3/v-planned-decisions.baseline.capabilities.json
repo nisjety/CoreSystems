@@ -1,0 +1,2296 @@
+[
+  {
+    "id": "v-planned-decisions-001",
+    "category": "Chat experience",
+    "name": "Streaming SSE chat with typed ChatEvent taxonomy (reasoning_delta, tool_call/result, citation, artifact, usage, memory_recall, plan_proposed, queued_input, result_receipt, stopped)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:460",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1811",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/model-plane-to-verevon-parity.md",
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. Adopted rule (PAR section 0): a new capability is a new ChatEvent plus an SPA case; gateway untouched. Producer/consumer coverage enforced by the SSE taxonomy CI gate."
+  },
+  {
+    "id": "v-planned-decisions-002",
+    "category": "Chat experience",
+    "name": "Byte-verbatim BFF SSE relay with no-event-allowlist contract test",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/tests/sse_relay_no_allowlist.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC+DOC. HAP 5.7: relay must stay allowlist-free; the test derives the event list from model-gateway ChatEvent::name()."
+  },
+  {
+    "id": "v-planned-decisions-003",
+    "category": "Chat experience",
+    "name": "Rich-event stream resume (frame buffer, monotonic id, Last-Event-ID cursor from SPA)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs:489",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:82"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/Verevon-ai-first-plan.md"
+    ],
+    "notes": "SRC: emit_and_buffer + BufferedEvent{seq,event,data}. DOC CPA:122: survives a gateway restart only if REDIS_URL (Dragonfly) is set, which it is not today. DeepSeek gap-repair half explicitly NOT adopted (HAP 5.6)."
+  },
+  {
+    "id": "v-planned-decisions-004",
+    "category": "Chat experience",
+    "name": "Conversation-node renderer registry (DeepSeek ConversationNodeDefinition) with three-path equivalence gate",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/registry.ts:41",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts:81"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. Adopted from DeepSeek (MIT) 2026-08-22 (HAP 5.3); exhaustive record so a node kind without a renderer fails the build."
+  },
+  {
+    "id": "v-planned-decisions-005",
+    "category": "Chat experience",
+    "name": "Tool presentation as recomputed (never persisted) intent, plus diff card from patch output and artifact revisions",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. DeepSeek pattern; truncated surfaced, total deliberately not invented (HAP 5.4). Unit-tested."
+  },
+  {
+    "id": "v-planned-decisions-006",
+    "category": "Chat experience",
+    "name": "Keyed projection channel (key + stream-generation guard against stale streams)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/projection/keyed-channel.ts:56"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. Readiness/gap-repair parts of the DeepSeek triad NOT adopted (HAP 5.6)."
+  },
+  {
+    "id": "v-planned-decisions-007",
+    "category": "Chat experience",
+    "name": "Mid-run queued input delivered at the tool-round boundary as a pause (model classifies redirect vs follow-up)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:47",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:62",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:253",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2000"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Owner decision 2026-08-22: a third semantic, neither pi steer nor followUp. Single-replica in-memory registry. Client half fixed 2026-08-26 (allowMidRunSubmit)."
+  },
+  {
+    "id": "v-planned-decisions-008",
+    "category": "Chat experience",
+    "name": "Regenerate and edit-and-resubmit with 1/N version siblings (final exchange only)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:123",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:124"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "DOC (live-proven per audit): siblings lost on reload; no server-persisted versions."
+  },
+  {
+    "id": "v-planned-decisions-009",
+    "category": "Chat experience",
+    "name": "Branch conversation (\"Fortsett i ny chat\") / session-as-tree",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:807",
+      "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/gateway.proto:250"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC: client-side \"continue in new chat\" only; proto parent_message_id=21 exists but nothing builds a tree. DECISION: pi session-as-tree (HAP 4.5) deferred as \"wait, pending a real need\"; durable fork listed parked in CPA; OD19 open."
+  },
+  {
+    "id": "v-planned-decisions-010",
+    "category": "Chat experience",
+    "name": "Stop / cancel / continue-after-stop with a distinct stopped terminal state",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1510",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC+DOC: stopped split from done (HAP 5.1); live-proven per CPA section 4."
+  },
+  {
+    "id": "v-planned-decisions-011",
+    "category": "Chat experience",
+    "name": "Search over past chats",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:397"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC: client-side search over the loaded thread list only. Searched session-core src+migrations for tsvector/to_tsquery and model-gateway for recall_conversations: none. Hermes-style FTS recall tool planned (BKL #20, CPA:111)."
+  },
+  {
+    "id": "v-planned-decisions-012",
+    "category": "Chat experience",
+    "name": "Shareable read-only link to a chat",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "Searched SPA features/chat for share-link code: none. gateway domains/shares.rs is DOCUMENT sharing (resource_grants), not chat. DECISION: deferred to Wave 6 (I19) pending the owner share-model ruling; recommended org-internal snapshot, 30-day, revocable (GCP OD19)."
+  },
+  {
+    "id": "v-planned-decisions-013",
+    "category": "Chat experience",
+    "name": "Checkpoint / rewind of conversation and workspace",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "Searched SPA chat + session-core for rewind/restore_conversation: none. Recommended scope (OD19): conversation + artifact versions; effectful turns non-rewindable (BKL section 4 item 5)."
+  },
+  {
+    "id": "v-planned-decisions-014",
+    "category": "Chat experience",
+    "name": "Artifacts with version history and revision diff viewer",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2618",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC: create/update/read_artifact tools; history held client-side; sandboxed HTML iframe (CHD 11.1)."
+  },
+  {
+    "id": "v-planned-decisions-015",
+    "category": "Chat experience",
+    "name": "Answer export to Word / Excel / PowerPoint / print-to-PDF",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/docx.ts",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/xlsx.ts",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/pptx.ts",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/print.ts"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. PDF goes through the browser print dialog (CPA partial). No charts/images in exports."
+  },
+  {
+    "id": "v-planned-decisions-016",
+    "category": "Chat experience",
+    "name": "Durable thread persistence with an origin dimension (chat threads isolated from Space/agent/support threads)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:21"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "SRC: MAX_THREADS=80; durable via session-core; origin dimension from chat-design invariant I2 (CHD 13.5-2)."
+  },
+  {
+    "id": "v-planned-decisions-017",
+    "category": "Chat experience",
+    "name": "Message pinning",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md:171"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md"
+    ],
+    "notes": "DOC: built across proto/session-core/gateway/SPA and deployed 2026-09-17 per LEF. Not re-verified in code this pass."
+  },
+  {
+    "id": "v-planned-decisions-018",
+    "category": "Multimodal & creation",
+    "name": "Speech TTS/STT provider + governed push-to-talk Voice mode and read-aloud",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/speech.rs",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC: 1073-line speech provider (CHD correction 2026-08-22). No live mic proof (CPA:147). DECISION: full-duplex barge-in voice parked (OD19 recommended); ZDR voice refused."
+  },
+  {
+    "id": "v-planned-decisions-019",
+    "category": "Multimodal & creation",
+    "name": "Realtime voice session broker (OpenAI client-secret)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/realtime.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md"
+    ],
+    "notes": "SRC exists; V2P: no browser/WebRTC integration; no live proof."
+  },
+  {
+    "id": "v-planned-decisions-020",
+    "category": "Multimodal & creation",
+    "name": "Image generation as an in-chat artifact",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs:1427"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC; DOC CPA:146 never run live; unavailable on the Terra subscription route."
+  },
+  {
+    "id": "v-planned-decisions-021",
+    "category": "Multimodal & creation",
+    "name": "Vision / image attachments",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/vision.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/vision.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC; CPA:127 not live; images not sent on the subscription route."
+  },
+  {
+    "id": "v-planned-decisions-022",
+    "category": "Multimodal & creation",
+    "name": "Video generation jobs (Azure OpenAI Sora)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/video.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md"
+    ],
+    "notes": "SRC; V2P: no real smoke coverage."
+  },
+  {
+    "id": "v-planned-decisions-023",
+    "category": "Multimodal & creation",
+    "name": "Document intelligence, translation and language analytics adapters",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/doc_intel.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/translation.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/language.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md"
+    ],
+    "notes": "SRC; V2P \"Partial\" rows (no production smoke)."
+  },
+  {
+    "id": "v-planned-decisions-024",
+    "category": "Multimodal & creation",
+    "name": "File attachments (PDF/DOCX/XLSX/PPTX/CSV/images) with 1 MB / 60k-char caps",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC+DOC: extraction via imports-core; caps far below peers (CPA:125-130)."
+  },
+  {
+    "id": "v-planned-decisions-025",
+    "category": "Multimodal & creation",
+    "name": "Charts from data",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:91"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DOC: no native chart renderer; matplotlib/HTML artifact path unproven."
+  },
+  {
+    "id": "v-planned-decisions-026",
+    "category": "Multimodal & creation",
+    "name": "Research-to-slide-deck generation",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:61"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DOC: pptx export only; no deck pipeline/theme/images."
+  },
+  {
+    "id": "v-planned-decisions-027",
+    "category": "Multimodal & creation",
+    "name": "Edit an existing Excel/PowerPoint in place; save back to OneDrive/Drive; Sheets/Graph workbook read-write",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:63"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "DOC: not built; Wave 4/5 behind write-posture owner decision OD14."
+  },
+  {
+    "id": "v-planned-decisions-028",
+    "category": "Multimodal & creation",
+    "name": "OCR for scanned/image-only PDFs",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:107"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DOC: task H9 (18 s deadline); never Azure Document Intelligence for tests."
+  },
+  {
+    "id": "v-planned-decisions-029",
+    "category": "Multimodal & creation",
+    "name": "Fine-tuning jobs (Azure OpenAI Files + Fine-tuning API)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/finetune_grpc.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/finetune_azure.rs",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/finetune"
+    ],
+    "plannedIn": [],
+    "notes": "SRC: \"Wave 7 v1\" job state machine. Not mentioned in the harness decision docs; live status unknown (INF, low confidence)."
+  },
+  {
+    "id": "v-planned-decisions-030",
+    "category": "Research & web",
+    "name": "Web search and URL fetch tools in chat",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2874",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3024"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. Live-proven on Terra (A6 per PSS)."
+  },
+  {
+    "id": "v-planned-decisions-031",
+    "category": "Research & web",
+    "name": "Deep research with coverage notes",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC; DOC CPA:145 live-proven but not runnable on Terra."
+  },
+  {
+    "id": "v-planned-decisions-032",
+    "category": "Research & web",
+    "name": "Wide research fan-out (subagent.research_fan_out, Manus-style)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs:36",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs:114",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2331",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs:820"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "SRC: flag-gated; the subscription-route budget resolves to 10 rounds / 2 subagents (sse.rs test). DOC: 3-way fan-out live-proven on Terra 2026-10-01; scale presets 12/24/48 await OD7."
+  },
+  {
+    "id": "v-planned-decisions-033",
+    "category": "Research & web",
+    "name": "Knowledge search, knowledge graph, wiki, contradictions and document listing over Data Plane",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3375",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3506"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "SRC. Grounded retrieval is called the moat (BKL section 3)."
+  },
+  {
+    "id": "v-planned-decisions-034",
+    "category": "Research & web",
+    "name": "Citations with claim ids and inline chips",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:79"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "DOC: built and unit-tested, not live-proven; client binds by array position."
+  },
+  {
+    "id": "v-planned-decisions-035",
+    "category": "Research & web",
+    "name": "Source-scope focus selector (workspace / conversation / web)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:813"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "SRC (line from the wave-2 critique) + DOC: disabled on the Terra route."
+  },
+  {
+    "id": "v-planned-decisions-036",
+    "category": "Research & web",
+    "name": "Tool-argument grounding gate (required user-held values must appear in the request)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/tool_arguments.rs:583",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/tool_arguments.rs:631"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Claimed lead over all reference harnesses (CHD TL;DR): measured 55-70% (agent) / 100% (chat) fabrication before the gate."
+  },
+  {
+    "id": "v-planned-decisions-037",
+    "category": "Research & web",
+    "name": "Data Plane reranking of web candidates with Quarry as a caller (option B)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/BUILD_PASS_4_5_2026-10-12.md:5",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md:1"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md",
+      "C:/dev/CoresSystem/apps/master-ownership-matrix.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/BUILD_PASS_4_5_2026-10-12.md"
+    ],
+    "notes": "DOC: QB-T05a/b, QB-T08, QB-M, CR-T15 built and reviewed (uncommitted, dark: WEB_RERANK_ENABLED=0); QB-T09 (Quarry client) \"do not ship\". Ownership rule 15 makes Quarry's own LLM reranker non-compliant."
+  },
+  {
+    "id": "v-planned-decisions-038",
+    "category": "Research & web",
+    "name": "Connectors in chat: Outlook/Gmail/OneDrive/Calendar listings and composer connector picker",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC+DOC CPA:92: headers only, no search/bodies, Do-mode only, never live on a real mailbox. Owner ruling: personal connections are owner-only."
+  },
+  {
+    "id": "v-planned-decisions-039",
+    "category": "Research & web",
+    "name": "Promote-on-use: repeatedly fetched pages promoted into the knowledge base",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs:1"
+    ],
+    "plannedIn": [],
+    "notes": "SRC exists; live use unknown (INF)."
+  },
+  {
+    "id": "v-planned-decisions-040",
+    "category": "Agent runtime",
+    "name": "Governed agent loop (execution-core run_rounds) with purpose-lock allowlist",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4116"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC: offered_tool_defs IS the purpose-lock allowlist (LED Needle entry)."
+  },
+  {
+    "id": "v-planned-decisions-041",
+    "category": "Agent runtime",
+    "name": "Two separate dispatch loops kept (HARN-1/2 unification rejected) + cross-service contract tests",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1410",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/postmortem/0001-harn-1-2-tool-dispatch-unification.md",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "DECISION rejected-on-measurement 2026-08-14; CHD section 8 \"what NOT to change\"."
+  },
+  {
+    "id": "v-planned-decisions-042",
+    "category": "Agent runtime",
+    "name": "Parallel tool-call dispatch in both loops (atomic shared subagent budget)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1874",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:7156"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. Adopted from the DeepSeek executionMode idea 2026-08-22."
+  },
+  {
+    "id": "v-planned-decisions-043",
+    "category": "Agent runtime",
+    "name": "Tool retry on transient failure, gated on is_risky_call, with drift contract test",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:150",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_retry.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/tool_retry_contract.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-044",
+    "category": "Agent runtime",
+    "name": "Refuse only the truncated final tool call in a length-stopped message",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:214"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. pi idea adopted more precisely than pi (HAP 4.1)."
+  },
+  {
+    "id": "v-planned-decisions-045",
+    "category": "Agent runtime",
+    "name": "Subagent delegation (subagent.task) at depth 1, child ceiling default 8 / hard 100",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:29",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:63",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:71",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4278"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Leaf restriction: depth>0 + risky call refused (Hermes DELEGATE_BLOCKED_TOOLS shape). HAP text says MAX_TOTAL_CHILDREN=8; code now resolves the ceiling with an org override."
+  },
+  {
+    "id": "v-planned-decisions-046",
+    "category": "Agent runtime",
+    "name": "Durable subagent lineage + cold resume (child answer on the child run; consent-gated read)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4262",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:160"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Owner decision 2026-08-22 #1. HAP: wants a staging pass before production trust."
+  },
+  {
+    "id": "v-planned-decisions-047",
+    "category": "Agent runtime",
+    "name": "Fork-semantics subagent (inherit parent history)",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1798"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "DECISION REJECTED 2026-08-24 (DeepSeek rejected it first). Searched: run_subagent builds a fresh LoopContext and a test asserts isolation."
+  },
+  {
+    "id": "v-planned-decisions-048",
+    "category": "Agent runtime",
+    "name": "Per-agent worktree / filesystem isolation",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1821"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "DECISION: replaced by a per-run child ceiling (DeepSeek maxTotalAgents shape). Not a gap by decision."
+  },
+  {
+    "id": "v-planned-decisions-049",
+    "category": "Agent runtime",
+    "name": "Server-side plan-mode enforcement (risky calls refused regardless of posture)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1804"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. Closed the Claude-Code-style prompt-only plan-mode hole 2026-08-22."
+  },
+  {
+    "id": "v-planned-decisions-050",
+    "category": "Agent runtime",
+    "name": "Plan proposal + editable plan approval gate (plan.propose, PlanApprovalControl)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:10998",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1911",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC+DOC: approving yields a grant + edited plan that no SPA turn consumes (CPA section 2.2); grant store in-memory. plan.propose live-proven on Terra (PSS)."
+  },
+  {
+    "id": "v-planned-decisions-051",
+    "category": "Agent runtime",
+    "name": "Autonomy ladder (read_only < workspace_write < danger_full_access) checked per call with a justification",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs:59",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs:164",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/tests/autonomy_ladder_contract.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Owner decision #5 (DeepSeek SandboxMode ladder). \"Fresh context\" deliberately NOT in the control. Grant carrier in-memory; durable thread-scoped carrier open (LED 2026-08-26)."
+  },
+  {
+    "id": "v-planned-decisions-052",
+    "category": "Agent runtime",
+    "name": "Tiered compaction in both loops + native Anthropic context editing (clear_tool_uses) and server compaction (compact_20260112)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/compaction.rs:145",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/compaction_budget.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:481",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:519"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CACHE_COMPACTION_AUDIT_2026-09-17.md"
+    ],
+    "notes": "SRC. Provider-native context edit was \"needs a design call\" in CHD 7.5; decided native over hand-rolled 2026-09-17 (CCA section 7). Local compaction still always runs (compaction.rs:145 returns true)."
+  },
+  {
+    "id": "v-planned-decisions-053",
+    "category": "Agent runtime",
+    "name": "Need-driven reattachment after compaction (reattach_context, reattach_skill)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3253",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3319",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/context_reattach.rs:87"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Owner decision #4: need-driven recovery, NOT Claude Code's pre-attach-5-files shape."
+  },
+  {
+    "id": "v-planned-decisions-054",
+    "category": "Agent runtime",
+    "name": "Compaction-recall eval harness (seed_turns, gold recall cases)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/python/eval-lab-py/cases/compaction/13_early_fact_survives_head_summary.yaml",
+      "C:/dev/CoresSystem/.github/workflows/eval-lab.yml"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC. Hermes evals/compaction pattern plugged into eval-lab-py."
+  },
+  {
+    "id": "v-planned-decisions-055",
+    "category": "Agent runtime",
+    "name": "PreToolUse/PostToolUse hook layer",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:2"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC; DOC CPA: hook_context not fed to agentic runs, in-memory registry, no durable store/UI, no input rewrite."
+  },
+  {
+    "id": "v-planned-decisions-056",
+    "category": "Agent runtime",
+    "name": "Scheduled runs from chat (\"Planlegg dette\", /schedule)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs:522",
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/cron",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC: a scheduled step is a single no-tool call with max_tokens 1024. Owner ruling 2026-09-28: scheduled runs are draft-only. \"Se resultater\" not wired (CPA:135)."
+  },
+  {
+    "id": "v-planned-decisions-057",
+    "category": "Agent runtime",
+    "name": "Background run \"notify me when done\" watchers",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/runwatch",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC; DOC CPA:134: no chat toggle, generic notification text."
+  },
+  {
+    "id": "v-planned-decisions-058",
+    "category": "Agent runtime",
+    "name": "Space Watch primitive (cursor-bearing, authority re-checked at disclosure)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch",
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/processwatch",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:4494"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC+DOC: S4.3 steps 1-3 implemented 2026-09-14; Model-runs adapter is a later slice."
+  },
+  {
+    "id": "v-planned-decisions-059",
+    "category": "Agent runtime",
+    "name": "Durable HITL approval continuation with AES-256-GCM encrypted descriptor",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/continuation_crypto.rs:1",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/Verevon-ai-first-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC exists; DOC AIF Phase 0: SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY empty on the stack so pauses return unavailable; 3 approval sites mint no descriptor. ROADMAP (2026-07-16) still says no continuation (stale)."
+  },
+  {
+    "id": "v-planned-decisions-060",
+    "category": "Agent runtime",
+    "name": "Managed-run terminalization receipts (StartManagedRun / RecordTerminalOutcome)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/terminalization.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md",
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-061",
+    "category": "Agent runtime",
+    "name": "Do mode (agentic) on the ChatGPT subscription route",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/agentic_subscription.rs:41"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "SRC: AGENTIC_SUBSCRIPTION_ENABLED defaults false; live-proven in the dev stack only (A6). OD2 open."
+  },
+  {
+    "id": "v-planned-decisions-062",
+    "category": "Agent runtime",
+    "name": "Run budgets (one resolve_run_budget for rounds/subagents + credential-expiry guard)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/run_budget.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs:9162"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC. The 300 s delegated bearer bounds every run (OD8 open)."
+  },
+  {
+    "id": "v-planned-decisions-063",
+    "category": "Agent runtime",
+    "name": "Model-authored orchestration scripts / Temporal workflows as the production path",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC exists but is not the production path. DECISION open: whether model-authored fan-out is wanted at all is the prior question (LED 2026-08-26)."
+  },
+  {
+    "id": "v-planned-decisions-064",
+    "category": "Agent runtime",
+    "name": "Agent self-modification / runtime plugin mounting",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "DECISION: needs a product call; recorded as open-with-analysis rather than a gap (CHD matrix). Not searched further."
+  },
+  {
+    "id": "v-planned-decisions-065",
+    "category": "Agent runtime",
+    "name": "DeepSeek FIFO subagent inbox",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "DECISION NOT ADOPTED 2026-08-24: delegation is synchronous within a turn."
+  },
+  {
+    "id": "v-planned-decisions-066",
+    "category": "Agent runtime",
+    "name": "Typed handoff report {status, summary, evidence, nextSteps, blocker}",
+    "status": "planned",
+    "evidence": [],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "DECISION deferred: build when an iterative fresh-context loop exists or code must branch on a delegation outcome."
+  },
+  {
+    "id": "v-planned-decisions-067",
+    "category": "Agent runtime",
+    "name": "Code mode: Verevon tools callable from inside the sandbox",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:43"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "DOC: not built (BKL #11). execution-core has a tool_bridge module whose scope was not inspected (INF, low confidence)."
+  },
+  {
+    "id": "v-planned-decisions-068",
+    "category": "Agent runtime",
+    "name": "Model-managed todo/plan recitation into the context tail (Manus todo.md)",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:110"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "DOC: not built."
+  },
+  {
+    "id": "v-planned-decisions-069",
+    "category": "Agent runtime",
+    "name": "Deterministic postcondition verifiers (post-mutation verification)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/postcondition.rs:1"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC exists; DOC: no type-check feedback for run_code, no automatic re-fetch for Visma."
+  },
+  {
+    "id": "v-planned-decisions-070",
+    "category": "Tools, plugins & extensibility",
+    "name": "Single Capability registry with Kind discriminator (plugin, MCP server, tool, skill) + health attestation",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/registry",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC. CHD 2026-08-22 correction: the \"plugin/MCP registry stub\" rows were wrong (grepped for non-existent type names)."
+  },
+  {
+    "id": "v-planned-decisions-071",
+    "category": "Tools, plugins & extensibility",
+    "name": "MCP client registry (Postgres CRUD, vaulted OAuth tokens, SSRF guards, allowlists, sharing) + agent-loop MCP bridge",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:377",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs:1",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC: 1802-line registry_apis.go. stdio disabled for MVP (ROADMAP Phase 7)."
+  },
+  {
+    "id": "v-planned-decisions-072",
+    "category": "Tools, plugins & extensibility",
+    "name": "Plugin registry surfaced in Settings",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC; no marketplace; the Hermes install-vs-load governance split (CHD 13.4) not adopted."
+  },
+  {
+    "id": "v-planned-decisions-073",
+    "category": "Tools, plugins & extensibility",
+    "name": "Skills registry with ~1% (8000-char) budget, degrade-before-drop, reattach_skill",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/skills.rs:775",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/skill_budget.rs:62",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. No on-disk SKILL.md bundles with scripts; skills off on the Terra route (CPA). context:fork skills NOT built (CHD 13.3, open)."
+  },
+  {
+    "id": "v-planned-decisions-074",
+    "category": "Tools, plugins & extensibility",
+    "name": "Slash commands in the composer",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:540"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC: built-in commands only; user/org templates with $ARGUMENTS not built (recommended user-authored first, OD19)."
+  },
+  {
+    "id": "v-planned-decisions-075",
+    "category": "Tools, plugins & extensibility",
+    "name": "Compositional system prompt assembled from the offered tools",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:208"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. pi idea adopted (HAP 4.4)."
+  },
+  {
+    "id": "v-planned-decisions-076",
+    "category": "Tools, plugins & extensibility",
+    "name": "Authored instruction hierarchy (platform + org + Space) + user persona",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/PersonaSection.tsx",
+      "C:/dev/CoresSystem/apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md:1"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC+DOC: ADR-0003 implemented 2026-08-20; CPA:59 not applied in Do/Plan runs."
+  },
+  {
+    "id": "v-planned-decisions-077",
+    "category": "Tools, plugins & extensibility",
+    "name": "Typed action registry with a model-executable allowlist",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:126"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/Verevon-ai-first-plan.md"
+    ],
+    "notes": "SRC: 8 actions admitted (tickets.create, inbox.*, chat.save_thread_snapshot, chat.submit_feedback, org.*). AIF (2026-08-25) says the set is empty: stale."
+  },
+  {
+    "id": "v-planned-decisions-078",
+    "category": "Tools, plugins & extensibility",
+    "name": "Outward MCP server exposing Verevon actions; WebMCP bridge",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "C:/dev/CoresSystem/Verevon-ai-first-plan.md"
+    ],
+    "notes": "Searched SPA for modelContext/registerTool/WebMCP and Model Plane bridges/: only mcp-bridge (a consumer). Planned M4 after M2 (AIF Phase 4)."
+  },
+  {
+    "id": "v-planned-decisions-079",
+    "category": "Tools, plugins & extensibility",
+    "name": "AG-UI adapter (gateway route + intentionally unwired reference client) + inline AG-UI frame handling",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:58",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts:1",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1179"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "SRC. CHD 11.4 said fix-or-delete; resolved as KEEP: the route now uses require_session and the client is documented as do-not-delete interop. CWP: AG-UI as a gateway interop adapter."
+  },
+  {
+    "id": "v-planned-decisions-080",
+    "category": "Tools, plugins & extensibility",
+    "name": "A2A agent-to-agent delegation",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:116"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "DOC: design phase 9; needs an Application-owned registry + Control authorization."
+  },
+  {
+    "id": "v-planned-decisions-081",
+    "category": "Tools, plugins & extensibility",
+    "name": "Strict function-tool schemas (strict: true)",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:2038"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/external-ideas-harvest.md"
+    ],
+    "notes": "DECISION DEFERRED 2026-08-25: strict disables parallel tool calls; replaced by pre-dispatch validation. Searched inference-core: only response_format json_schema uses a named wrapper."
+  },
+  {
+    "id": "v-planned-decisions-082",
+    "category": "Tools, plugins & extensibility",
+    "name": "Pre-dispatch argument validation + loud degrade on a malformed tool schema",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:1278",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:2103"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC+DOC."
+  },
+  {
+    "id": "v-planned-decisions-083",
+    "category": "Tools, plugins & extensibility",
+    "name": "Tool-catalogue size budget (degrade-before-drop descriptions)",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/external-ideas-harvest.md"
+    ],
+    "notes": "Searched services for catalogue-budget helpers: none. LED Needle entry: the gap is real (~16k unbounded chars vs an 8k skill cap); selection would collide with the purpose-lock."
+  },
+  {
+    "id": "v-planned-decisions-084",
+    "category": "Computer & environment control",
+    "name": "bwrap sandbox (Landlock/seccomp) with fail-closed AllowDomains when no egress proxy is configured",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox.rs:4",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs:156"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-085",
+    "category": "Computer & environment control",
+    "name": "SandboxBackend trait / remote sandbox backend seam",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1358"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "DECISION rejected for now 2026-08-22 (one backend; revisit when a second exists)."
+  },
+  {
+    "id": "v-planned-decisions-086",
+    "category": "Computer & environment control",
+    "name": "Sandbox full/partial enforcement report consumed by orchestration",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs:149"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC: probed per-call sandboxed bool + capability_profile over HTTP; searched go/ for a consumer: none (sandbox-manager capability_profile hits are a different Control decision). Open design call."
+  },
+  {
+    "id": "v-planned-decisions-087",
+    "category": "Computer & environment control",
+    "name": "code_interpreter with Space-scoped durable workspace (lease, hydrate, CAS promote)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2554",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:3483"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC+DOC: S3.3 complete 2026-09-12. Plain chat has no persistent variables (CPA:62)."
+  },
+  {
+    "id": "v-planned-decisions-088",
+    "category": "Computer & environment control",
+    "name": "Background processes process_start/read/stdin/signal/list (S4.2)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4089",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/process_host.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/process_tools.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC: cap.process.background is low risk, additionally gated by a lease with processes_permitted from Control space:processes."
+  },
+  {
+    "id": "v-planned-decisions-089",
+    "category": "Computer & environment control",
+    "name": "Hosted governed browser (Quarry) manual use: live frames, human takeover, profiles",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:82"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md"
+    ],
+    "notes": "SRC+DOC: live-proven manual use; WebSocket/takeover covered by Playwright only."
+  },
+  {
+    "id": "v-planned-decisions-090",
+    "category": "Computer & environment control",
+    "name": "Agent-driven browser runs (browser_agent / browser.observe / browser.act)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3099"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC: the gateway sends grant_id \"session:{id}\"; the broker mints random ids, so a start fails closed with 403. Model-initiated browser_agent in Do runs deferred to Wave 6 (E12)."
+  },
+  {
+    "id": "v-planned-decisions-091",
+    "category": "Computer & environment control",
+    "name": "Browser screenshots relayed with an authoritative content type and a renderable-type allowlist",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1526"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "DOC (HAP 5.5): Quarry-v2 artifacts, user-audience token, SVG/HTML excluded."
+  },
+  {
+    "id": "v-planned-decisions-092",
+    "category": "Computer & environment control",
+    "name": "Drive the user's own Chrome (extension/CDP)",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "DECISION parked by owner ruling 2026-09-28: Chrome control means the hosted governed browser."
+  },
+  {
+    "id": "v-planned-decisions-093",
+    "category": "Computer & environment control",
+    "name": "OS-level desktop computer use",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Endpoint Plane/docs/architecture.md"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "DECISION parked by the owner. Endpoint Plane exists but no agent tool targets it."
+  },
+  {
+    "id": "v-planned-decisions-094",
+    "category": "Computer & environment control",
+    "name": "Teach-by-demonstration browser routines",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:449"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md"
+    ],
+    "notes": "DOC shortlist #3 (L): must produce the same evidence trail; additive to the typed-action-first priority."
+  },
+  {
+    "id": "v-planned-decisions-095",
+    "category": "Computer & environment control",
+    "name": "Human takeover for secrets/2FA/CAPTCHA in the live view",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:428"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "DOC: manual takeover exists (CPA:82); the take-over-for-secrets handoff flow and copy are the planned addition."
+  },
+  {
+    "id": "v-planned-decisions-096",
+    "category": "Coding capability",
+    "name": "LSP bridge client (LspQuery to an external bridge)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1",
+      "C:/dev/CoresSystem/apps/Model Plane/bridges/lsp-bridge"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC exists; DOC CPA:44 not deployed; DECISION H11 (post-write diagnostics instead of an LSP bridge) deferred to Wave 6. Verevon is not an IDE (CWP: IDE-like capability, not IDE UI)."
+  },
+  {
+    "id": "v-planned-decisions-097",
+    "category": "Coding capability",
+    "name": "Editable, re-runnable code cell",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:62"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DECISION deferred to Wave 6 (H7) until sandbox limits are verified."
+  },
+  {
+    "id": "v-planned-decisions-098",
+    "category": "Coding capability",
+    "name": "Codex app-server as a provider route (ChatGPT subscription, gpt-5.6-terra)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:26"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CACHE_COMPACTION_AUDIT_2026-09-17.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "SRC. Decision 2026-09-23: keep terra as the product route; the direct OAuth Responses transport is built but opt-in (CCA 8.1). No provider failover on this route by owner choice."
+  },
+  {
+    "id": "v-planned-decisions-099",
+    "category": "Memory, learning & personalization",
+    "name": "Long-term memory: session-core agent_memory + letta-bridge (agentmemory / pgstore / memstore) with RRF fusion",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:207",
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/letta-bridge/internal/pgstore",
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/letta-bridge/internal/agentmemory"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md"
+    ],
+    "notes": "SRC. RRF recall fix shipped 2026-09-17 (LEF section 3). DECISION: no pgvector column, no MemFS rewrite, no second embedding pipeline (LSR section 8)."
+  },
+  {
+    "id": "v-planned-decisions-100",
+    "category": "Memory, learning & personalization",
+    "name": "SSE chat memory prefetch (400 ms, trivial-prompt skip incl. Norwegian) + recall disclosure with three-state provenance",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs:103",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs:168"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. Owner decision #3: show which memories (DeepSeek context-provenance model). Outcome metric with a closed label set (HAP 5.2)."
+  },
+  {
+    "id": "v-planned-decisions-101",
+    "category": "Memory, learning & personalization",
+    "name": "Model-callable save_memory / recall_memory in the agent loop",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4235"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC: bound to cap.memory.index/search, attested from a session-core probe; blocked in plan mode and in subagents; ZDR-refused."
+  },
+  {
+    "id": "v-planned-decisions-102",
+    "category": "Memory, learning & personalization",
+    "name": "Memory erasure propagated to the semantic tier on thread delete / org purge",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_erasure.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC. Org purge is best-effort inline (no receipt ledger): known limitation."
+  },
+  {
+    "id": "v-planned-decisions-103",
+    "category": "Memory, learning & personalization",
+    "name": "Dreaming extraction with supersession and provenance",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dreaming.rs:197"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-104",
+    "category": "Memory, learning & personalization",
+    "name": "Memory extractor grounding against existing keys (ADD/EXTEND/SUPERSEDE/NOOP)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_grounding.rs:90"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md"
+    ],
+    "notes": "SRC: implemented behind MEMORY_GROUNDING_ENABLED (default off per LEF 7.6)."
+  },
+  {
+    "id": "v-planned-decisions-105",
+    "category": "Memory, learning & personalization",
+    "name": "Memory dedup tool",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_dedup.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md"
+    ],
+    "notes": "SRC (LEF 7.8)."
+  },
+  {
+    "id": "v-planned-decisions-106",
+    "category": "Memory, learning & personalization",
+    "name": "G7 learning loop: RUN_COMPLETED -> LLM review -> skill rows (confidence floor, protected user skills)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/learning_events.rs:55",
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/learning/learning.go:39",
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/cmd/main.go:747"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC wired; DOC: no skill proven from a real run (I23 deferred); the review uses a paid model so a global kill switch LEARNING_REVIEW_ENABLED exists; the per-route skip is owner decision OD4."
+  },
+  {
+    "id": "v-planned-decisions-107",
+    "category": "Memory, learning & personalization",
+    "name": "Human promotion gate / three-tier (vendor-org-user) learned-skill library",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md:1352"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "DOC: confirmed gap (background_review candidates are org-wide matchable without review); deliberately not built pending a product/UX decision. The removed PromoteSkill RPC was dead theater."
+  },
+  {
+    "id": "v-planned-decisions-108",
+    "category": "Memory, learning & personalization",
+    "name": "Memory-adapter registry (one-external-provider cap, reserved tool names, durability-classed writes)",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1390"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "DECISION deferred 2026-05-30; CHD notes the trigger (a second backend) has fired, but the remaining Hermes manager pieces are structural or not applicable."
+  },
+  {
+    "id": "v-planned-decisions-109",
+    "category": "Memory, learning & personalization",
+    "name": "Standing \"mental model\" user profile (Honcho/hindsight style)",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md:87"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md"
+    ],
+    "notes": "DOC top-5 item #4; not started."
+  },
+  {
+    "id": "v-planned-decisions-110",
+    "category": "Memory, learning & personalization",
+    "name": "Skill-retirement feedback loop (Hermes lineage/rollback)",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md:286"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md"
+    ],
+    "notes": "DOC lowest priority; flag/log-only first."
+  },
+  {
+    "id": "v-planned-decisions-111",
+    "category": "Memory, learning & personalization",
+    "name": "Memory management UI (view / correct / forget)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/model-plane-to-verevon-parity.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md"
+    ],
+    "notes": "SRC; per-entry correct/forget inside chat noted as a gap in LEF."
+  },
+  {
+    "id": "v-planned-decisions-112",
+    "category": "Memory, learning & personalization",
+    "name": "Implicit dissatisfaction signals + explicit feedback into skill quality",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/implicit_feedback.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+      "C:/dev/CoresSystem/model-plane-to-verevon-parity.md"
+    ],
+    "notes": "SRC; the feedback action is now model-eligible; the quality loop is unproven live."
+  },
+  {
+    "id": "v-planned-decisions-113",
+    "category": "Memory, learning & personalization",
+    "name": "Projects / server-synced folders with project instructions",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:141"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "DECISION deferred to Wave 6 (I21) pending ADR-0003 precedence sign-off."
+  },
+  {
+    "id": "v-planned-decisions-114",
+    "category": "Memory, learning & personalization",
+    "name": "Graph claim validity intervals (Graphiti NOT adopted)",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/GRAPHITI_ADOPTION_ADR_2026-09-07.md:1"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/GRAPHITI_ADOPTION_ADR_2026-09-07.md"
+    ],
+    "notes": "DECISION ADR-0004 proposed 2026-09-07: do not adopt Graphiti in any shape; take validity intervals only; no automatic invalidation."
+  },
+  {
+    "id": "v-planned-decisions-115",
+    "category": "Memory, learning & personalization",
+    "name": "Semantic / exact-match answer cache",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/langcache.rs:1"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "DECISION REMOVED: hosted LangCache removed (residency/erasure), the local Dragonfly exact-match tier removed 2026-09-16 (could not both hit and be correct). BKL section 3 still lists it as a moat (stale)."
+  },
+  {
+    "id": "v-planned-decisions-116",
+    "category": "Models & routing",
+    "name": "Intent/budget routing policy + fallback chain with ZDR / privacy-tier / residency gates",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/intent.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-117",
+    "category": "Models & routing",
+    "name": "Providers: Anthropic (direct + Azure Foundry), OpenAI / Azure OpenAI incl. MaaS (DeepSeek, Cohere), Codex subscription",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:471",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/openai.rs:33",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:26"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md"
+    ],
+    "notes": "SRC: ModelFamily is only OpenAiCompatible | Anthropic."
+  },
+  {
+    "id": "v-planned-decisions-118",
+    "category": "Models & routing",
+    "name": "Google Gemini provider",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql:23"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md"
+    ],
+    "notes": "Searched inference-core for gemini: no adapter. The seed row was soft-deleted because no adapter can serve it. V2P lists Gemini/Mistral/Cohere/Ollama as Missing."
+  },
+  {
+    "id": "v-planned-decisions-119",
+    "category": "Models & routing",
+    "name": "Local / self-hosted models (Ollama, vLLM)",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1990"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_V2_PARITY.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "Searched inference-core for ollama/vllm/lmstudio: none. The Needle self-hosted path was cancelled after Phase 0 (2048-token context, 47% accuracy)."
+  },
+  {
+    "id": "v-planned-decisions-120",
+    "category": "Models & routing",
+    "name": "Extended-thinking budget dial (quick/standard/deep) wired from the composer",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/thinking.rs:18",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/thinking.rs:29"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Writer fixed 2026-08-26. OpenAI reasoning_effort mapping NOT done (no streamed reasoning)."
+  },
+  {
+    "id": "v-planned-decisions-121",
+    "category": "Models & routing",
+    "name": "Verevon modes budget/balance/genius + verbosity profiles + Auto/Raskt/Dyp response mode",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:833",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/verbosity.rs:1"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "SRC. caveman-style terse profiles (\"adopt later\" in REFERENCE-MATRIX) effectively adopted."
+  },
+  {
+    "id": "v-planned-decisions-122",
+    "category": "Models & routing",
+    "name": "Prompt caching (Anthropic cache_control, stable-prefix ordering, cache token telemetry and pricing)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:194",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs:243"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CACHE_COMPACTION_AUDIT_2026-09-17.md"
+    ],
+    "notes": "SRC; DOC CCA section 8: no cache hit measured on any route; OpenAI-route items built but undeployed."
+  },
+  {
+    "id": "v-planned-decisions-123",
+    "category": "Models & routing",
+    "name": "Structured outputs (response_format json_schema)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/openai.rs:466"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CACHE_COMPACTION_AUDIT_2026-09-17.md"
+    ],
+    "notes": "SRC; the planner on Terra requires the strict schema."
+  },
+  {
+    "id": "v-planned-decisions-124",
+    "category": "Models & routing",
+    "name": "Typed context-overflow classification (TooLong) feeding fallback to a larger-window provider",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/overflow.rs:100",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/overflow_contract.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. pi silent-overflow heuristics NOT adopted."
+  },
+  {
+    "id": "v-planned-decisions-125",
+    "category": "Models & routing",
+    "name": "Self-hosted Needle tool-calling model",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1990"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/external-ideas-harvest.md"
+    ],
+    "notes": "DECISION cancelled 2026-08-25."
+  },
+  {
+    "id": "v-planned-decisions-126",
+    "category": "Models & routing",
+    "name": "TOON compact encoding for grounded facts",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-toon/src/lib.rs:1",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grounding.rs:684"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. REFERENCE-MATRIX (2026-05-30) lists TOON as not started: stale."
+  },
+  {
+    "id": "v-planned-decisions-127",
+    "category": "Models & routing",
+    "name": "Side-by-side model comparison",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched SPA features/chat for compare/side-by-side: none. No plan found in the docs read."
+  },
+  {
+    "id": "v-planned-decisions-128",
+    "category": "Transparency, observability & control",
+    "name": "Context inspector (itemised window segments with content and tokens)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7932",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Reachability bug fixed 2026-08-26; no delegated Data Plane credential by decision."
+  },
+  {
+    "id": "v-planned-decisions-129",
+    "category": "Transparency, observability & control",
+    "name": "Reasoning trace (reasoning_delta) rendered collapsed",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:463"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "SRC; DOC CPA:108 not visible on Terra; recommended default is a collapsed summary (OD19)."
+  },
+  {
+    "id": "v-planned-decisions-130",
+    "category": "Transparency, observability & control",
+    "name": "Chat tabs chat/sources/artifacts/steps/trace with tool-call cards",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:41"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-131",
+    "category": "Transparency, observability & control",
+    "name": "Per-turn usage, cost, timing and servedBy + cost-core ledger",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:460",
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "SRC. The subscription route is counted as zero cost."
+  },
+  {
+    "id": "v-planned-decisions-132",
+    "category": "Transparency, observability & control",
+    "name": "Live credit meter during a run",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:48"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DOC not built; recommended show + warn at 80% (OD19)."
+  },
+  {
+    "id": "v-planned-decisions-133",
+    "category": "Transparency, observability & control",
+    "name": "Agent Run Console with proof bundles, plan panel, approvals, cost and browser evidence",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/model-plane-to-verevon-parity.md"
+    ],
+    "notes": "SRC; a contract test pins all 14 orchestration events."
+  },
+  {
+    "id": "v-planned-decisions-134",
+    "category": "Transparency, observability & control",
+    "name": "SSE event taxonomy freshness + producer/consumer coverage CI gate",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/scripts/gen-sse-event-taxonomy.py",
+      "C:/dev/CoresSystem/.github/workflows/sse-taxonomy.yml"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC. DeepSeek generated-docs gate, narrower (one taxonomy)."
+  },
+  {
+    "id": "v-planned-decisions-135",
+    "category": "Transparency, observability & control",
+    "name": "Decision ledger + numbered postmortems",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC/DOC. DeepSeek Agent Notes pattern adopted 2026-08-22; ledger updated to 2026-10-08."
+  },
+  {
+    "id": "v-planned-decisions-136",
+    "category": "Transparency, observability & control",
+    "name": "Unknown-event logging in the SPA stream client",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:681"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-137",
+    "category": "Transparency, observability & control",
+    "name": "inference-core metering decorator and typed posture-refusal trailers",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:146"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "DOC: built and tested 2026-10-06; state proposed until deployed."
+  },
+  {
+    "id": "v-planned-decisions-138",
+    "category": "Safety, permissions & governance",
+    "name": "Capability-before-dispatch policy with health attestation; unattested quarantine list",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3954"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC: 9 capabilities in UNATTESTED_BASELINE; CAPABILITY_PROMOTION_LEDGER.tsv shows every row source_only."
+  },
+  {
+    "id": "v-planned-decisions-139",
+    "category": "Safety, permissions & governance",
+    "name": "Risk classifier, consent-to-disclose predicate, restricted-context write block",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:160",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:181",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:195"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-140",
+    "category": "Safety, permissions & governance",
+    "name": "ZDR propagation fail-closed across planes (no provider attested)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/zdr_precheck.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/zdr.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md",
+      "C:/dev/CoresSystem/apps/master-ownership-matrix.md"
+    ],
+    "notes": "SRC; DOC: no provider attested, so every ZDR request is refused (Z-40 operator step)."
+  },
+  {
+    "id": "v-planned-decisions-141",
+    "category": "Safety, permissions & governance",
+    "name": "Own-connection ZDR waiver (signed, acknowledged, per-run, per-connection)",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/api/contracts/zdr-refusals.json",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:186"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/apps/master-ownership-matrix.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/BUILD_PASS_2_2026-10-11.md"
+    ],
+    "notes": "DOC+SRC (untracked files): Z-11/12/13/17/18/21a built dark; Z-15 \"do not ship\"; ownership rule 17 amends rule 4."
+  },
+  {
+    "id": "v-planned-decisions-142",
+    "category": "Safety, permissions & governance",
+    "name": "Org ZDR switch gated on an attested provider",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:345"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "DOC: built (Z-04); proposed until a live proof with a ZDR-on org."
+  },
+  {
+    "id": "v-planned-decisions-143",
+    "category": "Safety, permissions & governance",
+    "name": "Wire-identity tenancy chokepoint (authorize_rpc over every RPC)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc.rs:271"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "SRC. DeepSeek pattern verified as already satisfied 2026-08-22."
+  },
+  {
+    "id": "v-planned-decisions-144",
+    "category": "Safety, permissions & governance",
+    "name": "Privacy tiers (global, eu_resident, zdr_contractual, sovereign)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql:21"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-145",
+    "category": "Safety, permissions & governance",
+    "name": "Injection-defense classification of web.search / web.read as external content",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:2311"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "DOC: fixed 2026-08-25."
+  },
+  {
+    "id": "v-planned-decisions-146",
+    "category": "Safety, permissions & governance",
+    "name": "Content moderation enforcement point",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/moderation.rs:1"
+    ],
+    "plannedIn": [],
+    "notes": "SRC exists; policy lives in capability-core safety_policies; live effectiveness unknown (INF)."
+  },
+  {
+    "id": "v-planned-decisions-147",
+    "category": "Safety, permissions & governance",
+    "name": "Editable \"don't ask again\" rules / durable addressable approval queue UI",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md:1203"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "DOC: explicitly \"remains open and is NOT claimed\" (CHD 13.3 status box). Not searched in code."
+  },
+  {
+    "id": "v-planned-decisions-148",
+    "category": "Safety, permissions & governance",
+    "name": "Third-party audit / certification of the data-protection design",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:50"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "Owner-only (Workstream J)."
+  },
+  {
+    "id": "v-planned-decisions-149",
+    "category": "UI/UX & product design",
+    "name": "\"IDE-like capability, not IDE-like cold-start UI\": conversation-first with contextual surfaces",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md:193"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "DOC product decision; implementation in progress."
+  },
+  {
+    "id": "v-planned-decisions-150",
+    "category": "UI/UX & product design",
+    "name": "Space cockpit (Chat / Work / Knowledge / Activity / Agent / Members) with honest placeholders",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md"
+    ],
+    "notes": "SRC+DOC: Work/Knowledge/Activity wait on owner-plane projections."
+  },
+  {
+    "id": "v-planned-decisions-151",
+    "category": "UI/UX & product design",
+    "name": "Design-preview honesty badges on unbacked surfaces (WorkflowBuilder, ChatbotStudio)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotStudio.tsx"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md",
+      "C:/dev/CoresSystem/model-plane-to-verevon-parity.md"
+    ],
+    "notes": "SRC. DECISION: keep previews until a backend exists; the Model Plane is not an n8n DAG runner."
+  },
+  {
+    "id": "v-planned-decisions-152",
+    "category": "UI/UX & product design",
+    "name": "Keyboard shortcut sheet",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:45"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DOC not built."
+  },
+  {
+    "id": "v-planned-decisions-153",
+    "category": "UI/UX & product design",
+    "name": "Block-level streaming re-render",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:46"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DOC not built; no render benchmark."
+  },
+  {
+    "id": "v-planned-decisions-154",
+    "category": "UI/UX & product design",
+    "name": "Verb/object/outcome activity grammar for the run console and Space activity",
+    "status": "planned",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:341"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+      "C:/dev/CoresSystem/Verevon-ai-first-plan.md"
+    ],
+    "notes": "DOC (Buzz pattern); AIF Phase 3."
+  },
+  {
+    "id": "v-planned-decisions-155",
+    "category": "UI/UX & product design",
+    "name": "Norwegian-first i18n (i18n.tr NO/EN)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:494"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-156",
+    "category": "UI/UX & product design",
+    "name": "Presence / multi-user collaboration in plain /chat",
+    "status": "absent",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:58"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+    ],
+    "notes": "DECISION (recommended default OD19): presence stays in Spaces. A dormant Convex presence schema exists (COW appendix)."
+  },
+  {
+    "id": "v-planned-decisions-157",
+    "category": "UI/UX & product design",
+    "name": "Public Trust Center page",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/src/app/trust"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC exists; 30 sentences pending re-verification; edits not deployed."
+  },
+  {
+    "id": "v-planned-decisions-158",
+    "category": "Platform architecture",
+    "name": "Split Rust/Go Model Plane services (model-gateway, execution-core, session-core, inference-core, capability-core, sandbox-manager, browser-broker, cost-core, letta-bridge, orchestrator-core)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services",
+      "C:/dev/CoresSystem/apps/Model Plane/go/services"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/master-ownership-matrix.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-planned-decisions-159",
+    "category": "Platform architecture",
+    "name": "BFF minting audience-bound delegated user bearers per request (nine bearers incl. sandbox)",
+    "status": "shipped",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:3043"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC+DOC."
+  },
+  {
+    "id": "v-planned-decisions-160",
+    "category": "Platform architecture",
+    "name": "Outbox + NATS learning/audit events with a live ACL proof",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/audit_publisher.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "SRC; DOC: the audit-trail delivery fix is built, not deployed (4,992 events lost)."
+  },
+  {
+    "id": "v-planned-decisions-161",
+    "category": "Platform architecture",
+    "name": "Two InvokeRequest shapes (proto gRPC vs HTTP SSE struct)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md:984"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/claude-hermes-deepseek.md"
+    ],
+    "notes": "DOC: collapse recommended; not verified as done (INF)."
+  },
+  {
+    "id": "v-planned-decisions-162",
+    "category": "Platform architecture",
+    "name": "Single-replica in-memory registries (cancel, queued input, plan grant, idempotency)",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/queued_input.rs",
+      "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/harness-adoption-execution-plan.md",
+      "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC; constraint: the SSE connection pins a run to one process; grants are lost on restart."
+  },
+  {
+    "id": "v-planned-decisions-163",
+    "category": "Platform architecture",
+    "name": "Signed release artifact v3 and immutable rollback",
+    "status": "partial",
+    "evidence": [
+      "C:/dev/CoresSystem/apps/Model Plane/scripts/release-artifact.sh",
+      "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md:1"
+    ],
+    "plannedIn": [
+      "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "DOC: no candidate or rollback artifact exists (ROADMAP 2026-07-16; not re-verified)."
+  }
+]

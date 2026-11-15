@@ -1,0 +1,1765 @@
+{
+ "category": "UX patterns & layout",
+ "excluded": [
+  {
+   "id": "grokbot-agent-product-158",
+   "reason": "Implementation detail (Popover-API top-layer portal root to avoid z-index conflicts); no user-recognisable capability. Worth noting to the Solid UI kit owners as an engineering tip only."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t1-12-001",
+   "name": "Primary navigation IA: rail + sidebar with first-class destinations (Home/Inbox, Activity, Agents, Files, Later)",
+   "description": "A persistent left rail/app bar switches workspaces and top-level destinations (inbox/home, activity, agents, files, workflows, apps), with the conversation sidebar beneath; destinations can be pinned and reordered.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "qm",
+     "teams"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-172",
+    "slack-product-surface-148",
+    "qm-product-127",
+    "teams-product-surface-153"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-172"
+    ],
+    "why": "Only design that makes Agents, Workflows and the inbox first-class sidebar destinations next to grouped conversations, and routes threads/canvas/members/agent sessions into one shared right panel (q4, SRC with file evidence). Teams (teams-product-surface-153, REA) is best for the app-bar mechanics: pin/unpin, See-all flyout and keyboard drag-and-drop with spoken narration."
+   },
+   "mechanism": "File-based routes per destination (home, agents, pulse, workflows, projects, channel, forum post). A pinned header component holds search plus fixed feature entries; below it fixed conversation groups (Starred, Channels, Forums, DMs) plus user sections. A narrow community rail switches tenants. Teams adds an app bar model {appId, pinned, order} with a keyboard DnD state machine (pickup -> move -> place/cancel) announcing each step via a live region. In Solid: a <Rail> of route entries from a typed destinations registry (permission-checked like QM destinations()), a <Sidebar> composed of <PinnedHeader> + grouped lists.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-111",
+     "v-space-ui-110"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:356-490",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232"
+    ],
+    "gap": "Core Sidebar \"Spaces\" panel lists Channels, Personal Space and All conversations for the selected room only. There is no cross-room Home/Inbox, Activity, DMs, Later or Agents destination in the sidebar; agents and members live only inside cockpit tabs (doc-vs-code discrepancy 3 in the baseline). No workspace/org rail.",
+    "strengths": "One persistent sidebar shared across the app and a coherent workroom; hash-tab deep links."
+   },
+   "benefit": "Once a user belongs to several Spaces with several agents, the question \"what needs me\" has to be answered across rooms. A Home/Inbox and Agents destination is how Teams, Slack and Buzz users expect to navigate, and it gives approvals a place to land.",
+   "approach": "Frontend Plane: add a destinations registry (Home/Inbox, Spaces, DMs when built, Activity, Agents, Files) to the Core Sidebar with permission checks; Inbox/Activity read cross-room projections that Application Plane must publish (per-Space latest-activity aggregate, already listed as open in SPACE_PAGE_AUDIT). Gateway stays a proxy.",
+   "effort": "L",
+   "dependencies": [
+    "Cross-room activity/unread aggregate from Application Plane",
+    "Notification events for Space (category 05)",
+    "DM/group-DM kinds (category 01)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Building destinations before the aggregates exist yields empty or local-only views (the current sidebar dots are already browser-local). Must not imply visibility the owner plane does not grant.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Every reference has it and the Space vision (Teams+Slack) is impossible to navigate without a cross-room entry point; it is the frame that the thread panel, inbox and agents directory hang on.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-002",
+   "name": "Personal sidebar organisation: star/pin, custom sections, per-group sort, drag-drop, batch actions",
+   "description": "Users shape their own conversation list: pinned/starred items, user-created sections, sort per group (A-Z, recent, priority), drag between sections, multi-select batch move/hide/archive, colours, and a \"more unread\" affordance; synced across devices.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "qm",
+     "slack"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-173",
+    "grokbot-agent-product-111",
+    "qm-product-130",
+    "slack-product-surface-154"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-173"
+    ],
+    "why": "Most complete and cleanly specified (q4, SRC): per-group sort keys, synced sections/stars, dnd-kit sorting and an off-screen MoreUnread button. Grok Bot (grokbot-agent-product-111) adds hide-from-sidebar and batch move/hide/delete for agents; Slack (slack-product-surface-154, DOC) adds Priority sort and VIP break-through."
+   },
+   "mechanism": "Per-user settings blob {stars:[ref], sections:[{id,name,refs[]}], sort:{starred|channels|dms|section:<id> -> alpha|recent|priority}, hidden:[ref]} stored server-side and synced; list renders groups in fixed order then user sections; @dnd-kit (Solid: solid-dnd) sortable with keyboard sensor; IntersectionObserver on unread rows outside viewport drives a \"More unread\" pill that scrolls to the next one; selection mode with shift-range and bulk actions.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-111"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:281-321"
+    ],
+    "gap": "Org room is pinned first and threads show pinned/unread/working dots, but there are no user stars, custom sections, sort modes, drag-and-drop, hide or bulk actions, and unread dots exist only for the room open in this browser.",
+    "strengths": "Working/unread/pinned dots per thread already exist; filter box present."
+   },
+   "benefit": "With agents creating many threads, a flat list degrades fast; per-user organisation keeps humans oriented without changing anyone else's view (no authority impact).",
+   "approach": "Per-user sidebar preferences owned by Application Plane (user preference document, not a Space aggregate), read/written via typed gateway actions; Frontend renders with solid-dnd. Priority sort waits on the attention/salience model already used by Activity.",
+   "effort": "M",
+   "dependencies": [
+    "Cross-room unread aggregate",
+    "Primary navigation IA (C-t1-12-001)"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Low. Keep preferences per user so no Space ACL is touched; avoid storing room names in the preference blob (only refs) for retention/ZDR hygiene.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Expected by Slack/Teams users and cheap once nav exists; not a blocker on day one.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-003",
+   "name": "Conversation-list modes, filters and system sections (unified vs split, Muted, Meeting chats) with switch-back",
+   "description": "The conversation list can be unified or split (chats vs channels), has filter commands (unread, muted, meeting chats, channels), and optional system-generated sections the user can toggle; layout changes ship as experiment arms with an explicit switch back that keeps user sections.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-151",
+    "teams-shell-and-native-094",
+    "teams-product-surface-156"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-151",
+     "teams-shell-and-native-094"
+    ],
+    "why": "Only source with typed view modes (SPLIT/UNIFIED), filter tags and system folder kinds, plus a respectful switch-back modal that preserves custom sections (q5 REA + q4 SRC)."
+   },
+   "mechanism": "Enums: viewType {SPLIT, UNIFIED}, filterTag {COMBINED, SPLIT_CHAT, SPLIT_CHANNEL}, systemFolder {RECENT, MUTED, MEETING_CHATS, QUICK_VIEWS, HIDDEN}. List selector = filter(viewType, activeFilters) over conversation summaries; system sections are computed views, togglable in settings (show_muted_section etc). Layout experiments are flags with a switch-back that only flips a preference, never deletes sections.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232"
+    ],
+    "gap": "Sidebar shows fixed Channels / Personal Space / All conversations; no filters (unread, muted, agent runs, approvals), no system sections and no view modes.",
+    "strengths": ""
+   },
+   "benefit": "System sections such as \"Agent runs\" and \"Waiting for approval\" let agent-generated conversations stay out of the human list without hiding them, which matters more in Verevon than in Teams.",
+   "approach": "Frontend Plane computed sections over the same conversation summaries; persist toggles in the per-user sidebar preferences (C-t1-12-002). Run layout changes behind feature flags with switch-back.",
+   "effort": "S",
+   "dependencies": [
+    "Personal sidebar organisation (C-t1-12-002)",
+    "Run/approval state in conversation summaries"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low; avoid too many sections by default.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Useful refinement after the basic sidebar organisation; Teams-only evidence.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 2,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-004",
+   "name": "Room home and header shelf: tabs, pins, bookmarks and scope tools with live counts",
+   "description": "Each conversation/room carries a header shelf (tabs such as Messages, Canvas, Pins, Lists, bookmarks) or a scope page and top bar showing the room's resources (files, crons, memory, apps, skills, keychain) with live counts, so the room's artifacts and agent context sit next to the chat.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "slack-product-surface-149",
+    "qm-product-129",
+    "qm-product-128",
+    "qm-architecture-111"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-128",
+     "qm-product-129"
+    ],
+    "why": "QM's scope-centred page plus top-bar tool buttons with 60 s cached counts make the agent's working context legible in the conversation (q4, SRC, unique). Slack (slack-product-surface-149, DOC) is best for user-added artifact tabs and bookmark bars."
+   },
+   "mechanism": "Scope model {personal|project|channel|group} -> contextMeta(scope) renders panels (Conversations, People, Files, Webhooks, Crons, Apps, Skills) with manage actions and a settings aside (members, model, channel header, ambient policy). Session top bar = breadcrumb + tool buttons; TOOL_COUNTERS cache counts per scope for 60 s; opening a tool keeps the session scope (setScopedSession). Slack: tabs list per conversation with \"show by default\", Pins tab auto-created on first pin, bookmark folders with drag ordering.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-110",
+     "v-space-backend-108",
+     "v-space-backend-109"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-110",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:408-486",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4890-4925"
+    ],
+    "gap": "Six fixed tabs (Chat, Work, Knowledge, Activity, Agent, Members) with no user-added tabs (canvas, list, link), no bookmarks bar, no counts in the header, pins not shown first, and space_actions only echoes the org catalog. No room-level view of skills/connectors/memory (S3.x planned).",
+    "strengths": "Verevon is ahead of Slack/Teams in exposing Work, Knowledge, Activity and Agents as first-class room tabs; keep the fixed cockpit as the default and the \"gap, not empty\" rendering on each tab."
+   },
+   "benefit": "Matches the Teams \"tabs on a channel\" habit and QM's \"the room's computer\" view; lets humans see what an agent can use in this room before invoking it, which supports the authority model (Space access never widens owner ACLs, so showing the effective resources is honest).",
+   "approach": "Frontend Plane: add header counts (open approvals, running work, documents) from existing projections; add a user-pinnable tab type (link, document, canvas when built) stored as Space metadata in Application Plane; show pinned posts first. Room resource panels (skills, connectors, memory) follow S3.x.",
+   "effort": "M",
+   "dependencies": [
+    "Collaborative artifacts/canvas (category 08)",
+    "S3.x skills/connectors cockpit"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Tab sprawl; counts must show unknown, not zero, when a projection is unavailable.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Verevon already has the strongest fixed cockpit; extending it with counts and user tabs is incremental.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-005",
+   "name": "Contextual right-hand pane (details, assistant, agent session) with one header contract and resize",
+   "description": "A right-side pane hosts details, members, an assistant/agent session or AI notes beside the conversation; it has a standard header (back, title, actions, dismiss), optional tabs, a labelled resize handle, remembered width and accessible open/close.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "teams",
+     "slack"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "grokbot-agent-product-162",
+    "teams-product-surface-166",
+    "slack-product-surface-151"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-162"
+    ],
+    "why": "Most complete accessible mechanics (q4, SRC): 300 ms close linger for exit animation, inert while closing, focus to first enabled control, role=separator resize handle with label, shortcut toggle, and an option to dock a task thread beside the chat when wide. Teams (teams-product-surface-166) contributes the reusable header contract; Buzz uses the same shared auxiliary-pane shell for threads, canvas, members and agent sessions (buzz-product-172)."
+   },
+   "mechanism": "One <AuxPane> shell: props {kind, title, actions, onBack, onDismiss}; open state machine open -> closing (inert, aria-hidden, 300 ms linger) -> closed; width persisted per user; resize via pointer events on a role=separator element with aria-valuenow/orientation and keyboard arrows; kinds registered (thread, agent-session, details, run, approval). Width breakpoint decides docked vs overlay.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-111"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1253-1324",
+     "apps/Frontend Plane/verevonv3/src/features/inbox/components/InboxPage.tsx:1194"
+    ],
+    "gap": "The right rail is the read-only \"room pulse\" (working status + counts). It cannot host a thread, an agent session, run details or members; no resize, no standard header. A resizable separator exists elsewhere (Inbox) but not in Space.",
+    "strengths": "A third column already exists in the layout with responsive collapse, so the slot is there."
+   },
+   "benefit": "The single container that the thread panel, live agent session, run console and approval details all need; avoids per-feature layout work and keeps room scroll position.",
+   "approach": "Frontend Plane: generalise the pulse rail into an AuxPane shell reusing the Inbox separator logic; first kinds: thread, run/agent session (reuse AgentRunConsole panels as the QM plan asks), members. Pure UI; data stays from owner projections.",
+   "effort": "M",
+   "dependencies": [
+    "Thread panel (C-t1-12-006)",
+    "Run console components"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Focus traps and layout thrash at medium widths; must keep 720 px collapse behaviour.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Enabler for threads and visible agent work, both top gaps; modest effort.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-006",
+   "name": "Thread side panel, pop-out thread window and inline thread replies from inbox",
+   "description": "Replies to a message open in a side panel (or a separate window) so the channel keeps its position; a Threads view lists followed threads; inbox thread cards can expand and be replied to inline.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams",
+     "buzz"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "slack-product-surface-150",
+    "teams-product-surface-152"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-product-surface-150"
+    ],
+    "why": "Canonical pattern (q5, DOC): side panel plus pop-out window plus a Threads view of followed threads. Teams (teams-product-surface-152, REA) adds the best shortcut: expand a thread card in the inbox and reply in place via a tree-grid compose box. Buzz also opens threads in its shared right panel (SRC, buzz-product-172), counted as a third source."
+   },
+   "mechanism": "Message has thread_root_id; panel route ?thread=<id> renders root + replies with its own composer and scroll state; follow state per user drives a Threads list with unread per thread; pop-out opens the same route in a new window. Teams inline slice: tree-grid rows (thread -> replies), \"show N more\", inline compose box, unread-threads pill.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-116"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:497-607",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:200"
+    ],
+    "gap": "Replies continue inline (up to 30 turns per post). No thread pane, no followed-threads view, and thread deep links (?thread_id=) generated by Activity are never read by SpacePage.",
+    "strengths": ""
+   },
+   "benefit": "Agent runs produce long threads; a side panel lets humans follow or approve a run without losing the room, and gives the thread deep links already emitted by Activity a target.",
+   "approach": "Frontend Plane: thread kind in the AuxPane (C-t1-12-005) bound to a ?thread= search param; data from Model Plane Session Core thread transcript (owner of threads). Follow/unread per thread needs a participant/unread projection (S1.7, Application Plane).",
+   "effort": "M",
+   "dependencies": [
+    "AuxPane shell (C-t1-12-005)",
+    "S1.7 participant/unread projection",
+    "Push realtime (category 09)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Partial transcripts when shared reads are deny-by-default; the panel must show \"you cannot read these turns\" rather than an empty thread.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Table stakes across Slack/Teams/Buzz, flagged absent in code, and the natural home for agent run follow-up.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-007",
+   "name": "Multiview: tile several conversations or agent sessions side by side",
+   "description": "Drag conversations to pane edges to tile up to 16 conversations/views; each pane picks its own density from its size; layouts restore and sync across devices.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-133"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-133"
+    ],
+    "why": "Only source (q4, SRC); dockview-core with tile limits, per-pane density tiers and remote layout sync."
+   },
+   "mechanism": "dockview-core layout; MAX_TILES = MAX_PANES = 16; drag payload types per pane kind; serialised layout stored per user and synced; density.ts maps pane width/height to a density tier that the transcript respects.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:356-490"
+    ],
+    "gap": "One room at a time; no tiling of rooms or agent runs.",
+    "strengths": ""
+   },
+   "benefit": "Power users supervising several agents (Chief/Core console) can watch runs in parallel; a differentiator against Teams/Slack.",
+   "approach": "Frontend Plane, later: a dockview-style layout around existing room/run components once they are self-contained (AuxPane, density).",
+   "effort": "L",
+   "dependencies": [
+    "Self-contained room and run components",
+    "Push realtime"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Polling cost multiplies per tile until push realtime exists (6 s poll per room today).",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Real edge for operators but unique to QM and blocked by realtime cost; do after core chat gaps.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-008",
+   "name": "Keyboard-first navigation: quick switcher, unread jumping and discoverable shortcut hints",
+   "description": "Ctrl/Cmd+K quick switcher to any conversation, shortcuts for new message, Threads, Activity, jump to latest/next unread, mark read; hold a modifier to reveal numbered shortcuts on sidebar items.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "slack-product-surface-153",
+    "slack-shell-and-native-110",
+    "grokbot-agent-product-159"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-shell-and-native-110",
+     "slack-product-surface-153"
+    ],
+    "why": "Deepest documented keyboard model (q4, DOC high): switcher, unread navigation, All-unreads, Esc/Shift+Esc mark-read, F6 section cycling. Grok Bot (grokbot-agent-product-159, SRC) adds the cleverest discoverability: hold Cmd/Ctrl 500 ms to reveal numbered hints. Record coverage (2 sources) underestimates prevalence: a quick switcher is industry-standard (INF)."
+   },
+   "mechanism": "Global keydown router with scope (app, room, composer) and conflict rules; a palette component with fuzzy match over rooms, threads, agents, people and actions (action-registry entries are natural commands); unread navigation iterates the cross-room unread list; hold-to-reveal: timer armed on modifier keydown (500 ms), cancelled by other modifiers, keyup or blur, then renders numeric badges bound to Ctrl+1..9.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:11",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:170-179",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/ActionCommand.tsx:1-40"
+    ],
+    "gap": "Tablist arrow keys and composer keys exist, but Cmd/Ctrl+K opens web search, there is no room/thread/agent switcher, no unread jumping and no shortcut hints. No baseline record covers this directly (baseline client-shell table marks the command palette absent for Space).",
+    "strengths": "Typed action registry can feed a command palette with the same authority checks as buttons."
+   },
+   "benefit": "Cheap productivity win for daily users; a palette over the action registry also lets humans trigger agent actions with the same guardrails.",
+   "approach": "Frontend Plane: command palette fed by rooms/threads/agents lists plus action-registry entries (only human-eligible actions); rebind Cmd/Ctrl+K to the switcher and keep web search as a palette mode.",
+   "effort": "S",
+   "dependencies": [
+    "Cross-room room/thread list"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Shortcut conflicts with browser and the existing Cmd/Ctrl+K web-search habit.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Low effort, high daily value; not a vision blocker.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-009",
+   "name": "Rich composer: formatting, slash commands, attachments, clips, send-later, model presets, paste chips",
+   "description": "The message box combines formatting toolbar, slash and emoji completion, attachments and drag/drop, audio/video clips, scheduled send, and (for agents) saved model/effort presets and long pastes as editable chips.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "slack-product-surface-152",
+    "qm-product-131"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-131"
+    ],
+    "why": "For a human+agent room QM is the better model (q4, SRC): up to 8 saved model/effort presets, paste chips with a view/edit dialog, folder drop, slash completion and an upgrade banner when the org runtime moves. Slack (slack-product-surface-152, DOC) is best for the human messaging set (formatting toolbar, clips, send-later)."
+   },
+   "mechanism": "Composer state {text, attachments[], chips[], loadout} ; paste handler converts text over N chars into a chip object (label from first line) inserted as an atom; loadout presets upserted/reconciled with cap 8; slash token parser triggers a command menu from a registry; scheduling via a dropdown that writes a scheduled-send job owned by the message plane.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-117"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:597-772"
+    ],
+    "gap": "Two-row textarea with model picker, skill chips, reply banner and typing/working lines; no attachments, formatting, emoji, slash commands, clips, scheduled send, presets or paste chips. Every send is an AI invocation.",
+    "strengths": "Model picker and skill chips already exist; ZDR refusals are surfaced in the composer."
+   },
+   "benefit": "Attachments and slash commands are what make a room usable for real work; paste chips keep long pasted context legible for both humans and agents.",
+   "approach": "Frontend Plane composer extensions; attachments must go through Data Plane documents with Space-bound ACL (never widen) and respect ZDR; scheduled send needs an owner (Model Plane session or Application Plane scheduler). Each append still needs a Control thread:append decision bound to final bytes.",
+   "effort": "M",
+   "dependencies": [
+    "Human-only message path (category 01)",
+    "Attachments in Data Plane (category 08)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Content-bound append decisions make scheduled send and drafts harder; ZDR content must not be sent to external preview/embedding services.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Attachments and slash commands are expected immediately; rated recommended because the bigger blocker is the human-only message path in category 01.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-010",
+   "name": "Ambient agent-activity strip with hysteresis (who is typing/working, live headline, minimum display threshold)",
+   "description": "A single line near the composer shows humans typing and agents working, rotates a short headline of the single working agent's current step, opens its live session on click, and suppresses flicker by latching committed members and delaying phase labels.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-174",
+    "grokbot-agent-product-129",
+    "grokbot-agent-runtime-098"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-174",
+     "grokbot-agent-product-129"
+    ],
+    "why": "Buzz (q4, SRC) has the strongest interaction: headline rotation every 2.2 s, hover list of working agents, click-through to the session. Grok Bot supplies the essential anti-flicker rule (q4): reading members stay quiet, committed members are latched, and phase labels appear only after a minimum threshold (grokbot-agent-runtime-098)."
+   },
+   "mechanism": "Per room: typingUsers (presence TTL) + workingAgents (run state from owner projection). committedIds latch: an agent enters the visible set when it commits to a turn (not when reading) and leaves only on run end. Phase label shown only after min_display_threshold_ms. Headline = derive(lastStep) from the run event stream, rotated with a timer; non-owners get a generic \"working\" (Buzz headlines need owner-only transcript, INF in the source record). Click -> open AuxPane(kind=agent-session).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-117"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:616-627",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:349-369",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1253-1324"
+    ],
+    "gap": "Composer line \"Verevon is working in X\", per-post \"is working\" row and pulse card exist, but they are status-only: no step headline, no click-through to a live run, no latch/threshold rules (polling every 6 s hides flicker today but push realtime will expose it).",
+    "strengths": "Honest status from Model Plane run state, shown in three places; aria-live on live rows."
+   },
+   "benefit": "Makes agent work visible without flooding the timeline; directly addresses the baseline gap \"agent work is opaque inside the room\".",
+   "approach": "Frontend Plane: add headline derivation from run step events (Model Plane run stream via gateway), latch + threshold helpers in a pure lib with tests; click opens the AuxPane agent-session kind. Headlines must respect the shared-read rule: show step text only if the viewer may read the run.",
+   "effort": "S",
+   "dependencies": [
+    "Run step events available to the room",
+    "AuxPane (C-t1-12-005)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Leaking step content to members without read entitlement; flicker if latch rules are skipped.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Small effort, closes a top-3 baseline gap in the most visible spot of the room.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-011",
+   "name": "Plain-language activity and trust copy; agent-facing copy reviewed like UI",
+   "description": "Agent work is narrated in human phrases (reading, putting it together, waiting on results) with trust headlines (you stay in charge); errors, tool descriptions and hints are treated as an interface for both humans and agents.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "grokbot-agent-product-114",
+    "qm-architecture-130"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-114"
+    ],
+    "why": "Best non-technical vocabulary mapped from tool kinds to friendly labels (q4, SRC). QM (qm-architecture-130) contributes the principle that agent-facing copy (tool descriptions, errors) gets the same review as UI."
+   },
+   "mechanism": "Map activity kind/tool -> localized friendly label catalog; trust copy as static catalog strings; failure modules translate typed errors to human copy and keep provider refusals verbatim where written for people.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-114"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:1-35",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:122-137",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityFeed.tsx:58-118"
+    ],
+    "gap": "Verb/Object -> Outcome grammar with consequence ordering is shipped and stronger than the references, but its labels are hard-coded Norwegian and dates are forced to nb-NO; no friendlier phrasing layer for non-technical users.",
+    "strengths": "Consequence-ordered, salience-ranked grammar that mutates live rows in place is ahead of Grok Bot and QM; keep it as the single activity vocabulary."
+   },
+   "benefit": "English-speaking users currently see Norwegian activity labels; a localized friendly layer makes the strongest Verevon UX asset usable by everyone.",
+   "approach": "Frontend Plane: move activity-grammar labels into tr() catalogs, use the viewer locale for dates, add an optional friendly-label column keyed by verb.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small fix with immediate visible effect; the underlying design is already a strength.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-012",
+   "name": "Typed transcript rows for mixed human/agent rooms, with grouping and reading ergonomics",
+   "description": "The timeline renders typed row kinds (human, agent with owner label, system, run/event, approval, notice, attachment, diff) plus synthetic rows (day and unread dividers), collapses noisy machine activity into groups, shows long prompts as two-line previews and finished tool work as one timed disclosure.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "qm"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-176",
+    "grokbot-agent-product-148",
+    "qm-product-132"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-148",
+     "buzz-product-176",
+     "qm-product-132"
+    ],
+    "why": "Grok Bot (q4, SRC) has the most explicit row-kind contract including collapsible groups of agent exchanges and routine runs; Buzz (q4) has the best mixed-room anatomy (agent badge, managed-by owner, address prefix); QM (q4, SRC medium) has the best long-thread reading rules (collapsed prompts, completed-work disclosure, paged history without yanking the reader)."
+   },
+   "mechanism": "Discriminated union Row = message | send-message | event | notice | approval | attachment | voice-call | spend | synthetic(timestamp|unread-divider|day-divider|group). A grouping pass folds consecutive machine rows (same run or routine) into a group row with count and expand. Agent message rows carry {agentRef, ownerRef}; an address prefix shows \"@Agent\" targeting. QM: prompts > 2 lines collapse with Show more; completed tool steps collapse into a single \"Worked for 3m\" disclosure while the answer stays expanded; TAIL_TURNS paging loads older turns on demand.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:134-416",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:78-103"
+    ],
+    "gap": "Posts render with author, Agent chip, Reply/Pin, New/Pinned flags, approval card and working row, but there are no system rows, day/unread dividers, grouped machine activity, tool/step rows or collapsed completed work; up to 30 inline turns per post. No baseline record in this category covers it (messaging-core baseline does); verify row kinds in SpaceRoomTimeline.",
+    "strengths": "Honest attribution: unknown author vs former member are distinct; approval card is a typed in-timeline row."
+   },
+   "benefit": "The vocabulary the room needs before agents can show tool calls, delegations and approvals without drowning humans; grouping is what keeps a multi-agent room readable.",
+   "approach": "Frontend Plane: define a Row union in SP/lib with a grouping pass and tests; source run/tool events from Model Plane via the gateway (reuse AgentRunConsole step components as the QM plan asks).",
+   "effort": "M",
+   "dependencies": [
+    "Run step events in room scope",
+    "Virtualized timeline (C-t1-12-014)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Showing tool output to members without read entitlement; must apply audience filtering per entry (S1.7).",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Agent-aware references all converge on it and it is the precondition for visible agent work in the room.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-013",
+   "name": "One event log, several lenses (fast chat, slow decisions/approvals, automation traces) and per-surface projections",
+   "description": "The same authorized record is read through different lenses (stream, forum, workflow) or projected to different surfaces (web transcript, Slack messages, task cards), each with its own noise level.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-103",
+    "qm-architecture-110"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-110"
+    ],
+    "why": "QM implements it in code (SRC, q3): presenters for Slack and web read one session/run state. Buzz states the lens model more fully but only in VISION docs (DOC)."
+   },
+   "mechanism": "Single append-only conversation/run log in the owner plane; presenters are pure functions log -> surface view (web transcript rows, Slack mrkdwn, task cards, approval cards); lenses are filters + density settings over the same log, with per-lens notification defaults.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-ui-110",
+     "v-space-ui-114"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx:56-83",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:733-753"
+    ],
+    "gap": "No per-lens notification defaults and no external-surface presenters (Channel Plane docs-only).",
+    "strengths": "Activity tab already reads five owner sources through one salience-ordered grammar with lenses (Everything, Needs attention, Work and effects, Conversations, Authority) next to the Chat lens, and the BFF stays a proxy. Equal to or ahead of both references; keep the \"compose in browser from owner projections\" rule."
+   },
+   "benefit": "Already delivered; future Channel Plane adapters should be presenters over the same records, not new stores.",
+   "approach": "Keep; when notifications (category 05) land, attach default notification levels per lens.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None new.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon strength.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-014",
+   "name": "Virtualized timeline with scroll anchoring and jump-to-latest",
+   "description": "Long timelines render only nearby rows, keep the reader's place while history loads or new rows arrive, pin to bottom only when already there, animate late-arriving content without jumps, and offer jump-to-latest.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-177",
+    "grokbot-agent-product-149"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-177"
+    ],
+    "why": "Written-down, tested anchoring policy (useAnchoredScroll + anchoredScrollPolicy with lifecycle tests) on a patched virtua list, plus mobile IME handling (q3, SRC high). Grok Bot (grokbot-agent-product-149, q4 SRC medium) adds FLIP animation for rows shifting under late content and an epoch-keyed layout cache."
+   },
+   "mechanism": "Virtual list (virtua or TanStack Virtual; Solid: @tanstack/solid-virtual) with measured row heights; anchoring policy state {pinnedToBottom, anchorRowId, anchorOffset}: on prepend keep anchor offset; on append scroll only if pinnedToBottom; show Jump-to-latest when not pinned and new rows arrive; ResizeObserver + FLIP to animate siblings when a row grows; reduced-motion disables FLIP.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:134-416"
+    ],
+    "gap": "Checked in code (2026-10-13 grep): no virtualization and no scroll anchoring logic in src/features/spaces (no scrollTop/scrollIntoView use); the full thread list loads on every 6 s poll with no paging.",
+    "strengths": ""
+   },
+   "benefit": "Required before push realtime and streamed agent output, otherwise the room jumps and long agent threads become slow.",
+   "approach": "Frontend Plane: adopt @tanstack/solid-virtual for SpaceRoomTimeline with a pure anchoring-policy module and unit tests; add history paging from Model Plane (turn-based pages).",
+   "effort": "M",
+   "dependencies": [
+    "History paging API from Model Plane",
+    "Typed row model (C-t1-12-012)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Virtualization breaks find-in-page and screen-reader reading order if not handled (keep aria-setsize/posinset).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Not visible today at low volume, but a prerequisite for realtime and agent streaming.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-015",
+   "name": "Empty states, zero states and suggested starters",
+   "description": "Each pane has a specific zero state that names what will appear and how; new rooms show contextual action cards (add people, add an agent, add files); empty chats offer suggested activities that fill an editable draft rather than sending.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm",
+     "teams"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-175",
+    "qm-product-134",
+    "teams-product-surface-154"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-154",
+     "qm-product-134"
+    ],
+    "why": "Teams (q4, REA) has the most systematic coverage (24 zero-state keys, coachmarks, all-caught-up states). QM's \"fill a draft, never send\" rule (q3, SRC) is the right agent-safe pattern; Buzz (buzz-product-175) adds the add-an-agent card per channel kind."
+   },
+   "mechanism": "Per pane: zeroState {icon, title, explanation of what will appear, primary action}; intro block chosen by room kind; starters {id,title,prompt,icon} generated per person or from operator config; clicking fills the composer draft; starters fade when a draft exists and are inert when collapsed.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-ui-112",
+     "v-space-ui-113"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:433-479",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:233-246"
+    ],
+    "gap": "Room intro offers Start a conversation and Create an agent; no add-people/add-knowledge cards, no suggested starters, no coachmarks.",
+    "strengths": "Every tab distinguishes nothing / could-not-load / not-published, which is stricter than the references. Keep; optionally add \"fill a draft\" starters and an add-people card."
+   },
+   "benefit": "Already equal; small additions would help activation.",
+   "approach": "Frontend Plane: add starter cards that fill the draft (never auto-send, since every send costs a model turn today).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Auto-send would trigger paid agent runs; keep draft-only.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is at parity and ahead on honest empty-vs-unavailable rendering.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-016",
+   "name": "First-run onboarding for collaboration: agent-led welcome, role/tools questions, derived first-run gate",
+   "description": "New members land in a non-empty welcome room where default agents introduce themselves, are asked their role and tools to seed templates, see a demo of the agent's computer, and the decision to show onboarding is derived from facts (signed-in, saved flag, existing agents, provisioning state).",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-116",
+    "grokbot-agent-product-113",
+    "grokbot-agent-product-171"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-113",
+     "grokbot-agent-product-171"
+    ],
+    "why": "Grok Bot (q4, SRC) has the complete flow (meet, computer demo, jobs, role, tools, create from templates, notifications, hand-off) and a gate state machine that fails open for returning users. Buzz (buzz-architecture-116) shows the agent-led welcome channel."
+   },
+   "mechanism": "Gate state machine: checking -> probe (agent count, provisioning status with patience timer) -> landed | onboarding | shell; a saved onboarding-seen flag per user; steps as an ordered list with skippable ids; answers (role, tools) persisted and fed into agent template recommendations and system context; welcome room seeded with a default agent post whose content is derived from observed state (see honest-state cluster).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-112"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/onboarding/components/steps/IntroStep.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacesIndexPage.tsx:36-47"
+    ],
+    "gap": "Org onboarding exists (Intro, Organization, Website, Connect, Paywall, Assembly steps) and /spaces self-heals into the org room, but there is no Space-specific first run: no welcome room content, no agent introduction, no role/tools questions feeding agent templates, and no derived gate for returning users on a new device (not verified in code).",
+    "strengths": "SpacesIndexPage resolves to the right room and self-heals the org room."
+   },
+   "benefit": "An empty room is the worst first impression for a human+agent product; a welcome where an agent introduces itself demonstrates the product in seconds.",
+   "approach": "Frontend Plane + Application Plane: seed the org room with a welcome post and template agent proposals (human confirms creation; agents may not create bindings themselves, per the authority wall); add role/tools step to existing onboarding and feed the three agent templates.",
+   "effort": "M",
+   "dependencies": [
+    "Agent templates (exists)",
+    "Human-only post path (category 01)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Agents must not self-create bindings; welcome claims must be derived from facts, not timers.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Valuable for activation but secondary to the core chat and visibility gaps.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-017",
+   "name": "Honest-state UX: unknown is not zero, never silently stuck, facts decide (not timers)",
+   "description": "The UI distinguishes unknown from zero, unverified from failed and offline from unknown; every async action has a named waiting/failure state with recovery; UI claims and onboarding messages derive from observed facts, with timers only as a backstop.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-178",
+    "grokbot-agent-product-117",
+    "buzz-architecture-104"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-178",
+     "buzz-architecture-104"
+    ],
+    "why": "Buzz states it as cross-cutting rules (q5 and q4, DOC). Grok Bot (grokbot-agent-product-117, q4 SRC) has the richest typed failure vocabulary tied to resume points (after reaction, approval, handoff)."
+   },
+   "mechanism": "Every count/chip/status is a tri-state {known(value) | unknown(reason) | loading}; render nothing or \"unavailable\" for unknown, never 0; typed failure codes per async operation with a recovery action; derived claims computed from state, timers only emit a \"still waiting\" hint.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-backend-107",
+     "v-space-ui-113"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1205-1222",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:233-246",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:150-158"
+    ],
+    "gap": "One known exception: the timeline hides a 403 space_read_not_authorized behind preview text (SpaceRoomTimeline.tsx:201), i.e. a silent refusal. No typed resume-point failure taxonomy for agent runs in the room.",
+    "strengths": "Server-composed unavailable[] {section, code, reason} contract and \"gap, not empty\" rendering are equal to Buzz's rules and are enforced in code (Buzz's are DOC). Keep and extend to every new chip, count and pane."
+   },
+   "benefit": "Already a Verevon differentiator; fix the silent shared-read refusal.",
+   "approach": "Frontend Plane: render the read refusal explicitly; adopt a resume-point failure taxonomy for run states as agent work becomes visible.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon strength; one small fix.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-018",
+   "name": "Shell start-up and failure UX: staged loading, cannot-connect page with diagnostics, release notes",
+   "description": "Explicit loading screen and start-up milestones (loader started, core ready, first paint, warm), a clear offline/cannot-connect page with steps and log download, crash/hang dialogs and About/What's New surfaces.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "slack-product-surface-155",
+    "slack-shell-and-native-120",
+    "teams-shell-and-native-093"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-093",
+     "slack-shell-and-native-120"
+    ],
+    "why": "Teams (q5, SRC) makes start-up measurable with named milestones reported to the shell and critical-error screens; Slack (q4, SRC) has the best user-facing cannot-connect page with self-serve log download."
+   },
+   "mechanism": "Milestone events emitted by the SPA (loaderStarted, coreInitialized, firstPaint, experienceWarm) to telemetry; critical script load failures (marked data-critical) route to an error page; error page lists network/security-software checks, cache reset and \"download logs\" (a redacted diagnostic bundle). Web-only Verevon can do the same with a root error boundary and a static offline page served by the gateway.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts:5",
+     "apps/Frontend Plane/verevonv3/src/demo/fixtures/fjordform-home.ts:8"
+    ],
+    "gap": "Code comments state the app has no root ErrorBoundary and zero Suspense/ErrorBoundary; no cannot-reach-Verevon page, no diagnostic export, no start-up milestones (no baseline record; checked by grep 2026-10-13). Native shell is absent (web SPA only).",
+    "strengths": ""
+   },
+   "benefit": "A blank page on gateway failure undermines the \"never go dark\" stance that Verevon applies inside the Space; milestones make start-up regressions measurable.",
+   "approach": "Frontend Plane: root error boundary with an honest failure screen; gateway serves a static cannot-connect page; diagnostic export with redaction (no tokens, respect ZDR); emit start-up milestones to the existing telemetry path.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Diagnostic bundles must never include secrets or ZDR content.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap and aligns with Verevon's own honesty principle; users notice a blank screen immediately.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-019",
+   "name": "Calm destructive confirmation (arm-in-place, explicit kept-vs-lost)",
+   "description": "Destructive actions arm in place (click again to confirm) and state exactly what is lost and what is kept.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-131"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-131"
+    ],
+    "why": "Only reference record (q3, SRC); explicit lists of what teammates lose."
+   },
+   "mechanism": "Button state idle -> armed (label changes, timeout) -> confirm; copy enumerates consequences per action.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-ui-115"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceConfirmButton.tsx:24-104"
+    ],
+    "gap": "Kept-vs-lost wording could be made explicit for agent revoke and member removal.",
+    "strengths": "SpaceConfirmButton arms in place and disarms after 6 s or on blur; personal-Space deletion shows per-plane receipts, which is stronger than the reference. Keep."
+   },
+   "benefit": "Already at parity.",
+   "approach": "Keep; add kept/lost lists to revoke/remove copy.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 1,
+   "rationale": "Verevon strength.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-020",
+   "name": "Distinct agent avatars and identity (shape x colour characters, upload, generated)",
+   "description": "Each agent gets a recognisable non-human avatar (shape + colour), an uploaded photo or a generated avatar; per-agent colour tints its messages.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-115"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-115"
+    ],
+    "why": "Only source (q4, SRC): 14+ shapes x 11 colours, crop upload, describe-to-generate; Buzz shows a similar idea with BotIdenticon (buzz-product-176)."
+   },
+   "mechanism": "Agent identity fields {avatar_shape, avatar_color, avatar_version, image_ref}; deterministic SVG character from shape x colour; image upload with crop stored as an asset; colour token used for accent in agent rows.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:106-132",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:911-915"
+    ],
+    "gap": "Create-agent dialog collects a colour but SpaceAgent has no colour field and cards show an initial only (baseline known gap 16). No shapes, uploads or generated avatars.",
+    "strengths": "Agent chip on posts already distinguishes agents from humans."
+   },
+   "benefit": "Agents must be instantly distinguishable from people in a mixed room (and must never look like a human colleague); the colour is already collected, so it is a bug-level fix.",
+   "approach": "Application Plane: persist avatar colour (and later shape) on the agent definition/binding; Frontend: render a deterministic shape x colour SVG on posts, cards and roster.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "Generated avatars that resemble real people; keep non-human characters by default.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Very small effort, visible immediately, fixes a collected-but-dropped field.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-021",
+   "name": "Agent computer view in the conversation: preview thumbnail -> modal, multi-screen, control indicator",
+   "description": "The agent's screen appears as a live preview card in chat, expands to a modal with screen switcher, shows who is in control, pauses when idle, offers wake/retry and shows a recording indicator.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-116"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-116"
+    ],
+    "why": "Only source (q4, SRC); glanceable-to-interactive progression keeps computer use visible without leaving the room."
+   },
+   "mechanism": "Computer view modes {preview, interactive}; preview = periodic frame or low-rate VNC stream into a card; modal = interactive VNC with screen switcher and a control-owner badge (agent | you); idle pause with wake/retry; REC overlay while recording.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:551-569"
+    ],
+    "gap": "Browser with human takeover exists only on the dashboard and run screenshots only in AgentRunConsole; nothing is reachable from a Space (baseline category 7). No per-agent computer.",
+    "strengths": "BrowserChrome takeover and run screenshots are reusable building blocks."
+   },
+   "benefit": "Core to the \"agents work like a human with their own PC/browser\" vision; members see what the agent is doing in the room they share.",
+   "approach": "Frontend Plane UI over Quarry-executed browser sessions: Model proposes actions, Quarry executes under BrowserBroker grants; the preview card streams frames that Quarry exposes, takeover requires a human grant. Show only to members entitled to read the run; never share credentials across members.",
+   "effort": "L",
+   "dependencies": [
+    "Per-agent browser/sandbox (agents category)",
+    "AuxPane (C-t1-12-005)",
+    "Quarry frame streaming"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Screen frames may contain sensitive or ZDR data; must respect privacy tier and read entitlement, and frames should not be retained beyond policy.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "High vision value, but the UX layer depends on the per-agent computer capability tracked in another category; build the preview card as soon as that lands.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-022",
+   "name": "Agent/member hover card prioritising blocking state",
+   "description": "Hovering an agent shows avatar, status and a one-line preview chosen by priority: what it is waiting on from you, a pending draft, its last message, or an empty text.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-163"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-163"
+    ],
+    "why": "Only source (q3, SRC medium); the priority order puts human-blocking state first."
+   },
+   "mechanism": "preview = awaitingReason ? localized(awaitingReason) : draft ? draftLabel+firstLine : lastEntry ? preview(lastEntry) : emptyText; hover card with delay and keyboard focus trigger.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:245-321"
+    ],
+    "gap": "No hover cards found in src (grep HoverCard/hover-card: 0 files, 2026-10-13).",
+    "strengths": ""
+   },
+   "benefit": "Surfaces \"waiting for your approval\" wherever an agent name appears.",
+   "approach": "Frontend Plane component reading agent status + pending approvals from existing projections.",
+   "effort": "S",
+   "dependencies": [
+    "Agent status projection"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Do not reveal approval details to non-owners (only run owner may decide today).",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Pleasant but not essential.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-023",
+   "name": "Accessibility layer: live-region announcer, narrated list rows, accessible pane transitions",
+   "description": "A central polite/assertive announcer for status changes, screen-reader narration for every list row (type, unread, private, last message), filter result counts announced, and animated pane navigation that makes the outgoing pane inert and hands focus to the new pane.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "grokbot-agent-product-160",
+    "grokbot-agent-product-161",
+    "teams-product-surface-155"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-161",
+     "grokbot-agent-product-160"
+    ],
+    "why": "Grok Bot (q5 and q4, SRC) has precise, re-implementable rules: inert + aria-hidden outgoing pane, focus to first heading via MutationObserver, reduced-motion bypass, and a tick-keyed announcer so identical messages repeat. Teams (teams-product-surface-155, q5 REA) is best for row-level narration coverage."
+   },
+   "mechanism": "Announcer: two hidden regions (role=status aria-atomic, role=alert) each wrapping a span keyed by a counter; announce(text, politeness). Pane navigation: navigate(direction, landingTarget) renders outgoing pane inert/aria-hidden until animationend, then focuses landing target (tabindex=-1) once headings exist and inert clears, skipping if focus is already elsewhere; prefers-reduced-motion disables animation. Row narration: aria-label assembled from {kind, unread, private, agent state, last message}.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1387-1397",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityFeed.tsx:79-112",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-accessibility.test.ts"
+    ],
+    "gap": "Space uses aria-live/role=status on live rows and colour-independent status shapes, but has no central announcer (one exists in /chat), no row narration for agent states in the sidebar, and no focus hand-off rules for tab/route changes (not verified for the sidebar; check CoreSidebarSpacesPanel aria labels).",
+    "strengths": "Status shapes that do not rely on colour and radiogroup lenses are good foundations."
+   },
+   "benefit": "Agent rooms change constantly; without an announcer every live row becomes a noisy live region. Enterprise buyers (Teams customers) require it.",
+   "approach": "Frontend Plane: promote the chat announcer to a shared module, route Space completions/approvals through it, add row aria-labels including agent state, and a shared navigate-with-focus helper.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Over-announcing; keep polite by default and assertive only for approvals addressed to the viewer.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Low effort, required for enterprise adoption, cheaper now than retrofitted.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-024",
+   "name": "Motion, density and device-adaptive performance (reduced motion, compact/comfortable, efficiency mode)",
+   "description": "Delight animations (emoji bursts, animated counts, shimmer) gated by reduced-motion; a conversation density setting; heavy features disabled on low-memory devices with a visible efficiency-mode indicator.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-179",
+    "teams-shell-and-native-095"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-179"
+    ],
+    "why": "Buzz (q3, SRC) gates about 70 motion components on reduced motion and ships a 3-level density setting; Teams (teams-shell-and-native-095) adds device-memory thresholds with an indicator."
+   },
+   "mechanism": "Global density token (compact|comfortable|spacious) applied as a data attribute that scales spacing variables; motion components check matchMedia(prefers-reduced-motion) or a user setting; navigator.deviceMemory thresholds disable heavy features and show an indicator.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/styles/global.css:4630",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx"
+    ],
+    "gap": "prefers-reduced-motion rules exist in global.css and several features, but none in src/features/spaces; no user density setting; no device-adaptive mode (grep 2026-10-13).",
+    "strengths": "Reduced-motion is already a practised pattern elsewhere in v3."
+   },
+   "benefit": "Density matters for dense agent consoles; reduced motion is an accessibility baseline.",
+   "approach": "Frontend Plane: density attribute + spacing tokens; audit Space animations for reduced motion.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Polish; not blocking.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-025",
+   "name": "Per-workspace colour themes / org accents mirrored into the shell",
+   "description": "Each workspace has a sidebar colour theme so users can tell tenants apart; the shell falls back to a default palette.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "slack-shell-and-native-121"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-shell-and-native-121"
+    ],
+    "why": "Only source (q3, SRC): 8-colour team theme schema with default fallback."
+   },
+   "mechanism": "Theme object {column_bg, hover_item, active_item, active_presence, badge, text, titlebar} per org, applied as CSS variables.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/styles/global.css:44084-44110"
+    ],
+    "gap": "Light/dark themes and responsive CSS exist; no per-org accent (not verified as absent; 27 files mention \"accent\").",
+    "strengths": "Token-based theming with dark mode."
+   },
+   "benefit": "Helps multi-org users; low priority.",
+   "approach": "Frontend Plane: org accent token from Control Plane org settings.",
+   "effort": "S",
+   "dependencies": [
+    "Multi-org switching"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Contrast failures with custom colours.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Only matters once users switch between orgs often; revisit with a workspace rail.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-026",
+   "name": "In-product feedback, What's New and admin feature campaigns",
+   "description": "Category-driven problem reports, per-feature feedback, a What's New carousel and admin-targeted campaign notifications announcing agent features.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-157"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-157"
+    ],
+    "why": "Only source (q3, REA high), including admin campaigns for agent features."
+   },
+   "mechanism": "Feedback form keyed by category taxonomy; whats_new items with index; campaign notifications targeted by role (admin) and feature flag.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No What's New found by grep (whats-new/WhatsNew: 0 files); \"feedback\" matches 36 files of unknown purpose. Check for an in-app feedback form and admin announcements.",
+    "strengths": ""
+   },
+   "benefit": "Deny-by-default agent policies mean admins must learn what to enable; an admin campaign surface supports that rollout.",
+   "approach": "Frontend Plane: What's New panel fed from a static release feed; admin-only notices via Control Plane role targeting.",
+   "effort": "S",
+   "dependencies": [
+    "Notifications (category 05)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Noise.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful for policy rollout, not core.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-027",
+   "name": "Mini-mode compact window",
+   "description": "A compact always-available window with its own counter badge (and minimized call view), disabled in shipped defaults.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-shell-and-native-132"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-132"
+    ],
+    "why": "Only source (q3, SRC medium); note it is off by default in Teams."
+   },
+   "mechanism": "Separate window tag Mini with prewarm and counter badge; minimised call view.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Web SPA only; no desktop host.",
+    "strengths": ""
+   },
+   "benefit": "Low; requires a desktop host.",
+   "approach": "Defer until a desktop shell exists.",
+   "effort": "M",
+   "dependencies": [
+    "Desktop shell (category 11)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Even Teams ships it disabled.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "No desktop host and unproven value (disabled by default in the reference).",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-028",
+   "name": "Selection-to-context hand-off: select items, then discuss with an agent or open a channel",
+   "description": "Multi-select work items, commits or reviews in a list, then send them as quoted context to an agent chat or open a discussion channel; a context strip shows exactly what is attached.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-product-180"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-180"
+    ],
+    "why": "Only source (q4, SRC): selection groups, count menu, discuss action and a capped context block builder."
+   },
+   "mechanism": "Selectable list groups with selection state; buildContext(selection) produces a quoted, capped context block with object refs; action opens an agent chat or a new channel with the block pre-attached as visible chips.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:106-192",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:82-243"
+    ],
+    "gap": "Work and Knowledge tabs are read-only lists; no multi-select and no \"ask an agent about these\" action (no baseline record; not verified in code).",
+    "strengths": ""
+   },
+   "benefit": "Gives humans precise control over what an agent receives, which fits the authority model: the agent gets refs the human can see, and owner planes re-check access.",
+   "approach": "Frontend Plane: selection mode on Work/Knowledge/Activity lists, composer context chips carrying refs (not copied content) so Data/Model planes enforce ACL and ZDR at use time.",
+   "effort": "M",
+   "dependencies": [
+    "Composer chips (C-t1-12-009)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Copying content into prompts would bypass owner ACL/ZDR; pass refs.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Strong human-to-agent interaction that suits Verevon's ref-based authority model.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-029",
+   "name": "Unified \"To:\" recipient picker: find or create agents, people and group chats in one field",
+   "description": "New chat opens a recipient bar that searches agents, team agents and people, creates a new agent by typing a name, and turns multiple recipients into a group chat.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-112"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-112"
+    ],
+    "why": "Only source (q4, SRC); collapses start chat, create agent and create group into one field."
+   },
+   "mechanism": "Recipient token input over a combined directory (agents, team agents, people); free text offers \"Create <name> agent\"; >1 recipient creates a group conversation; team directory tab with search and empty state.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:87-239",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceBindAgentDialog.tsx:26-153"
+    ],
+    "gap": "Separate flows: inline \"+ New room\" form, Create-agent dialog and Bind-agent dialog; no people search, no DMs/group DMs, so no single entry point.",
+    "strengths": "Create and bind flows exist with honest pending states."
+   },
+   "benefit": "One field for \"start working with someone or something\" fits the hybrid vision; reduces three flows to one.",
+   "approach": "Frontend Plane: a New-conversation picker over Control roster (people) and Application agent bindings; creation still goes through the two-step Application -> Control lifecycle, rendered as pending.",
+   "effort": "M",
+   "dependencies": [
+    "DM/group-DM kinds (category 01)",
+    "People directory (category 02)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Creating agents too casually; keep born-narrow policy.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Good unifier once DMs exist.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-030",
+   "name": "External-link / app-protocol interstitial with per-host memory",
+   "description": "Links that open another app (ftp, smb) show a plain explanation page with Open and an \"always allow for this host\" option.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "slack-shell-and-native-119"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-shell-and-native-119"
+    ],
+    "why": "Only source (q4, SRC)."
+   },
+   "mechanism": "Intercept non-http(s) schemes; modal page with explanation; allowlist {protocol, hostname} stored per user.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not covered by baseline; check how agent-posted links with non-web schemes are rendered (markdown link sanitizer in chat components).",
+    "strengths": ""
+   },
+   "benefit": "Agents post links; a consent step for non-web protocols reduces risk from model-generated links.",
+   "approach": "Frontend Plane: link sanitizer that routes non-http(s) schemes through a confirmation; never auto-open agent-proposed protocol links.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Small safety improvement relevant to agent-generated content.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-031",
+   "name": "Usage meter in the chat UI with warning thresholds and limit-hit paths",
+   "description": "Shows weekly included usage and reset day, warns at thresholds (75/90%), and offers upgrade/credits on limit; distinguishes included, on-demand and prepaid usage.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-118"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-118"
+    ],
+    "why": "Only source (q3, SRC)."
+   },
+   "mechanism": "Usage policy config {thresholds:[75,90]}; meter component reads usage summary; limit-hit state renders upgrade or credit options.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:541-567",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:694-730"
+    ],
+    "gap": "budget_exceeded renders as a refusal linking to Settings > Spend ceiling; no proactive meter, no thresholds, no per-room spend (blocked per SPACE_PAGE_AUDIT section 17; token counts are 0 from Session Core).",
+    "strengths": "Refusal is explicit with a fix path."
+   },
+   "benefit": "Since every post is a paid model turn today, shared rooms need visible budgets before limits hit.",
+   "approach": "Model Plane cost service publishes per-org/per-Space usage summaries; Frontend renders a meter with thresholds in the pulse rail.",
+   "effort": "M",
+   "dependencies": [
+    "Per-Space cost attribution in Model Plane",
+    "Token counts from Session Core"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Showing zero when counts are unknown (Session Core reports 0) would mislead; render unknown.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Belongs mainly to the governance/cost category; UX surface is simple once data exists.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-12-032",
+   "name": "Cross-surface continuity cues (external channel header pointing back to the canonical web room)",
+   "description": "In an external chat surface (Slack), a pinned header names the model and links to the web scope settings; long work shows a \"follow on web\" link; the web lists linked external channels.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-135"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-135"
+    ],
+    "why": "Only source (q3, SRC)."
+   },
+   "mechanism": "Surface header ensurer sets topic or pins/updates a bot message per channel setting; welcome message on join; follow-on-web links to the run.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Channel Plane is docs-only; S5.3 (first external surface, Slack) is planned in the QM adoption plan.",
+    "strengths": ""
+   },
+   "benefit": "When external surfaces exist, keeps the Space canonical.",
+   "approach": "Channel Plane adapter (future), presenters over Space records; ZDR content must not be mirrored externally.",
+   "effort": "M",
+   "dependencies": [
+    "Channel Plane (S5.1-S5.3)"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "External delivery leaves the ZDR boundary.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Blocked by a docs-only plane; revisit when Channel Plane starts.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

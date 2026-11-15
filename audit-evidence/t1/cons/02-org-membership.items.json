@@ -1,0 +1,696 @@
+{
+  "category": "Org & membership",
+  "items": [
+    {
+      "id": "R-t1-02-01",
+      "title": "Room role management: change a member's role, pick a role on add, owner guard",
+      "summary": "Add a per-member role change for named rooms (viewer, editor, manager, owner) and a role choice when adding someone, instead of the fixed editor grant. Port Buzz's pure policy functions (canGrant, canChangeRole, canLeave, last-owner and elevated-actor rules) with table tests, and decide whether room ownership can be transferred.",
+      "whyItMatters": "Today every person added to a shared room is an editor forever, so a room owner cannot hand stewardship to a second manager. Because only owner or manager may bind agents, this also blocks sharing agent administration inside a room. It is the smallest change that unlocks the role model Verevon already stores.",
+      "referenceBestPractice": {
+        "bestSource": "buzz",
+        "others": [
+          "slack (richest role set: primary owner, owner, admin, member, two guest tiers)",
+          "qm (separate read, write, manage predicates per scope kind)",
+          "teams",
+          "grokbot"
+        ],
+        "prevalence": "5 of 5 sources have graded roles; 3 of 5 (buzz, slack, qm) have record-level evidence in this category; table-stakes",
+        "mechanism": "Closed role enum with rank. canGrant(actor, target_role) requires actor rank >= target rank and actor >= manager; canChangeRole refuses demoting the last owner; canLeave refuses the sole owner. The role write runs in one transaction with a membership-revision check (TOCTOU-safe). Read, write and manage are separate predicates per room kind."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/spaceMembers.ts:45-96 (addSpaceMemberForGateway inserts role: \"editor\" at line 85; no role argument)",
+          "apps/Application Plane/convex-core/convex/spaceMembers.ts:98-120 (remove refuses to remove the registered owner)",
+          "apps/Control Plane/user-core/internal/spaces/repository.go:612-733 (ReplaceMemberships already honors a declared role per subject, never revokes the owner by absence, advances membership_revision only on real change)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-735 (route table has POST /members and DELETE /members/{member_id} only; no PATCH or role route)",
+          "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:51-66 (space_memberships; role check at line 63: viewer|editor|manager|owner)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx:20-30"
+        ],
+        "gap": "Roles exist in the authority schema and in the declarative roster endpoint, but nothing lets a user change a member's role or choose one on add; no pure guard functions; no ownership transfer."
+      },
+      "approach": "Application Plane (convex-core spaceMembers.ts): add changeSpaceMemberRoleForGateway that updates spaceMemberGrants.role, and an optional role on addSpaceMemberForGateway; both then redeclare the full roster through the existing roomMembersForControl -> Control replace-memberships path (managed_subject_types [\"user\"], so agents are untouched). Gateway: PATCH /api/v1/spaces/{space_ref}/members/{member_id}, gated by the caller's room role from Control. Frontend: role picker in SpaceMemberControls. Put the rank rules in one pure function with table tests and enforce them both in the Convex mutation and in Control's replace endpoint, so the authority plane does not simply trust the declaring plane (INF). Decide owner transfer separately: it touches spaces.ownerExternalAuthId and registered_spaces.owner_principal_id.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Application Plane (room grant list) with Control Plane enforcement",
+      "risks": "A demotion must invalidate in-flight signed decisions; rely on the authority revision already bound into decisions. Convex edit and Control declaration are two steps, so keep the declaration idempotent and retried. Control's 017 header says Control owns membership while the editable list lives in Convex; keep Control as the final check.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-007"
+      ]
+    },
+    {
+      "id": "R-t1-02-02",
+      "title": "Room visibility, directory and self-join, with a late-joiner history rule",
+      "summary": "Add open/private visibility to named rooms, a paged directory of open rooms the caller is not in, and a self-join that grants the default role only for open rooms (private rooms return not-found to non-members). Record join and leave sequence per membership so thread reads can be limited to a tenure window, and make membership-change and revocation delivery durable.",
+      "whyItMatters": "In every chat reference users find and join rooms themselves. In Verevon a room is reachable only if a manager adds you, so Spaces cannot behave like Slack channels. Tenure has to be decided in the same change because self-join exposes earlier history to a stranger.",
+      "referenceBestPractice": {
+        "bestSource": "buzz",
+        "others": [
+          "teams (preview-before-join flexible channels)",
+          "qm (tri-state membership, deny-on-unknown fallback; sequence-bounded participant windows)",
+          "slack (public and private channels, no record in this category)"
+        ],
+        "prevalence": "3 of 5 for discovery and self-join (buzz, teams, qm); tenure windows 1 of 5 (qm); table-stakes for discovery, unique for tenure",
+        "mechanism": "room.visibility in {open, private}. GET /rooms/directory returns open rooms in the org the caller is not in, paged and separate from the member poll. POST /rooms/{id}/join self-grants the default role only for open rooms; private rooms 404 to non-members; when membership is unknown, deny. QM adds ParticipantWindow{validFromSeq, validToSeq} on membership rows that filters transcript reads and approvals, and a roster-version fence on enqueue."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-735 (no directory, browse, join or visibility route; listing is filtered to the caller's Control index)",
+          "apps/Application Plane/convex-core/convex/schema.ts:546-580 (spaces table has name but no visibility or topic field)",
+          "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:51-66 (membership rows carry no valid_from or sequence); privacy_revision exists at line 38",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:35-43",
+          "apps/Control Plane/user-core/internal/nats/shared_publisher.go:196-214 (revocation events on plain NATS, loss tolerated)"
+        ],
+        "gap": "No visibility, directory, self-join or tenure rule. Fencing by authority and audience revision is strong, but late-joiner history and durable delivery of revocations are not covered."
+      },
+      "approach": "Control Plane (user-core): add visibility to registered_spaces (bump privacy_revision on change) and a self-join decision that writes a membership only for open rooms and org members, keeping thread_read_entitled and the owner-plane knowledge ACL in force. Store join and leave sequence per membership and carry the reader's window in the thread-read decision (shared_thread_read_decision.go) so Session Core filters transcripts; make the history rule a room setting (full history default for open rooms, strict window default for guests). Application Plane: mirror visibility on spaces and add a directory query separate from the member list. Gateway: GET /api/v1/spaces/directory, POST /api/v1/spaces/{space_ref}/join. Frontend: browse dialog in CoreSidebarSpacesPanel. Move membership_changed to JetStream or an outbox.",
+      "effort": "L",
+      "dependencies": [
+        "Room role management (R-t1-02-01) for the default join role",
+        "Model Plane Session Core thread-read filtering by window",
+        "Durable membership events (JetStream)"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "A self-joiner could read history from before they joined; decide the tenure rule first (Slack shows full history, QM windows strictly). Open-room names in the directory must respect residency and ZDR. Self-join must never widen an owner-plane ACL, so the knowledge intersection still applies after join.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-010",
+        "C-t1-02-023"
+      ]
+    },
+    {
+      "id": "R-t1-02-03",
+      "title": "Agent access list and add policy (who may add, use or manage an agent)",
+      "summary": "Give every agent definition an owner-controlled access list (principals: users now; teams, org and link later; roles owner, manager, collaborator) and an add policy (owner_only, nobody, anyone). Binding an agent into a room must require the room's manager role AND pass the agent's add policy, and the installable-agent list must show only agents the caller may add. Edits carry an expected-state token.",
+      "whyItMatters": "Personal agents, a core part of the vision, cannot exist safely without this: today any room manager can bind any org agent, and the bind dialog lists them all. It is also a safety rule: without it a shared agent's owner cannot stop others from pulling it into rooms.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot",
+        "others": [
+          "buzz (add policy owner_only, nobody, anyone)"
+        ],
+        "prevalence": "2 of 5 (grokbot, buzz); differentiator",
+        "mechanism": "agent_access(agent_id, principal_type user|group|team|link, principal_id, role owner|manager|collaborator) plus agent.add_policy. Binding an agent requires the room's manager role and the agent's policy (owner_only means the actor must be the agent owner). Edits carry expected_state_token; a stale token is refused with a repeat-the-change message; owner and managers are always retained."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/spaceAgents.ts:486-516 (listInstallableSpaceAgentsForGateway returns every agent definition of the org to a room manager)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3913-3932 (installable list gated only by the caller's room role)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceBindAgentDialog.tsx:26-153",
+          "apps/Application Plane/convex-core/convex/schema.ts:324-364 (agents table read in part: scoped by orgId, no access list or add policy observed)"
+        ],
+        "gap": "Only the room side is gated. An agent has no owner-controlled access list or add policy, and personal agents cannot exist because a personal Space cannot hold agents."
+      },
+      "approach": "Control Plane: store agent_access and add_policy as authority (agents are already service subjects in space_memberships), and make the bind decision check both the room role and the agent policy. Application Plane keeps the agent definition and a display projection; filter the installable list by the caller's add right. Frontend: access panel on the agent and policy badge in the bind dialog. Coordinate with the agents category on where agent ownership is recorded.",
+      "effort": "M",
+      "dependencies": [
+        "Personal agents (agents category)",
+        "Agent ownership field on agent definitions"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Collaborator access must not let someone use the owner's connected accounts: tools still need owner-plane grants. Group and link principals must be resolved by Control, not by the browser.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-015"
+      ]
+    },
+    {
+      "id": "R-t1-02-04",
+      "title": "Room lifecycle: rename, topic, archive/unarchive, delete with restore window, TTL rooms",
+      "summary": "Let managers rename a room and edit its topic, archive and unarchive it (read-only archive), and let the owner or an org admin delete it with a restore window and per-plane receipts. Add ephemeral TTL rooms (deadline pushed forward by each durable event) for agent task rooms later.",
+      "whyItMatters": "Basic hygiene every chat reference has. Today a shared room can never be renamed, retired or removed, so room lists only grow and orphaned rooms (owner left) cannot be cleaned up.",
+      "referenceBestPractice": {
+        "bestSource": "buzz",
+        "others": [
+          "teams (30-day restore window)"
+        ],
+        "prevalence": "2 of 5 (buzz, teams); common",
+        "mechanism": "room.state in {active, archived, deleted(restore_until)}. Rename and topic are metadata edits with role checks (topic by any member, name by admins in Buzz). TTL rooms: ttl_deadline = last durable event + ttl_seconds, advanced by a deferred trigger; a sweeper archives expired rooms."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/schema.ts:546-604 (spaces.lifecycle union has no archived state; table has name only, no topic)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-735 (only personal-Space deletion-requests exist; no rename, topic, archive or restore route)",
+          "apps/Control Plane/user-core/internal/spaces/deletion_authorization.go:17-22",
+          "apps/Control Plane/user-core/internal/http/server.go:346-349 (deletion-policy and legal-hold endpoints exist as service-only routes)"
+        ],
+        "gap": "Lifecycle states and per-plane deletion receipts exist, but only personal Spaces can be deleted. Shared rooms have no rename, topic, archive or restore."
+      },
+      "approach": "Application Plane: add spaces.topic and an archived lifecycle value or archivedAt, plus rename and topic mutations gated by manager or owner. Control Plane: add an archived registration_state so decisions deny new writes but allow reads, extend deletion authorization to room kind (owner, or org admin for orphaned rooms) with a restore_until window, and keep legal hold blocking deletion. Gateway and Frontend: PATCH room settings, archive/unarchive and delete controls in the room header. TTL sweeper later.",
+      "effort": "M",
+      "dependencies": [
+        "Org admin capability for orphaned rooms (R-t1-02-05)"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Deleting a shared room must cascade receipts across planes and honour the retention class and legal hold; ZDR orgs need immediate purge semantics rather than a restore window.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-026"
+      ]
+    },
+    {
+      "id": "R-t1-02-05",
+      "title": "Space governance admin: effect-policy admin UI, typed denial reasons, org Space registry, feature flags",
+      "summary": "Phase 1 (priority): give org admins an API and UI to view and set the per-org space_effect_policies (safe presets, an effective-policy view), and map Control denial codes to typed, actionable reasons in the gateway and UI. Phase 2: an admin Space registry (all rooms, owners, orphaned rooms, archive), per-member activity and spend, bulk actions on agents and sandboxes, and per-org and per-user feature flags next to billing entitlements.",
+      "whyItMatters": "Every shared-room feature is denied by default and dev has no policy rows, so a customer cannot turn on features that are already built; a denied action currently has no admin path. Admin consoles are table-stakes in QM, Buzz and GrokBot, and typed denial reasons make the strict model usable.",
+      "referenceBestPractice": {
+        "bestSource": "teams (policy administration), qm (admin console), grokbot (typed access-status reasons)",
+        "others": [
+          "slack",
+          "buzz"
+        ],
+        "prevalence": "admin console 3 of 5 (table-stakes); policy admin 2 of 5 (common); typed access reasons 2 of 5 (differentiator); flags 2 of 5",
+        "mechanism": "Teams: every feature area has policies; precedence is direct assignment, then highest-ranked group, then global default; batch assignment has a status log. QM: separate admin service over signed HTTP, admin only from a durable grants store, every mutation audited, bulk actions as jobs with per-item status. GrokBot: one access-status call returns GRANTED, UNAVAILABLE or PAYMENT_REQUIRED plus a typed reason, and the UI has one component per reason."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/user-core/migrations/018_space_effect_policies.up.sql (one row per org, deny when absent) and migrations 019-028",
+          "apps/Control Plane/user-core/internal/http/server.go:354 and apps/Control Plane/user-core/internal/http/spaces.go:98-106 (PUT /internal/spaces/effect-policy is reachable only by the Control Space policy service principal with scope spaces:policy:write)",
+          "grep of apps/Frontend Plane/verevonv3 gateway and src found no reference to effect-policy (no admin route or UI)",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:37-41",
+          "apps/Control Plane/billing-core/internal/billing/types.go:35-36 (plans carry FeatureFlags and Entitlements)"
+        ],
+        "gap": "A service-only write path for effect policies exists but no human admin can reach it; no assignment beyond one row per org; no typed denial surfacing verified; no admin view of all Spaces; no rollout flags."
+      },
+      "approach": "Control Plane: a gateway-delegated, org-admin-gated route (new capability in org-core rbac catalog.go) wrapping the existing effect-policy upsert with preset validation (presets must not enable retention-bearing effects under ZDR). Gateway: /api/v1/admin/spaces/policy (GET effective, PUT) and a denial mapper returning {state, reason, actor_role}. Frontend: a Space policy section in WorkspaceSettingsPage and one component per denial reason. Phase 2: Space registry page over Control registered_spaces plus the Convex projection; flags in billing-core or org-core next to entitlements. No impersonation. Group-level assignment waits for teams.",
+      "effort": "L",
+      "dependencies": [
+        "Room lifecycle (R-t1-02-04) for archive and orphan handling",
+        "Teams (R-t1-02-07) for group assignment"
+      ],
+      "planeOwner": "Control Plane (policy and registry), Frontend Plane (UI)",
+      "risks": "Must stay deny-by-default; presets must not silently enable retention-bearing effects under ZDR. Admin views of room content must respect ZDR and thread_read_entitled. Do not reveal policy details to non-admins beyond what they need. Flags must not override deny-by-default effect policies.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 13,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-02-019",
+        "C-t1-02-021",
+        "C-t1-02-018",
+        "C-t1-02-020"
+      ]
+    },
+    {
+      "id": "R-t1-02-06",
+      "title": "Keep the organization room's roster in sync with the org (fix missing members)",
+      "summary": "Run the existing syncAllOrganizationRooms on a schedule and trigger syncOrganizationRoom when org membership changes (join, removal, suspension), so everyone active in the org is in the organization room and removed members leave it. Optionally add a welcome agent run on join later (Buzz's starter-room pattern).",
+      "whyItMatters": "The organization room is the default place every member should land. Its roster is synced once, at activation, so people who join the org afterwards may never appear in it, and removed members are not revoked from it. This is a small fix for a defect users hit immediately.",
+      "referenceBestPractice": {
+        "bestSource": "buzz",
+        "others": [
+          "qm (agent-led onboarding recorded in the agent notebook)"
+        ],
+        "prevalence": "2 of 5 (buzz, qm); differentiator",
+        "mechanism": "ensure_starter_rooms(org) with deterministic ids; on member join, add to default rooms and optionally trigger a welcome agent run that opens a welcome thread and closes it when introductions are done."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/spaces.ts:1440-1445 (the only trigger: roster sync is scheduled when the room moves pending_registration to active)",
+          "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:135-147 (syncAllOrganizationRooms is defined but has no caller; no crons file in convex-core/convex)",
+          "apps/Application Plane/convex-core/convex/spaces.ts:298-345 (ensureOrganizationRoomForGateway returns the existing room without re-syncing)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacesIndexPage.tsx:62-113"
+        ],
+        "gap": "Provisioning is idempotent, but later org joins and removals are not propagated to the organization room. Impact beyond the missing trigger is inferred (INF); an external operator invocation of the action was not found in the repository."
+      },
+      "approach": "Application Plane (convex-core): add convex/crons.ts calling syncAllOrganizationRooms every few minutes as a reconcile, and subscribe to the org membership-changed event to call syncOrganizationRoom for that org immediately. The existing action is declarative (Control converges the roster and deactivates absent members), so this also revokes. Keep members mapped to editor as the code already does. Optional later: a welcome agent run through the normal bind and turn path.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Application Plane",
+      "risks": "Event loss on plain NATS is covered by the periodic reconcile. Sync cost grows with org count and size; page the org-core member list and batch rooms.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-025"
+      ]
+    },
+    {
+      "id": "R-t1-02-07",
+      "title": "Teams and sub-groups with source-tracked membership; mentionable groups",
+      "summary": "Add a team concept to Control (owners, members, visibility) where a team grant expands into room memberships tagged with their source, so removing someone from a team removes only team-derived grants. Later add team-level mentions (server-side expansion at send) once Space notifications exist.",
+      "whyItMatters": "Teams are the core of the Teams half of the vision: orgs organise people into teams with their rooms. Today there is no team concept, only flat org membership and per-room lists. Teams are also the prerequisite for SCIM group sync, team-level agent context and group-based agent access.",
+      "referenceBestPractice": {
+        "bestSource": "teams",
+        "others": [
+          "qm (team contributes read-only resources to a turn only under a membership rule)",
+          "slack (user groups)"
+        ],
+        "prevalence": "teams 2 of 5 (teams, qm), mentionable groups 2 of 5 (teams, slack); common",
+        "mechanism": "team(id, org_id, name, visibility), team_members(team_id, principal, role owner|member), team_rooms(team_id, room_id). Joining a team grants membership in its standard rooms; private rooms keep their own roster. Mentions: the server expands @tag into the member list at send and fans out through the notification service with per-recipient permission checks. QM teamsForTurn includes a team layer only if the actor is on the team AND the room is configured for it."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:92 (ticket teams are support routing only)",
+          "apps/Application Plane/convex-core/convex/schema.ts:556-562 (comment anticipates team rooms as kind room, but no team table)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces (no @here, @channel or user-group hits)"
+        ],
+        "gap": "No team or sub-group concept, no source tracking on memberships, no group mentions; Space events produce no notifications, so group mentions have nothing to ride on."
+      },
+      "approach": "Control Plane (org-core and user-core): teams as a membership source; a team grant expands into space_memberships rows tagged with source, and removal only clears that source. Application Plane: team directory projection and, later, tag definitions; notification-core allowlist extended for mention events. Team resources reach agents only through owner-plane grants, never widened by team membership. Agents in a mentionable group must be opt-in.",
+      "effort": "L",
+      "dependencies": [
+        "Room role management (R-t1-02-01)",
+        "Room discovery (R-t1-02-02)",
+        "Space notifications (for group mentions)"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Team-derived plus manual membership needs source tracking or removing someone from a team will wrongly remove a manual grant. Broadcast mentions to agents can trigger many paid model turns.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-008",
+        "C-t1-02-009"
+      ]
+    },
+    {
+      "id": "R-t1-02-08",
+      "title": "Guests and link invitations with mandatory expiry",
+      "summary": "Introduce a guest principal type with memberships only in explicitly granted rooms, no directory or roster access and no agent invocation by default, invited through room-scoped invitations with a required expiry. Extend invitations with shareable links or codes (TTL, max uses, optional admin approval, stored terms acceptance) and a combined invite-to-org-and-room flow.",
+      "whyItMatters": "Teams, Slack, QM and Buzz all support external collaborators; Verevon rosters only active org members, so a customer or contractor cannot be pulled into one room. Org invitations exist but cannot target a room or be shared as a link.",
+      "referenceBestPractice": {
+        "bestSource": "teams (guest tiers), buzz (invite codes), qm (mandatory guest expiry)",
+        "others": [
+          "slack (single- vs multi-channel guests, admin approval queue)"
+        ],
+        "prevalence": "guests 4 of 5 (table-stakes); link invitations 2 of 5 (common)",
+        "mechanism": "principal.type in {internal, guest}. Guests get memberships only in granted rooms, cannot browse the directory, create rooms or see the roster, and by default cannot invoke agents; invitations require expires_at and expiry removes memberships through the normal membership-change path. Invite code = base64(org, room?, role, expires_at, max_uses, nonce) + HMAC; claim verifies HMAC and expiry, counts uses, records terms acceptance, then creates the membership through the normal Control path; claim is rate-limited (10 per minute in Buzz)."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:34-48 (rosters only from active org members)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx:20-30 (picker lists org members only)",
+          "apps/Control Plane/auth-core/src/auth/auth.ts:942-960 (org email invitations, 48 h, verified email, rate-limited accept)",
+          "apps/Frontend Plane/verevonv3/src/shared/api/membership-client.ts:5-10",
+          "apps/Application Plane/convex-core/convex/spaceMembers.ts:60-73 (a room grant requires existing org membership by design)"
+        ],
+        "gap": "Org email invitations exist, but there are no guests, no room-scoped invitations, no link or code invites with max uses, no approval queue, and no stored terms acceptance."
+      },
+      "approach": "Control Plane (auth-core, org-core, user-core): guest principal type, room-scoped guest invitation with mandatory expiry, and link invites with TTL, max uses and an optional room target and role; per-org approval policy. Agent turns in rooms with guests use the room audience in the Control decision so org-only knowledge is not retrieved. Guest seats flow to billing-core. Frontend: invite dialog on the room with a link option.",
+      "effort": "L",
+      "dependencies": [
+        "Room role management (R-t1-02-01)",
+        "Tenure windows (R-t1-02-02)",
+        "billing-core seat model"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Agent answers in a guest room can leak org knowledge; guest seat billing; ZDR and residency apply to guest data too; link invites leak easily, so keep a short TTL, max uses and admin revoke.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 3,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-011",
+        "C-t1-02-013"
+      ]
+    },
+    {
+      "id": "R-t1-02-09",
+      "title": "Enterprise identity: SSO enforcement and domain verification, SCIM, linked identities",
+      "summary": "Make SSO a per-org setting (domain verification, enforce-SSO flag, break-glass owner, domain allowlist and auto-join) with a typed session state shown in the UI; add SCIM Users and Groups in org-core so IdP deactivation revokes sessions and Space memberships; add principal_links in Control so a person's sign-ins and external chat identities resolve to one canonical principal.",
+      "whyItMatters": "Slack and Teams buyers expect SSO enforcement and SCIM; without deprovisioning a leaver can remain in rooms. Linked identities are the prerequisite for the planned external chat surfaces and for resolving ownership and approvals to a person.",
+      "referenceBestPractice": {
+        "bestSource": "slack (SSO and SCIM), qm (principal links, actor gates)",
+        "others": [
+          "teams (auth state machine, M365 group sync)",
+          "grokbot (user-facing Slack link flow)",
+          "buzz"
+        ],
+        "prevalence": "SSO methods 2 of 5 (common); SCIM 1 of 5 (unique here, enterprise suite feature); linked identities 2 of 5 (differentiator); allowlists 2 of 5 (differentiator)",
+        "mechanism": "Per-org sign-in policy {methods, default IdP, enforce SSO}; typed session auth state (up, interaction_required, licence_error, sign_in_restricted, unredeemed_invite). SCIM 2.0 /Users and /Groups per org with an org-scoped bearer token; deactivate revokes sessions and all Space memberships; group membership maps to a team. principal_links(person_id, provider, subject, evidence, created_by, revoked_at) with a cached canonicalPerson() resolver; links never carry admin rights and unlinking is immediate. Allowlist(org_id, kind email|domain, value) checked at sign-up, invite claim and agent invocation."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/auth-core/src/auth/auth.ts:1018-1030 (better-auth sso() enabled only when SSO_ENABLED=true)",
+          "apps/Control Plane/auth-core/src/auth/auth.ts:835-845",
+          "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:34-48",
+          "no SCIM code found in auth-core, user-core or org-core (backend baseline v-space-backend-033)"
+        ],
+        "gap": "Passkeys, 2FA, email OTP and generic OAuth exist. Not verified: per-org SSO enforcement, domain verification and a typed auth state. SCIM and IdP group sync are absent. Principal linking exists only as an ADR."
+      },
+      "approach": "Control Plane: auth-core and org-core settings for per-org SSO policy, domain verification (DNS) and allowlist or auto-join; a SCIM service in org-core writing org membership, after which Control publishes membership_changed (Space memberships and Session Core revocations already consume it); principal_links owned by Control with OAuth proof as evidence, with integration-corev2 resolving provider subjects through Control instead of keeping its own mapping. Expose a typed session state to the gateway. Sequence: SSO and domains, then durable membership events and SCIM, then links once the Channel Plane starts.",
+      "effort": "XL",
+      "dependencies": [
+        "Durable membership-change delivery (R-t1-02-02)",
+        "Teams (R-t1-02-07) for SCIM groups",
+        "Channel Plane for external links",
+        "integration-corev2 provider identities"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Enforcing SSO can lock owners out; keep a break-glass owner path. Deprovisioning is currently best-effort over plain NATS, so a lost event would leave a deprovisioned user in rooms. A wrong principal link is an impersonation bug; audit every link. Domain verification must be real to prevent takeover.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Principal links only: QM adoption plan S5.1 ADR; external surfaces under apps/Channel Plane/docs (docs-only)"
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-02-003",
+        "C-t1-02-004",
+        "C-t1-02-035",
+        "C-t1-02-005"
+      ]
+    },
+    {
+      "id": "R-t1-02-10",
+      "title": "Scoped agent context and promotion path: team layer, setup manifests, publish to team, service accounts",
+      "summary": "Extend ResolvedSpaceContext with a team layer (included only when the actor is on the team and the room is configured for it), add explicit scope-to-scope grants that stay with the resource-owning plane, and add scoped setup manifests (org, team, user) for agent computers. Once personal agents exist, add a publish-to-team flow with a step-by-step carry-over proposal (never secrets) and agent-owned service credentials scoped per binding.",
+      "whyItMatters": "Verevon already has the stricter half (decisions bound to audience and owner-plane ACL, authored instruction hierarchy). The missing half is how agents and their computers are configured at team level and promoted from a person's own agent to a team's, which GrokBot's vision of personal agents needs.",
+      "referenceBestPractice": {
+        "bestSource": "qm (scope layering), grokbot (publish, manifests, service accounts)",
+        "others": [],
+        "prevalence": "each 1 of 5 (qm or grokbot only); unique",
+        "mechanism": "QM resolve(actor, scope, audience) mounts org (read-only), each applicable team (read-only) and the active scope (read-write) and composes instructions, policies and granted handles; handlesForAudience returns only what every participant is entitled to. GrokBot: PublishToTeam builds a carry-over proposal (skills, plugins, memories, automations) the owner confirms item by item and never copies personal chats; setup_manifest(scope_kind USER|TEAM|ORGANIZATION) merged org, then team, then user at sandbox creation; team agents act through service-account credentials."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3720-3888 and :4231-4398 (authored instruction hierarchy: platform, org, Space, user persona, agent persona)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:632-738",
+          "apps/Control Plane/user-core/internal/spaces/repository.go:670-673 (personal Space membership immutable, so no personal agents)",
+          "no setup-manifest code found by name search in the Model Plane (comparator check)"
+        ],
+        "gap": "No team layer, no cross-scope grants, no setup manifests (status unknown), no publish flow because personal agents cannot exist yet, and provider-level agent service accounts are unverified."
+      },
+      "approach": "Phase A (after teams): add a team layer to ResolvedSpaceContext; resource grants live with the owner plane (Data Plane for files, Model Plane for skills) and are referenced by Control, never in a central table. Phase B (Model Plane sandboxes): setup manifests per org, then team and user, restricted to an allowlisted package registry. Phase C (after personal agents and agent access list): publish-to-team in the Model Plane with a Control publish decision; service credentials in integration-corev2 scoped per room binding, with the team copy re-requesting owner-plane grants.",
+      "effort": "XL",
+      "dependencies": [
+        "Teams (R-t1-02-07)",
+        "Agent access list (R-t1-02-03)",
+        "Personal agents (agents category)",
+        "integration-corev2 credential ownership"
+      ],
+      "planeOwner": "Model Plane (agent definitions, sandboxes) with Control Plane decisions",
+      "risks": "A central grants table would be cross-plane DB access. Carrying credentials would break agents not sharing credentials; memory carry-over can leak personal data. Packages in manifests are a supply-chain risk. Single-source, partly medium-confidence evidence.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-02-022",
+        "C-t1-02-036",
+        "C-t1-02-016",
+        "C-t1-02-017"
+      ]
+    },
+    {
+      "id": "R-t1-02-11",
+      "title": "Room creation flows: templates with an agent roster, project and case rooms, invite-on-mention",
+      "summary": "Let a room be created from a template (description, instructions, agent roster; each agent bound through the normal bind decision) and cloned from an existing room; enable creation of project and case kinds with owner and roster; and when someone mentions a non-member or an unbound agent, offer to add or bind them using the normal add-member and bind decisions.",
+      "whyItMatters": "Cheap differentiators on top of existing binding flows: Buzz has agent-roster templates that neither Slack nor Teams has, and the mention-to-invite flow is already described in Verevon's own Space doc but missing in code. Project and case schemas are ready and only the gateway refuses them.",
+      "referenceBestPractice": {
+        "bestSource": "buzz (templates, non-member mention dialog)",
+        "others": [
+          "teams (create from group, clone)",
+          "qm (project rooms with source-tracked channel members)"
+        ],
+        "prevalence": "templates 2 of 5 (buzz, teams; differentiator); project rooms 1 of 5 (qm); mention-to-invite 1 of 5 (buzz); unique to differentiator",
+        "mechanism": "room_template(id, name, visibility, description, canvas_ref, agents[{definition_id, role, policy}]); instantiate creates the room then binds each agent through the normal decision. On send the server returns non_member_mentions[]; the client shows a dialog (safe action focused, invite withheld and explained when the actor cannot administer the room, draft restored on cancel); invite goes through the normal add-member decision. QM project store keeps channel-derived members separate so unlinking removes only them."
+      },
+      "verevonToday": {
+        "status": "stub",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2860-2900 (room create takes a name only; kinds other than personal and room return unsupported_space_kind)",
+          "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27 (project and case kinds accepted)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:20-77 (agent templates only)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:188-199 (unbound or paused agents are not mention candidates; nothing offered for people)"
+        ],
+        "gap": "No room templates or clone, project and case creation refused by the gateway, and no invite-on-mention for people or unbound agents."
+      },
+      "approach": "Application Plane: room templates (instructions plus agent roster); the gateway create route accepts a template id and, once policies exist, project and case kinds; agent bindings still go through Control decisions one by one and templates never pre-grant tools (agents stay mention-only until confirmed). Gateway returns non_member_mentions and Frontend adds the dialog, reusing add-member and bind-agent decisions and respecting the agent add policy. External channel linking for projects stays with the future Channel Plane.",
+      "effort": "L",
+      "dependencies": [
+        "Agent access list (R-t1-02-03)",
+        "Room lifecycle (R-t1-02-04)",
+        "Role management (R-t1-02-01)",
+        "Channel Plane for the project channel link"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Templates must not pre-grant tools. The mention dialog must not reveal whether a private-room candidate exists. Source-tracked membership is needed for project rooms so unlinking does not remove manual members.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Space definition doc says mentioning an unbound agent offers to add it (per the comparator's UI baseline narrative; document path not re-verified)"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-027",
+        "C-t1-02-024",
+        "C-t1-02-032"
+      ]
+    },
+    {
+      "id": "R-t1-02-12",
+      "title": "Navigation at scale: sidebar sections, favorites, mute, stale cleanup; cross-org switcher badges",
+      "summary": "Replace the fixed sidebar groups with per-user sections (Favorites, Muted, custom sections with drag ordering and unread-first sort) and a rate-limited stale-room suggestion. Add a per-org unread or attention summary so the workspace switcher can show cross-org badges, with keyboard shortcuts to switch.",
+      "whyItMatters": "Once rooms can be discovered and joined, users will have many more rooms; both Slack and Teams solve this with user-organised sections. Most users have one org today, so cross-org badges are the lower-value half.",
+      "referenceBestPractice": {
+        "bestSource": "teams (sections), slack (workspace rail)",
+        "others": [],
+        "prevalence": "sections 2 of 5 (teams, slack; common); account and workspace switching 4 of 5 (table-stakes, partly present)",
+        "mechanism": "user_sidebar(user_id, org_id, sections[{id, name, emoji, sort, filter, items[]}], muted[], favorites[]) with keyboard-accessible drag between sections; stale suggestion = rooms with no visit in N days, excluding dont_suggest entries, rate-limited to once per day. Switcher: client keeps a list of {account, tenant, session}, one cheap unread badge per tenant from a per-tenant summary endpoint, Ctrl/Cmd+1..9 and next/previous, per-tenant sign-out clears only that tenant's local data."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232 (fixed groups plus a text filter)",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:672-729 (org WorkspaceSwitcher)",
+          "apps/Control Plane/auth-core/src/auth/auth.ts:835-837 and :942-948 (multiSession up to 10, organizationLimit 5)"
+        ],
+        "gap": "No sections, favorites, ordering or mute; the switcher has no cross-org unread badges, keyboard switching or tenant marker. Unread is browser-local even within one org (UI baseline), so a badge has nothing server-side to read."
+      },
+      "approach": "Application Plane: per-user sidebar preferences and visit timestamps, plus a server-side unread and attention projection per org and member. Frontend: sections with drag ordering and mute in CoreSidebarSpacesPanel; badges and Ctrl+1..9 in the WorkspaceSwitcher. Each org's badge must come from that org's own projection (no cross-plane joins).",
+      "effort": "M",
+      "dependencies": [
+        "Server-side unread state (notifications category)",
+        "Room discovery (R-t1-02-02) for more rooms per user"
+      ],
+      "planeOwner": "Application Plane (preferences) and Frontend Plane (UI)",
+      "risks": "Section names are user content; ZDR orgs may require that they are not logged.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 3,
+        "SRC": 6,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-031",
+        "C-t1-02-002"
+      ]
+    },
+    {
+      "id": "R-t1-02-13",
+      "title": "Multi-org and external collaboration horizon: org archive and transfer, shared cross-org rooms, managed external chat connections",
+      "summary": "Do the cheap part first: org lifecycle states (archived, owner transfer) in org-core. Later, after guests, add org-to-org links with host-org-owned shared rooms and external trust cues, with QM's rule that an external audience restricts agents to a context without org memory or keys. External chat workspace connections belong to the future Channel Plane, not to be built elsewhere.",
+      "whyItMatters": "Slack Connect and Teams shared channels are enterprise differentiators, and a parent org over several orgs matters for managed-service customers. Verevon's customers are single companies today, so this is a long-horizon investment; org archive and transfer are the useful cheap slice.",
+      "referenceBestPractice": {
+        "bestSource": "slack (Enterprise Grid, Slack Connect), buzz (operator lifecycle), qm (external audience isolation, managed Slack connections)",
+        "others": [
+          "teams (external banner and consent pane)"
+        ],
+        "prevalence": "tenant hierarchy 2 of 5, shared channels 3 of 5 (common), external connections 1 of 5; differentiator",
+        "mechanism": "Two-level tenancy org -> workspaces with policy resolving org then workspace; operator lifecycle as a state machine on the tenant row (active, archived, deleting with fence generation, deleted) with transfer as an owner swap. Shared rooms: shared_room(host_org, room_id) plus org_link(host_org, guest_org, status); the host org's policy governs posting and apps, members authenticate in their own org, and the client shows an external marker and a consent pane on first contact. QM: a reconciler swaps the Slack adapter on config version change with rollback."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/org-core/internal/rbac/catalog.go:15-60",
+          "apps/Control Plane/auth-core/src/auth/auth.ts:942-960",
+          "apps/Frontend Plane/verevonv3/src/features/settings/components/OrgDeletionDangerZone.tsx (org deletion exists, no archive or transfer)",
+          "apps/Channel Plane/docs/vision.md:17-125 (Channel Plane is docs-only)"
+        ],
+        "gap": "Single-level org tenant with deletion; no archive or ownership transfer, no parent org, no shared or cross-org rooms, no external chat connections (planned, blocked)."
+      },
+      "approach": "Control Plane: org-core lifecycle (archived, transfer_pending) and owner-transfer flow first; defer a parent-org table until a customer needs it. After guests exist, org-to-org links and host-org-owned rooms with decisions that carry both orgs' policies, plus agent audience isolation as soon as any external participant can exist. External chat connections: wait for the Channel Plane; do not build adapters elsewhere.",
+      "effort": "XL",
+      "dependencies": [
+        "Guests (R-t1-02-08)",
+        "Linked identities (R-t1-02-09)",
+        "Channel Plane",
+        "billing-core seat model"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "ZDR, residency and retention differ per org and one org's ZDR must hold for content its members post, which is hard to fit under per-org deny-by-default policies. Hierarchical policy resolution interacts with deny-by-default effect policies. The Channel Plane is docs-only, so this cannot be built as if it existed.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 6,
+        "DOC": 4,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "External chat connections: apps/Channel Plane/docs/vision.md (docs-only); QM adoption plan S5.1 ADR adopted, S5.3 blocked"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-02-001",
+        "C-t1-02-012",
+        "C-t1-02-037"
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t1-02-028",
+      "reason": "Channel moderation and posting modes: largely covered by the existing viewer role (read-only members); revisit after room role management (R-t1-02-01) ships if announcement-only rooms are requested. Teams-only (1 of 5)."
+    },
+    {
+      "cluster": "C-t1-02-029",
+      "reason": "Room email address: the existing MailTaskAddressSection is a personal self-forward alias that starts a chat thread, not a per-room address; niche, Teams-only, adds spam and prompt-injection exposure. Revisit with the Channel Plane."
+    },
+    {
+      "cluster": "C-t1-02-033",
+      "reason": "Convert a group chat into a room: depends on DMs and group DMs, which do not exist in Verevon (messaging category); nothing to convert until they ship."
+    }
+  ],
+  "strengthsToKeep": [
+    "Signed, short-lived Control decisions bound to authority, membership and audience revisions: equal to or stronger than QM's roster-version fence (apps/Control Plane/user-core/internal/spaces/decision.go; migrations/017_space_authority.up.sql:33-45)",
+    "Effective access is the intersection of the Space decision, the recipient audience and the owner-plane ACL, stricter than QM's every-participant-entitled rule (apps/Control Plane/user-core/internal/spaces/shared_thread_read_decision.go; apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3720-3888)",
+    "The room roster is declared to and converged by Control: agents are service subjects, human roster edits cannot remove them (managed_subject_types user), the registered owner is never revoked by absence, and revisions move only on real change (apps/Application Plane/convex-core/convex/spaceMembers.ts:1-12; apps/Control Plane/user-core/internal/spaces/repository.go:612-733)",
+    "Deny-by-default per-org effect policies with compliance fields (lawful basis, retention class, residency, ZDR), plus service-only deletion-policy and legal-hold endpoints (apps/Control Plane/user-core/migrations/018_space_effect_policies.up.sql; apps/Control Plane/user-core/internal/http/server.go:346-354)",
+    "Org-level custom roles over a capability catalog are richer than the closed role enums in Buzz and QM (apps/Control Plane/org-core/internal/rbac/catalog.go:15-60)",
+    "Idempotent organization-room provisioning with an explicit isOrganizationRoom marker and an invariant check (apps/Application Plane/convex-core/convex/spaces.ts:298-345)",
+    "Per-plane deletion receipts for Space deletion (apps/Control Plane/user-core/internal/spaces/deletion_authorization.go:17-22; apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts)",
+    "Org invitations are email-verified and accept is rate-limited; passkeys and 2FA are present (apps/Control Plane/auth-core/src/auth/auth.ts:942-960)"
+  ]
+}

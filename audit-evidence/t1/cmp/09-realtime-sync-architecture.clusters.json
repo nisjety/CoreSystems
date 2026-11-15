@@ -1,0 +1,2434 @@
+{
+ "category": "Realtime & sync architecture",
+ "excluded": [
+  {
+   "id": "slack-product-surface-116",
+   "reason": "Electron shell cookie SameSite rewriting and encryption for Slack hosts: browser-shell implementation trivia with no Space product relevance (Verevon is a web SPA with gateway-managed session cookies)."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t1-09-001",
+   "name": "Persistent push channel delivering room events to every member",
+   "description": "One long-lived authenticated WebSocket or server stream per client carries new and changed messages, typing, presence and agent state the moment the server accepts them, replacing interval polling.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "qm",
+     "slack",
+     "teams"
+    ],
+    "n": 5,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-133",
+    "slack-product-surface-107",
+    "slack-shell-and-native-062",
+    "teams-product-surface-117",
+    "teams-shell-and-native-045",
+    "grokbot-agent-product-088",
+    "qm-product-103"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-088"
+    ],
+    "why": "q5, SRC: a single multiplexed, sequenced server stream carries rows, deletes, generation resets, heartbeats, agent live state, roster changes and turn failures for all of a user's agents, with per-entry updated_seq cursors so resume is exact. Slack and Teams (Trouter) prove the pattern at scale but are DOC/REA-level; Buzz (q4 SRC) is the best open, room-centric WebSocket reference."
+   },
+   "mechanism": "Client opens one stream (WebSocket or HTTP/2 server-stream/SSE) after auth; sends subscription cursors [{room_id, generation, after_seq}]. Server replies with a connected frame {stream_id, server_time, lifetime}, then replays rows with seq > after_seq, then live frames: rows{entries,deletes}, cleared{new_generation}, cursor_too_old (client must re-snapshot), heartbeat, presence/typing, agent_state, roster_changed. Every room mutation gets a server-assigned monotonic per-room seq (and updated_seq for edits). Slack adds a thin fabric: gateway servers hold sockets and subscriptions, channel servers keyed by consistent hash of channel id fan out. In Rust: axum WebSocket/SSE in the gateway, fed from an Application Plane projection stream; Solid client applies frames into a keyed store.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-090",
+     "v-space-ui-088",
+     "v-space-backend-088",
+     "v-space-ui-087"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:78-87",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:273-338"
+    ],
+    "gap": "No WebSocket, SSE or Convex subscription for rooms. Members see other people's posts and agent replies only via a 6 s visible-tab poll of the full thread projection (plus 30 s authority recheck). Agent turns from other members are invisible until the next poll; latency floor is 6 s and cost grows with members x rooms.",
+    "strengths": "Visibility-gated polling with refetch on resume is a correct fallback and should stay as the safety net once push lands."
+   },
+   "benefit": "Removes the 6 s floor so human-human chat feels like Slack/Teams and agent work is visible as it happens; cuts poll load (full projection + N+1 transcript fetches each 6 s per open tab). Prerequisite for live agent streams, cross-room unread and presence.",
+   "approach": "Application Plane emits a typed per-Space event projection (seq-numbered) from Convex mutations and from Model Plane run/thread events received over NATS; the Rust gateway terminates one authenticated SSE (or WebSocket) per browser tab, subscribes on behalf of the user after a Control read decision, and re-authorizes per delivery/at decision expiry. Client: one EventSource per tab, frames applied to a Solid store keyed by room/thread; keep the 6 s poll as a degraded mode.",
+   "effort": "L",
+   "dependencies": [
+    "C-t1-09-002 authorized fan-out",
+    "C-t1-09-020 typed Space event envelope",
+    "C-t1-09-003 cross-node bus (NATS)",
+    "Control read decisions with short TTL"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Long-lived connections vs 2-minute Control decisions (must re-authorize mid-stream); content must not be cached or copied in the push tier under ZDR (send references or ephemeral frames only); gateway horizontal scale and sticky connections; plane ownership of message content (Model Plane) vs room events (Application).",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Present in 5/5 references and the single most visible difference between a chat room and a polling dashboard; blocks the Teams/Slack half of the vision.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-002",
+   "name": "Authorization enforced at subscribe time and at every delivery",
+   "description": "Live delivery re-checks the reader's current access for each event, so a revoked or non-member connection stops receiving immediately even if its subscription outlived the change; the subscription is only registered after access is checked, and the client opens live before backfilling.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-architecture-004",
+    "buzz-architecture-005",
+    "buzz-product-134",
+    "buzz-architecture-007"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-004",
+     "buzz-architecture-005",
+     "buzz-architecture-007"
+    ],
+    "why": "q4 SRC: one send chokepoint (filter_fanout_by_access) shared by local and cross-node paths, fail-closed on lookup error; subscribe checks access then registers; cross-pod channels separate idempotent cache-invalidate hints from imperative connection-control commands that drop banned users' sockets cluster-wide."
+   },
+   "mechanism": "Subscription registry indexed by (room, kind), room wildcard, and global; global subs never receive room-scoped events. On every outbound event: tenant label equality, per-kind audience rules, room membership via a short (10 s) cache, fail closed. REQ: load accessible rooms, apply the token scope upper bound, repair cache-negatives against the DB, then register. Revocation: publish a cache-invalidate hint (loss tolerable) and a separate conn-control command that closes affected sockets on every node. Client contract: open live subscription first, then page history, dedupe by id.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-093",
+     "v-space-backend-092"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:75-78,317-338",
+     "apps/Control Plane/user-core/internal/spaces/decision.go:4-60,145-222",
+     "apps/Model Plane/rust/services/session-core/src/space_membership_nats.rs:1-80"
+    ],
+    "gap": "There is no live delivery path, so there is no per-delivery check. Today authority is re-checked by the browser every 30 s (fail-closed) and per request through Control decisions; revocation reaches Session Core over best-effort NATS. A push transport would need a delivery-time chokepoint that honours Control audience snapshots and the 2-minute decision TTL.",
+    "strengths": "Control-signed, short-lived, audience-hash-bound decisions and the 30 s fail-closed recheck are stronger primitives than Buzz's cache; reuse them as the delivery-time check."
+   },
+   "benefit": "Keeps the rule that Space access never widens an owner-plane ACL once content moves over long-lived sockets; prevents leaks to removed members or revoked agents.",
+   "approach": "In the gateway push tier: subscribe only after a Control read decision for (user, space, audience revision); cache decision until expiry, re-mint before expiry; drop or close on membership_changed NATS events (treat as hint) and on decision refresh failure (fail closed). Deliver only event ids and metadata for agent content and let the client fetch bodies through the existing decision-gated read path if ZDR requires.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-001 push channel",
+    "Control decision minting endpoints",
+    "membership_changed NATS subject"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Decision minting load (one per subscriber per 2 min); NATS loss means the decision expiry is the hard backstop, so revocation latency is up to the TTL.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Not visible to users when right, but push without it would break the authority model; must ship with C-t1-09-001.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-003",
+   "name": "Tenant-scoped cross-node pub/sub bus for fan-out",
+   "description": "A message accepted on one node reaches subscribers connected to other nodes through per-tenant, per-room topics that nodes subscribe to only while they have local subscribers.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-006",
+    "buzz-product-135",
+    "qm-architecture-058",
+    "qm-product-101"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-006",
+     "buzz-product-135"
+    ],
+    "why": "q4 SRC with a measured 64x ingress reduction: community-scoped Redis topics with refcounted dynamic SUBSCRIBE and delayed unsubscribe. QM's Postgres LISTEN/NOTIFY bus (one listener per process, payload capped ~7.5 KB, resync on reconnect) is the simplest variant."
+   },
+   "mechanism": "Topics {tenant}:room:{id} and {tenant}:global; retain_topic/release_topic refcount local subscribers and drive SUBSCRIBE/UNSUBSCRIBE on one dedicated connection (500 ms unsubscribe delay to absorb churn); broadcast into an in-process channel; a resync is forced after the bus connection reconnects because messages in the gap are lost. QM: pg NOTIFY with JSON payloads capped below 8 KB, drop oversize, one LISTEN connection per process.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-092"
+    ],
+    "evidence": [
+     "apps/Control Plane/user-core/internal/nats/shared_publisher.go:196-214",
+     "apps/Application Plane/convex-core/nats-subscriber.js"
+    ],
+    "gap": "NATS exists for cross-plane events (membership_changed) but is plain NATS, unsigned and best-effort, with no per-Space subject scheme for realtime fan-out to gateway nodes.",
+    "strengths": "NATS is already deployed across planes; subject hierarchy can mirror the Buzz topic scheme (space.{org}.{space}.events)."
+   },
+   "benefit": "Lets the gateway scale horizontally with push connections while staying inside plane boundaries (events, not DB reads).",
+   "approach": "Define NATS subjects verevon.space.{org}.{space}.events carrying event ids/metadata (no content under ZDR); gateway nodes subscribe per active room with refcounting; on reconnect force client resync by seq. Consider JetStream only for the durable outbox side, not for ephemeral fan-out.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-001",
+    "C-t1-09-020"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Unsigned NATS: a compromised publisher could inject events, so frames must carry only ids that the client then reads through authorized paths, or be signed.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Infrastructure needed for push at more than one gateway replica; NATS makes it medium effort.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-004",
+   "name": "Gap-free resume and catch-up after disconnect",
+   "description": "After sleep, network loss or server restart the client re-subscribes and fills exactly the missed events using cursors or sync tokens, detects gaps, and re-snapshots when its cursor is too old.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "teams"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-architecture-015",
+    "buzz-product-145",
+    "grokbot-agent-runtime-044",
+    "teams-product-surface-118",
+    "teams-shell-and-native-046"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-044"
+    ],
+    "why": "q5 SRC: per-agent cursors {generation, afterUpdatedSeq} with cursor_too_old and cleared{new_generation} frames give an exact resync contract. Buzz (q4) contributes the operational policy (event-driven resume triggers on online/focus/visibility, paced replay, passive stall watchdog); Teams uses sync tokens plus gap detection (REA)."
+   },
+   "mechanism": "Server: monotonic per-room seq; keep a bounded replay window; if after_seq < window floor send cursor_too_old. Client: store last applied seq per room; resume triggers are events (online, focus, visibilitychange; min 5 s apart), not timers; open live first, then page backfill (500 rows, a few pages concurrently), dedupe by id; cap page retries (3) then degrade to live-only and mark the missed window; never write to a half-open socket from a watchdog.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-089",
+     "v-space-ui-089",
+     "v-space-ui-087"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:17,31-32",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:136-142",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:688-702",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:273-338"
+    ],
+    "gap": "Only the sender's own turn can resume (SSE Last-Event-ID with monotonic seq and client dedupe). The room has no cursor: each poll and each visibility resume refetches the full projection, and there is no gap detection.",
+    "strengths": "Own-turn SSE resume is already seq-based with duplicate-frame refusal (chat-client.ts), a good template for the room stream."
+   },
+   "benefit": "No lost or duplicated messages after laptop sleep or network blips; cheaper reconnects than full refetch.",
+   "approach": "Reuse the own-turn seq + Last-Event-ID pattern for the room stream: Application Plane assigns per-Space seq; gateway replays from a bounded buffer or falls back to a projection snapshot (cursor_too_old).",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-001",
+    "C-t1-09-020"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Seq assignment must be single-writer per Space (Convex mutation) to stay monotonic; replay buffers must hold metadata only under ZDR.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Push without exact resume produces silent gaps, which is worse than polling; ships with C-t1-09-001.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-005",
+   "name": "Live agent-run stream that any room member can watch",
+   "description": "A running agent turn is streamed (tool call start/result, text deltas by offset, run snapshot, finish, and for computer-use agents the cursor actions) so every viewer, not just the requester, watches the agent work live and can join mid-turn.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "qm-architecture-056",
+    "qm-product-098",
+    "grokbot-agent-product-124"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-056",
+     "qm-product-098"
+    ],
+    "why": "q4 SRC: AG-UI-shaped SSE per run (RUN_STARTED, TOOL_CALL_START/RESULT, CUSTOM delta {offset, delta}, run snapshot, RUN_FINISHED) with SSE ids and replay of tool entries from a cursor; joinable by any authorized viewer. Grok Bot adds a computer_actions frame {type, x, y, button, count, at_ms} for visualising an agent's clicks (q3)."
+   },
+   "mechanism": "GET /runs/{id}/events (auth = room read decision): server first replays tool entries since cursor and the current text length, then streams deltas keyed by byte offset so a late joiner can splice; a terminal snapshot carries the final text. Client: if a delta offset is beyond what it has, abandon SSE and fetch the snapshot (fallback). Computer-use: batch action frames to the same stream for a live cursor overlay.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-089",
+     "v-space-backend-089"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-473",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:56-62,174-175",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:17,31-32"
+    ],
+    "gap": "Only the sender sees the turn stream; other members see the result (and queued/running/awaiting_approval status) after the next 6 s poll. Run events SSE exist for the run owner only. No computer-action stream reaches a Space.",
+    "strengths": "AG-UI SSE and resume routes already exist in the gateway (ag_ui.rs with Last-Event-ID passthrough), so the envelope is in place; the gap is audience, not protocol."
+   },
+   "benefit": "Core of \"humans and agents cooperating\": colleagues can watch, steer or stop an agent working in the room; makes agent work trustworthy and visible.",
+   "approach": "Model Plane run event stream (already seq-based) exposed through the gateway to any member holding a room read decision for that thread; deltas carry offsets; Application room stream announces run start with run id so clients attach. Respect ZDR: stream through, never persist in gateway/Application. Browser-agent actions are proposals executed by Quarry: stream Quarry execution receipts/frames as computer actions.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-001",
+    "Control thread read decision for non-owners",
+    "Model Gateway run events SSE"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Fan-out cost of token deltas to many viewers (coalesce to ~50-100 ms); privacy tier of a turn may forbid other viewers seeing intermediate tool output.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Directly serves the agent-room vision and Grok-style \"agent works like a human\" feel; protocol already exists so effort is moderate.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-006",
+   "name": "Stream health watchdog with polling safety net (hybrid push + poll)",
+   "description": "Live streams are guarded by open and silence timeouts, offset checks and inactivity windows; when the stream stalls the client falls back to polling or resyncs, and keeps a slow safety poll even when push is healthy.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm",
+     "slack",
+     "teams"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "qm-architecture-057",
+    "grokbot-agent-runtime-056",
+    "grokbot-agent-runtime-110",
+    "teams-shell-and-native-138",
+    "slack-shell-and-native-051"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-057"
+    ],
+    "why": "q4 SRC: SSE open timeout and 30 s silence timeout, offset sanity check returning fallback, terminal snapshot application and resync on every reconnect. Teams (q4) documents relaxed poll intervals when push is healthy and stopping presence polling when locked; Grok Bot sets server-tunable stall thresholds (advisory 20 s, fail 30 s) and 60 s safety polls with 45 s inactivity timeout."
+   },
+   "mechanism": "Per stream: open timeout, silence timeout (heartbeats every <15 s keep it alive), advisory-then-fail stall detector; on fail, switch to poll mode and attempt reconnect with jittered backoff; while push is healthy, poll at a relaxed interval (e.g. 60-180 s) to heal silent drift; pause non-critical polling when the OS is locked or tab hidden.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-087"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:78-87",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:273-338",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:363-460"
+    ],
+    "gap": "Polling exists (and pauses when hidden), but there is no push to guard. Own-turn SSE has a timeout outcome in turn timing, but no documented silence watchdog with fallback in the Space composer (not verified in detail).",
+    "strengths": "Visibility gating and refetch-on-resume already implement the \"pause when hidden\" half."
+   },
+   "benefit": "Push that silently stalls is the classic chat bug; a watchdog plus safety poll makes the new channel trustworthy.",
+   "approach": "Keep the 6 s poll code path as the fallback mode; add heartbeat frames to the room stream; client watchdog switches modes; relaxed 60 s safety poll while connected.",
+   "effort": "S",
+   "dependencies": [
+    "C-t1-09-001"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Thundering herd when many clients fall back at once (add jitter).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap insurance that ships with push; reuses existing polling.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-007",
+   "name": "Idempotent, retry-safe sends with explicit pending/accepted/failed states",
+   "description": "Each send carries a stable client id or content hash so retries after timeouts never duplicate a message; the composer distinguishes queued, sending, accepted and failed.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "qm"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-architecture-003",
+    "grokbot-agent-runtime-045",
+    "qm-architecture-062"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-045"
+    ],
+    "why": "q5 SRC: staged send pipeline (queued, prepared, dispatching, accepted-awaiting-echo) with a persisted send journal, nonce and echo confirmation; resolutions dispatched/retired/parked/failed. Buzz uses content-addressed event ids with ON CONFLICT DO NOTHING (q4); QM enforces idempotency keys and a 5-minute replay window at every ingress (q4)."
+   },
+   "mechanism": "Client generates a send id (uuid/nonce) when the user presses enter and persists it with the draft; server insert is ON CONFLICT (tenant, send_id) DO NOTHING returning was_inserted; ack returns the canonical message id; client marks accepted only when the echo (stream frame with the same send id) arrives; retries reuse the same id; failures show a retry affordance.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-092"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:136-137,605-613",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-473",
+     "apps/Control Plane/user-core/internal/spaces/decision.go:4-60,145-222"
+    ],
+    "gap": "Control append decisions bind an idempotency key, but the gateway generates one per request when the client omits it (spaces.rs required_or_generated) and the Space composer does not send one, so a client retry after a timeout is a new append (and a new AI turn). No accepted/failed state machine beyond the local echo.",
+    "strengths": "Decisions already carry idempotency_key and payload digest, so end-to-end idempotency only needs a client-supplied key."
+   },
+   "benefit": "Prevents duplicate posts and duplicate (billed) AI turns on flaky networks; prerequisite for any queued/offline send.",
+   "approach": "Composer generates idempotency_key per send and reuses it on retry; gateway passes it into the Control thread:append decision; Session Core dedupes on (thread, idempotency_key) and returns the existing turn/stream request id.",
+   "effort": "S",
+   "dependencies": [
+    "Session Core dedupe on idempotency key (verify)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Content-bound decisions: a retry with edited content must get a new key.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small change with real cost and correctness payoff (duplicate AI turns are billed).",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-008",
+   "name": "Optimistic insert into the shared timeline, swapped in place on ack",
+   "description": "A sent message appears in the timeline instantly with a local key and is replaced in place by the server-confirmed message without remounting.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-architecture-018"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-018"
+    ],
+    "why": "q3 SRC, only explicit record: TanStack Query onMutate inserts optimistic-<uuid>, onSuccess swaps for the signed event preserving the render key."
+   },
+   "mechanism": "Insert a pending row keyed by the client send id; when the ack or stream echo with that send id arrives, replace fields but keep the DOM key; on failure mark the row failed with retry.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-092"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:386,524-595"
+    ],
+    "gap": "The sender sees a separate local exchange block, but the timeline itself only updates on the next poll; no in-place reconciliation by send id. Approvals and pins are deliberately non-optimistic (keep).",
+    "strengths": "Deliberately non-optimistic authority actions (approvals, pins) are a good rule to preserve."
+   },
+   "benefit": "Removes the visual jump between the local exchange block and the polled timeline row.",
+   "approach": "Key timeline rows by idempotency key until the canonical id arrives via the push stream; Solid store reconcile by key.",
+   "effort": "S",
+   "dependencies": [
+    "C-t1-09-007",
+    "C-t1-09-001"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Polish that falls out of idempotent sends plus push.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-009",
+   "name": "Offline action queue with ordered replay",
+   "description": "Sends, deletes and read-position updates made while offline are queued durably, retried across sessions and replayed in order.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "teams-shell-and-native-048",
+    "buzz-product-142"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-048"
+    ],
+    "why": "q4 SRC: offline-supported resolvers (sendMessage, setConsumptionHorizon, delete/undelete) with guaranteed ordering, 48 h action expiry, 10 cross-session retries and a 10 min sync refresh. Buzz has it only as a mobile spec (DOC)."
+   },
+   "mechanism": "Persist each pending action (IndexedDB) with idempotency key, ordering key (conversation) and expiry; a manager replays in order when connectivity returns, stops a conversation's queue on a hard failure, surfaces failed items.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-094",
+     "v-space-backend-093"
+    ],
+    "evidence": [],
+    "gap": "No queued sends or offline store. Each message requires a fresh content-bound Control thread:append decision with a 2-minute TTL, so a queued send must re-mint its decision at replay time.",
+    "strengths": ""
+   },
+   "benefit": "Reliability on mobile and flaky links; lower priority for an AI-first web product where most sends start agent turns that need connectivity.",
+   "approach": "If built: queue only the user intent (text, room, idempotency key) in IndexedDB, re-request the decision at replay, encrypt at rest, and honour ZDR by not queuing content for ZDR orgs.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-007",
+    "C-t1-09-010"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "ZDR conflict (content at rest in the browser); stale sends firing agent turns hours later.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Only Teams ships it; content-bound decisions and ZDR make it costly for limited benefit on web.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-010",
+   "name": "Local replica / cache for instant paint and restart",
+   "description": "The client persists recent rooms, roster, drafts and layout locally so it renders instantly on launch and then reconciles with the server; the local store is disposable, never authoritative.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "slack",
+     "teams"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-architecture-017",
+    "buzz-product-141",
+    "grokbot-agent-product-090",
+    "grokbot-agent-runtime-048",
+    "grokbot-agent-product-123",
+    "teams-product-surface-123",
+    "teams-shell-and-native-049",
+    "slack-shell-and-native-056"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-017",
+     "buzz-product-141"
+    ],
+    "why": "q3 SRC but the cleanest contract: a bounded (32 channels, 1 MiB/row, versioned) paint-accelerator cache always replaced by authoritative data. Grok Bot (q4) goes further with named local replicas and a transcript write-ahead journal; Teams persists session recovery in IndexedDB."
+   },
+   "mechanism": "Per (user, server) scope store: last N room head pages, roster, selection, drafts; hydrate before subscribing; replace on first authoritative page; schema version and wipe on mismatch; size caps.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-093",
+     "v-space-ui-094"
+    ],
+    "evidence": [],
+    "gap": "No local room cache, drafts persistence or replica; every navigation refetches. Only the server-side read marker spans devices.",
+    "strengths": "Not caching content in the browser is consistent with ZDR by default."
+   },
+   "benefit": "Faster room switch and app boot; drafts survive reloads.",
+   "approach": "Start with non-content state (drafts for non-ZDR orgs, room list, selection) in localStorage/IndexedDB; cache content pages only when the org privacy tier allows and wipe on sign-out (C-t1-09-011).",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-011",
+    "org ZDR posture in client"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "ZDR: content at rest on the device; stale cache showing revoked rooms (must re-authorize before render).",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Common in desktop clients but conflicts with ZDR; push plus paging gives most of the speed benefit.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t1-09-011",
+   "name": "Local data lifecycle and cache hygiene (wipe on sign-out, version changes)",
+   "description": "Caches, service workers and local databases are cleared on sign-out or runtime change with clear rules about what survives.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "slack-shell-and-native-055",
+    "slack-product-surface-115",
+    "teams-shell-and-native-050"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-shell-and-native-055"
+    ],
+    "why": "q5 SRC: sign-out clears caches and service workers but keeps IndexedDB until the last workspace leaves; Electron version up/down-grades handled explicitly."
+   },
+   "mechanism": "Sign-out hook: clear CacheStorage, service workers, per-account IndexedDB and storage; keep shared data only while another account is signed in; on client version change migrate or wipe local schema.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check what the v3 SPA stores in localStorage/IndexedDB outside spaces and whether sign-out clears it (search src for localStorage, indexedDB, caches, serviceWorker and the logout flow).",
+    "strengths": ""
+   },
+   "benefit": "Required companion to any local cache for privacy and ZDR.",
+   "approach": "Central client-storage registry with per-org/per-user keys and a sign-out purge; build together with C-t1-09-010.",
+   "effort": "S",
+   "dependencies": [
+    "C-t1-09-010"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Only needed once local caching exists.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-012",
+   "name": "Per-user state synced across devices (read position, preferences, layout)",
+   "description": "Read positions (including per-thread), sidebar sections, stars, mutes and layout follow the user to every device and merge deterministically.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-140",
+    "buzz-architecture-019",
+    "buzz-architecture-027",
+    "qm-architecture-141",
+    "qm-product-104"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-140",
+     "buzz-architecture-019"
+    ],
+    "why": "q5 SRC: each preference is a field-level last-writer-wins register [version, device, value] merged per field, encrypted to the user, never overwriting remote data after a failed fetch; read state moved to a server-derived API with thread read positions. QM offers a simpler server key/value UI-state API with LWW and future-skew clamp."
+   },
+   "mechanism": "Server store keyed (user, key) with value <= 64 KB and updated_at; writes rejected if older than stored; clamp client clocks far in the future; for multi-field docs use per-field registers with device ids; read markers server-side per room and per thread.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-094"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:845-851",
+     "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:50",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/settings/preferences.rs:12-31"
+    ],
+    "gap": "Room read markers are server-side (so work across devices), and user preferences proxy to user-core. No per-thread read positions, no sidebar/layout/mute sync, no LWW conflict semantics documented for preferences.",
+    "strengths": "Server-side read markers already give cross-device unread for the open room."
+   },
+   "benefit": "Teams/Slack-grade continuity between laptop and phone.",
+   "approach": "Extend user-core preferences (Control) for profile-level settings and add Application Plane per-user Space state (mutes, sections, per-thread read markers) with LWW by updated_at.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-013 for unread aggregates"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Plane split between Control preferences and Application per-Space state must be explicit.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Read markers already cover the core; rest is polish.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-013",
+   "name": "Cross-room state stream (sidebar unread, working, roster changes)",
+   "description": "One multiplexed stream tells the client which rooms are working, awaiting approval, idle or have new messages, and when agents or rooms are created or changed, so the sidebar updates without opening each room.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm",
+     "slack"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "qm-architecture-059",
+    "grokbot-agent-product-095",
+    "slack-shell-and-native-060"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-059"
+    ],
+    "why": "q4 SRC: GET /v1/session-state/events emits session_state {threadRef, state working|awaiting_approval|idle, participants}, relayed with delivery and inbox events, filtered server-side to what the user can see. Grok Bot adds typed roster change events (agent created/updated/deleted/visibility/room members)."
+   },
+   "mechanism": "Server keeps a per-room latest-activity aggregate (last seq, last author, run state); a per-user stream emits deltas for rooms the user can read; client compares last seq with the user's read marker to show unread; roster events update the room/agent list.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-094"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:35-145",
+     "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:50"
+    ],
+    "gap": "No cross-room aggregate. Sidebar working/unread dots exist only for the room open in this browser (browser-local live-work store retracted on leave). Audit section 18 claim that others' polling fills it is wrong in code.",
+    "strengths": "The browser-local live-work store shape (page, sidebar and composer share one store) is a good client sink for the future stream."
+   },
+   "benefit": "Unread badges and \"agent working\" dots across all rooms are table-stakes in Slack/Teams and the main way users notice agent activity in other rooms.",
+   "approach": "Application Plane maintains a per-Space activity aggregate (updated from Model Plane run/thread events via NATS and Convex mutations); gateway exposes a per-user SSE of aggregate deltas filtered by Control read decisions; client feeds space-live-work store.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-001",
+    "C-t1-09-002",
+    "Model Plane per-Space activity events"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Aggregates must not leak titles/content of rooms the user cannot read; per-user fan-out cost in big orgs.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Users notice immediately when unread badges are missing; QM proves a single stream is enough.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-014",
+   "name": "Presence and typing as ephemeral leases, separate from the message path",
+   "description": "Online/away/offline and typing are short-lived leases renewed by heartbeat, never stored as messages, expire on client death, and fan out only to viewers who need them.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-architecture-008",
+    "slack-product-surface-108",
+    "teams-product-surface-127"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-008"
+    ],
+    "why": "q4 SRC: presence key with EX 180 (3x the 60 s heartbeat), typing ZSET with 5 s window, ephemeral kinds skip DB/audit/search, agents get the same lease so a dead agent shows offline in about 3 minutes. Slack (DOC q5) separates presence servers and only pushes presence for users visible on screen."
+   },
+   "mechanism": "Heartbeat every 60 s sets lease TTL 180 s; typing is a sorted set by expiry; changes fan out as ephemeral frames on the push channel; clients subscribe to presence only for visible users; idle/lock signals set away.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-088",
+     "v-space-ui-087"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/spacePresence.ts:42,50,122",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1918-2061"
+    ],
+    "gap": "Presence (30 s TTL) and typing (8 s decay) are shipped, room-scoped, content-free, but ride the 6 s poll so typing indicators lag; no global status, no agent presence lease, no visible-user subscription.",
+    "strengths": "Content-free presence rows with TTL in Application Plane already match the lease model."
+   },
+   "benefit": "Real-time typing and agent availability make the room feel alive.",
+   "approach": "Keep Convex presence leases; publish presence/typing deltas as ephemeral frames on the room stream; add agent presence derived from run/heartbeat state.",
+   "effort": "S",
+   "dependencies": [
+    "C-t1-09-001"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Presence fan-out volume in large rooms (throttle, visible-only).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Mostly a transport move once push exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-015",
+   "name": "Single transport-neutral admission pipeline with ordered side effects",
+   "description": "Every write (from browser, CLI, agent or webhook) passes the same admission steps in a fixed order (auth, signature, membership, store, publish, fan-out, audit, workflow triggers) and is acknowledged only at the end.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-architecture-002",
+    "buzz-product-136"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-002",
+     "buzz-product-136"
+    ],
+    "why": "q4 SRC: one ingest_event shared by WebSocket EVENT and HTTP POST /events; fixed step order with the ack last."
+   },
+   "mechanism": "One function per write: authenticate, verify, authorize, persist (with derived columns), publish to bus, local fan-out, audit, trigger workflows, ack; transports are thin adapters.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:54-293",
+     "apps/Control Plane/user-core/internal/spaces/decision.go:4-60,145-222"
+    ],
+    "gap": "No baseline record in this category; from the backend baseline (SRC), every room post goes browser -> gateway -> Control thread decision -> Model Gateway -> Session Core, and agents use the same decision path. A human-only (no AI) post path does not exist yet.",
+    "strengths": "Control-issued, content-bound decisions are one authority chokepoint for humans and agents; keep any new transport (push, CLI, external channel) behind it."
+   },
+   "benefit": "Already aligned with the \"Control is the only authority\" rule.",
+   "approach": "Keep; when adding human-only posts or external channel ingress, route them through the same decision pipeline.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None for keeping it.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is equal or ahead (stronger authority binding than Buzz's membership check).",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-016",
+   "name": "Ack-after-durable ingress for external chat platforms",
+   "description": "Events from Slack/Teams-style platforms are acknowledged to the platform only after they are durably staged, so a crash causes redelivery instead of loss.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm",
+     "slack"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "qm-architecture-061",
+    "qm-product-102",
+    "qm-architecture-157",
+    "slack-shell-and-native-063"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-061",
+     "qm-product-102"
+    ],
+    "why": "q4 SRC: deferred envelope ack capped at 2.5 s; staging within 300 ms if the cap is hit; failed handlers withhold the ack so Slack redelivers; Socket Mode by default with HTTP events opt-in. Slack DOC shows the Socket Mode contract (envelope ack, up to 10 connections)."
+   },
+   "mechanism": "Receiver holds the platform ack; AckGate resolves on persisted() or failed(); after a cap, write the raw envelope to a durable map keyed account:event_id and ack; a sweeper processes staged envelopes; dedupe by event id.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:644-664"
+    ],
+    "gap": "No baseline record in this category. Delivery targets on agent bindings are a schema stub with no adapter; Channel Plane is docs-only/future.",
+    "strengths": ""
+   },
+   "benefit": "Needed when Verevon agents live inside Teams/Slack channels (Channel Plane).",
+   "approach": "Defer to Channel Plane design; adopt the AckGate + staging pattern there.",
+   "effort": "M",
+   "dependencies": [
+    "Channel Plane"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Platform-specific ack deadlines.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Out of scope until Channel Plane exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-017",
+   "name": "Transactional outbox for side effects (push, delivery) with claim leases",
+   "description": "Side effects of a write (push notifications, external deliveries) are enqueued in the same transaction, claimed by workers with time-limited leases, retried, and deduplicated by idempotency key.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-022",
+    "qm-architecture-060"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-060"
+    ],
+    "why": "q4 SRC: delivery outbox with idempotency keys, claim TTL, overage expiry and shadow mode. Buzz (q4) adds a push match queue and wake outbox that never block chat writes."
+   },
+   "mechanism": "enqueue(idempotencyKey, payload) in the write transaction; poller claims rows with claimed_until; ack marks delivered; expired claims return to the queue; rows past a max age are expired; shadow mode runs the pipeline without sending.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-091"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:680-820",
+     "apps/Application Plane/convex-core/convex/spaceAudienceRegistration.ts:13-22"
+    ],
+    "gap": "Outboxes with leases, retry and idempotent event ids are shipped for lifecycle, audience, deletion and owner receipts, but not for room-message push or external delivery (S4.4 durable completion delivery is planned).",
+    "strengths": "The outbox pattern is already proven in Convex for Space lifecycle; extend rather than invent."
+   },
+   "benefit": "Reliable notifications and agent completion delivery without blocking chat writes.",
+   "approach": "Add a Space delivery outbox in Application Plane (S4.4) with receipts pending/claimed/sent_unconfirmed/acknowledged/failed.",
+   "effort": "M",
+   "dependencies": [
+    "Notifications plane design"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Delivery receipts must not store content under ZDR.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Builds on a shipped strength; needed for notifications.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-018",
+   "name": "Durable, per-conversation serialized agent run queue with leases",
+   "description": "Each agent turn is a durable run claimed by a worker under a lease with heartbeat; at most one run per conversation runs at a time; lost leases self-cancel; a reaper requeues or parks; a per-attempt tool ledger prevents duplicate side effects on replay.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "qm-architecture-051",
+    "qm-architecture-052",
+    "qm-architecture-053",
+    "qm-architecture-054",
+    "qm-product-099",
+    "grokbot-agent-product-092"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-099",
+     "qm-architecture-051",
+     "qm-architecture-052",
+     "qm-architecture-054"
+    ],
+    "why": "q5 SRC: unique partial index one-running-per-session, SKIP LOCKED claim, heartbeat at ttl/3, abort after 3 lost beats, reaper with crash-loop parking, ToolLedger keyed (run, attempt, call index). Grok Bot runs a Temporal durable harness as an alternative."
+   },
+   "mechanism": "runs table (session_id, status, lease_token, lease_expires_at); claim = UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) guarded by unique index on (session_id) WHERE status = running; worker heartbeats; reaper requeues expired leases and parks after N crashes; effectful tool calls go through once(runId, attempt, callIndex) which returns the cached result on replay.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Leases exist in capability-core (cron, watch, taskexec), sandbox-manager process registry and execution-core approval delivery, but per-thread run serialization and lease-based recovery for room turns in Session Core/execution-core were not found by a quick grep. Check session-core run tables and execution-core runtime_loop for concurrent-turn handling when two members post to the same thread.",
+    "strengths": ""
+   },
+   "benefit": "Multi-human rooms will trigger concurrent turns on the same thread; serialization prevents interleaved transcripts and duplicate tool side effects.",
+   "approach": "In Model Plane (Session Core/execution-core, Rust): per-thread run queue with lease + reaper; tool ledger for effectful actions (Quarry executions already have receipts to key on).",
+   "effort": "L",
+   "dependencies": [
+    "Session Core run model"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Queueing changes perceived latency in busy rooms; needs steering (C-t1-09-019) to feel right.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Correctness for multi-member rooms; status unknown so verify before committing effort.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-019",
+   "name": "Mid-run steering and stop routed into the live agent turn",
+   "description": "A message sent while an agent is working becomes a steering input at the next step boundary; \"stop\" aborts; signals that race with completion are replayed rather than lost.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-architecture-055"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-055"
+    ],
+    "why": "q4 SRC, only source: routeWake returns engage|steer|drop; RunSignalStore stores abort|steer signals; orphaned signals replayed."
+   },
+   "mechanism": "Incoming message for a thread with a running run: classify (engage new run, steer current, drop); steer is appended to a signal store read by the agent loop at step boundaries; abort cancels; on run completion, unconsumed steers start a follow-up run.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:488-520"
+    ],
+    "gap": "Stop is shipped (abort SSE then cancelInvocation, recorded as cancelled). Steering a running turn is not present; the composer is locked when replying into a paused thread. No baseline record in this category.",
+    "strengths": "Honest distinction between recorded and local-only stop."
+   },
+   "benefit": "Lets humans correct an agent mid-task in the room, the core of human-agent cooperation.",
+   "approach": "Model Plane run signal channel (steer/abort) consumed by execution-core at step boundaries; gateway route gated by Control append decision.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-018"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Steer content needs its own append decision and audit.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Unique to QM but high value for agent rooms.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-020",
+   "name": "One append-only, typed event log per room as the source of truth (with generations and projections)",
+   "description": "Every message, reaction, agent action and state change is one typed event in an append-only log; new features are new kinds that old clients ignore; derived state (membership, reply counts, presence snapshots) is served as projection events; rollback/fresh start bumps a generation.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "qm"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-architecture-001",
+    "buzz-architecture-105",
+    "qm-architecture-068",
+    "qm-product-100",
+    "grokbot-agent-product-089"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-001",
+     "buzz-architecture-105"
+    ],
+    "why": "q4 SRC: signed NIP-01 events with u32 kind as the only dispatch switch (133 kinds) and relay-signed projection events. QM's session tape (model-view-first WAL, context = fold(tape, audience)) and Grok Bot's generation counter with cleared/cursor_too_old are the agent-specific refinements."
+   },
+   "mechanism": "Envelope {id, room_id, seq, kind, author (human|agent), created_at, refs, body_ref}; append-only; consumers dispatch on kind and ignore unknown kinds; projections (membership, thread summary, presence snapshot) emitted as server-authored events; generation bump invalidates replicas.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:2252,2301-2330",
+     "apps/Application Plane/convex-core/convex/schema.ts:546-1012"
+    ],
+    "gap": "Room content lives in Session Core threads (Model Plane) while room identity, presence and read state live in Convex (Application); there is no unified typed Space event envelope or seq that a push transport and cross-room aggregates could consume. No baseline record in this category.",
+    "strengths": "Session Core keeps an append-style thread with origin=space; Convex keeps immutable audience snapshots; both can feed a projection."
+   },
+   "benefit": "Gives push, resume, unread and activity one shared contract without cross-plane DB reads.",
+   "approach": "Application Plane owns a Space event projection (metadata + references only) built from Convex mutations and Model Plane NATS events; Session Core stays the content owner. Adopt kind-based dispatch and ignore-unknown in the client.",
+   "effort": "L",
+   "dependencies": [
+    "ADR on message ownership (human-only posts)",
+    "NATS events from Session Core"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Duplicate truth between projection and Session Core; must stay a projection.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Enabler for C-t1-09-001/004/013; not visible on its own.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-021",
+   "name": "Scalable partitioned/sharded message store",
+   "description": "Message storage is partitioned by time and keyed by tenant (or sharded by channel) for predictable query plans at scale.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-011",
+    "buzz-product-146",
+    "slack-product-surface-109"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-product-surface-109"
+    ],
+    "why": "q4 DOC: Vitess-sharded MySQL moved from workspace-keyed to channel-keyed sharding for very large teams. Buzz (q4 SRC) is the concrete Postgres recipe: monthly range partitions, tenant-leading primary keys, generated search column."
+   },
+   "mechanism": "events PARTITION BY RANGE(created_at) monthly via an advisory-locked partition manager; PK (tenant_id, created_at, id); generated tsvector column; at larger scale shard by conversation id.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check Session Core migrations for thread/message partitioning and tenant-leading keys.",
+    "strengths": ""
+   },
+   "benefit": "Future scale; not a current user-visible gap.",
+   "approach": "Session Core (Model Plane) Postgres: adopt tenant-leading keys and time partitions when volume warrants.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Premature optimisation.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Not a gap users notice; revisit with load data.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-022",
+   "name": "Server-computed timeline windows with exact cursors (paging, reply summaries)",
+   "description": "Timelines page by top-level messages with reply counts and participants attached, exact has_more, and composite cursors that never skip or duplicate rows, including on replicas.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-architecture-012",
+    "buzz-architecture-014",
+    "buzz-product-137"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-137",
+     "buzz-architecture-014",
+     "buzz-architecture-012"
+    ],
+    "why": "q5 SRC, only source: query extension (top_level, include_summaries, until + before_id composite cursor) from thread_metadata computed at ingest, limit+1 probe for has_more, bounded client clock skew so keyset order is replica-safe."
+   },
+   "mechanism": "Maintain thread_metadata (reply_count, last_reply_at, participants) at write; page query WHERE (created_at, id) < (until, before_id) ORDER BY created_at DESC, id DESC LIMIT n+1; return summaries inline; reject client timestamps beyond a skew bound or use server seq instead.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-090"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:193-204",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:78-87"
+    ],
+    "gap": "The full thread list loads on every 6 s poll with no paging or jump-to-date, and each post fetches its transcript separately (N+1, re-keyed on updated_at). Deep links with thread_id are ignored.",
+    "strengths": ""
+   },
+   "benefit": "Rooms with months of human and agent traffic stay fast; removes the N+1 cost multiplied by polling.",
+   "approach": "Gateway/Model Gateway endpoint for a Space timeline window (top-level threads with summaries, keyset cursor by server seq), fed by Session Core; client virtualised list.",
+   "effort": "M",
+   "dependencies": [
+    "Session Core query support"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Summaries must respect per-thread read decisions.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Scaling cliff today (full list + N+1 every 6 s); users notice slow rooms.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-023",
+   "name": "Read-your-writes discipline: writer for decisions, replicas for display",
+   "description": "Reads that gate a write or permission go to the primary; scrolling, counts and badges may use replicas within a freshness budget.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-architecture-013",
+    "buzz-product-138"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-138",
+     "buzz-architecture-013"
+    ],
+    "why": "q5 SRC (product) / q4 DOC (architecture): Db::query_events always writer, query_events_routed opt-in replica with a soundness predicate and freshness budget."
+   },
+   "mechanism": "Two query paths; replica only when the request is display-only and replica lag < budget; client signals recent writes to pin.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check whether Session Core/user-core use read replicas at all; if not, this is moot.",
+    "strengths": ""
+   },
+   "benefit": "Safe scale-out of reads.",
+   "approach": "Adopt as a rule when replicas are introduced.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Only relevant once replicas exist.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-024",
+   "name": "Sync engine off the UI thread with batched delivery (worker / utility process / shared socket)",
+   "description": "The network connection, send journal and replicas live in a worker or separate process; frames are coalesced before reaching the UI so catch-up bursts do not freeze it; windows and tabs share one connection.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "teams"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-architecture-016",
+    "buzz-product-139",
+    "grokbot-agent-product-091",
+    "grokbot-agent-runtime-046",
+    "grokbot-agent-runtime-047",
+    "teams-product-surface-164",
+    "teams-shell-and-native-051"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-139",
+     "buzz-architecture-016"
+    ],
+    "why": "q4 SRC: native-owned socket with 8 ms frame coalescing under a byte cap into the webview. Grok Bot (q4 REA/SRC) uses a utility-process coordinator over MessagePort with typed contracts; Teams uses dedicated/shared workers and BroadcastChannel/Web Locks across windows."
+   },
+   "mechanism": "Web equivalent: a SharedWorker (or leader tab elected via Web Locks + BroadcastChannel) owns the single SSE/WebSocket per browser; it coalesces frames into 8-16 ms batches and posts them to tabs; tabs send typed requests over MessagePort.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-091"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:35-145"
+    ],
+    "gap": "A browser-local store shares one projection between page, sidebar and composer within a tab, but there is no worker/shared connection across tabs (no BroadcastChannel or Web Locks use found); not needed until push exists.",
+    "strengths": "Single shared store per tab already avoids duplicate polls inside a tab."
+   },
+   "benefit": "One connection per browser instead of per tab; UI stays smooth when agents flood a room.",
+   "approach": "With push: SharedWorker-based connection manager with frame batching feeding Solid stores.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-001"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "SharedWorker support on iOS Safari is limited; fall back to leader election.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Optimisation after push; Solid fine-grained updates already limit render cost.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 2,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-025",
+   "name": "Normalized client data layer with explicit resource states",
+   "description": "All server data flows through one normalized cache (GraphQL/Apollo or resource machines) with explicit loading/ready/failed-with-previous/empty/unavailable states and write-supersedes-read guards.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "teams-product-surface-119",
+    "teams-shell-and-native-047",
+    "grokbot-agent-runtime-134"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-134"
+    ],
+    "why": "q4 SRC: in-house resource state machine with stale-while-revalidate and write-supersedes-read guards so the UI never shows blank or regressed data. Teams (q5 SRC) runs a central data layer worker with a GraphQL/Apollo cache and ~190 resolvers."
+   },
+   "mechanism": "Resource<T> = {state: loading|ready|failed(prev)|empty|unavailable, value, version}; revalidate keeps showing prev; a write bumps version so an older in-flight read is discarded; push frames patch the normalized entities.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-091"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:35-145"
+    ],
+    "gap": "Space UI renders \"gap, not empty\" honestly per section, but data fetches are per component/resource without a normalized store that push frames could patch.",
+    "strengths": "Gap-not-empty rendering is equivalent to explicit unavailable states."
+   },
+   "benefit": "Clean target for push frames; avoids stale overwrites.",
+   "approach": "Solid createStore keyed by entity id, patched by stream frames and fetches with version guards.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-001"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Refactor churn.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Needed to apply push frames cleanly; moderate effort.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-026",
+   "name": "Desktop shell with main-process state store replicated to renderers",
+   "description": "A desktop shell keeps shell state (windows, workspaces, downloads, notifications) in a single main-process store mirrored to renderers over one IPC channel, persisted to disk, while the chat UI is a remote web app.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "slack-shell-and-native-046",
+    "slack-product-surface-112",
+    "slack-shell-and-native-047",
+    "slack-shell-and-native-048",
+    "slack-product-surface-113",
+    "teams-shell-and-native-053"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-shell-and-native-046",
+     "slack-shell-and-native-047"
+    ],
+    "why": "q4 SRC: Redux Toolkit store in main, forward-to-main middleware, ~150 named redux-observable epics, redux-persist to root-state.json."
+   },
+   "mechanism": "Main-process store; preload replicas; every non-local action forwarded over one channel; epics per shell behaviour; throttled persistence.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; Verevon v3 is a web SPA. Check whether any desktop shell (Tauri/Electron) exists or is planned under apps/Frontend Plane.",
+    "strengths": ""
+   },
+   "benefit": "Only relevant if Verevon ships a desktop app.",
+   "approach": "If a desktop app is built, prefer a thin Tauri shell around the web app.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Scope creep.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Web-first product; no user-visible gap.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-027",
+   "name": "Connectivity awareness: offline vs service-down, sleep/wake, lock, diagnostics",
+   "description": "The client distinguishes \"you are offline\" from \"the service is down\" with a probe, reacts to sleep/wake/lock (resync, pause work), reloads blank pages with backoff, and explains unreachable states; stale data is labelled.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "slack",
+     "teams"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "slack-product-surface-114",
+    "slack-shell-and-native-050",
+    "slack-product-surface-117",
+    "slack-shell-and-native-052",
+    "slack-shell-and-native-053",
+    "slack-shell-and-native-054",
+    "teams-shell-and-native-061",
+    "grokbot-agent-runtime-051",
+    "grokbot-agent-product-164"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-shell-and-native-050",
+     "slack-product-surface-114",
+     "slack-shell-and-native-052"
+    ],
+    "why": "q4 SRC: three-state model online|slackDown|offline via an unauthenticated api.test probe, network-quality hints, sleep/wake and lock forwarded to the web app. Grok Bot adds a DNS/gateway diagnostic taxonomy and a stale-transcript banner."
+   },
+   "mechanism": "Probe a cheap no-auth health endpoint on connection errors to classify offline vs down; listen to online/offline, visibilitychange, freeze/resume (Page Lifecycle) and trigger resync on resume; show a banner with the class and when data was last fresh.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-087"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:273-338"
+    ],
+    "gap": "Polling pauses when hidden and refetches on visibility resume, and the room shows named gaps per section; there is no offline vs service-down banner or last-fresh indicator for the room (not verified beyond spaces code).",
+    "strengths": "Gap-not-empty rendering already avoids presenting stale/empty data as truth."
+   },
+   "benefit": "Users know whether to wait or check their network; agents' work is not mistaken for silence.",
+   "approach": "Frontend connectivity service: gateway /healthz probe, page lifecycle hooks, room banner; feeds C-t1-09-006 fallback.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap, visible quality improvement.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-028",
+   "name": "Connection hardening, rate limits with retry hints, shared reliability policies",
+   "description": "Servers shed slow or dead clients (bounded queues, ping/pong, auth timeouts, graceful close on restart) and rate-limit per principal with a machine-readable retry hint; clients share named retry/backoff/deadline policies.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "slack"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-architecture-009",
+    "buzz-architecture-010",
+    "grokbot-agent-runtime-049",
+    "grokbot-agent-runtime-058",
+    "slack-shell-and-native-124"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-009",
+     "buzz-architecture-010"
+    ],
+    "why": "q4 SRC: connection and handler semaphores, 5 s auth timeout, 30 s ping with 3 missed pongs, bounded per-connection send queue, explicit close frame on rolling restart; Redis fixed-window limits per pubkey/IP with retry-in hint that drives one client back-off gate. Grok Bot (q4) supplies the client policy library (deadline, retry with jitter, stall watchdog)."
+   },
+   "mechanism": "Per-connection bounded mpsc queue; if full beyond a grace period, close with a code; ping interval and missed-pong limit; global semaphores; token bucket per principal in Redis/Dragonfly with Retry-After; client back-off honours Retry-After.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:3-4"
+    ],
+    "gap": "No baseline record. Verified in this step: the gateway has a Redis/Dragonfly-backed per-key token-bucket limiter returning 429 with Retry-After (rate_limit.rs). Socket-level hardening does not apply yet (no sockets); client-side shared retry policy not checked.",
+    "strengths": "Distributed token-bucket limiter with Retry-After already exists."
+   },
+   "benefit": "Push tier must not let one slow client or agent flood degrade others.",
+   "approach": "Apply bounded queues, heartbeats and graceful close in the gateway push tier; reuse the limiter per subscriber.",
+   "effort": "S",
+   "dependencies": [
+    "C-t1-09-001"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Part of building push correctly.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-029",
+   "name": "Horizontal scale-out and zero-downtime deploys for realtime nodes",
+   "description": "Realtime nodes are stateless and autoscale on connection count; deploys drain old nodes; background work has a single owner; zones or cells can be drained.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm",
+     "slack"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-architecture-024",
+    "slack-product-surface-110",
+    "qm-architecture-063",
+    "qm-product-106",
+    "qm-architecture-140",
+    "qm-architecture-124"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-product-surface-110"
+    ],
+    "why": "q5 DOC: cell-based architecture and AZ drain in ~5 minutes in 1% steps. Buzz (q4 SRC): stateless pods with HPA on active-websocket gauge; QM (q4 SRC): blue-green drain by build heartbeat and a single background-owner record."
+   },
+   "mechanism": "No in-memory authority on nodes; HPA on active connections; on deploy, new build heartbeats, old build stops claiming and sends close frames so clients reconnect with resume; one leader record owns background loops.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check gateway deployment manifests (replicas, HPA metric) and whether background loops in gateway/Convex/Session Core have leader election.",
+    "strengths": ""
+   },
+   "benefit": "Push connections survive deploys via resume.",
+   "approach": "Gateway push tier: HPA on connection gauge, drain with close frame + client resume.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-09-004"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Reconnect storms (jitter).",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Ops concern once push exists.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t1-09-030",
+   "name": "Deployment profiles: self-host kit and sovereign clouds",
+   "description": "The same backend ships as a one-command self-host bundle, an HA chart, or per-sovereign-cloud configs with distinct endpoints.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-114",
+    "buzz-product-147",
+    "teams-product-surface-124"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-124"
+    ],
+    "why": "q4 SRC: per-cloud serve configs (commercial, consumer, GCC High, DoD and others) with distinct push endpoints. Buzz (q4 SRC) has compose + Helm production/quickstart profiles."
+   },
+   "mechanism": "Config-driven endpoint sets per cloud; Helm values profiles that fail if secrets are missing in production.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; outside Space realtime scope. Check infra for regional/sovereign deployment plans.",
+    "strengths": ""
+   },
+   "benefit": "Enterprise and EU data-residency deals.",
+   "approach": "Out of scope for Space; track in infra.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Control Plane",
+   "risks": "n/a",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Not a Space feature.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-031",
+   "name": "Protocol evolution: capability discovery and backward-compatible rollouts",
+   "description": "Clients discover server capabilities before use (absence means unsupported); payload or protocol changes roll out in legacy/dual/new stages; migrations are immutable and backward compatible; data backfills are resumable.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "qm"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-architecture-026",
+    "buzz-architecture-025",
+    "grokbot-agent-runtime-057",
+    "qm-architecture-148",
+    "qm-architecture-065"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-026",
+     "buzz-architecture-025"
+    ],
+    "why": "q4 DOC: NIP-11 capability document with absence-means-unsupported, durable resumable backfills. Grok Bot stages blob-reference transport legacy|dual|ref_only; QM fixes rolling-upgrade rules."
+   },
+   "mechanism": "GET /capabilities returns supported features and limits; client gates UI; mode flags legacy -> dual -> new; migrations registered with checksums; backfills as claimable rows with progress cursors.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check whether the gateway exposes a capability/feature endpoint to the SPA (the ZDR capability tests in chat-client suggest per-feature capability signalling exists).",
+    "strengths": ""
+   },
+   "benefit": "Lets push and new event kinds roll out without breaking old tabs.",
+   "approach": "Advertise realtime capabilities (push available, event kinds) in an existing config endpoint; ignore-unknown-kinds rule in the client.",
+   "effort": "S",
+   "dependencies": [
+    "C-t1-09-020"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Good hygiene, low visibility.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-032",
+   "name": "Server-driven runtime tuning and feature flags with client fallbacks",
+   "description": "Timeouts, retry policies, concurrency limits and rollouts are changed centrally through typed dynamic configs, with safe client defaults and disk-cached bootstrap.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-runtime-055",
+    "grokbot-agent-runtime-135"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-055"
+    ],
+    "why": "q5 SRC, only source: ~260 typed dynamic configs each with a zod schema and client fallback; flags bootstrapped through the product backend and disk-cached."
+   },
+   "mechanism": "Registry name -> schema + fallback; values fetched at boot via own backend; invalid values fall back; session-latched gates for risky switches.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check for a feature-flag/config service consumed by the SPA (poll intervals such as the 6 s room poll appear hard-coded in SpacePage.tsx).",
+    "strengths": ""
+   },
+   "benefit": "Tune poll/stream intervals and roll out push safely.",
+   "approach": "Control Plane config endpoint with typed schema per key; client fallback constants.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Control Plane",
+   "risks": "Config sprawl.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful for safe rollout, not user-visible.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-033",
+   "name": "Perceived-latency observability: end-to-end tracing and client performance budgets",
+   "description": "Each send carries a trace context and client timestamps (enter pressed, composed) so key-press-to-ack latency is measurable; telemetry targets perceived quality (time to first render, send ack, missing rows, resyncs); CI tests typing and scroll latency while simulated agents flood the room.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "slack"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "grokbot-agent-product-094",
+    "grokbot-agent-runtime-052",
+    "grokbot-agent-runtime-147",
+    "buzz-architecture-115",
+    "slack-shell-and-native-057",
+    "slack-shell-and-native-058",
+    "slack-shell-and-native-059"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-147",
+     "grokbot-agent-product-094"
+    ],
+    "why": "q4 SRC: traceparent + enter_epoch_ms + composed_at_ms on every send and 114 named perceived-quality events (render TTFR, send ack, transcript missing rows, replica resync). Buzz (q4 SRC) uniquely runs Playwright perf budgets under simulated agent load; Slack batches telemetry and records startup phases."
+   },
+   "mechanism": "Client adds W3C traceparent to send requests and stream subscriptions; gateway propagates; client emits spans for enter->ack and ack->first-frame; perf CI project measures Event Timing API under agent-typing floods.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:363-460"
+    ],
+    "gap": "No baseline record. Verified in this step: server-side turn timing (phases, first token) is surfaced in chat-client.ts, but no traceparent is sent from the SPA or gateway (grep found none) and no client perceived-latency or agent-load perf budget was found.",
+    "strengths": "Server turn-timing phases already exist."
+   },
+   "benefit": "Agent-heavy rooms risk UI jank; budgets catch it before users do.",
+   "approach": "Add traceparent in http.ts and gateway propagation (OpenTelemetry); Playwright perf test with simulated agent floods.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Telemetry must not carry content (ZDR).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Agent-load perf budget is a real differentiator for an agent-first room.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-034",
+   "name": "Reverse channel: cloud reaches the user's own computer without inbound ports",
+   "description": "A local daemon keeps an outbound stream open; the server pushes tool requests (local execution, WebAuthn) down it and the daemon posts results back, with heartbeat, polling fallback and supervised restart.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-runtime-042",
+    "grokbot-agent-runtime-043",
+    "grokbot-agent-product-093",
+    "grokbot-agent-runtime-050"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-042"
+    ],
+    "why": "q5 SRC, only source: GET /local-exec/requests as SSE; results POSTed back; one daemon serving several accounts; discovery record and respawn limits."
+   },
+   "mechanism": "Daemon: outbound SSE with heartbeat; on request frame, execute under local policy and POST result with request id; if stream fails, poll a pending endpoint; app adopts or replaces daemon via a discovery record (pid, generation).",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record in this category; space baselines list agent PC/browser in the room as absent and only RustDesk remote-support config exists. Check for any local agent/daemon in the repo.",
+    "strengths": ""
+   },
+   "benefit": "Enables personal agents acting on the user's own machine (Grok Bot style) in addition to cloud sandboxes.",
+   "approach": "If pursued: Quarry-style executor daemon that only executes Model-proposed actions after local policy check; outbound SSE through the gateway.",
+   "effort": "XL",
+   "dependencies": [
+    "Executor policy model",
+    "Model proposes / Quarry executes contract"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Large security surface (local code execution); must keep Model-proposes/executor-decides split.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Strong differentiator for the Grok half of the vision but large and risky; cloud sandbox/browser covers most use first.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-035",
+   "name": "Resumable large-file transfer and agent file sync off the chat path",
+   "description": "Attachments and agent working files move through presigned multipart object storage with checksums and fenced commits, and a sync engine keeps desktop folders and agent storage in step.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "grokbot-agent-runtime-053",
+    "grokbot-agent-runtime-054",
+    "qm-architecture-066"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-054",
+     "grokbot-agent-runtime-053"
+    ],
+    "why": "q5 SRC: agent store sync engine (debounce, resume after sleep, large files) and presigned multipart with fenced manifest commits. QM: presigned multipart 16 MiB parts, 1 GB cap, per-blob capability tokens."
+   },
+   "mechanism": "Client requests upload session -> presigned part URLs -> uploads parts -> commit manifest with precondition (fence); downloads via short-lived capability URLs; never through the model path.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record here; space baselines list attachments in rooms as absent. Check Data Plane document upload paths for multipart/presigned support.",
+    "strengths": ""
+   },
+   "benefit": "Needed for room attachments and agent file hand-off.",
+   "approach": "Data Plane owns blobs; room messages carry references.",
+   "effort": "L",
+   "dependencies": [
+    "Data Plane upload API"
+   ],
+   "planeOwner": "Data Plane",
+   "risks": "ZDR for file content.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Belongs mostly to the attachments category.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-036",
+   "name": "Realtime media transport for calls and huddles",
+   "description": "Audio/video/screen share run on a native or mesh media stack (ICE, DTLS-SRTP, FEC) with optional E2EE for calls and support for virtual desktops.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-023",
+    "buzz-product-144",
+    "teams-product-surface-122",
+    "teams-shell-and-native-054",
+    "teams-shell-and-native-056",
+    "teams-shell-and-native-057"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-054",
+     "teams-shell-and-native-057"
+    ],
+    "why": "q5 SRC: native SlimCore stack with ICE, DTLS 1.2/1.3 (Rust), RED/RTX/NACK, E2EE plumbing for calls. Buzz has a QUIC inter-pod mesh with Redis-fenced session ownership for huddle audio."
+   },
+   "mechanism": "WebRTC with SFU; signalling over the push channel; DTLS-SRTP; E2EE via insertable streams for 1:1.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Calls, huddles and screen share are absent per the backend baseline (only AI realtime voice and RustDesk config). Covered by the calls category.",
+    "strengths": ""
+   },
+   "benefit": "Teams parity for meetings.",
+   "approach": "Buy (LiveKit/SFU) rather than build; signalling over the Space push channel.",
+   "effort": "XL",
+   "dependencies": [
+    "C-t1-09-001"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Large scope.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Handled in the calls category; only the signalling dependency on push matters here.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-037",
+   "name": "Encryption posture: server-managed chat, no E2EE for messages, selective owner-private encryption",
+   "description": "All references keep channel/DM content server-readable (so search, audit, eDiscovery and agents work), encrypted in transit and at rest, with customer-managed keys or client-side encryption only for owner-private side data; E2EE only for calls (Teams).",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm",
+     "slack",
+     "teams"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-architecture-020",
+    "buzz-product-143",
+    "slack-product-surface-118",
+    "slack-shell-and-native-061",
+    "teams-product-surface-126",
+    "qm-architecture-067"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-020",
+     "buzz-product-143"
+    ],
+    "why": "q3 SRC: explicit split, server-readable chat plus NIP-44 encryption of owner-private blobs (reminders, agent memory, preference blobs, key backups). Teams/Slack add customer-managed keys."
+   },
+   "mechanism": "TLS in transit, storage encryption at rest, optional tenant keys (KMS) for content; client-side encryption only for data no server feature needs.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-backend-093",
+     "v-space-ui-094"
+    ],
+    "evidence": [],
+    "gap": "No E2EE (same as all references for chat). Customer-managed keys not checked.",
+    "strengths": "Verevon's Zero-Data-Retention propagation (typed ZDR refusals end to end) goes beyond every reference's posture; keep ZDR as a hard constraint on any new push/cache tier."
+   },
+   "benefit": "Parity; ZDR is a differentiator.",
+   "approach": "Keep; consider customer-managed keys for enterprise later.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Control Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Equal or ahead thanks to ZDR.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 3,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t1-09-038",
+   "name": "Device registration and pairing for multi-device identity and push",
+   "description": "Each device has an id and push registration; new devices pair via QR plus short authentication string.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-021",
+    "teams-shell-and-native-059"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-021"
+    ],
+    "why": "q4 SRC: NIP-AB device pairing with SAS confirmation over an ephemeral relay. Teams registers device ids for push routing."
+   },
+   "mechanism": "Device registry (device_id, push token, platform); pairing via ECDH + SAS compare.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check notifications for web push/device registration.",
+    "strengths": ""
+   },
+   "benefit": "Mobile push routing.",
+   "approach": "Belongs to notifications category (Control device registry).",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Control Plane",
+   "risks": "Low.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Key-based identity pairing does not fit Verevon's SSO identity; push registration is a notifications concern.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-039",
+   "name": "Multi-account / cross-workspace global state",
+   "description": "With several accounts or workspaces signed in, a global store aggregates unread, presence and notifications across them and keeps them consistent.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "teams-shell-and-native-052",
+    "slack-shell-and-native-049"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-052"
+    ],
+    "why": "q5 SRC: cross-cloud global state stores pushed to every web instance with periodic consistency checks. Slack shares one browser session across workspaces."
+   },
+   "mechanism": "Shell-level aggregator per account; push updates to each web instance; periodic verification.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check whether a user can belong to several orgs and switch without re-login, and whether unread spans orgs.",
+    "strengths": ""
+   },
+   "benefit": "Consultants and multi-org users.",
+   "approach": "Later; per-org streams aggregated client-side.",
+   "effort": "L",
+   "dependencies": [
+    "C-t1-09-013"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Cross-org leakage.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Edge case relative to current gaps.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-040",
+   "name": "Load shaping and graceful degradation for large rooms and bursts",
+   "description": "Published size limits, batching and throttling of update streams for huge tenants, top-of-hour spike handling for scheduled work, and memory-aware eviction of cached views.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "slack-product-surface-111",
+    "teams-product-surface-125",
+    "teams-shell-and-native-060",
+    "teams-shell-and-native-058"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-125",
+     "teams-shell-and-native-060"
+    ],
+    "why": "q5 DOC + q4 SRC: published limits per surface with feature degradation by size (e.g. realtime updates limited above a member count), batched/throttled participant and data-layer updates, a supermassive tenant mode."
+   },
+   "mechanism": "Throttle per-room update fan-out above N members (coalesce, send summaries); jitter scheduled jobs off the top of the hour; publish limits.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check room size limits and whether scheduled agent runs (capability-core cron) add jitter.",
+    "strengths": ""
+   },
+   "benefit": "Agents posting at scale and cron-fired agent runs can create bursts.",
+   "approach": "Coalesce frames per room in the push tier; jitter cron fires.",
+   "effort": "S",
+   "dependencies": [
+    "C-t1-09-001"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Matters when agent volume grows.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-041",
+   "name": "Durable-by-default engineering rule for shared state",
+   "description": "Anything read back later (queued work, approvals, resolved config, audit) must live in the database; process memory is only a cache; one generic durable map serves small records.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-architecture-152",
+    "qm-architecture-064"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-152"
+    ],
+    "why": "q4 SRC: rule in AGENTS.md backed by a catalogue of past process-local-state bugs; DurableMap<T> abstraction over Postgres JSONB."
+   },
+   "mechanism": "Code review rule plus a typed durable KV with atomic update/insertIfAbsent.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-091"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:35-145",
+     "apps/Application Plane/convex-core/convex/schema.ts:680-820"
+    ],
+    "gap": "Backends use durable outboxes and decisions, but cross-room working/unread lives in a browser-local store (and a stale doc claims otherwise), which is the exact class of bug the rule targets.",
+    "strengths": "Outboxes, audience snapshots and decisions are durable by design."
+   },
+   "benefit": "Avoids \"works only while someone's tab is open\" behaviour.",
+   "approach": "Adopt as an explicit rule in CLAUDE.md for Space features; move cross-room state server-side (C-t1-09-013).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "None.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Cheap governance improvement.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-042",
+   "name": "Membership-versioned writes that fence stale rosters",
+   "description": "Writes into a shared conversation carry the roster/authority version they started with; if membership changed, the write is rejected.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-105"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-105"
+    ],
+    "why": "q4 SRC: ProjectStore.version()/withRosterLock(); appends wrapped in managed roster version checks."
+   },
+   "mechanism": "Read roster version at turn start; commit with WHERE roster_version = expected; reject and re-evaluate on mismatch.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Control Plane/user-core/internal/spaces/decision.go:4-60,145-222"
+    ],
+    "gap": "No baseline record in this category; backend baseline (SRC) shows Control decisions bind audience ref/hash/revision and authority revision and Session Core verifies them.",
+    "strengths": "Signed, short-lived decisions bound to audience revision and payload digest are stronger than QM's in-process roster version; keep."
+   },
+   "benefit": "Already provides the guarantee.",
+   "approach": "Keep; ensure the push tier and steering reuse it.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Control Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is ahead.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-09-043",
+   "name": "Dedicated realtime services for co-authoring and AI-augmented documents",
+   "description": "Collaborative documents and AI augmentation use separate realtime services (operational/CRDT co-authoring, signal services) from chat push, with an explicit allowlist of socket endpoints.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-120",
+    "teams-product-surface-121",
+    "teams-shell-and-native-055"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-121"
+    ],
+    "why": "q4 SRC: Fluid Framework co-authoring with a OneDrive/SharePoint driver and Augloop WebSockets for AI augmentation, separate from Trouter; endpoints enumerated in CSP."
+   },
+   "mechanism": "Per-document realtime session (CRDT/ops) on its own service; chat carries only links/cards; CSP connect-src lists each realtime host.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Application Plane is described as collaborative/realtime workspace projections; check whether any Verevon document co-editing (Convex or Yjs) is live and whether Spaces link to it.",
+    "strengths": ""
+   },
+   "benefit": "Humans and agents co-editing an artifact from a room.",
+   "approach": "Application Plane collaborative docs linked from Space; agent edits as proposals.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "Scope.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Belongs to collaboration/canvas category.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

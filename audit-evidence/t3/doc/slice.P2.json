@@ -1,0 +1,1055 @@
+[
+ {
+  "finalId": "F-t3-009",
+  "title": "Per-thread sandbox computer behind a SandboxBackend seam: microVM backend, persistent thread workspace, typed executor protocol and visible lifecycle",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 9,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Add a SandboxBackend trait to sandbox-manager (leases already carry backend_id and endpoint) with bwrap as implementation 1 and a microVM backend (Firecracker or Kata, or one attested managed provider) as implementation 2 that stops when idle and snapshots to encrypted object storage. Extend the CAS workspace from Space scope to thread scope, define a typed executor protocol (the cloud loop proposes, the host executes), expose lifecycle states, typed failure causes and a heartbeat in the UI, and harden path handling.",
+  "whyItMatters": "Every 'do the work' reference (Manus, ChatGPT agent, claude.ai, Perplexity) gives each task its own computer; Verevon runs hermetic per-call bwrap processes inside the execution-core container that cannot install tools, keep state or host a browser or desktop. This is the foundation for file analysis at scale, app building, the computer panel and computer use, and it is the biggest single architectural gap against the Manus/Claude vision.",
+  "referenceBestPractice": {
+   "bestSource": "Perplexity SPACE and Manus (product lifecycle, DOC) plus Cursor (code-verified mechanism: Docker inside Firecracker with a shared tmux session the user can watch) and Claude (VM startup state machine with typed failure causes, 30 s heartbeat with five-strike restart) ; claude.ai (per-conversation VM, DOC) with Manus (typed executor protocol, SRC)",
+   "others": [
+    "Hermes (seven backends behind one spawn contract)",
+    "DeepSeek (execution-world principle)",
+    "Codex",
+    "web Claude",
+    "ChatGPT",
+    "Manus web",
+    "Cursor",
+    "Claude desktop app"
+   ],
+   "prevalence": "R-t3-06-03: 5 of 12 sources for a per-task computer (common); 3 of 12 for pluggable backends and 3 of 12 for explicit lifecycle states (differentiators) | R-t3-13-03: C-036: 3 of 12 (differentiator, DOC-only evidence). C-003: 3 of 12 (differentiator, SRC). C-016: 6 of 12 (table-stakes). C-025: 1 of 12 (unique)",
+   "mechanism": "A control plane allocates a microVM per task from a warm pool built from a prebuilt image; One microVM (Firecracker, Kata or gVisor) per thread with a persistent volume;"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:1-20",
+    "apps/Model Plane/docs/decisions/ledger.md:1358",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:270-279",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:336-372",
+    "apps/Model Plane/rust/services/execution-core/src/capability_client.rs:165",
+    "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-20",
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+    "apps/Model Plane/rust/services/execution-core/src/process_tools.rs:1-8",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-40",
+    "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:1-15"
+   ],
+   "gap": "R-t3-06-03: sandbox-manager is lease and bookkeeping only (Postgres leases, CAS workspace, process registry). | R-t3-13-03: SRC: sandboxing is bwrap inside the execution-core container with --die-with-parent, so a process never outlives its host."
+  },
+  "approachOriginal": "Phase 1 (W2): introduce the seam with bwrap as impl #1, lifecycle states and typed failures, thread-scoped workspace manifests. Phase 2 (W3): microVM backend with idle stop and encrypted snapshots, VM-seconds metering in cost-core, Control-signed lease decisions. Phase 3 (W4): browser and desktop inside the VM for F-t3-024. Keep bwrap/Landlock/seccomp as the in-guest second layer.",
+  "effortOriginal": "XL",
+  "dependencies": [
+   "F-t3-002",
+   "ADR: sandbox backend and thread workspace",
+   "cost-core VM metering"
+  ],
+  "planeOwner": "Model Plane (sandbox-manager, execution-core) with Control Plane (lease decisions) and cost-core metering",
+  "risks": "Cost of idle VMs and snapshot storage; ZDR requires snapshot destruction and no content in logs; a thread workspace outside Spaces must not become a back door around Space ACLs; microVM supply chain and kernel patching become Verevon's responsibility. Needs an ADR before phase 2.",
+  "significance": 5,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 42,
+   "DOC": 10,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-13-03: S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md (Space-scoped CAS workspace); agentic-engineering-audit-2026-07-17.md:131 recommends Firecracker/runc or a remote executor pool; ledger.md:1358 defers the SandboxBackend trait until a second backend exists"
+  },
+  "sourceClusters": [
+   "C-t3-06-001",
+   "C-t3-06-015",
+   "C-t3-06-003",
+   "C-t3-13-036",
+   "C-t3-13-003",
+   "C-t3-13-016",
+   "C-t3-13-025"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-009",
+    "status": "partial",
+    "exactGap": "Exists: sandbox-manager (Go) is a Postgres lease, snapshot and process-registry service with a SCRATCH/ACTIVE/SNAPSHOTTING/DESTROYED lifecycle enum and Control-signed capability decisions that pin a lease to one backend_id (one sandbox-manager instance); execution-core runs bwrap per call plus an opt-in background-process host (default off); a Space-scoped CAS workspace hydrate/upload is wired in sandbox_lease.rs (lease scope_type is 'agent' keyed by run id, Space turns only). Missing: any SandboxBackend seam (the 2026-08-22 ledger entry declined it until a second backend is planned), a microVM or remote backend, thread-scoped lease and workspace for non-Space chats, idle-stop and snapshot-to-object-storage VM lifecycle, typed failure causes and heartbeat, VM-seconds metering and any lifecycle UI; the inline ExecuteStep chat path still loses workspace edits.",
+    "evidence": [
+     "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:1-20,150-160",
+     "apps/Model Plane/go/services/sandbox-manager/cmd/main.go:40-70",
+     "apps/Model Plane/docs/decisions/ledger.md:1358-1375",
+     "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:270-360",
+     "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-50,100-182,225-235,431-510",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:1-15",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-25",
+     "apps/Model Plane/rust/services/execution-core/src/process_tools.rs:1-20",
+     "apps/Model Plane/proto/model_plane/v1/sandboxes.proto:11-60,90-135,280-300",
+     "apps/Model Plane/deploy/docker-compose.yml:1184",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:205-245"
+    ],
+    "reuse": [
+     "Control-signed Space capability decision plus SandboxCapabilityProfile (persistence, processes, backup, egress, credential_mode), already designed to admit an explicit external, attested backend",
+     "sandbox-manager lease/snapshot/process registry, staleness sweeper and redaction packages",
+     "workspace_cas.rs, workspace_hydrate.rs diff_and_upload and the per-path CAS PromoteWorkspace",
+     "execution-core process_host.rs and process_tools.rs (S4.2 background processes)",
+     "the nats-provisioner contract-test approach as a model for backend conformance tests"
+    ],
+    "constraints": "Decision ledger 2026-08-22 rejects a SandboxBackend trait until a second real backend is planned, so an ADR must reverse that first. sandbox-manager owns rows and authority but not execution; the OS process lives in execution-core, and backend identity is today a per-instance env (SANDBOX_MANAGER_BACKEND_ID) that Control's decision pins. Space access never widens: a thread-scoped workspace for non-Space turns needs its own Control-signed decision and must not alias Space workspaces. ZDR runs must stay ephemeral (no snapshot, no content in logs). Model proposes / host executes: a typed executor protocol fits, but any browser or desktop inside a VM must still go through Quarry-brokered grants, not a second browser path.",
+    "approachAdjustment": "The seam is in the wrong service: put the backend abstraction on execution-core's spawn/execute contract (Rust trait with bwrap and a remote-executor client), keep sandbox-manager as lease/registry authority and extend it with typed lifecycle, failure-cause and heartbeat fields. A microVM can first land as a second attested executor plus sandbox-manager pair with its own backend_id and a profile that says persistence durable, using the existing Control decision as the gate. Smallest first slice: thread-scoped lease and workspace on bwrap, which also fixes the inline-ExecuteStep edit loss. Write the ADR that reverses the 2026-08-22 deferral before phase 2.",
+    "effortRevised": "XL",
+    "effortNote": "Unchanged overall; phase 1 (seam, thread workspace on bwrap, typed lifecycle) is about M, the microVM backend with snapshots and metering is the XL.",
+    "verdict": "reword",
+    "verdictReason": "Status is correctly partial, but the item places the trait in sandbox-manager (a bookkeeping service) and ignores the standing ledger decision and the existing Control-signed backend pin; the build should be ADR-first with the seam in execution-core.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-009",
+    "verdict": "partial",
+    "checked": [
+     "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/cursor/resources/app/extensions/cursor-agent-exec/dist/main.js: system-prompt text 'Docker container inside of a Firecracker VM', proto enum anyrun.v1.FirecrackerVersion (V1_12_1, V1_16_1), shared tmux session prompt text",
+     "REA analyze_javascript_application(directory=cursor-agent-exec, summary) -> ev_4f135b06...; REA trace_application_feature(seed string 'Firecracker') -> no-match (the graph does not index prompt literals; grep confirmed instead)",
+     "extract/claude/.vite/build/index.chunk-EzXl5k4A.js: heartbeat (__heartbeat__ ping, 'Guest disconnected', lam_vm_heartbeat_failure with consecutive_failures), vpn_routing_conflict error_type - SRC confirmed",
+     "C:/dev/hermes-agent/tools/environments/ (local, docker, singularity, ssh, modal, managed_modal, daytona, vercel_sandbox)",
+     "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1358-1365 (SandboxBackend trait deferred)",
+     "records cursor-harness-architecture-083, claude-runtime-architecture-042/063, manus-computer-control-architecture-001/002, hermes-architecture-and-surfaces-075, web-claudeai-web-product-119, web-perplexity-web-product-071"
+    ],
+    "corrections": "(1) Claude desktop's VM state machine and 30 s heartbeat govern a LOCAL VM on the user's PC (download, Hyper-V/HCS boot, host share, VPN routing). They are a transferable liveness pattern, not a hosted per-thread microVM. The heartbeat is also flag-gated, with a fallback monitor otherwise. (2) The Cursor 'code-verified mechanism' is overstated. The evidence is agent system-prompt text plus a client proto enum naming Firecracker versions, and the VM orchestration itself is server-side and not inspectable. Call it SRC (client strings/proto), not a verified implementation. (3) 'Firecracker, Kata or gVisor' and the warm-pool, vsock-guest-agent and proxy credential injection details are Verevon design. Only Firecracker appears in the references (Perplexity DOC, Cursor strings). Perplexity's per-task microVM and claude.ai's per-conversation VM with snapshot and 30-day expiry are DOC-only. (4) Prevalence double-counts vendors (manus + web-manus and web-claudeai in both C-06-001 and C-13-036) and the two clusters overlap. The distinct vendors with a hosted per-task computer are roughly Cursor, Manus, Anthropic (claude.ai), Perplexity and OpenAI (ChatGPT): 5 vendors, not 5 + 3. (5) Hermes' 'seven backends' are terminal/exec backends behind a spawn-per-call shell contract, not VM lifecycles. (6) The Manus executor protocol is SRC from binary strings and protobuf names (HOST_KIND_OPERATOR / SANDBOX_RUNTIME), and its direction (cloud = client) is inferred from the message names.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Perplexity SPACE, claude.ai VM lifecycle and Manus sleep/wake/recycle are DOC-only",
+     "Cursor microVM: prompt text + proto enum, server-side not inspectable",
+     "Claude heartbeat is flag-gated and applies to a local Cowork VM",
+     "Manus executor protocol direction inferred from message names"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-010",
+  "title": "Connected apps that work in chat: prove Gmail, Outlook, Drive and Calendar reads end to end, add Ask-mode reads, @-connector scoping, citations, then approved writes",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 10,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "integration-corev2 already implements real read operations (mail search and get, Drive search and content, windowed calendar). Close the Model Plane half: update execution-core's agent catalogue to the real operations, ship the read-only provider tool that does not stall on approval, expose the same reads in Ask mode behind the source-scope filter, add @connector mention and per-turn account scoping, cite connector sources, live-prove against real mailboxes, then enable writes behind per-action approval.",
+  "whyItMatters": "Connected apps are table-stakes (6 of 11) and the main way a B2B assistant becomes useful on a user's own data. The plumbing exists on both sides but has never run end to end against a real account, and Ask-mode reads are parked (F12), so users cannot ask about their own mail in normal chat.",
+  "referenceBestPractice": {
+   "bestSource": "ChatGPT connectors (web-chatgpt-web-product-043, DOC) for breadth and read vs write gating; Manus (manus-product-ux-041, SRC) for per-task toggles and account defaults ; Claude desktop (bundled GitHub server with device-code sign-in, token bound to host/client/scope, read-only and toolset switches, admin policy entries; SRC) plus Perplexity web (widest catalogue, project-level binding; DOC); Hermes for the in-chat connect flow (SRC)",
+   "others": [
+    "Claude connectors (SRC)",
+    "Manus web (DOC)",
+    "Perplexity (DOC)",
+    "Antigravity (SRC)",
+    "Codex",
+    "Manus web",
+    "Claude desktop (suggested installs)"
+   ],
+   "prevalence": "R-t3-03-04: 6 of 11 sources; table-stakes | R-t3-05-02: First-party connector catalogue: 4 of 12 sources, common; model-suggested connection flows: 3 of 12, differentiator",
+   "mechanism": "Connector registry (OAuth per user, optionally per org) -> per-connector action catalogue tagged read or write -> per-task enablement and account selection resolved explicit > project > user default -> agent calls actions, writes need approval -> an @mention narrows the turn to one connector. Connector = provider OAuth app + curated action catalogue (typed inputs, read/write class, confirmation rule) + scopes;"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:208-300",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/mail_read.go",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:8-40",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:73-135",
+    "apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:1-30",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3588-3696",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:160-164",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:268",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:1-25",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:830-831"
+   ],
+   "gap": "R-t3-03-04: SRC (checked 2026-10-14, and corrects the earlier baseline): integration-corev2 now implements mail.messages with search, folder and paging, mail.messages.get, gmail.messages.get, drive.files with search, drive.file.content and windowed calendar reads. | R-t3-05-02: One typed provider-action bridge exists (list_provider_actions bound to cap.tool.provider.read, execute_provider_action to cap.tool.provider.execute;"
+  },
+  "approachOriginal": "Plan rows F2-F4, F6, F8-F11b, then G7-G10 for writes. Un-park F12 (Ask-mode reads): ChatGPT and Manus show reads in plain chat with clear source chips. Treat mail bodies and file text as untrusted content with the existing trust-class framing; respect ZDR by not persisting connector content on ZDR turns; tokens stay in integration-corev2.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-003",
+   "F-t3-006",
+   "OD10/OD12 owner decisions",
+   "Google/Microsoft OAuth app verification"
+  ],
+  "planeOwner": "Model Plane (tools, scoping, citations) with Ingestion Plane (integration-corev2 provider actions) and Control Plane (connection ownership)",
+  "risks": "Personal mailbox content in shared Spaces must not be visible to other members (Space never widens owner ACL). Prompt injection through mail bodies. OAuth app verification with Google and Microsoft takes calendar time. Token lifetime on long runs.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 17,
+   "DOC": 7,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-03-04: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md rows F2 to F4, F6, F8, F9, F10, F11b; row F12 (Ask-mode reads) is parked as optional. @mention scoping and connector citations are not in the plan. | R-t3-05-02: Partly: connector reads and writes are tasks F1-F13 and the G rows in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (reads Waves 1 and 4, writes Wave 5), with open owner decisions OD10, OD11 and OD12 (lines 462-472). The in-chat connect card and per-connector admin toggles are not in the plan."
+  },
+  "sourceClusters": [
+   "C-t3-03-016",
+   "C-t3-05-004",
+   "C-t3-05-024"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-010",
+    "status": "partial",
+    "exactGap": "Ingestion side is shipped: integration-corev2 dispatches mail.messages and .get, gmail.messages and .get, drive.files, drive.file.content and windowed calendar reads (mail_read.go, drive_read.go, calendar_read.go), and a user-driven composer picker attaches extracted text from OneDrive, Gmail, Outlook, Drive and calendars. The Model Plane half is not: execution-core's catalogue still says no search filter and omits the .get and drive.file.content operations, so operation_is_write returns None and those calls are treated as risky (approval-gated); there is no read-only provider tool (plan F6 'not built yet'), the inline Ask-mode loop has only Verevon-native inbox, social and knowledge reads (F12 parked), and there is no @connector mention, per-turn account scoping or connector citation chip. mail_read.go itself records that provider query behaviour is unverified against a live mailbox (live proof is plan task F10).",
+    "evidence": [
+     "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:195-310",
+     "apps/Ingestion Plane/integration-corev2/internal/actions/mail_read.go:1-70",
+     "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:1-160,744-761",
+     "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:168-225",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:815-850",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4366-4410",
+     "apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:1-60",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3580-3700,4233-4270",
+     "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:11-23",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:150-200",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:148,160-163,268,467-472"
+    ],
+    "reuse": [
+     "integration-corev2 actions (tokens never leave it) and execution-core IntegrationActionsClient with list_provider_actions mapped to cap.tool.provider.read",
+     "the composer connector picker, integrations-client browse/content calls and prepare-chat-attachments provenance labels",
+     "is_risky_call/operation_is_write read-vs-write classification as the approval boundary",
+     "record_tool_step ZDR redaction path and the untrusted-content framing planned in F8",
+     "CHAT_GAP_CLOSURE_PLAN rows F2-F13 and G7-G10"
+    ],
+    "constraints": "Tokens stay in integration-corev2; model proposes, integration-corev2 executes. Non-ZDR runs persist truncated tool output into session-core step records (record_tool_step), so mail and file text would be stored unless F8's connector redaction lands first. The source-scope prune only knows web-class and org-class tool names (tool_loop.rs ORG_CLASS_TOOLS) and is not propagated to execution-core, so a new connector read tool must be added to the org class or a web_only turn would still offer it and break the 'personal memory not consulted' notice. Space never widens an owner ACL: personal mailbox content must not surface in a shared-Space thread, and OD11 notes the existing inbox tools are org-wide and must not be the F6 target. The inline Ask-mode loop has no approval gate by design, so writes stay out of Ask mode.",
+    "approachAdjustment": "Most of the item is already plan rows F2-F13, so reword it to the unplanned deltas: @connector mention with per-turn account scoping, connector citation chips, and moving provider tools into the retrieval-scope classes. Make the catalogue refresh and the read-only tool (F6) the first slice, land F8 redaction and untrusted framing before enabling it on non-ZDR runs, and reuse the same tool for Ask mode (F12) rather than building a second one. Writes stay behind per-action approval (G rows).",
+    "effortRevised": "L",
+    "effortNote": "Unchanged; the catalogue refresh is S, F6 plus F8 is the L, @mention and citations add M.",
+    "verdict": "keep",
+    "verdictReason": "The item states the current split correctly (ingestion reads shipped, Model Plane half unbuilt, never proven live); keep it with the scope-class and step-record constraints added and an explicit note that it overlaps plan rows F2-F13.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-010",
+    "verdict": "partial",
+    "checked": [
+     "scratchpad/tmp/claude-ext/pretty/c_CR1LIe8r.js:28-36 (github-mcp-server.exe env: GITHUB_HOST, GITHUB_TOOLSETS, GITHUB_READ_ONLY=1)",
+     "scratchpad/tmp/claude-ext/pretty/c_CH3m0eAL.js (GitHub device-code endpoint /login/device/code; default scope 'repo read:org read:user'; token cache key = sha256(host, clientId, scope))",
+     "scratchpad/tmp/claude-ext/pretty/core.js:16204-16472,37825-37834 (managedMcpServers built-in entries github/microsoft365/websearch with availableInVersion gates; 'built-in servers are not permitted for source' other than admin)",
+     "extract/manus/dist/connectorCompletion.js (PKCE-style connector OAuth completion, 15-minute TTL)",
+     "extract/manus/frontend/out/_next/static/chunks/*.js (enabledConnectorUids, sessionConnectorAccountsMap, selectConnectorAccount, projectEnabledConnectorUids, connectors.v1.* proto message names)",
+     "https://open.manus.ai/docs/v2/connectors.md (explicit list > project defaults > user default enabled connectors; clear_connectors; uninstalled connectors skipped only on reuse, InvalidArgument on override)",
+     "C:/dev/hermes-agent/tools/connectors/contract.py:1-70 (TargetState pending/initiated/connected/skipped/failed/expired; actors user/backend_watcher/clock; SettleReason)",
+     "C:/dev/hermes-agent/tools/connectors/managed.py:1-25 and gateway/config.py:1-40 (hosted tool gateway, authoritative for entitlement)",
+     "scratchpad/tmp/ag2/protos/third_party__jetski__cortex_pb__cortex.proto.txt:1248-1256,3354-3356 (CortexStepWorkspaceAPI {url, http_method, body}; WorkspaceAPIToolConfig.read_only)",
+     "https://help.openai.com/en/articles/11487775-connected-apps-in-chatgpt (HTTP 403, could not re-verify)"
+    ],
+    "corrections": "1) Prevalence 6 of 11 (C-t3-03-016) counts Antigravity on the strength of a generic WorkspaceAPI step (URL, method, body, read_only flag; record quality 2). That is an inference from names, not an OAuth connector catalogue with in-chat connected apps. Drop Antigravity or mark it INF, which gives 5 of 11 (still table-stakes). 2) ChatGPT as overall best is DOC-only and the help page could not be re-fetched (403). Say so, and note that the read/write gating, @mention and admin pre-indexing claims are unverified DOC. 3) The Claude GitHub mechanism (device code, token bound to host/client/scope, read-only and toolset switches) is accurate, but it applies only to admin-managed built-in connectors (managedMcpServers, source must be admin, version-gated). It is not a consumer connector catalogue; present it as the enterprise-policy reference. 4) The Manus 'explicit > project > user default' resolution is verified in the public API docs (DOC), not in desktop SRC. The SRC confirms per-session connector toggles, per-session account selection and project-enabled connectors. 5) The Hermes in-chat connect flow is accurate (typed state machine with actors and settle reasons) but runs through a hosted, entitlement-gated tool gateway.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Claude GitHub/M365 built-ins are admin/enterprise-policy only (managedMcpServers, admin source) and version-gated.",
+     "ChatGPT and Perplexity connector claims are DOC-only; the ChatGPT help page returned 403 on re-check.",
+     "Manus default-resolution order is DOC (public API docs); per-task toggles and account selection are SRC.",
+     "Hermes connectors depend on a hosted gateway that is authoritative for entitlement.",
+     "Antigravity inclusion is name-based inference (WorkspaceAPI step), low confidence."
+    ],
+    "confidence": "medium"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-011",
+  "title": "Finish human-in-the-loop: plan approve-then-continue, a typed ask_user tool, and docked approval, plan, question and queue trays",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 11,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "After a plan is approved the run continues on its own (grant and plan persisted in session-core, no extra user message). Add ask_user as a non-effectful builtin in both loops: a durable pause with a user_question ChatEvent and a card that supports single/multi select, free text and skip, resumed through the existing route. Render pending approvals, plan proposals, questions and the message queue as trays docked above the composer in priority order.",
+  "whyItMatters": "Plan mode is table-stakes (9 of 12) and structured clarifying questions are common (6 of 12). Verevon has the editable plan card but the run stops after approval and there is no way for the agent to ask a question, so agents either guess or stall. Docked trays (Cursor, DeepSeek) keep the request visible during long runs.",
+  "referenceBestPractice": {
+   "bestSource": "Codex (decision-complete proposed_plan after a read-only interview; sync and async request_user_input) for plans; Manus (typed human-request socket messages) for questions ; Claude desktop (SRC) plus Antigravity (SRC) ; Cursor (trays for plan, questionnaire, queue, goal and subagents docked above the prompt) plus DeepSeek (timed question card with drafts and late replies; editable queue promotable to steering)",
+   "others": [
+    "Antigravity (task boundaries with PLANNING/EXECUTION/VERIFICATION modes)",
+    "Cursor (late answers delivered durably into the paused run)",
+    "Claude Desktop, DeepSeek, T3 Code, web Manus and Perplexity (plan mode)",
+    "claude.ai (DOC)",
+    "Perplexity (DOC)",
+    "Hermes Agent (typed approval, clarify and masked secret prompts)"
+   ],
+   "prevalence": "R-t3-04-03: plan mode with approval gate 9 of 12 sources (table-stakes); structured clarifying questions 6 of 12 (common) | R-t3-01-05: 4 of 12 sources; common | R-t3-12-03: 3 of 12 sources (differentiator).",
+   "mechanism": "Plan: a mode flag on the run; A builtin ask_user tool with schema {questions:[{question, options[], multi_select, allow_write_in, rank}]} suspends the run and emits a typed event. Server to client request events {kind: approval|clarify|secret|plan, id, options, deadline};"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2040-2095 (approveTurnPlan calls approvePlan, turns plan mode off and waits; the error copy admits the NEXT message may lack the grant)",
+    "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:69-202 (PlanModeStore is in-memory with TTL; take_approved_plan consumed by the next run)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8844-8867 and 9120-9150 (next run prepends the approved plan block to its goal)",
+    "apps/Model Plane/proto/model_plane/v1/execution.proto:143-154 (plan_mode and autonomy_rung on RunAgentRequest)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1645,1806 (risky calls refused in plan mode at dispatch)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1873-1975 (approvePlan and rejectPlan client)",
+    "grep of apps/Model Plane/rust/services/{model-gateway,execution-core}/src for ask_user, request_user_input, ask_question: no tool (only unrelated prompt text in tool_loop.rs:6712)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2217-2542",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1940",
+    "apps/Model Plane/docs/PLAN.md:134"
+   ],
+   "gap": "R-t3-04-03: Plan half: enforcement, the editable plan card and the server-side approved-plan injection exist, but nothing starts the continuation run (the user must send another turn) and the grant store is in memory on one replica. | R-t3-01-05: Plan-proposal and tool-approval cards exist with durable approvals and resume routes, but there is no ask_user or clarifying-question tool (a grep of model-gateway and execution-core sources found none; | R-t3-12-03: The plan proposal card (edit, reorder, authority rung, justification) and tool approval cards ship but render inside the transcript, not docked."
+  },
+  "approachOriginal": "Build on F-t3-002's checkpoint: plan approval and ask_user both become typed interaction requests that pause and resume the loop. Budget ask_user per run so models do not over-ask. Notify away users through the attention model of F-t3-015. Echo answers into the transcript as Q/A text so the context stays honest.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-002",
+   "F-t3-001",
+   "F-t3-016",
+   "F-t3-015"
+  ],
+  "planeOwner": "Model Plane (tool, pause state, events) with Frontend Plane (trays, cards)",
+  "risks": "Over-asking degrades UX; skipped questions must resume safely; the in-memory PlanModeStore must move to session-core to survive replicas.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 29,
+   "DOC": 8,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-04-03: Approve-then-continue is backlog item B7 per the cluster baseline (CHAT_PARITY_AUDIT_2026-10-01.md); the ask_user half is also a recommendation of category 01 (R-t3-01-05). File itself not re-read."
+  },
+  "sourceClusters": [
+   "C-t3-04-024",
+   "C-t3-04-029",
+   "C-t3-01-013",
+   "C-t3-12-025"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-011",
+    "status": "partial",
+    "exactGap": "Exists: plan mode with autonomy rung enforced at dispatch, the editable PlanApprovalControl and tool ApprovalRequests cards, a durable approval pause (execution-core mints an approval, flips the run to AwaitingApproval, returns early, resume re-invokes run_agent), and mid-run queued input (/v1/invoke/:id/queue, QueuedInputStrip). Missing: approving a plan does not start the executing run (approveTurnPlan only records the grant and turns plan mode off, and warns that the next message may lack the grant if it was not persisted; the closure plan carries B2, B5 and B7), the grant lives in the gateway's in-memory PlanModeStore (one replica, lost on restart), there is no ask_user tool, event or card anywhere in Model Plane or Frontend (grep), and approvals, plan card and queue render inside the transcript rather than as trays docked above the composer.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2030-2135",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1911",
+     "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:40-215",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:137-142,1393-1451",
+     "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs:247-260",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8717-8760,8840-8870",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:14-25,930-940,4441-4540",
+     "apps/Model Plane/docs/PLAN.md:134",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:880-960",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889,2105,2217",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:148,178"
+    ],
+    "reuse": [
+     "the durable approval pipeline (execution-core approval mint, approval delivery outbox, resume routes) as the pause/resume engine for ask_user",
+     "session-core SetRunMode (already durably persists run mode) as the carrier for a thread-scoped grant",
+     "PlanApprovalControl, ApprovalRequests and QueuedInputStrip components and the queued-input route",
+     "composer dock wrapper in ChatPage.tsx for the trays",
+     "attention events from F-t3-015 for away users"
+    ],
+    "constraints": "ZDR: a ZDR credential is refused for plan approval, resume and any durable continuation (zdr_posture::continuation_gate, owner decision 17) because a ZDR run keeps no plan, todo or approval to advance, so approve-then-continue and a durable ask_user pause work only on persistent or waived runs; ZDR threads need an in-stream, non-durable ask or no ask_user. User answers are conversation content and follow normal persistence/redaction rules. The grant must be minted and validated server-side (the browser never selects authority) and bound to the run's receipts (plan B9). ask_user is a model proposal to the human, so it fits Model proposes / user decides, but it must be non-effectful and budgeted per run.",
+    "approachAdjustment": "Sequence plan continuation first, as already planned (B2, B5, B7): move the thread-scoped grant from the gateway's in-memory map into session-core and start the executing run on approval. Model ask_user as a new interaction kind in the existing durable approval pause rather than a second pause state machine, and gate it off or make it ephemeral for ZDR threads. The docked trays are a layout change in the ChatPage composer dock and can ship independently of any backend work.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged; trays alone are S to M, plan continuation is the already-planned M to L, ask_user is M.",
+    "verdict": "keep",
+    "verdictReason": "The item's account of today matches the code (no continuation run, in-memory grant, no ask_user, in-transcript cards); the plan half is already planned work and the ZDR continuation constraint needs adding, but nothing here exists to drop.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-011",
+    "verdict": "partial",
+    "checked": [
+     "scratchpad/tmp/codex_rt/codexexe.prose.txt (Codex Plan Mode text: decision-complete <proposed_plan>; 'Do not ask should I proceed'; the user switches out of Plan mode to request implementation)",
+     "scratchpad/tmp/codex_rt/astra_collaboration_modes.txt (request_user_input only when listed in this turn's tools; optional questions only; never for permission)",
+     "scratchpad/tmp/ag2/protos/third_party__jetski__cortex_pb__cortex.proto.txt:42,1788-1812 (AgentMode PLANNING/EXECUTION/VERIFICATION; AskQuestionEntry options/is_multi_select/write_in_response/skipped; AskQuestionInteraction cancelled)",
+     "Claude install ion-dist/assets/v1/c68c4283d-CO0VlQwV.js (claudeai.epitaxy.ask_user_question.viewed/answered/skipped); shared-5/shared-7 hold ask_user_input_rank_sortable and ask_user_input_sheet; en-US.json 'Drag to reorder', 'Select all', 'needs your input'",
+     "extract/manus/frontend/out/_next/static/chunks/*.js: no structured clarifying-question message type; 'ASK_USER' is only an approval-policy enum (ASK_USER/FULL_AUTO)",
+     "https://open.manus.ai/docs/v2/task-lifecycle.md (messageAskUser/cascadeAskUser with question_expectation {options, selection_mode single|multiple}; answered via task.sendMessage)",
+     "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/cursor/resources/app/out/vs/workbench/workbench.glass.main.js (plan-tray, questionnaire-tray, queue-tray, goal-tray, PromptInputAnchoredTray)",
+     "C:/dev/deepseek-harness/packages/interaction/tool-ask-user/README.md:12-74 (blocking by default; timed mode opt-in; late answers arrive as user messages)",
+     "C:/dev/deepseek-harness/packages/client/ui-user-questions/README.md:12-52 (composer-seat card, countdown, focus pause, Take time, drafts, late replies, plan-review Approve card)",
+     "findings/t3/cmp clusters C-t3-04-024, C-t3-04-029, C-t3-01-013, C-t3-12-025"
+    ],
+    "corrections": "1) Codex is not a model for 'approve-then-continue'. Its Plan Mode tells the model not to ask whether to proceed; the user switches out of Plan mode and asks for implementation in a new turn, which is what Verevon does today. Keep Codex as best-in-class only for the decision-complete plan content. For a plan approval that resumes the same run, cite DeepSeek: its exit_plan_mode review is an ask_user wait with an Approve card, so approving resumes the run (SRC README). The C-t3-04-024 mechanism claim that the run 'then continues automatically' is not supported by the Codex evidence. 2) Manus is mis-attributed for questions. The SRC record (manus-product-ux-127) covers typed confirmation and approval socket messages (touchpoint, cascade workflow, connector re-OAuth, and similar), not clarifying questions. Manus structured questions with options are verified only through its public API docs (messageAskUser with question_expectation, DOC), and the answer goes back as a plain message. Either rephrase as 'Manus (DOC: question_expectation with single/multi options; SRC: typed confirmation messages for approvals)' or name Antigravity (SRC AskQuestion proto) or DeepSeek (SRC/DOC) as best for questions. 3) The 'rank' field in the ask_user schema comes only from Claude (drag-to-rank). Antigravity has options, multi-select, write-in and skip, but no rank.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "Codex request_user_input is available only when listed for the turn (flag-gated); async variant per record, from binary strings only.",
+     "Cursor trays live in the workbench.glass bundle (new agent window); questions are gated by flags such as ask_question_all_modes per record.",
+     "DeepSeek timed questions are opt-in (shipped presets use blocking mode); the timed-card behaviour is documented in the package README plus an e2e test.",
+     "Claude ask_user_question is in the epitaxy (Claude Code desktop) surface and is SRC from analytics events, lazy-module ids and i18n strings, not traced logic.",
+     "Manus structured questions are DOC (public API); the Manus SRC evidence is approvals and confirmations only."
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-012",
+  "title": "Conversation history foundation in session-core: durable message tree with versions and fork, full-text search, a recall tool, paging and thread organisation",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 12,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Give messages a parent pointer, sibling ordinal and active-leaf pointer so regenerate and edit create persisted versions (with model or effort override), forks record lineage, and rewind is a confirmed supersede, never a delete. Add an owner-scoped Postgres full-text index with a search route and sidebar search, a read-only recall_conversations tool returning snippets as untrusted data, @thread references, cursor paging that removes the 80-thread cap, and archive, unread and star fields.",
+  "whyItMatters": "Four consolidators asked for the same data model. Fork, versions and search are table-stakes (7-9 of 12) and users notice immediately when regenerated answers vanish on reload or old chats cannot be found. Hermes and Claude show the mechanism; the plan already has I8-I12, so this is mostly sequencing one shared schema instead of four features.",
+  "referenceBestPractice": {
+   "bestSource": "Hermes Agent (truncating rewind with durable row ids; FTS5 plus trigram search and a recall tool) ; Claude desktop (SRC) for fork, lineage and message actions; Perplexity and ChatGPT (DOC) for regenerate with model or effort ; Claude desktop (SRC) for search; T3 Code (SRC) and Claude desktop (SRC) for thread organisation ; hermes (search tool); deepseek (reference snapshot)",
+   "others": [
+    "Cursor (ForkSession, AttachSession, WatchSessions)",
+    "Codex (resume and fork by id)",
+    "DeepSeek harness (SRC, inherited-prefix marker)",
+    "Antigravity",
+    "Manus",
+    "claude.ai (DOC)",
+    "ChatGPT (DOC)",
+    "Perplexity (DOC)",
+    "Cursor",
+    "T3 Code",
+    "DeepSeek harness",
+    "web-chatgpt"
+   ],
+   "prevalence": "R-t3-13-05: C-043: 1 of 12 (unique). C-011: 3 of 12 (differentiator). C-015: 2 of 12 (differentiator) | R-t3-01-02: 8 of 12 sources (fork) and 4 of 12 (message actions); table-stakes | R-t3-01-03: 7 of 12 sources (search) and 9 of 12 (organisation); table-stakes | R-t3-08-02: Search: 3 of 12 in the records (common, but table-stakes in practice since every chat product has it). Past-chat reference: 4 of 12 (common).",
+   "mechanism": "Hermes: the user message is written durably before the turn runs; Each assistant turn stores model, mode and effort. A worker-backed index over transcripts per owner (limit 50, up to 200 sessions, archived optional) behind a palette with snippets and jump-to-message, plus an agent tool search_past_conversations(query, scope) whose snippets are treated as untrusted data and rendered as a visible tool call. Hermes: one tool with four shapes (discover, scroll around an anchor, read, browse) and no LLM calls;"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:220-222",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:251-252",
+    "apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:144-181",
+    "apps/Model Plane/rust/services/session-core/migrations/0025_message_space_audience_context.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/0035_message_author_attribution.sql",
+    "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:1-9",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3499-3531",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions.ts:44-137",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3752-3786"
+   ],
+   "gap": "R-t3-13-05: SRC/DOC: the gateway has thread list, archive, delete, messages and events-replay routes but no fork, rewind, supersede or search route, and no tsvector or trigram index exists in session-core migrations (the only Postgres full-text work is in Data Plane v2). | R-t3-01-02: Edit-and-resubmit ships and effectful turns are immutable, but regenerate keeps 1/N versions for the final exchange only and loses them on reload; | R-t3-01-03: Only a client substring filter over a BFF list capped by MAX_THREADS = 80 (SRC history.rs:21,351) with no paging. | R-t3-08-02: No search RPC, no index, no UI search over message text, no agent recall tool, no @thread reference and no reference-chat-history setting."
+  },
+  "approachOriginal": "One session-core migration for the tree (parent_id, sibling ordinal, superseded_by, lineage root) and a tsvector index that excludes ZDR content and honours hard deletes; context assembly follows the active leaf. Then routes: regenerate/edit/fork/rewind/search/paging; then SPA. recall_conversations makes no model call and is owner-scoped; shared-Space threads need a Control-signed Space read decision.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-016",
+   "OD19 branch semantics"
+  ],
+  "planeOwner": "Model Plane (session-core single writer, model-gateway routes) with Frontend Plane (sidebar, versions UI)",
+  "risks": "Context leakage between siblings if assembly does not follow the active leaf; search index must never index ZDR turns and must honour erasure; recall snippets are a prompt-injection channel; branch semantics need owner decision OD19.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 36,
+   "DOC": 20,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-13-05: CHAT_GAP_CLOSURE_PLAN_2026-10-01.md I8, I9, I10, I11 (Waves 4-5) and I12 (full-text search plus recall_conversations) | R-t3-01-02: Yes: plan I8 server-owned branch (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:220), I9 supersede primitive (:221), I10 persist versions across reload (:251); the parity backlog calls the server-authoritative session the prerequisite (apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md:31) | R-t3-01-03: Partly: plan I12 full-text search plus recall_conversations (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:222); thread-list paging, unread and star were not found in the plan | R-t3-08-02: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:222 (I12: search plus recall_conversations, Wave 3). The @thread reference phase is not in that plan."
+  },
+  "sourceClusters": [
+   "C-t3-13-043",
+   "C-t3-13-011",
+   "C-t3-13-015",
+   "C-t3-01-008",
+   "C-t3-01-009",
+   "C-t3-01-028",
+   "C-t3-01-027",
+   "C-t3-08-015",
+   "C-t3-08-016"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-012",
+    "status": "partial",
+    "exactGap": "Server side has thread list, archive, presentation (pinned_at, archived_at), messages and events-replay routes plus a memory lineage pattern, but no message parent/sibling/active-leaf, no fork, rewind or supersede route, no tsvector or trigram index, no search RPC, no recall_conversations tool (recall_memory is semantic memory and reattach_context reads only the current thread), no unread or star fields, and the BFF list is capped at MAX_THREADS = 80 with no cursor. Regenerate and edit versions are deliberately client-only, final-exchange-only and session-lifetime (chat-versions.ts) because an earlier persisted, nestable design was rejected in review (CHAT_RESUME_AND_VERSIONS_SPEC.md); sidebar search is a client substring filter and projects/filters live in client storage (chat-organization.ts). The plan carries I8 (branch), I9 (supersede) and I12 (search plus recall_conversations) with owner decision OD19 open.",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:137-185",
+     "apps/Model Plane/rust/services/session-core/migrations/0021_thread_presentation.sql:1-12",
+     "apps/Model Plane/rust/services/session-core/migrations/0037_agent_memory_lineage.sql:27-74",
+     "apps/Model Plane/rust/services/session-core/src/dreaming.rs:860-930",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:5389-5392",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3142,4294-4302",
+     "apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md:1-80",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:21,340-365",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions.ts:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:5-62",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:220-222"
+    ],
+    "reuse": [
+     "threads.pinned_at/archived_at and the update_thread_presentation route (pin and archive already exist server-side)",
+     "agent_memory supersedes_id/is_latest transaction (write_lineage_memory) as the pattern for supersede without delete",
+     "reattach_context and recall_memory tool plumbing and the untrusted-result framing for a recall_conversations tool",
+     "session-core ListConversation (also the transcript source for learning review and Dreaming) as the single place to make read paths follow the active leaf",
+     "run_events resume and stream_buffer path for reconnect",
+     "plan rows I8, I9, I12 and OD19"
+    ],
+    "constraints": "No cross-plane DB: the full-text index must live in session-core (Model Plane Postgres), not in Data Plane v2 whose tsvector migration is documents only. ZDR turns must be excluded from the index and indexed rows must honour the durable erase contract on thread delete (http_routes.rs); Space-audience threads (migration 0025) need a Control-signed Space read decision for search and recall and must never widen an owner ACL. The rejected-design failure modes recorded in CHAT_RESUME_AND_VERSIONS_SPEC must be designed out: context assembly, learning review (ListConversation), Dreaming memory extraction, compaction and audit must read the active path only, effectful turns stay immutable, and branch semantics (OD19) are unresolved. recall results are a prompt-injection channel and stay owner-scoped.",
+    "approachAdjustment": "Reword as reopening a previously rejected design with an active-path read model, and decouple the pieces: ship cursor paging, an owner-scoped full-text index with search route, and recall_conversations first (M, independent of branch semantics), then fork-as-copy with lineage (I8), then persisted versions/supersede (I9) only after OD19 and after ListConversation returns the active path for every consumer. 'One migration for four features' is the risky part, so sequence the tree last. Unread and star are small additive columns; pin and archive need only UI wiring.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged in total; search, paging and recall are about M and the persisted message tree with active-path consumers is the L.",
+    "verdict": "reword",
+    "verdictReason": "Gaps are real (no tree, search, recall, paging) but the item understates that persisted versions were explicitly rejected once and that server-side pin and archive already exist; the tree must be sequenced after the independent search and paging work.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-012",
+    "verdict": "partial",
+    "checked": [
+     "extract/claude/.vite/build/index.chunk-EzXl5k4A.js: LocalSessions forkSession(parentSessionId, forkAtMessageUuid, targetCwd) and detachFromParent",
+     "Claude install ion-dist/i18n/en-US.json: 'Fork with this prompt', 'Forked from {source}', 'Branch to new chat', 'Search chats and sessions...'",
+     "extract/claude/.vite/build/index.chunk-1xGiXs9t.js: [cowork-search] searchCandidates(limit 50, maxSessions 200, includeArchived) and the search_session_transcripts tool description (substring match, case-insensitive; snippets treated as data, not instructions; scope = other CCD session transcripts)",
+     "extract/claude/.vite/build/transcript-search-worker/transcriptSearchWorker.js: streams JSONL via createReadStream/readline; no FTS/sqlite/index library",
+     "REA analyze_javascript_application (directory, summary) on transcript-search-worker: ev_542fc30994fa59b8f99cd00efb9a4a275144c320adafb11e34bd8df079f8c14f, 1 file, 0 request relations, no storage",
+     "C:/dev/hermes-agent/hermes_state_rewind.py:1-25 (carrier-aware rewind; durable transcript is the authority)",
+     "C:/dev/hermes-agent/website/docs/developer-guide/programmatic-integration.md:66-87 (truncate_before_row_id, confirm_truncate/empty/deep, survivor_user_row_ids; calls it a destructive rewrite that archives turns)",
+     "C:/dev/hermes-agent/tools/session_search_tool.py:23-56 (BM25 discover scan limit 300, cron demotion, read cap 2000, lineage dedupe)",
+     "C:/dev/hermes-agent/hermes_state_common.py:298-370,859-862 (external-content FTS5 plus trigram index)",
+     "scratchpad/tmp/t3/src/client/src/components/threadActionMenu.logic.ts (pin, settle, snooze, rename, regenerate-title, mark-unread, archive, delete, copy ids)",
+     "C:/dev/deepseek-harness/packages/context/session-reference/README.md:1-30 (@label to a bounded read-only snapshot as durable untrusted context)",
+     "findings/t3/cmp/*.clusters.json: C-t3-01-008, -009, -027, -028, C-t3-08-015, -016, C-t3-13-011, -015, -043"
+    ],
+    "corrections": "1) Claude desktop search is not an index. The transcript-search-worker scans on-disk JSONL transcripts per query with a case-insensitive substring match, capped at 200 recent sessions. It covers only local Claude Code Desktop (cowork/CCD) sessions, not claude.ai chats. So 'worker-backed index' should read 'worker-backed scan'. Hermes (FTS5 plus trigram, BM25) is the only verified indexed-search reference. 2) Prevalence: 'fork, versions and search are table-stakes (7-9 of 12)' overstates versions. Persisted regenerate/edit versions with a model or effort switch are 4 of 12 (C-t3-01-008), and the model/effort part is DOC-only (ChatGPT, Perplexity). The search counts also disagree across clusters: 7 of 12 in C-01-028, 3 of 12 in C-08-015 and 2 of 12 in C-13-015. Present search as table-stakes as a UI feature, but say that indexed full-text search plus an agent recall tool is verified only in Hermes (SRC), Claude CCD (a scan, SRC) and Cursor (SRC per records). 3) 'Hermes ... shows the mechanism' for versions is wrong. Hermes rewind is a confirmed truncation that archives the cut turns, with no sibling-version tree. The tree with 1/N versions comes from ChatGPT/Perplexity (DOC). Verevon's 'supersede, never delete' design is its own choice, closest to Hermes' archive-on-truncate. 4) The untrusted-snippet framing for the recall tool is verified in Claude (tool description) and DeepSeek (session-reference). It was not found as an explicit framing in Hermes session_search_tool.py.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Claude fork and search are local Claude Code Desktop session features (SRC), not claude.ai consumer chat. claude.ai chat search and branching are DOC.",
+     "Claude search is a substring scan over JSONL, not an FTS index.",
+     "Regenerate with a model/effort override is DOC-only (ChatGPT, Perplexity); the ChatGPT help pages returned HTTP 403 and were not re-verified.",
+     "The Hermes rewind is documented as a destructive rewrite that archives truncated turns; no version tree.",
+     "Search prevalence figures are inconsistent across clusters (7, 3 and 2 of 12)."
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-013",
+  "title": "Make Spaces the chat project: instructions, knowledge, members and a retrieval indicator in Ask and Do",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 13,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Replace the browser-only localStorage project organiser with Space-backed projects. A Space already carries governed instructions, Data Plane v2 knowledge and members, so add a project picker and folder view to the chat sidebar, apply Space instructions and retrieval scope in Do runs as well as Ask, and show a knowledge-mode indicator (in context versus retrieval). Also confirm and expose the multi-author Space room threads that session-core already stores.",
+  "whyItMatters": "Projects are how every comparable product organises ongoing work (7 of 12 sources) and, for Verevon, they are the container that carries org governance: who sees what and which knowledge a run may retrieve. Today chat projects do not survive a browser change and Do runs ignore Space-authored instructions, so the vision of project-scoped agents is visibly missing.",
+  "referenceBestPractice": {
+   "bestSource": "Manus (SRC) plus Claude desktop (SRC) and claude.ai (DOC)",
+   "others": [
+    "claude.ai (DOC)",
+    "ChatGPT web (DOC)",
+    "Perplexity web (DOC)",
+    "Manus web (DOC)",
+    "DeepSeek harness"
+   ],
+   "prevalence": "7 of 12 sources; table-stakes",
+   "mechanism": "A project entity holds versioned, restorable instructions, files and links, default connectors and skills, members with read/write/full roles and a visibility policy (Manus ProjectService, 37 RPCs). Threads carry project_id and inherit that configuration. Knowledge stays in context while it fits and switches to a retrieval tool when it outgrows the window, with a visible indicator (Claude, claude.ai). Real-time multi-user use (C-031) is DOC-only: Manus lets up to 49 collaborators instruct one task, Perplexity uses head-checked optimistic concurrency."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-organization.ts:3-27",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:5-45",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:55-96",
+    "apps/Model Plane/rust/services/session-core/migrations/0023_thread_space_context.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/0035_message_author_attribution.sql",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto:255-260"
+   ],
+   "gap": "Chat projects are a client-only organiser (max 100) with no instructions, files, memory or sharing. The server container is Spaces, whose instructions are layered into Ask turns but not Do runs, and chat shows no knowledge-mode indicator. session-core already persists space_id, audience refs and a per-message author_subject_id (SRC, migrations 0023/0035), which suggests multi-author Space room threads exist at the data layer, but whether the Application Plane or SPA exposes them as a shared agent thread was not verified."
+  },
+  "approachOriginal": "Do not invent a new container. Application Plane keeps Space membership and projections; Data Plane v2 keeps knowledge and the retrieval scope; Model Plane reads Space instructions and scope for both Ask and Do (close the known Do-run instruction-layering gap). SPA: migrate the local organiser into server-synced Space folders (plan I21), add a project picker to the chat sidebar and composer, and render a knowledge-mode badge from the existing retrieval_notice event. First step for the collaboration facet: read the Space room implementation and the author_subject_id read path and write down which actor's delegated token runs a collaborator-triggered agent turn.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-001",
+   "F-t3-012",
+   "ADR: Spaces as the chat project container (OD19)"
+  ],
+  "planeOwner": "Application Plane (membership, projections) with Model Plane (instruction and scope layering) and Data Plane v2 (knowledge)",
+  "risks": "Space access must never widen an owner-plane ACL. Per-member overrides complicate audit. Authority confusion when a collaborator instructs the agent (whose delegated token runs). ChatGPT retired group chats in July 2026 (DOC), a warning that multi-user chat is hard to make useful, so keep collaboration a later phase.",
+  "significance": 5,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 8,
+   "DOC": 10,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Partly: plan I21 'server-synced project folders with folder instructions' is deferred to Wave 6 pending an owner precedence ruling (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:273; OD19)"
+  },
+  "sourceClusters": [
+   "C-t3-01-029",
+   "C-t3-01-031"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-013",
+    "status": "partial",
+    "exactGap": "The chat sidebar organiser is a localStorage-only folder list (chat-organization.ts:8-34, 100-project cap, no instructions or sharing) and /chat deliberately has no Space entry point (use-chat-controller.ts:2274-2286), while Space-as-project already exists on the Space page with instructions, a knowledge panel, members and a multi-author room timeline (SpacePage.tsx:434,632; SpaceRoomTimeline.tsx:87). The real functional gap is that Space authored instructions are composed only on the inline path (sse.rs:1855 runs after the agentic return at sse.rs:1491) and RunAgentRequest has no authored_instructions field (execution.proto:76-168), so Do runs ignore them (plan task B3, not built). There is no knowledge-mode (in context vs retrieval) indicator: retrieval_notice only marks a reduced answer (chat-client.ts:246-250), and the per-turn source_scope_applied badge only appears when the scope is not auto (chat-client.ts:556-566).",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:2-34",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/chat-organization.ts:3-4",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx:21-60",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:23-30",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2274-2286",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:55-95",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4281-4330",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1443-1520",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1855",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6375-6420",
+     "apps/Model Plane/proto/model_plane/v1/execution.proto:76-170",
+     "apps/Model Plane/proto/model_plane/v1/sessions.proto:263-274",
+     "apps/Model Plane/rust/services/session-core/migrations/0023_thread_space_context.sql:1-20",
+     "apps/Model Plane/rust/services/session-core/migrations/0035_message_author_attribution.sql:1-20",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:60-100",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:434,626-720",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:246-250,556-566,1740-1748",
+     "apps/Model Plane/rust/services/model-gateway/src/normalize.rs:52-82",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:273,507-510",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-gap-closure-plan-2026-10-01.json:581"
+    ],
+    "reuse": [
+     "Space page surfaces that already hold the project facets: SpaceInstructionsSection, SpaceKnowledgePanel, member controls, SpaceRoomTimeline and SpaceRoomComposer (src/features/spaces/components)",
+     "CoreSidebarSpacesPanel, which already lists Spaces and Space threads in the core sidebar",
+     "Gateway inject_authored_instructions plus resolve_space_role (spaces.rs:4291) as the only place Space instructions are fetched and authorised",
+     "authored_instructions_message (sse.rs:6375) for a Do-run instruction layer",
+     "RunAgentRequest.space_id (execution.proto:168), which already carries the Space into Do runs for the durable sandbox workspace",
+     "Per-turn RetrievalScope and the source_scope_applied event/badge for the knowledge-mode indicator",
+     "Plan tasks B3 (Do-run instruction layering) and I21 (server-synced project folders)"
+    ],
+    "constraints": "Space access must never widen an owner-plane ACL: the gateway re-resolves the caller Space role before it reads instructions (spaces.rs:4281-4290), so any Space picker in chat must go through resolve_space_role and the Control-signed Space decision, never a client-supplied space_ref. Chat history is filtered by thread origin == \"chat\" and the design keeps Space conversations in the Space timeline (use-chat-controller.ts:2274-2286; sessions.proto:263-274), so making Spaces the chat project reverses a deliberate decision; plan OD19 lists three options (per-browser folders, server-synced folders with instructions, private-room projects), recommends server-synced folders with a project-instruction layer, and is waiting for the ADR-0003 precedence sign-off. ZDR: Do-run instructions ride the agentic request and must not be logged (plan task B3); a Do run in a Space already has no SPA entry point other than scheduled or Work-cockpit runs (INF: the Space room composer streams Ask turns only).",
+    "approachAdjustment": "Do not present \"Spaces become the chat project\" as decided; frame it as the OD19 choice between server-synced folders (plan I21, chat-owned, lowest authority risk) and private-room Space projects. Split out the Do-run instruction-layering gap as its own small item (add RunAgentRequest.authored_instructions, compose via authored_instructions_message in the agentic branch, plan B3) because it helps under either container. Render the knowledge-mode badge from a new field or by extending the source_scope_applied badge, not from retrieval_notice, which means \"answered in a reduced form\". Remove \"confirm and expose multi-author room threads\": they are already exposed on the Space page (author attribution, reply, @agent mention).",
+    "effortRevised": "L",
+    "effortNote": "Keep L for the container change. Within it: Do-run instruction layering is S-M (one proto field plus plumbing), server-synced folders are M (plan I21), the badge is S.",
+    "verdict": "reword",
+    "verdictReason": "Partly shipped on the Space page and deliberately kept out of /chat; the proposed approach conflicts with plan OD19 and misnames retrieval_notice as the indicator source. The Do-run instruction gap and the knowledge-mode badge are the real, confirmed pieces.",
+    "confidence": "medium"
+   },
+   "reference": {
+    "finalId": "F-t3-013",
+    "verdict": "partial",
+    "checked": [
+     "Claude install ion-dist/i18n/en-US.json keys CcV//aH6DP, alcVFq9VM9, 4GCi2qH3xL (Searched project knowledge), JIsnwRlH0D, 1vND0qQgVb, IqUMWBoy4d, 4D/I7UvPMT, 6u7AtijCgs (read directly)",
+     "extract/manus/frontend/out/_next/static/chunks/3qo0xy3zujfql.js: decoded session/v1/project.proto and project_common.proto descriptors independently; ProjectService has exactly 37 methods; enums PROJECT_MEMBER_ROLE_READ/WRITE/FULL_ACCESS, PROJECT_SHARED_TASK_POLICY_DISABLED/EDITORS/OWNER_ONLY, team_visibility_permission, personal_instruction",
+     "scratchpad/tmp/gpt/08-10169521-projects-in-chatgpt.txt (cached help page: chats, files, instructions, sources; no retrieval-switch indicator)",
+     "findings records web-claudeai-web-product-008/009, web-perplexity-web-product-012/013, web-manus-web-product-004/007, deepseek-harness-architecture-156"
+    ],
+    "corrections": "Prevalence is overstated: deepseek-harness-architecture-156 is a workspace registry of project DIRECTORIES with grouped sessions (and an archive handshake). It has no instructions, knowledge, members or retrieval, so it should not count toward 'projects with instructions, knowledge, members'. Real count: 6 of 12 sources, and those are only 4 distinct vendors (Anthropic: claude and web-claudeai; Manus: manus and web-manus; OpenAI; Perplexity). The 'switch to retrieval with a visible indicator' part is Anthropic-only (Claude desktop SRC strings and claude.ai DOC), so present it as one vendor's pattern, not table-stakes. The 37 Manus RPCs include 6 sidebar-section and pin/reorder RPCs, so this is not 37 project-semantics operations. Multi-user use (49 collaborators, Perplexity head-checked commits) stays DOC-only.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Manus project model is SRC from embedded protobuf descriptors (schema only; server behaviour not observed)",
+     "claude.ai RAG auto-switch is DOC; Claude desktop shows only UI strings (SRC strings, behaviour not exercised)",
+     "Perplexity and Manus collaboration are DOC-only",
+     "manus and web-manus (and claude and web-claudeai) are the same products counted twice"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-014",
+  "title": "Verified Office deliverables through executable SKILL.md bundles: docx, xlsx, pptx and pdf skills with structural checks, render-and-look and an in-panel previewer",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 14,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Accept the open Agent Skills format (SKILL.md plus references, templates and scripts) as bundles stored in object storage and run their scripts in the hermetic code_interpreter with the bundle mounted read-only. Prove it with first-party document skills: after writing a file the agent runs a checker (zip/XML validity, relationships, formula recalculation, slide count, page thumbnails via headless LibreOffice in bwrap without network) and only then returns a typed artifact, which the Output panel previews with a renderer registry.",
+  "whyItMatters": "Producing real documents is table-stakes for an assistant that does work (5 of 11 sources create Office files through skills and a sandbox) and SKILL.md bundles are table-stakes for extensibility (9 of 12). Today Office files come from ad-hoc python scripts with no verification, so broken files reach users. DeepSeek's verify-and-render step plus Claude's skill-plus-sandbox shape is the best combination.",
+  "referenceBestPractice": {
+   "bestSource": "DeepSeek harness (DOC) for the verify-and-render step, combined with Claude desktop (SRC) and claude.ai (DOC) for the skill-plus-sandbox shape; DeepSeek and Manus for the previewer ; claude.ai (open standard with three-stage loading, DOC) plus Claude desktop (six always-on document skills with scripts and validators, SRC)",
+   "others": [
+    "claude desktop (SRC)",
+    "claude.ai (DOC)",
+    "ChatGPT web (DOC)",
+    "Perplexity web (DOC)",
+    "Manus (SRC, previews)",
+    "Codex (tested helpers, distinct skill approval category)",
+    "Cursor",
+    "Hermes (cached tiered index)",
+    "Manus",
+    "ChatGPT web",
+    "Perplexity web",
+    "Antigravity",
+    "DeepSeek harness"
+   ],
+   "prevalence": "R-t3-02-01: Creation: 5 of 11 sources (4 distinct vendors), table-stakes. Verify-and-render and previewers: 2 of 11 each, differentiator | R-t3-05-03: SKILL.md packages: 9 of 12 sources, table-stakes; executable first-party skills: 2 of 12, differentiator",
+   "mechanism": "One skill per file type (instructions, helper library, examples) injected when the request names a format. Parse SKILL.md frontmatter (name <= 64, description <= 200, optional dependencies);"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4319-4321",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4356-4358",
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-8",
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-34",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2748-2790",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:88-600",
+    "apps/Model Plane/rust/services/model-gateway/src/skills.rs:1-8",
+    "apps/Model Plane/rust/services/model-gateway/src/skills.rs:775",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5662-5700",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/skill_budget.rs:62"
+   ],
+   "gap": "R-t3-02-01: The code_interpreter tool description already names python-docx, python-pptx, openpyxl, xlsxwriter, reportlab and pypdf and steers to native Excel charts (SRC tool_loop.rs:4320), and files come back as artifacts, so ad-hoc Office files work in code. | R-t3-05-03: Skills are markdown text records (disk and learned) with CRUD, sharing, per-turn matching (max 3), a character budget and reattach_skill, but there are no folder bundles with references or scripts, no zip import, skills are off on the Terra route (plan I7 only restores explicit picks), and context:fork skills are not..."
+  },
+  "approachOriginal": "Bundle format and skill_file read tool in capability-core; sandbox image with LibreOffice and fonts (owner ruling OD18); first-party docx/xlsx/pptx/pdf skills with checker scripts; renderer registry in the Output panel. Plans H3-H6 cover adjacent pieces; this item adds the verification and bundle shape they lack.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-017",
+   "OD18 fonts and caps"
+  ],
+  "planeOwner": "Model Plane (capability-core skills, execution-core sandbox, model-gateway) with Frontend Plane previewer",
+  "risks": "Image size and cold start; LibreOffice parser CVEs (keep inside bwrap, no network); fidelity differences from Microsoft Office; third-party skill scripts are code execution and need the supply-chain rules of F-t3-059.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 19,
+   "DOC": 11,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-02-01: Partly. Plan H5 (code_interpreter live proof of docx/pdf/pptx/xlsx), H3 (direct PDF), H4 (native charts in exports) and G6 (edit in place, behind OD14) are in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:133,205,206,240. File-type skills, the checker, LibreOffice and the previewer registry are not in the plan (INF, not found there)."
+  },
+  "sourceClusters": [
+   "C-t3-02-020",
+   "C-t3-02-025",
+   "C-t3-05-027",
+   "C-t3-05-030"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-014",
+    "status": "partial",
+    "exactGap": "Office files already come from code_interpreter, a bubblewrap sandbox with no network and a per-call workspace whose image carries openpyxl, xlsxwriter, python-docx, reportlab and pypdf (python-pptx via pip), and whose tool description steers the model to native charts and live formulas (tool_loop.rs:4319; code_interpreter.rs:1-34; Dockerfile:55-71), returned as downloadable artifacts. Missing are the SKILL.md bundle format (skills are markdown text in an in-memory registry with learned skills pulled from session-core, skills.rs:1-29; no SKILL.md bundle code exists anywhere), any verify or render step (no LibreOffice or pdftoppm in any Model Plane file), and any docx/xlsx/pptx preview (the artifact panel previews PDF inline and shows other binaries as a download chip, ChatArtifactPanel.tsx:442-448,558; ChatMessages.tsx:2748-2790).",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4310-4325",
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-45",
+     "apps/Model Plane/rust/services/execution-core/Dockerfile:55-80",
+     "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-20",
+     "apps/Model Plane/rust/services/model-gateway/src/skills.rs:1-30",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs:1-30",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:442-455,555-570",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2748-2790",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:131-133,205-208,240,249",
+     "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:43-70"
+    ],
+    "reuse": [
+     "code_interpreter hermetic sandbox and its low-risk cap.command.sandbox binding (code_interpreter.rs:1-34)",
+     "workspace_cas.rs, the first MinIO/S3 content-addressed object client in Model Plane, for storing bundle files by sha256 (workspace_cas.rs:1-25)",
+     "capability-core agent_skills CRUD, gateway /api/v1/skills and the skills.rs matching and budget machinery",
+     "Plan tasks H5 (live Office proof), H6 (stage attached docs into the sandbox), G6 (verevon_office helper and fidelity check) and H8 (deck path)",
+     "ChatArtifactPanel PDF iframe path for showing rendered page previews",
+     "reportlab and pypdf already in the image for PDF structural checks"
+    ],
+    "constraints": "The hermetic sandbox must be preserved: files_in accepts only flat base64 names (tool schema, tool_loop.rs:4319-4321), so a read-only bundle mount is a new staging path in execution-core and must keep the no-network, per-call-workspace guarantees (code_interpreter.rs:11-18). Tenant-authored bundle scripts are code and may run only inside the sandbox bound to the low-risk cap.command.sandbox, so adding a skill-script path must not widen that binding; third-party bundles also need the supply-chain rules of F-t3-059. LibreOffice adds parser attack surface and must stay inside bwrap with no network. ZDR: runs carry zdr (execution.proto:103-107), so bundle content and rendered thumbnails must follow the run retention class and stay out of logs (INF). Plane split: bundle storage and checkers are Model Plane (CAS plus execution-core), the previewer is Frontend Plane.",
+    "approachAdjustment": "Split into three items so each has one owner and dependency: (a) verification and render-and-look as a first-party helper plus checker run inside code_interpreter, which needs only a LibreOffice and fonts image layer (OD18) and no bundle format; (b) SKILL.md bundles stored in workspace_cas with a skill_file read tool; (c) a previewer registry in the artifact panel. Reference H5, H6, G6 and H8 as existing plan items rather than saying Office output is only ad-hoc scripts.",
+    "effortRevised": "XL",
+    "effortNote": "As written (bundle format, sandbox mount, LibreOffice image, four first-party skills with checkers, previewer registry, supply-chain rules) is XL; split per the adjustment it becomes roughly L + M + M.",
+    "verdict": "reword",
+    "verdictReason": "Gap confirmed (no bundles, no verification, no docx/xlsx/pptx preview), but the item bundles three separable deliverables and should name the CAS and sandbox pieces and plan items that already exist.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-014",
+    "verdict": "partial",
+    "checked": [
+     "extract/claude/resources/bundled-skills/manifest.json (6 skills, all tier 'always')",
+     "extract/claude/resources/bundled-skills/{docx,pptx,xlsx,pdf,pdf-reading,frontend-design}.skill (unzip -l listings)",
+     "pptx.skill!pptx/SKILL.md:17-52 (thumbnail.py grid, scripts/office/validate.py after writeFile)",
+     "xlsx.skill!xlsx/SKILL.md:23-44 (mandatory recalc.py, zero formula errors)",
+     "docx.skill!docx/SKILL.md:42-44 (soffice.py convert to PDF, pdftoppm, Read the page images)",
+     "C:/dev/deepseek-harness/packages/skill/skill-office/README.md (office-docx/pptx/xlsx only; check_office.py; Known Limitations)",
+     "C:/dev/deepseek-harness/packages/skill/skill-office/assets/ (3 SKILL.md + scripts/check_office.py)",
+     "C:/dev/deepseek-harness/docs/subsystems/office-to-pdf.md:1-40",
+     "C:/dev/deepseek-harness/packages/client/ui-sidebar-documentpreview/README.md:12-142 (register API, excel.maxBytes 16 MiB, maxCells 250000, Office->PDF preview)",
+     "extract/manus/frontend/out/_next/static/chunks/2jwv7cz4lh77_.js (filePreviewer/officePreviewer/codeViewer slice names) and 32_2-1jr2qqin.js ('Cannot preview this file')",
+     "C:/dev/hermes-agent/agent/skill_utils.py:822-839 (SKILL_PROMPT_DESC_LIMIT = 60)"
+    ],
+    "corrections": "1) Claude desktop: not all six always-on skills 'ship scripts and validators'. docx, pptx, xlsx share scripts/office/validate.py with OOXML XSD schemas plus soffice.py; pdf ships form/bounding-box check scripts; pdf-reading has only SKILL.md and REFERENCE.md; frontend-design has only SKILL.md and is not a document skill. Say 'four document skills with scripts, three with OOXML schema validators'. 2) Best-in-class for verify-and-render should be Claude desktop (SRC), not DeepSeek. Claude's shipped SKILL.md files already require render-and-look (docx: soffice to PDF, pdftoppm, then read the page images; pptx: thumbnail.py grid plus validate.py; xlsx: mandatory recalc.py). DeepSeek's checker README says it does NOT judge pagination, clipping, fonts, chart appearance or Excel recalculation. Rendering comes only from the separate LibreOffice Kit. 3) DeepSeek ships office-docx/pptx/xlsx only, with no PDF authoring skill, so the title 'docx, xlsx, pptx and pdf skills' applies to Claude only. 4) 'description <= 200' is the claude.ai custom-skill upload limit, not an open-standard limit: Claude's own bundled skill descriptions exceed 200 characters. Attribute it to the claude.ai upload UI (DOC). 5) The DeepSeek previewer best-in-class is accurate: register-by-extension, 16 MiB / 250k-cell Excel caps, Office->PDF conversion with a missing-font notice.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "claude.ai creation and sandbox limits are DOC-only. Claude desktop skills are SRC (shipped bundle), but their runtime execution was not observed.",
+     "DeepSeek office skills need a deployment-supplied Python and authoring libraries. LibreOffice Kit is an external package.",
+     "Manus previewer evidence is UI strings and slice names (SRC, medium confidence). Behavior not exercised.",
+     "Codex 'distinct skill approval category' is medium-confidence string evidence."
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-015",
+  "title": "Attention model for long-running agents: closed run-state vocabulary, attention-ordered work list, typed alerts with Web Push, a live shell stream and an installable PWA",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 15,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Publish one server-derived run-state enum (working, needs_approval, needs_input, plan_ready, completed, failed, archived) on thread rows and rebuild the sidebar around it (Waiting for you, Working, Unseen results, Settled), mixing chats and agent runs. Emit typed attention events (approval, input, done, failed) as notification-core workflow types with a per-user channel matrix, add a tab badge, Web Push and an installable PWA, and push sidebar state over a per-user SSE shell stream instead of polling.",
+  "whyItMatters": "Agents that run for minutes or hours are only useful if users learn when they are needed. Five of twelve references have typed notifications and the T3/Claude inbox pattern is the clearest UX in the comparison. Verevon has a per-run 'notify me when done' watcher but free-form status strings mapped to two chip tones and no push.",
+  "referenceBestPractice": {
+   "bestSource": "Claude desktop (per-type off|badge|banner for permission, idle and question, sounds, actionable notifications, a sessions-waiting-for-you list) plus Antigravity (distinct sounds for action-required and done, web push for remote sessions) ; T3 Code (inbox-style sidebar: pinned, active with status pills and elapsed time, snoozed, collapsed Settled) combined with Claude (closed state vocabulary, mark-completed, sections, group-by, bulk select, auto-archive, mixed chat and task Recents) ; T3 Code (live sync); Antigravity (one UI bundle for web, PWA, desktop and remote view)",
+   "others": [
+    "Cursor",
+    "Manus",
+    "Perplexity web (automations notify only when something noteworthy changed)",
+    "Claude.ai web and ChatGPT web (mobile parity and push)",
+    "T3 Code (responsive rules)",
+    "Antigravity",
+    "ChatGPT web (Chat|Work toggle with mixed Recents)",
+    "Claude.ai web",
+    "Perplexity web",
+    "Claude desktop app",
+    "DeepSeek harness",
+    "Hermes Agent",
+    "claude.ai"
+   ],
+   "prevalence": "R-t3-12-02: Notifications: 5 of 12 sources; multi-platform and mobile reach: 6 of 12 (both table-stakes). | R-t3-12-01: Mixed Recents of chats and tasks: 6 of 12 sources (table-stakes). Attention-ordered inbox: 2 of 12 and sidebar organisation: 2 of 12 (differentiators). | R-t3-13-06: C-010: 4 of 12 (common). C-033: 5 of 12 (common). C-022: 3 of 12 (differentiator)",
+   "mechanism": "Run events map to a closed set of attention kinds {needs_approval, needs_input, finished, failed}. A server-derived state enum on every thread/run row; T3: the server attaches the live event buffer before taking the snapshot so no event is lost, coalesces per aggregate so bursts become one refetch per thread per window, and resumes after the client's snapshot sequence;"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go:85-93",
+    "apps/Model Plane/rust/crates/mp-events/src/subjects.rs:232",
+    "apps/Application Plane/notification-core/migrations/013_register_run_watch_notifications.up.sql",
+    "apps/Application Plane/notification-core/README.md",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/RunNotifyButton.tsx:1-20",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:535",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3685",
+    "apps/Frontend Plane/verevonv3/src/shared/api/notifications-client.ts",
+    "apps/Frontend Plane/verevonv3/src/app/App.tsx:178-180",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:869-896"
+   ],
+   "gap": "R-t3-12-02: A per-run Notify me when done watcher exists (RunNotifyButton, capability-core runwatch to notification-core, delivered in the notification bell), and notification-core already has per-workflow, per-channel preferences and a retention_mode (standard|zdr) on every request (SRC). | R-t3-12-01: chatRunStatusChip maps free-form strings (queued/pending, running/in_progress, awaiting_approval/waiting_approval/paused/blocked/ambiguous, failed/timed_out/denied/rejected) to two chip tones, so there is no closed vocabulary shared with notifications and no attention ordering, snooze, settled tail or mark-completed... | R-t3-13-06: SRC: the SPA keeps a ZDR-aware derived localStorage cache and fetches thread lists and run states by REST."
+  },
+  "approachOriginal": "Phase 1: closed enum in mp-contracts plus thread-list paging; Phase 2: attention events into notification-core with the existing retention_mode (standard|zdr); Phase 3: PWA manifest, shell-only service worker, Web Push channel, per-user shell stream fed by the session-core outbox and NATS.",
+  "effortOriginal": "XL",
+  "dependencies": [
+   "F-t3-016",
+   "F-t3-012"
+  ],
+  "planeOwner": "Model Plane (run-state, shell stream) with Application Plane (notification-core) and Frontend Plane (sidebar, PWA)",
+  "risks": "Notification noise; push payloads must be content-free on ZDR threads; a service worker must never cache authenticated content.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 3,
+   "SRC": 45,
+   "DOC": 13,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t3-12-006",
+   "C-t3-12-018",
+   "C-t3-12-007",
+   "C-t3-12-001",
+   "C-t3-12-008",
+   "C-t3-13-010",
+   "C-t3-13-033",
+   "C-t3-13-022"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-015",
+    "status": "partial",
+    "exactGap": "A per-run 'notify me when done' watcher exists end to end (RunNotifyButton.tsx -> runs-client watchRun -> capability-core runwatch consumer -> notification-core types modelplane.run_completed and run_failed, in-app on by default, email opt-in) on top of a notification-core with per-user per-channel preferences, retention_mode standard|zdr and a navbar bell, but runwatch maps only RUN_COMPLETED and RUN_FAILED. Run state travels as free strings (runs.proto comment, session-core is_terminal_run_status, CoreSidebar chatRunStatusChip, chat-organization.ts status sets, three divergent client unions), so there is no closed vocabulary, attention ordering, needs_approval or needs_input alert, tab badge, per-user shell stream, service worker, manifest or Web Push (no PushManager, VAPID or manifest code in verevonv3 or Application Plane). The only typed seeds are execution-core's RunStatus enum and the run.paused_for_approval and approval.state_changed event names, whose orchestrator-core publishers the broker drops.",
+    "evidence": [
+     "apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go:81-100",
+     "apps/Model Plane/rust/crates/mp-events/src/subjects.rs:222-236",
+     "apps/Model Plane/go/services/nats-provisioner/publishers_registry_test.go:70-73,126-135,172-206",
+     "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md:260-278",
+     "apps/Model Plane/rust/services/execution-core/src/state.rs:16-40",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:3283-3285",
+     "apps/Model Plane/proto/model_plane/v1/runs.proto:282",
+     "apps/Application Plane/notification-core/migrations/013_register_run_watch_notifications.up.sql:1-14",
+     "apps/Application Plane/notification-core/README.md:55-70",
+     "apps/Application Plane/notification-core/internal/feed/types.go:10-20",
+     "apps/Application Plane/notification-core/internal/runtime/client.go:205-235",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/RunNotifyButton.tsx:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:869-900",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:47-62",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:86-90,288-292",
+     "apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts:79-100",
+     "apps/Frontend Plane/verevonv3/src/shared/api/notifications-client.ts:1-60",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/types.ts:6",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:99",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:192"
+    ],
+    "reuse": [
+     "runwatch consumer plus the notification-core registration-migration pattern (013) for each new attention type",
+     "notification-core preferences/channels API and retention_mode (standard|zdr)",
+     "execution-core RunStatus enum and the durable approval pause as the source of needs_approval",
+     "chat-organization.ts attention/active sets and CoreSidebar chip as the client seed for the closed enum",
+     "CoreNavbar unread badge and /api/v1/notifications client for the in-app side",
+     "existing per-run run_events SSE as the model for a per-user shell stream"
+    ],
+    "constraints": "ZDR must propagate: notification-core README says the full payload still reaches Novu and ZDR content delivery must stay off until a provider-side contract is proven, so every attention notification must be content-free (generic title plus deep link) on all threads, not only ZDR ones. Do not rely on orchestrator-core's mp.v1.orchestration.* publishers: the publishers registry lists its plan, todo, approval, subagent and run subjects as known gap rows (deploy/nats.conf grants it only mp.v1.run.*.event, so the broker drops them) and the postmortem found MP_ORCHESTRATION_EVENTS empty, so typed run-state events must be written by session-core (single writer of run state) through its outbox/terminalization path, or the grants must be fixed first. Application Plane owns notifications and realtime projections, so Web Push subscriptions and the per-user shell stream belong there or in the gateway BFF, with Model Plane only publishing typed events; the service worker must never cache authenticated content; no cross-plane DB reads.",
+    "approachAdjustment": "Re-home the shell stream and Web Push: Model Plane publishes the closed run-state enum and typed attention events, Application Plane (notification-core plus a realtime projection) owns push subscriptions and the per-user stream, Frontend owns PWA and sidebar. Split the XL into three shippable deliverables: (1) enum plus needs_approval/needs_input/plan_ready events plus sidebar ordering, (2) Web Push plus manifest plus content-free payloads, (3) shell stream replacing REST refetch. Fix the orchestrator-core publish-grant gap, or use the session-core outbox, before anything depends on NATS fan-out.",
+    "effortRevised": "XL",
+    "effortNote": "Unchanged: three planes, a new subscription store, and a broker-grant fix; deliverable (1) alone is L.",
+    "verdict": "keep",
+    "verdictReason": "The item's description of today (watcher exists, free-form status strings, no push, no PWA) matches the code; only the plane placement of the shell stream and push and the broker-drop constraint need correcting, which approachAdjustment covers.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-015",
+    "verdict": "partial",
+    "checked": [
+     "extract/claude/.vite/build/index.chunk-EzXl5k4A.js: notificationLevels{permission,idle,question} schema, notificationSound system|none, dockBounceEnabled - SRC confirmed",
+     "scratchpad/tmp/ag2/protos/devtools__jetski__boq__api__proto__api.proto.txt:107-156 (ApiService.RegisterWebPush {subscription_id, fcm_token, user_agent})",
+     "scratchpad/tmp/ag (Antigravity UI bundle): appVariant tree Web/Desktop/RemoteControl/Pwa and a Pwa detection branch",
+     "scratchpad/tmp/t3code/recovered/server/src/ws.ts:823-850,1322-1390 (subscribeShell, coalesceShellLiveStream, synchronized marker, afterSequence replay) - SRC confirmed",
+     "scratchpad/tmp/t3code/recovered/client/src/components/Sidebar.tsx (snooze/Woke logic, about 200 snooze references); client-runtime/src/state/threadSettled.ts",
+     "records claude-product-ux-054/129, antigravity-agent-ux-and-gemini-114, antigravity-architecture-009, t3code-ui-and-multimodel-020, t3code-architecture-092; clusters C-t3-12-001/006/007/008/018, C-t3-13-010/022/033"
+    ],
+    "corrections": "(1) The closed attention set {needs_approval, needs_input, finished, failed} is a Verevon synthesis. Claude's notification kinds are permission, idle and question, with no 'failed' kind, and Antigravity distinguishes only action-required from done. Present the set as a design choice, not as a reference practice. (2) Antigravity web push is evidenced only by an RPC in the cloud API proto (RegisterWebPush with an FCM token). It is FCM-based, not VAPID, and the 'remote sessions' framing is inference from its neighbours in the proto (instances, mesh sessions). (3) Antigravity PWA support is an app-variant enum plus a detection branch. Whether it is publicly shipped or installable was not observed. (4) Mobile parity and push for claude.ai and ChatGPT are DOC-only. (5) The prevalence counts include same-vendor pairs (manus + web-manus, claude + web-claudeai) in the multi-platform and Recents clusters, so the '6 of 12' table-stakes counts are about one vendor too high.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Claude sidebar sections, group-by and auto-archive are partly evidenced via agent-callable sidebar tool names and i18n strings (SRC strings, behaviour not run)",
+     "Antigravity web push: proto-only RPC; PWA: variant enum only",
+     "Antigravity favicon badge is wired only for the internal app type (per record notes)",
+     "claude.ai and ChatGPT mobile and push are DOC-only"
+    ],
+    "confidence": "medium"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-017",
+  "title": "Attachments v2: fail closed on unsupported media, durable reference-based uploads, and sandbox analysis of the user's files",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 17,
+  "wave": "W1",
+  "quickWin": false,
+  "summary": "First (quick win) expose model capability fields to the composer, refuse unsupported media with a stated reason instead of silently stripping attachments on the ChatGPT subscription route, and pass images as parts on vision routes instead of diverting the whole turn to AnalyzeImage. Then wire the existing durable upload route so turns carry Data Plane document ids instead of 1 MB of pasted text, add PDF page images and local OCR, and stage attachments read-only into the code_interpreter workspace (plan H6) with a per-thread session workspace.",
+  "whyItMatters": "Uploading a spreadsheet and asking for analysis is table-stakes (4 of 11 for analysis, 4 of 11 for multi-format attachments) and Verevon caps files at 1 MB and 60k characters while peers accept 30-512 MB. Silent attachment stripping is an honesty bug that contradicts Verevon's own 'never fake success' rule.",
+  "referenceBestPractice": {
+   "bestSource": "claude.ai (DOC) with the Claude desktop document funnel (SRC) for limits and conversion; DeepSeek harness (DOC) for the store; T3 Code (SRC) for the client queue ; DeepSeek harness read_image (SRC) for fail-closed tools and Antigravity (SRC) for the composer-level MIME table ; claude.ai (DOC) and ChatGPT web (DOC), equivalent; Perplexity (DOC) uses Firecracker microVMs",
+   "others": [
+    "ChatGPT web (DOC)",
+    "Manus web (DOC)",
+    "Antigravity (SRC, link chips)",
+    "Perplexity web (DOC)"
+   ],
+   "prevalence": "R-t3-02-02: Attachments: 4 of 11 sources (3 distinct vendors), table-stakes (class adjusted by comparator). Content-addressed store and queue: 2 of 11, differentiator. Link chips: 1 of 11, unique | R-t3-02-03: 2 of 11 sources; differentiator | R-t3-02-04: 4 of 11 sources, all documentation-only; table-stakes (class adjusted by comparator)",
+   "mechanism": "Presigned direct upload into object storage so no bytes pass through the chat API. Each model catalogue entry declares input modalities, supported MIME types and a max size per type. A per-conversation sandbox session, stateful across calls, with uploaded files mounted read-only at a known path, preinstalled data libraries, a per-call limit measured in minutes, an org egress policy (off, package managers, allowlist, all), and outputs (PNG charts, CSV, XLSX) returned as artifacts and rendered in an expandable viewer."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts:6-43",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:11-40",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:43-109",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2081-2118",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:175-181",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1084",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1144",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1405-1432",
+    "apps/Model Plane/rust/services/model-gateway/src/vision.rs:1-12",
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:421-456"
+   ],
+   "gap": "R-t3-02-02: Caps are 1 MB per file, 60,000 characters per file and 120,000 per turn (SRC prepare-chat-attachments.ts:6-43). | R-t3-02-03: The SPA sends attachments: [] when the provider is the ChatGPT subscription route (SRC chat-client.ts:1144), and also disables tools, web, image generation, deep research and skills there; | R-t3-02-04: The code_interpreter contract already accepts files_in {name, content_b64} and handle_code_interpreter forwards it (SRC), but the only source of those bytes is the model's own base64, so a chat attachment cannot reach the sandbox (plan H6 not built)."
+  },
+  "approachOriginal": "Phase 1 (W1): capability gating and typed refusals (R-t3-02-03) plus H6 staging (resolve attachment references to files_in server-side). Phase 2 (W2): durable uploads with per-route token budgets, retrieval for the remainder, OCR (H9), upload queue with content-addressed ids scoped per org. Bytes are read through Data Plane APIs, never by direct DB access.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Data Plane documents-api upload route",
+   "OD18 caps",
+   "plan H9 OCR"
+  ],
+  "planeOwner": "Model Plane (gateway, execution-core) with Data Plane (blob store, extraction) and Frontend Plane (composer, queue)",
+  "risks": "Storage and retention must follow org policy and ZDR (refuse persistence under ZDR); cross-tenant dedup leaks existence, so hash per org; deletion must cascade to derived documents and workspaces.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 16,
+   "DOC": 10,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-02-02: Partly. H9 (local OCR) and raising the cap to 4 MB for xlsx/pptx/pdf with the 60k-character limit kept are in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:208,504. Wiring the durable upload route, reference-based turns and the upload queue are not in the plan (INF, not found there). | R-t3-02-04: Plan H6 (stage attached documents into the sandbox so the model can analyse data exactly) is in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:207 with exit criterion \"pandas totals match a Python reference\" at :228; durable session workspace is part of the S3.3 design (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11, cited in tools.rs)."
+  },
+  "sourceClusters": [
+   "C-t3-02-001",
+   "C-t3-02-002",
+   "C-t3-02-007",
+   "C-t3-02-003",
+   "C-t3-02-027"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-017",
+    "status": "partial",
+    "exactGap": "Documents are read and extracted client-side, capped at 1 MB, 60,000 chars per file and 120,000 per turn, and inlined into the message text; only image attachments travel as parts, and those are replaced by [] on the ChatGPT subscription route (chat-client.ts:1144) and otherwise divert the whole turn, including a Do turn, into AnalyzeImage before the agentic branch (sse.rs:1409 vs 1449). The composer has no capability or MIME gating (DashboardComposer.tsx:1699, attach button at :3419 never disabled). The durable text-only upload route exists end to end with zero production callers, code_interpreter files_in is model-authored base64 only (code_interpreter.rs:187), RunAgentRequest has no attachment field, and no local OCR or PDF rasterization exists (plan H6 and H9 unbuilt).",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts:6-43 (1 MB, 60k, 120k caps; unsupported types throw)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts:1150-1240 (documents inlined into content; only images become stream attachments; durable route is asynchronous, measured 2026-09-14)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1144 (attachments: [] on subscription route)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2081-2118 (uploadChatDocument, text only, refused under ZDR with 412; no non-test caller found)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1699-1725 (addFiles has no MIME or capability check)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3419-3430 (attach button not disabled on subscription route)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:11-109 (ephemeral extract route and durable text upload via documents-api)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:960-977 (vision turn refused for waived ZDR turns)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1405-1432 (image attachment routes the whole turn to AnalyzeImage)",
+     "apps/Model Plane/rust/services/model-gateway/src/vision.rs:1-60 (first image only; non-image kinds ignored)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:655-685 (feature_flags emits vision, image, tools, zdr per provider)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:866-886 and :2624 (ModelInfo.capabilities only read for agentic)",
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-60 and :180-260 (files_in contract, flat staging, bare filenames only)",
+     "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-40 (Space-scoped durable workspace lease; no per-thread workspace)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/doc_intel.rs:1-30 (Azure document-intelligence provider exists)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:207-208 and :502-504 (H6, H9, OD18 recommends 4 MB, in-memory binary staging, local Tesseract)"
+    ],
+    "reuse": [
+     "inference-core feature flags (vision, image) already on /v1/models features and ModelInfo.capabilities",
+     "imports-core extract route through gateway documents.rs (ephemeral, no storage)",
+     "Data Plane documents-api upload through the BFF for the optional durable path",
+     "code_interpreter files_in contract and the Space-scoped durable workspace lease",
+     "inference-core AnalyzeDocument and AnalyzeImage OCR as an alternative to local Tesseract",
+     "queued DeferredSends and composer attachment chips for the client queue"
+    ],
+    "constraints": "ZDR and sovereignty: durable upload is refused under ZDR (412) and OD18 recommends holding binaries in memory only for the run, so durable-by-default conflicts with ZDR; make durability an org-policy opt-in and hash content per org. The existing durable route is text-only and asynchronous (the sending turn saw only the first chunk when measured), so wiring it as-is recreates the failure that client-side inlining fixed. Bytes must reach the sandbox through Data Plane or an ephemeral model-gateway store, never by direct DB access, and a Do run only receives what model-gateway resolves into RunAgentRequest. Vision turns are already refused for waived ZDR turns.",
+    "approachAdjustment": "Correct the premise: on the subscription route only image parts are dropped; text and extracted PDF, DOCX, XLSX and PPTX still reach the model because they are inlined into content. The cheapest first step is client-only: read the existing vision feature flag from the catalogue, disable or explain image attach on routes without it, and send images as parts on vision routes instead of diverting the turn (sse.rs:1409). For H6 add a bounded attachment-reference field to RunAgentRequest resolved by model-gateway from an ephemeral per-run store; treat durable reference-based uploads, PDF page images and OCR as a later phase, and size against OD18 (4 MB, 60k chars) rather than the 30-512 MB of peers.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged as a whole; phase 1 (capability gating, image parts, typed refusal) is S to M and can ship alone.",
+    "verdict": "reword",
+    "verdictReason": "Gaps are real, but the silent-strip claim applies to images only, the durable route is text-only and async, and capability fields already exist server-side, so the phasing and approach must change.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-017",
+    "verdict": "partial",
+    "checked": [
+     "https://support.claude.com/en/articles/8241126-upload-files-to-claude (500MB per chat file, 20 files, PDF <=100 pages visual, 101-1000 text only, project files 30MB)",
+     "https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude (egress: off / package managers only (default) / package managers + specific domains / all domains; 30MB per file for uploads and downloads in the file-creation environment; sandboxes never shared between users)",
+     "scratchpad/tmp/t3code/recovered/client/src/lib/attachmentUploadQueue.ts:16-17,80,213,343 (3 per environment, 5-min timeout, retry)",
+     "scratchpad/tmp/t3code/recovered/client/src/lib/imageCompression.ts:8-31 (HEIC decode, 2048 max dimension, quality ladder to wire cap)",
+     "scratchpad/tmp/t3code/recovered/server/src/attachmentStore.ts:20-26 (pending attachments, max-age; no content hashing found)",
+     "C:/dev/deepseek-harness/packages/attachment/attachment-local/README.md:12,59,78,84,88 (objects/<sha256-prefix>/<sha256>, dedup, per-route request-image cache, under DSH_HOME)",
+     "C:/dev/deepseek-harness/packages/fs/tool-fs/src/read-image.ts:9-10,113 (unknown capability refuses before filesystem/attachment work)",
+     "scratchpad/tmp/ag2/protos/third_party__jetski__codeium_common_pb__codeium_common.proto.txt:563,917 (supported_mime_types on ClientModelConfig and ModelFeatures)",
+     "scratchpad/tmp/ag/ui_copy.txt:172,344,1465 ('Selected model does not support this media type', 'PDF file size exceeds 10MB limit')"
+    ],
+    "corrections": "1) 'Presigned direct upload into object storage so no bytes pass through the chat API' is not shown by any cited reference. T3 Code uses signed upload URLs to its own local server, which writes files to disk. DeepSeek stores content-addressed objects on the local filesystem under DSH_HOME. Label this as Verevon design (INF). 2) The claude.ai limits conflict between articles: the upload article gives 500MB per chat file (30MB for project files), but the file-creation/code-execution article gives 30MB per file for uploads and downloads in the sandbox. State both rather than '500MB' alone. 3) The egress tiers are confirmed for claude.ai Team/Enterprise (DOC), with plan-specific defaults: Team defaults to package managers, Enterprise defaults to off. 4) 'Uploaded files mounted read-only at a known path' and 'per-call limit measured in minutes' were not found in the claude.ai articles checked. Mark as INF or remove the attribution to claude.ai. 5) Best-in-class for the store: DeepSeek is backed by in-repo README plus source files (store.ts, file-store.ts), so it could be upgraded from DOC to SRC, but it is single-machine. The T3 Code queue is image-only; generic files follow a different path. 6) The fail-closed parts (DeepSeek read_image, Antigravity per-model supported_mime_types plus refusal copy) are confirmed SRC.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "Sandbox data analysis (C-t3-02-027) is DOC-only for all four sources (claude.ai, ChatGPT, Manus, Perplexity). Perplexity Firecracker was not re-verified.",
+     "The claude.ai per-file limit differs by surface (chat 500MB vs code-execution environment 30MB vs project 30MB).",
+     "The Antigravity link-chip feature is a single-source SRC record at medium confidence.",
+     "The presigned object-storage upload path is a design proposal (INF), not reference behavior."
+    ],
+    "confidence": "medium"
+   }
+  }
+ }
+]

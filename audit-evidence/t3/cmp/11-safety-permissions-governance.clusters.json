@@ -1,0 +1,3776 @@
+{
+ "category": "Safety, permissions & governance",
+ "excluded": [
+  {
+   "id": "claude-extensibility-and-safety-053",
+   "reason": "Developer/preview URL override guarded by biometrics: internal build tooling, no product relevance for Verevon users"
+  },
+  {
+   "id": "claude-runtime-architecture-082",
+   "reason": "Crash-reporter hook isolation: reliability implementation trivia, not a safety or governance capability"
+  },
+  {
+   "id": "web-chatgpt-web-product-131",
+   "reason": "Ads isolation on free tiers: monetisation policy, not a safety capability Verevon plans to offer"
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t3-11-001",
+   "name": "Named permission modes / presets (ask, accept-edits, plan, auto, full access)",
+   "description": "One selector that sets how much the agent may do without asking, mapped to a bundle of enforceable settings, chosen per thread/project with an inherited default.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "manus",
+     "t3code",
+     "web-claudeai"
+    ],
+    "n": 8,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-103",
+    "antigravity-agent-ux-and-gemini-133",
+    "antigravity-architecture-067",
+    "claude-product-ux-113",
+    "claude-runtime-architecture-078",
+    "codexagent-plugins-and-extensibility-084",
+    "cursor-ai-features-080",
+    "deepseek-transparency-and-customization-046",
+    "manus-computer-control-architecture-055",
+    "manus-product-ux-070",
+    "t3code-architecture-071",
+    "t3code-ui-and-multimodel-029",
+    "t3code-ui-and-multimodel-062",
+    "web-claudeai-web-product-097"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-084",
+     "antigravity-agent-ux-and-gemini-103",
+     "claude-product-ux-113"
+    ],
+    "why": "Codex (q5) defines the richest typed vocabulary (read-only/auto/granular/guardian/full/custom) with a granular approval config per effect class; Antigravity shows the clean preset-to-settings-bundle mapping with per-project inherit; Claude adds plan and auto modes with admin disable switches."
+   },
+   "mechanism": "Enum of modes; each mode resolves to a struct {sandbox_mode, approval_policy per effect class (exec, file write, MCP, network, skill), reviewer=user|auto}. Stored per thread with an org/project default ('inherit'); admin requirements remove disallowed modes from the picker; the server, not the client, resolves the effective bundle at run start.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-155",
+     "v-modelplane-156",
+     "v-modelplane-157",
+     "v-chat-agents-ui-134"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/profile.rs:1-20,119",
+     "Model Plane/rust/services/execution-core/src/permission/mod.rs:6-20",
+     "Model Plane/rust/crates/mp-contracts/src/autonomy.rs:1-60",
+     "Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2536-2542"
+    ],
+    "gap": "Posture is server-resolved per profile (chat=auto with read-only tools, Do/deployed_agent=ask) and the autonomy rung is chosen only on plan approval. There is no user-visible, named mode selector persisted per thread or Space (e.g. Ask every time / Auto-review / Full access), and no org default that admins can restrict. Not verified in the composer (check DashboardComposer for a mode picker).",
+    "strengths": "Server-resolved posture that the client can only tighten is better than T3 Code's client-side default of full access."
+   },
+   "benefit": "Users of the Do/agent page get one understandable control instead of an invisible profile; enterprises can cap autonomy per org. Fits the authority model because the server still resolves the bundle.",
+   "approach": "Add a typed AgentMode enum to mp-contracts (ask, auto_review, workspace_write, full) that maps to the existing posture + autonomy rung; persist on the thread in session-core; expose in the Do composer; Control Plane org setting lists allowed modes; model-gateway clamps to min(org cap, user choice).",
+   "effort": "M",
+   "dependencies": [
+    "auto-review classifier (C-t3-11-006) for an auto_review mode",
+    "Control Plane org settings"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "A full-access mode in a hosted product enlarges blast radius; ship it behind admin opt-in.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Table-stakes UX in every agent product; Verevon already has the enforcement pieces so this is mostly contract + UI.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 12,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-002",
+   "name": "Unsafe-mode friction, elevated-risk labels and safe defaults",
+   "description": "Confirmation dialogs that list what full access allows, persistent banners while approvals are skipped, consistent 'elevated risk' labelling, and least-privilege shipped defaults.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "deepseek",
+     "hermes",
+     "web-chatgpt"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-076",
+    "claude-extensibility-and-safety-007",
+    "claude-extensibility-and-safety-110",
+    "claude-product-ux-138",
+    "codexagent-agent-runtime-and-models-057",
+    "deepseek-transparency-and-customization-047",
+    "hermes-architecture-and-surfaces-119",
+    "web-chatgpt-web-product-118"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-057",
+     "web-chatgpt-web-product-118",
+     "claude-extensibility-and-safety-110"
+    ],
+    "why": "Codex's full-access confirm lists files, terminal, internet and connected apps plus injection/data-loss risks, with a persistent dismissible banner and admin-disabled options; ChatGPT's single shield label is the cleanest cross-product convention; Claude ships every high-risk capability off by default."
+   },
+   "mechanism": "Mode change to a risky rung opens a modal listing capability classes and risks (default Cancel); while active a banner shows (dismissable per session or 30 days); every risky toggle carries one shared 'Elevated risk' badge with a Learn-more link; defaults ship off and require per-account opt-in plus a server gate.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-134",
+     "v-modelplane-157"
+    ],
+    "evidence": [
+     "Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2536-2542",
+     "Model Plane/rust/crates/mp-contracts/src/autonomy.rs:1-60"
+    ],
+    "gap": "DangerFullAccess requires a typed justification (>=12 chars) on plan approval, which is real friction, but there is no persistent banner while a run holds the highest rung, no shared elevated-risk label vocabulary across settings, and the rung labels are Norwegian-only.",
+    "strengths": "Written justification for escalation is stronger friction than a checkbox."
+   },
+   "benefit": "Makes Verevon's escalations legible and consistent as more autonomous features (browser, connectors, schedules) ship.",
+   "approach": "Frontend Plane: one ElevatedRiskBadge component and copy catalogue (no/en); run header banner when the run's rung is danger_full_access or approvals are auto; Model Plane emits the effective rung on the run stream so the banner is server-truthful.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-11-001 mode selector"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Banner fatigue if overused; reserve for the top rung.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap, high-visibility trust signal; common across references.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-003",
+   "name": "Strict / Lockdown mode (anti-exfiltration profile)",
+   "description": "An opt-in or admin-enforced profile that forces human review of every action and closes outbound exfiltration paths (live browsing, agent mode, image rendering, JS).",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "web-chatgpt"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-108",
+    "antigravity-architecture-069",
+    "claude-extensibility-and-safety-064",
+    "web-chatgpt-web-product-117"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-117",
+     "antigravity-architecture-069"
+    ],
+    "why": "ChatGPT Lockdown Mode (DOC) is the clearest product framing (browsing restricted to cached content, agent and deep research disabled, role-level); Antigravity Strict Mode (SRC) shows the implementation: options carry disabledInSecureMode and lock messages."
+   },
+   "mechanism": "A single boolean profile per user/role that (1) forces approval on every effect, (2) disables tools with open-world egress, (3) disables markdown image rendering and browser JS, (4) greys out conflicting settings with a lock reason. Evaluated server-side as a clamp on the mode bundle.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No lockdown profile. ZDR clamps persistence, not egress; there is no single switch that disables web/browser/connector egress for high-risk users.",
+    "strengths": ""
+   },
+   "benefit": "Gives security-sensitive orgs a one-click posture against prompt-injection exfiltration; composes naturally with the existing server clamp and ZDR posture.",
+   "approach": "Control Plane role/org flag lockdown=true; model-gateway profile resolver clamps the tool catalogue (drop web_fetch, browser, provider writes) and forces ask; SPA disables remote image rendering in markdown.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-11-001",
+    "C-t3-11-035 admin policy registry"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Users may see a crippled product; explain clearly.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Only 3 sources; valuable for enterprise but not blocking.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-004",
+   "name": "Declarative permission rules: action(target) with deny > ask > allow",
+   "description": "A rule grammar over typed resources (read_file(path), read_url(domain), command(prefix)) with precedence, scopes (global/project/conversation) and wildcard strictness resolution.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-104",
+    "antigravity-architecture-066",
+    "claude-extensibility-and-safety-017",
+    "claude-extensibility-and-safety-061",
+    "claude-extensibility-and-safety-130"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-architecture-066",
+     "claude-extensibility-and-safety-130"
+    ],
+    "why": "Antigravity's action(target) grant store with deny>ask>allow and per-conversation grants is the cleanest model; Claude's strictness lattice (blocked>ask>ask-session>allow) with strictest-wildcard folding and lossy merge of wildcard allows is the most rigorous resolution."
+   },
+   "mechanism": "Rule = {action, target-pattern, effect in [deny, ask, ask_session, allow], scope, source}. Resolve: exact match first, else fold the strictest over all matching wildcard patterns; deny from any scope wins; a wildcard 'allow' only survives a merge if both layers specify it. Grants are recorded per conversation for 'allow for this chat'.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-147",
+     "v-chat-agents-ui-135"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/capability_policy.rs:737-840",
+     "Model Plane/go/services/capability-core/internal/policy/engine.go",
+     "Model Plane/rust/services/execution-core/src/hook/mod.rs:1-18"
+    ],
+    "gap": "capability-core EvaluatePolicy returns Allow/Ask/Deny per capability with signed evidence, and the hook engine supports allow/deny/ask globs, but there is no user- or admin-authored rule set over typed targets, no ask-session level, and editable 'don't ask again' rules are planned only.",
+    "strengths": "Central policy decision point with signed Allow evidence and fail-closed unknown tools."
+   },
+   "benefit": "Lets users and admins say 'always allow reading this domain' or 'never send mail outside example.com' without code, cutting approval fatigue safely.",
+   "approach": "Extend capability-core policy with a rules table (org, Space, user, thread scopes) keyed by capability id + target pattern; resolve strictest-wins in Go; execution-core passes the target (domain, recipient, path) in EvaluatePolicy; SPA 'Rules' settings page.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-11-014 decision taxonomy",
+    "C-t3-11-061 side-effect taxonomy"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Wildcard allows can silently widen; require strictest-wins and audit every rule change.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Underpins editable approvals; Verevon has the PDP already.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-005",
+   "name": "Shell command static analysis and layered command approval",
+   "description": "Parse shell commands (tree-sitter bash/PowerShell) so allow/deny lists match real executables and redirects; parse failure is treated as possible bypass; hardline floors always apply.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-106",
+    "antigravity-architecture-068",
+    "codexagent-agent-runtime-and-models-095",
+    "cursor-ai-features-082",
+    "cursor-harness-architecture-089",
+    "cursor-harness-architecture-090",
+    "cursor-harness-architecture-092",
+    "deepseek-transparency-and-customization-143",
+    "hermes-architecture-and-surfaces-116"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-089",
+     "cursor-harness-architecture-090",
+     "hermes-architecture-and-surfaces-116"
+    ],
+    "why": "Cursor's ordered pipeline (parse -> hard deny -> allowlists -> team blocklist -> delete protection -> readonly -> hooks -> mode) on a tree-sitter AST is the most complete; Hermes adds de-obfuscation and a hardline floor that applies even in yolo."
+   },
+   "mechanism": "Parse with tree-sitter-bash into executableCommands, redirects and command substitution; if parsing fails or finds dynamic constructs, force a prompt; match each executable against hard-deny, team blocklist and allowlist; recursive delete and history-rewriting git commands always ask.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-156"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/permission/mod.rs:229-260"
+    ],
+    "gap": "No command-level parsing; risk is a substring match on tool names. code_interpreter and process_* run in bwrap with no network, so the need is lower than for local agents.",
+    "strengths": "Hermetic sandbox makes command-level policy less critical."
+   },
+   "benefit": "Would matter once process_* or networked sandboxes run user-requested commands against Space files.",
+   "approach": "Rust: tree-sitter-bash in execution-core for process_start/sh; reject dynamic constructs in Space-write contexts; show parsed executables on approval cards.",
+   "effort": "M",
+   "dependencies": [
+    "networked sandbox (C-t3-11-031)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Parser divergence from the real shell; fail closed on parse errors.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Verevon is not an IDE and runs commands only in a hermetic sandbox.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-006",
+   "name": "Model-based auto-review of risky actions (approve for me / guardian)",
+   "description": "A separate reviewer model classifies each risky step as allow, block or escalate so routine actions run without a card while risky or injected ones stop.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "web-chatgpt"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-105",
+    "antigravity-architecture-070",
+    "claude-product-ux-112",
+    "codexagent-agent-runtime-and-models-055",
+    "codexagent-plugins-and-extensibility-083",
+    "cursor-ai-features-081",
+    "cursor-harness-architecture-091",
+    "deepseek-transparency-and-customization-054",
+    "hermes-architecture-and-surfaces-117",
+    "web-chatgpt-web-product-120"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-083",
+     "claude-product-ux-112",
+     "antigravity-architecture-070",
+     "hermes-architecture-and-surfaces-117"
+    ],
+    "why": "Codex Guardian v2 (q5) scores the trajectory asynchronously and switches later actions to gated when risk is high, with thresholds and scope config; Claude's auto mode makes the classifier the default with fallbacks; Antigravity adds specialised vetting tools (data flow, dependency, shell change); Hermes adds a consecutive-denial circuit breaker."
+   },
+   "mechanism": "Reviewer gets user messages + proposed tool name/arguments (not tool outputs), a policy prompt, and returns {decision, reason, risk 0..1}. Allow below threshold, escalate to a human above it, deny on clear violation; N consecutive denials pause the run; reviewer failure fails closed to a human card; every verdict is logged.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-156"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/permission/mod.rs:229-260"
+    ],
+    "gap": "Only a coarse substring classifier on tool names decides risk; there is no reviewer model, so Do runs either ask for everything risky or nothing.",
+    "strengths": "Durable HITL approvals exist to escalate to."
+   },
+   "benefit": "Removes approval fatigue from Do-mode and scheduled agents (the Manus-like vision) while keeping injection-driven actions stopped; fits 'Model proposes' because the reviewer only gates.",
+   "approach": "execution-core: a Reviewer step between capability policy and HITL; call inference-core with a small model on a cheap route; inputs limited to user turns + tool call; fail closed to CreateApproval; verdicts written to the run trace and audit outbox; ZDR runs use a ZDR-attested reviewer or force a human.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-11-061 side-effect taxonomy",
+    "C-t3-11-007 classifier policy text",
+    "inference-core cheap route"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Classifier false negatives under injection; keep hard floors and never-auto tools outside the classifier.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Present in 7 of 12 sources; the main lever for usable autonomous agents.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-007",
+   "name": "Classifier policy engineering: intent-clearing rules, argument provenance, tool-result blindness, forced-card escalations",
+   "description": "How the auto-review policy itself is written: block rules name what the user's own message must contain, agent-written arguments prove nothing, the classifier never sees tool outputs, and certain conditions always force a human card.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-114",
+    "claude-extensibility-and-safety-115",
+    "claude-extensibility-and-safety-116",
+    "claude-extensibility-and-safety-118",
+    "claude-extensibility-and-safety-119",
+    "claude-extensibility-and-safety-120",
+    "claude-extensibility-and-safety-121",
+    "claude-extensibility-and-safety-123",
+    "claude-extensibility-and-safety-146"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-115",
+     "claude-extensibility-and-safety-118",
+     "claude-extensibility-and-safety-123",
+     "claude-extensibility-and-safety-121"
+    ],
+    "why": "Only Claude does this (q5, SRC): a rule template with must-name and clears-when clauses, explicit tool-result blindness against injection, and forceAsk verdicts (discards work, raises permissions, outranks caller) that override auto mode."
+   },
+   "mechanism": "Each soft-deny rule = {name, must_name (what the user explicitly asked), action pattern, clears_when}. Tool descriptions list which arguments are agent-authored. Classifier input excludes tool results. A deterministic pre-pass forces a card when the action raises permissions, deletes unsaved work, or would let a routine exceed its caller.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No classifier, so no classifier policy. The concept of deterministic forced-card checks partly exists as capability Ask.",
+    "strengths": ""
+   },
+   "benefit": "If Verevon builds auto-review, this is the difference between a toy and a defensible reviewer.",
+   "approach": "Author the policy as versioned data in capability-core (rules per capability); execution-core composes the reviewer prompt; deterministic forceAsk checks in Rust run before the reviewer.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-11-006"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Policy prompts drift from tool semantics; test with red-team fixtures.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Unique to Claude but directly reusable with C-t3-11-006.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-008",
+   "name": "Denied-action equivalence analysis",
+   "description": "After a denial, a separate check decides whether a new action is a rephrasing of the denied one so the agent cannot retry around a refusal.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "antigravity-architecture-072"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-architecture-072"
+    ],
+    "why": "Only source; SRC prompt with precise repeat criteria (same violation against the same target)."
+   },
+   "mechanism": "Keep a per-run list of denials {rule, resource}; before executing a new risky action, compare target/endpoint/intent against the list; repeats are auto-denied with the original reason.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No denial memory per run.",
+    "strengths": ""
+   },
+   "benefit": "Stops retry loops after a user says no.",
+   "approach": "execution-core: store denials on the run; deterministic same-capability+same-target match first, model check optional.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-11-014"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Over-blocking legitimate variants.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Single source; the deterministic version is cheap.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-009",
+   "name": "Information-flow control and data classification",
+   "description": "Classification levels on sessions, connectors and tools; data may not flow to a destination below its level without approval; sessions taint upward.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-architecture-071",
+    "claude-extensibility-and-safety-105",
+    "manus-computer-control-architecture-059",
+    "manus-computer-control-architecture-060",
+    "manus-product-ux-071"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-071",
+     "antigravity-architecture-071",
+     "manus-computer-control-architecture-060"
+    ],
+    "why": "Manus (SRC) ships admin-defined levels with per-connector input/output levels, allow_downgrade and approval on downward flow; Antigravity's vet_data_flow maps command arguments to source/destination/intent with secrets taint."
+   },
+   "mechanism": "Admin defines ordered levels; each session carries a level that rises when it reads higher-classified data; each connector/tool has a max input level; a write whose session level exceeds the destination's input level requires approval or is blocked; downgrades are explicit and audited.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-139",
+     "v-planned-decisions-144"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/permission/mod.rs:160-181",
+     "Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql:21"
+    ],
+    "gap": "Verevon has a consent-to-disclose predicate, a restricted-context write block and privacy tiers for routing, but no admin-defined data classification on threads/connectors with session taint and flow approvals.",
+    "strengths": "The restricted-context write block is an existing taint primitive."
+   },
+   "benefit": "Enterprise customers can stop confidential Data Plane content leaking into Slack/email through agents; aligns with 'Space access never widens an owner-plane ACL'.",
+   "approach": "Data Plane labels documents; Model Plane raises a thread's level on retrieval; capability-core stores connector levels; execution-core checks before provider writes and routes to HITL.",
+   "effort": "L",
+   "dependencies": [
+    "Data Plane document labels",
+    "C-t3-11-038 connector policies"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Taint over-propagation makes threads unusable; offer an explicit reviewed downgrade.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Enterprise differentiator; Verevon has primitives.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-010",
+   "name": "LLM review of configuration changes for security downgrades",
+   "description": "Edits to registry, firewall, SSH or telemetry configs are screened by a model for downgrades.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "antigravity-architecture-073"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-architecture-073"
+    ],
+    "why": "Only source."
+   },
+   "mechanism": "A diff of the config file is passed to a prompt that flags registry hijack, HTTPS-to-HTTP and disabled verification.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable: Verevon's agent does not edit host configuration.",
+    "strengths": ""
+   },
+   "benefit": "Little.",
+   "approach": "Do not build.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "IDE/local-agent concern; Verevon agents work in hermetic sandboxes.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-011",
+   "name": "System-prompt confidentiality with decoy answer",
+   "description": "Built-in prompts instruct the model to keep instructions confidential and answer probes with a fixed line.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "antigravity-architecture-074"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-architecture-074"
+    ],
+    "why": "Only source."
+   },
+   "mechanism": "A prompt clause plus a fixed decoy answer.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not checked; low value.",
+    "strengths": ""
+   },
+   "benefit": "Low; prompt secrecy is not a security boundary.",
+   "approach": "Skip; treat prompts as non-secret.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "False sense of security.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Not a real control and conflicts with Verevon's transparency goals.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-012",
+   "name": "Agent-browser governance: site allow/block lists, per-site consent, JS policy, origin trust",
+   "description": "Controls on where and how the agent's browser may act: per-site first-action consent and 'always allow', admin allow/block lists, site categories, JS execution policy, private-network origin pinning, per-tab authorisation.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "manus",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-architecture-075",
+    "claude-extensibility-and-safety-047",
+    "claude-extensibility-and-safety-079",
+    "claude-extensibility-and-safety-080",
+    "claude-extensibility-and-safety-106",
+    "cursor-ai-features-094",
+    "manus-computer-control-architecture-083",
+    "web-claudeai-web-product-100",
+    "web-manus-web-product-077",
+    "web-perplexity-web-product-096"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-079",
+     "web-claudeai-web-product-100",
+     "claude-extensibility-and-safety-106",
+     "web-perplexity-web-product-096"
+    ],
+    "why": "Claude combines per-site consent with prohibited sensitive actions (DOC), an admin default site policy with allow/block lists and localhost carve-out, and DNS address pinning for trusted private origins (SRC q5); Perplexity Comet's per-domain Browser Control / Read Only / No Access is the clearest user model."
+   },
+   "mechanism": "Per (org, user) site table: domain -> {control | read_only | no_access, source}; first action on a new domain asks; admin lists override user lists (block wins); sensitive actions (login, purchase, download, permission grant) always ask; private-network origins only when trusted and the resolved IPs match pinned addresses; per-run grant carries the allowed domains.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/go/services/browser-broker/internal/grant/grant.go:26-47,130-156",
+     "Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1-8",
+     "Frontend Plane/verevonv3/apps/gateway/src/browser.rs:1235",
+     "Model Plane/rust/services/model-gateway/src/browser_run.rs:138-200"
+    ],
+    "gap": "No baseline record covers this directly (SRC check done here). The browser-broker grant already carries a canonical AllowedDomains list (max 32) and AllowedActions for sensitive scopes, and execution-core classifies risky browser actions (login, checkout, form post, cross-domain, cookies) into durable approvals. Missing: (1) grants are never minted for chat (BFF sends grant_id 'session:{id}'), so agent browser runs fail closed; (2) no per-site consent memory or user/admin allow/block list UI; (3) no site-category screening.",
+    "strengths": "Model proposes, Quarry executes; broker-owned immutable domain policy per grant; risk classes with HITL."
+   },
+   "benefit": "The browser agent is central to the Manus/Perplexity-like vision; per-site consent is what makes users trust it.",
+   "approach": "Control/Space decision mints a browser-broker grant per run with AllowedDomains derived from the user's site table + admin lists; Model Plane stores the site table (capability-core); SPA consent card 'Allow on example.com: once / always / read-only'; Quarry rejects navigation outside the grant.",
+   "effort": "M",
+   "dependencies": [
+    "grant issuance in BFF/browser-broker",
+    "C-t3-11-014 decision scopes"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Domain lists are coarse against redirects and embedded frames; Quarry must re-check on every navigation.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Agent browser runs cannot start today; this unblocks a headline capability with governance built in.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-013",
+   "name": "Per-call sandbox escalation with justification",
+   "description": "When the sandbox blocks something, the model asks in the same tool call for the narrowest wider permission with a stated reason, which the user approves.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-132",
+    "antigravity-architecture-078",
+    "codexagent-agent-runtime-and-models-052",
+    "cursor-ai-features-085",
+    "deepseek-transparency-and-customization-053"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-052",
+     "deepseek-transparency-and-customization-053"
+    ],
+    "why": "Codex's schema (sandbox_permissions use_default|with_additional_permissions|require_escalated, justification, reusable prefix_rule, additional fs/network) is the most complete; DeepSeek enforces narrowest-wider-mode and a single retry."
+   },
+   "mechanism": "Tool schema field sandbox_permissions plus justification; the runtime shows a card with the delta; approval can store a reusable prefix rule; denial is reported back to the model.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-157"
+    ],
+    "evidence": [
+     "Model Plane/rust/crates/mp-contracts/src/autonomy.rs:1-60"
+    ],
+    "gap": "Shipped as an autonomy ladder per call with justification (deepseek-harness design). Missing: reusable prefix rule on approval and additional_permissions granularity (network vs filesystem).",
+    "strengths": "Per-call ladder with mandatory justification is in contracts and matches the best references."
+   },
+   "benefit": "",
+   "approach": "Keep; later add an approved_with_amendment decision so one approval can become a scoped rule.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-11-014"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is at parity here.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-014",
+   "name": "Approval request/decision contract with scopes (once, session, always, amend)",
+   "description": "A typed, server-initiated approval request carrying the reason and suggested rules, and decisions that carry a permanence class (once, this session, always, with rule amendment); fail closed when no answerer.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "deepseek",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-006",
+    "claude-extensibility-and-safety-136",
+    "claude-extensibility-and-safety-150",
+    "codexagent-agent-runtime-and-models-053",
+    "deepseek-harness-architecture-086",
+    "deepseek-transparency-and-customization-048",
+    "t3code-architecture-049"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-053",
+     "claude-extensibility-and-safety-136",
+     "deepseek-transparency-and-customization-048"
+    ],
+    "why": "Codex's bidirectional JSON-RPC (q5) has typed request variants and decisions approved / approved_for_session / approved_with_amendment / denied / abort; Claude's can_use_tool carries reasons, matched rule and permanence and coerces one-click 'always' to session scope; DeepSeek proves the fail-closed seam (no answerer = denied)."
+   },
+   "mechanism": "Request {kind, tool, args, reason_code, matched_rule, suggestions[]}; Decision {behavior allow|deny, scope once|session|always, updatedInput?, ruleUpdates[]}; 'always' from a card is stored at session scope unless confirmed in settings; a missing or throwing answerer resolves deny; pending approvals survive restarts.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-147"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/approvals.rs:1-14",
+     "Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476,4558",
+     "Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:64-112",
+     "Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60"
+    ],
+    "gap": "Approvals are durable rows in session-core with Approve/Reject only; no 'allow for this run/thread' scope, no rule amendment, and 'don't ask again' rules are explicitly not built. After approval only three effect kinds are re-executed and the LLM loop does not resume (runtime gap).",
+    "strengths": "Durable, restart-safe approvals with encrypted exact-effect descriptors (T3 Code's in-process approvals go stale on restart)."
+   },
+   "benefit": "Without scoped decisions every repeated action asks again, which makes Do-mode tiring; with them Verevon matches Codex/Claude while keeping durability.",
+   "approach": "Extend orchestration.proto Approval decision with scope and rule_updates; session-core stores session-scoped grants keyed by run/thread + capability + target hash; execution-core consults them before HITL; SPA card adds 'Allow for this run' and 'Always (review in settings)'.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-11-004 rules",
+    "LLM loop resume after approval (runtime category)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "'Always' scope widening; keep it session-scoped by default and audited.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Users notice immediately; blocks a usable agent page.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-015",
+   "name": "Approval card content: exact command, permission delta, human-readable templates, anti-decoy display",
+   "description": "What the approval card shows: the exact effect, the permission delta (network, write paths, escalation), a plain-language sentence per connector tool, recipient fields first with decoy warnings, and execution-time re-check of what the card promised.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "manus",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-029",
+    "claude-extensibility-and-safety-117",
+    "codexagent-plugins-and-extensibility-047",
+    "manus-computer-control-architecture-056",
+    "t3code-ui-and-multimodel-030"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-029",
+     "codexagent-plugins-and-extensibility-047",
+     "manus-computer-control-architecture-056",
+     "claude-extensibility-and-safety-117"
+    ],
+    "why": "Claude's anti-decoy card (recipients first, duplicate 'to' spellings flagged, truncation disclosed) and app-written plan fingerprint re-checked at execution are unique and q5; Codex's 55 versioned templates ('Allow GitHub to add a comment to PR #x?') and Manus's permission-delta badges complete it."
+   },
+   "mechanism": "Template registry keyed by (connector, tool) with labelled params; card renders recipients/subject first, flags duplicate recipient keys, discloses truncation; app (not model) writes the plan summary with a fingerprint; executor re-verifies the effect matches the approved descriptor.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1940",
+     "Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60,1280-1330",
+     "Model Plane/rust/services/session-core/src/continuation_crypto.rs:1-8"
+    ],
+    "gap": "No baseline record; SRC from the baseline narrative. Cards show Approve/Reject with tool name/arguments; strings are partly Norwegian-only. Missing: per-tool human-readable templates, recipient-first/anti-decoy rendering, permission-delta badges.",
+    "strengths": "Execution re-checks an encrypted exact-effect descriptor and runs a postcondition read-back, equal to Claude's execution-time re-check."
+   },
+   "benefit": "Users approve what they understand; reduces social-engineering via injected recipients.",
+   "approach": "capability-core holds templates per provider action; execution-core attaches a rendered summary + structured fields to CreateApproval; SPA renders recipients first with decoy warnings.",
+   "effort": "M",
+   "dependencies": [
+    "integration-corev2 action catalogue"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Template drift from real arguments; render raw args behind a disclosure.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "High user-facing value; partly built.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-016",
+   "name": "Approvals off-surface: OS/push notifications, remote device, child-session relay",
+   "description": "Pending approvals reach the user when they are not looking: OS or push notifications with limited actions, approval from another device only for tools that do not run locally, relay from dispatched child sessions to the parent.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-003",
+    "claude-extensibility-and-safety-004",
+    "claude-extensibility-and-safety-005"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-003",
+     "claude-extensibility-and-safety-005",
+     "claude-extensibility-and-safety-004"
+    ],
+    "why": "Only Claude (SRC): notifications drop the 'Allow' action for high-risk tools so they must be approved on the card; child-session permission relay; remote approval restricted by where the tool executes."
+   },
+   "mechanism": "On approval_requested: push a notification {title, tool, session}; include an Approve action only for low-risk classes; deep link to the card; child runs forward requests to the parent thread.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "Application Plane/convex-core/convex/spaceAgents.ts"
+    ],
+    "gap": "No baseline record. Check whether Application Plane notifications fire on awaiting_approval for Do and scheduled runs, and whether subagent approvals surface on the parent run.",
+    "strengths": ""
+   },
+   "benefit": "Long agent runs stall silently on approvals today unless the tab is open; notifications fix that.",
+   "approach": "Model Plane publishes approval.requested on NATS; Application Plane notification projection delivers in-app/web push; approve action for low-risk only.",
+   "effort": "M",
+   "dependencies": [
+    "Application Plane notifications"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Approving from a notification without context; restrict to low-risk.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Single source, but matters for background agents.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-017",
+   "name": "Unattended / scheduled run approval policy",
+   "description": "What happens when nobody can answer: headless modes default to deny, scheduled runs auto-approve only narrowly stored unexpired rules, some tools are never delegable, unattended prompts are injection-scanned and auto-paused.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "hermes",
+     "web-manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-110",
+    "claude-extensibility-and-safety-038",
+    "claude-extensibility-and-safety-078",
+    "claude-extensibility-and-safety-095",
+    "hermes-architecture-and-surfaces-118",
+    "hermes-learning-and-memory-099",
+    "web-manus-web-product-078"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-038",
+     "hermes-architecture-and-surfaces-118",
+     "hermes-learning-and-memory-099"
+    ],
+    "why": "Claude's shouldAutoApprovePermission (stored rules with expiry, non-delegable browser/computer/skill/memory/schedule tools) is the most precise; Hermes's cron/single-query/unattended modes default to deny with a narrowed toolset and auto-pause on injection hits."
+   },
+   "mechanism": "Each schedule stores approvedPermissions [{tool, rule, expiresAt}] captured at creation; at run time a request is auto-approved only if every suggested rule is covered and unexpired and the tool is delegable; otherwise the run pauses with an instructive denial; prompts of unattended jobs are scanned before execution.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-165"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/scheduled_step_decision.rs:1-8",
+     "Model Plane/go/services/capability-core/internal/cron/control_authorizer.go"
+    ],
+    "gap": "Scheduled effects need Control-signed decisions (strong), but scheduled steps are a single no-tool call today, and there is no per-schedule stored approval set with expiry or non-delegable tool list; unattended identity and guards (D10/D11) are planned.",
+    "strengths": "Control-signed per-effect decisions for cron/watch are stricter than any reference."
+   },
+   "benefit": "Scheduled and background agents (Manus-style) are core to the vision; they need a defined approval contract before they get tools.",
+   "approach": "session-core: schedule.approved_capabilities with expiry captured at creation from an explicit consent card; execution-core: unattended runs consult it and otherwise pause with a durable approval + notification; never-delegable list in mp-contracts.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-11-018",
+    "C-t3-11-016",
+    "tools in scheduled steps (runtime)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Stale consents; enforce expiry and show them in settings.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Blocks tool-using scheduled agents.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-018",
+   "name": "Never-auto-approvable tools and the self-escalation ratchet",
+   "description": "Tools that always need a human card regardless of mode, and a ratchet so the model cannot raise its own permission mode or change settings without a card.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-002",
+    "claude-extensibility-and-safety-039",
+    "claude-runtime-architecture-089"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-002",
+     "claude-extensibility-and-safety-039",
+     "claude-runtime-architecture-089"
+    ],
+    "why": "Claude (q5) keeps static sets that require approval in every mode and ranks modes so any self-requested increase is card-only; nonce-bound consent for self-management tools."
+   },
+   "mechanism": "Static never_auto set in contracts; permission-mode tool compares rank(requested) > rank(current) -> card; consent nonces bind the approved request.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-155"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/profile.rs:95,119",
+     "Model Plane/rust/services/execution-core/src/capability_policy.rs:350-390"
+    ],
+    "gap": "The client can only tighten the posture and the model has no tool to change its own mode, so the ratchet effectively holds. Missing: an explicit, declared never-auto class that survives a future auto-review or full-access mode (verify capability-core for an equivalent).",
+    "strengths": "Server-resolved, tighten-only posture."
+   },
+   "benefit": "Becomes essential the moment auto-review or full-access modes exist.",
+   "approach": "mp-contracts: RiskClass::NeverAuto on capabilities (payments, external sends to new recipients, memory/skill writes, schedule creation); execution-core forces HITL for them in every mode.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-11-061"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small, prevents a class of regressions.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-019",
+   "name": "Filesystem boundaries and folder grants",
+   "description": "Agent file access confined to workspace roots, outside reads need approval, folder grants are first-class state, path containment uses realpath and rejects alternate spellings.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "deepseek",
+     "manus",
+     "t3code"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-107",
+    "claude-extensibility-and-safety-019",
+    "claude-extensibility-and-safety-096",
+    "claude-runtime-architecture-083",
+    "claude-runtime-architecture-085",
+    "claude-runtime-architecture-088",
+    "cursor-harness-architecture-096",
+    "deepseek-harness-architecture-145",
+    "manus-computer-control-architecture-051",
+    "t3code-architecture-075"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-096",
+     "claude-runtime-architecture-085",
+     "t3code-architecture-075"
+    ],
+    "why": "Claude validates folder grants before the prompt (network drives, UNC, protected host locations) and confines file tools with alternate-spelling rejection; T3 Code shows lexical + realpath containment at every I/O site."
+   },
+   "mechanism": "Grant store per session; canonicalise (realpath) and reject UNC/network/protected roots; enforce at every file I/O; reads outside roots ask.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/sandbox.rs:1-8,256,402",
+     "Model Plane/rust/services/execution-core/src/policy.rs:1-8",
+     "Model Plane/go/services/sandbox-manager/internal/lease/lease.go:1-20"
+    ],
+    "gap": "No baseline record in this category; the baseline narrative shows bwrap + Landlock with ReadOnly/WorkspaceWrite policy and Space-scoped workspace leases. Local folder grants do not apply to a hosted web product.",
+    "strengths": "Kernel-enforced confinement on the server rather than path checks in the app."
+   },
+   "benefit": "",
+   "approach": "Keep. If a desktop/local connector is ever added, adopt Claude's pre-prompt path validation.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon has server-side confinement; local folder grants do not fit.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-020",
+   "name": "Protection of agent persistence and self-modification points",
+   "description": "Even inside a writable area, the agent cannot write its own config, hooks, permission files, interpreter or checkout; auto-executing config is dropped when files cross trust boundaries.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-097",
+    "claude-extensibility-and-safety-127",
+    "claude-extensibility-and-safety-147",
+    "claude-product-ux-114",
+    "cursor-ai-features-084",
+    "hermes-architecture-and-surfaces-128"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-084",
+     "claude-extensibility-and-safety-097",
+     "hermes-architecture-and-surfaces-128"
+    ],
+    "why": "Cursor's hard-coded protected-path list (q5) and Claude's protected-subpath deny rules for shell profiles and agent config; Hermes protects its interpreter and checkout."
+   },
+   "mechanism": "Deny-write list evaluated before any write; explicit carve-outs where the agent is meant to author (skills folder) go through a separate gate.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check whether any Do-mode tool can modify agent skills, instructions or memory configuration outside session-core's governed APIs (reattach_skill exists).",
+    "strengths": ""
+   },
+   "benefit": "Prevents a prompt-injected agent from planting persistent instructions for future runs.",
+   "approach": "Keep all persistent agent state behind session-core APIs with their own gates (see C-t3-11-021); sandbox images mount no agent config.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-11-021"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Mostly a local-agent concern; Verevon's server design likely covers it.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-021",
+   "name": "Memory and skill write governance",
+   "description": "Cross-session memory and skill writes are governed: optional user approval with staged entry-pinned writes, injection scans at write and load, write authority limited to the primary agent, read-before-write for autonomous edits, egress redaction to memory providers.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-transparency-and-customization-060",
+    "hermes-architecture-and-surfaces-120",
+    "hermes-learning-and-memory-007",
+    "hermes-learning-and-memory-008",
+    "hermes-learning-and-memory-017",
+    "hermes-learning-and-memory-022",
+    "hermes-learning-and-memory-059",
+    "hermes-learning-and-memory-060"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-learning-and-memory-008",
+     "hermes-learning-and-memory-059",
+     "hermes-learning-and-memory-060",
+     "hermes-learning-and-memory-007"
+    ],
+    "why": "Hermes (q5, SRC) is the only source with a full design: staged writes replay only if the pinned entry still exists, the background review fork can only use memory/skill tools with approvals auto-denied, and skill patches require a fresh read."
+   },
+   "mechanism": "Memory write -> scan (injection/exfil patterns) -> if write_approval: stage {op, pinned_entry} for review -> apply only if the pinned entry is unchanged; subagents/cron cannot write; memory is re-scanned when loaded into a prompt.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/session-core/src/dream_extractor.rs:20-40",
+     "Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12"
+    ],
+    "gap": "No baseline record in this category (SRC check here). Dreaming extraction treats content as untrusted: model names closed memory slots, never DB keys; closed scope/kind sets; confidence floor and per-call cap; rows tagged extractor:llm so users can see inferred memories. Missing: optional user approval/staging of memory writes, injection scan of memory text at write and at load, explicit rule that subagents cannot write memory (verify).",
+    "strengths": "Closed-slot extraction with provenance tags is a strong, Verevon-specific design."
+   },
+   "benefit": "Memory that learns about the user (the Hermes goal) is a prime persistent-injection target; governed writes keep it trustworthy.",
+   "approach": "session-core: run scan_injection on every memory value before accept and when building memory_prefetch; optional per-user 'review new memories' queue reusing the approvals table; deny memory writes from subagent and scheduled contexts.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-11-022 injection scanner upgrade"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Review queues nobody reads; default to auto-accept with visible provenance.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Memory is a headline differentiator; protecting it is cheap relative to its value.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-022",
+   "name": "Prompt-injection defences (untrusted-content labelling, scanning, sanitisation, layered monitoring)",
+   "description": "Every untrusted tool/web/MCP result is labelled as data, scanned for injection patterns, stripped of invisible Unicode and forged envelope tags, and monitored by classifiers.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 8,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "claude-extensibility-and-safety-052",
+    "claude-extensibility-and-safety-125",
+    "claude-runtime-architecture-080",
+    "cursor-ai-features-092",
+    "cursor-harness-architecture-095",
+    "deepseek-harness-architecture-137",
+    "hermes-architecture-and-surfaces-053",
+    "hermes-architecture-and-surfaces-127",
+    "manus-computer-control-architecture-022",
+    "manus-computer-control-architecture-034",
+    "web-chatgpt-web-product-122",
+    "web-claudeai-web-product-098",
+    "web-perplexity-web-product-095"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-095",
+     "claude-extensibility-and-safety-125",
+     "hermes-architecture-and-surfaces-053",
+     "hermes-architecture-and-surfaces-127"
+    ],
+    "why": "Perplexity documents the most layered stack (intent anchoring, BrowseSafe screening classifier, containment, runtime monitoring, red-teaming; DOC); Claude's homoglyph-aware scrubber that neutralises forged host envelope tags is the best concrete code (q5 SRC); Hermes strips invisible Unicode tag characters and reserved _meta from MCP results."
+   },
+   "mechanism": "Normalise untrusted text (NFKC, strip U+E0000 tag block and zero-width chars, neutralise lookalike '<' + reserved tag names); wrap in a trust-class envelope; tiered pattern scan (strict for context files/memory, advisory for tool results); semantic classifier on external content; user intent anchoring in the system prompt.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-158",
+     "v-planned-decisions-145",
+     "v-chat-agents-ui-139"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/moderation.rs:183-186",
+     "Model Plane/rust/services/model-gateway/src/semantic_screening.rs:1-10",
+     "Model Plane/rust/services/model-gateway/src/security_events.rs:1-10",
+     "Model Plane/rust/services/execution-core/src/provenance.rs:1-8"
+    ],
+    "gap": "Trust-class provenance, a fail-closed scan over the full payload before truncation and hash-only security events are shipped. Weaknesses: scan_injection is a lowercase substring match over a marker list with no Unicode/homoglyph normalisation or invisible-character stripping (SRC moderation.rs:183-186); the semantic ContentSafety pass runs in shadow, not enforcing.",
+    "strengths": "Trust-class envelope and scan-before-truncation are ahead of DeepSeek/Manus labelling; hash-only security events."
+   },
+   "benefit": "Injection is the main risk once browser and connectors run; normalisation closes cheap bypasses.",
+   "approach": "model-gateway moderation.rs: add a normaliser (NFKC, tag-block/zero-width strip, confusable folding) before scan_injection; neutralise forged envelope tags in untrusted text; promote semantic_screening from shadow to enforce for ExternalWeb/Browser trust classes after measuring false positives.",
+   "effort": "M",
+   "dependencies": [
+    "evaluation set for false positives"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Over-blocking legitimate pages; enforce by trust class.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Verevon is already strong; upgrades are incremental but important.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-023",
+   "name": "Content moderation, safety banners and policy-error transparency",
+   "description": "Input/output moderation with user-facing safety banners, warnings, reports and appeals, and typed policy errors that tell the model and user what happened.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "manus",
+     "web-claudeai"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-117",
+    "codexagent-agent-runtime-and-models-061",
+    "manus-product-ux-075",
+    "web-claudeai-web-product-108"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-117",
+     "codexagent-agent-runtime-and-models-061",
+     "manus-product-ux-075"
+    ],
+    "why": "Claude shows dismissible safety banners for sensitive topics with resource links and model-fallback explanations; Codex returns typed safety errors (cyber, bio) with a steering hint; Manus has report/appeal flows."
+   },
+   "mechanism": "Moderation verdict -> typed event {category, action, user_copy, resources}; the SPA renders a banner; a report button posts to a review queue; refusals are typed and localised.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-146",
+     "v-chat-agents-ui-139",
+     "v-chat-agents-ui-133"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/moderation.rs:1",
+     "Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts:1"
+    ],
+    "gap": "A moderation enforcement point exists but input/output enforcement is incomplete and the semantic pass is shadow-only; no safety banners or report flow found in the chat page (not searched exhaustively).",
+    "strengths": "A typed, localised refusal catalogue (built for ZDR) is the right pattern to extend to safety refusals."
+   },
+   "benefit": "A public chat product needs visible, explainable moderation for trust and compliance (EU AI Act transparency).",
+   "approach": "Extend the typed refusal catalogue with safety categories; model-gateway emits safety_notice events; SPA banner + report action into Application Plane.",
+   "effort": "M",
+   "dependencies": [
+    "policy content in capability-core safety_policies"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Over-moderation hurts B2B usefulness.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common; partly built.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-024",
+   "name": "Computer-use safety (per-app grants, app tiers, input guardrails, overlay and hard stop)",
+   "description": "Guardrails for an agent controlling a desktop: per-app grants with TTL, view-only tiers for browsers/trading apps, blocked OS shortcuts, secure-field blocks, a visible overlay and a hard-stop hotkey.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-008",
+    "claude-extensibility-and-safety-009",
+    "claude-extensibility-and-safety-010",
+    "claude-extensibility-and-safety-011",
+    "codexagent-plugins-and-extensibility-102",
+    "manus-computer-control-architecture-020",
+    "manus-computer-control-architecture-041",
+    "manus-computer-control-architecture-046",
+    "manus-computer-control-architecture-047",
+    "manus-computer-control-architecture-065"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-009",
+     "claude-extensibility-and-safety-011",
+     "manus-computer-control-architecture-020"
+    ],
+    "why": "Claude's app tiering (browsers/trading read-only, terminals click-only) and protected-field blocks are q5 unique; Manus's always-visible overlay with Shift+Esc stop is the best UX."
+   },
+   "mechanism": "Classify target app -> access tier; per-app grant with expiry; key-chord filter; refuse typing into password fields; overlay while controlling; global stop.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "OS-level computer use is parked by the owner; no Model Plane path.",
+    "strengths": ""
+   },
+   "benefit": "Only relevant if computer use is revived.",
+   "approach": "Skip now; if revived, model these as Quarry-side executor rules.",
+   "effort": "XL",
+   "dependencies": [
+    "computer-use runtime"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 2,
+   "rationale": "Parked by the owner; hosted browser covers the near-term need.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-025",
+   "name": "Model-blind credentials and login handling for the agent browser",
+   "description": "The agent can log in or fill secrets without seeing them: secret references substituted by the executor with origin binding, vault autofill, sensitive-field denial, takeover for logins, selective import of browser sessions.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "hermes",
+     "manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-081",
+    "cursor-harness-architecture-097",
+    "hermes-architecture-and-surfaces-124",
+    "manus-computer-control-architecture-031",
+    "manus-computer-control-architecture-032",
+    "manus-computer-control-architecture-038"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-031",
+     "hermes-architecture-and-surfaces-124",
+     "manus-computer-control-architecture-032"
+    ],
+    "why": "Manus (q5 SRC): the model types {{secret:name.field}}, the operator substitutes only when the live frame origin matches allowed hosts, mixed text gets no sensitive-input authority, and password/payment fields reject plain-text input; Hermes's vault fill re-asserts origin inside the injected script and registers exact bytes for redaction."
+   },
+   "mechanism": "Vault items bound to origins; model sees handles only; executor validates live document origin (deny opaque/sandboxed frames), fills the field, registers the value with the redaction boundary; plain typing into password fields is refused; otherwise hand off to human takeover.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1-8",
+     "Model Plane/go/services/browser-broker/internal/grant/grant.go:48-50"
+    ],
+    "gap": "No baseline record. Browser risk classes route login and cookie use to HITL, and Quarry's manual browser supports human takeover (live-proven per the parity audit, DOC). Missing: a vault of origin-bound secret references substituted by Quarry so the model never sees credentials.",
+    "strengths": "Model proposes, Quarry executes is exactly the split needed for executor-side substitution."
+   },
+   "benefit": "Lets agents work on sites behind login (Manus's core use case) without leaking credentials into model context or ZDR-violating logs.",
+   "approach": "Control Plane or integration-corev2 holds an encrypted per-user vault; browser-broker grant lists allowed secret handles + origins; Quarry substitutes at execution; Model Plane only passes handles; redaction registry in sandbox/Quarry output.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-11-012 grants",
+    "Quarry executor change"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Vault is a high-value target; origin binding must fail closed.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "5 sources; key to useful browser agents.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-026",
+   "name": "Agent payments with one-time cards and per-purchase approval",
+   "description": "Agents buy on the user's behalf through a linked wallet with one-time virtual cards; each order shows merchant and line items for approval; card numbers never reach the model.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "manus-computer-control-architecture-033",
+    "manus-product-ux-068",
+    "manus-product-ux-069"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-069",
+     "manus-computer-control-architecture-033",
+     "manus-product-ux-068"
+    ],
+    "why": "Manus is the only source (SRC); Stripe Link one-time cards exported to an owner-only directory and referenced by token."
+   },
+   "mechanism": "Wallet link (Stripe Link); per purchase: approval card with merchant, items, total; mint a one-time card; executor fills standard autocomplete fields from a temporary reference.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No payment capability (book_shipment books shipments through a provider API, not card payments).",
+    "strengths": ""
+   },
+   "benefit": "Would enable end-to-end errands; large compliance surface.",
+   "approach": "Defer; if built, keep it in integration-corev2 with step-up verification (C-t3-11-049).",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-11-025",
+    "C-t3-11-049"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Fraud and liability.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Unique to Manus; not core for a B2B launch.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-027",
+   "name": "Credential storage and secret references",
+   "description": "API keys and tokens are stored in OS keystores or encrypted stores, referenced by name in config, write-only in the UI, resolved in a fail-closed per-profile scope, optionally sourced from external secret managers.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "manus",
+     "t3code"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-architecture-079",
+    "claude-extensibility-and-safety-036",
+    "claude-extensibility-and-safety-134",
+    "cursor-ai-features-091",
+    "deepseek-harness-architecture-085",
+    "deepseek-transparency-and-customization-055",
+    "hermes-architecture-and-surfaces-122",
+    "hermes-architecture-and-surfaces-133",
+    "manus-computer-control-architecture-086",
+    "t3code-architecture-020"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-122",
+     "deepseek-transparency-and-customization-055",
+     "cursor-ai-features-091"
+    ],
+    "why": "Hermes's context-scoped secret resolution that raises instead of falling through to the environment (q5) is the best multi-tenant pattern; DeepSeek shows write-only keys with source disclosure; Cursor's team/personal keyrings for cloud agents are closest to Verevon's hosted model."
+   },
+   "mechanism": "Secrets live in a per-tenant encrypted store; config holds references; resolution uses a request-scoped context and fails if unscoped; the UI shows source (env/vault) but never the value; cloud-agent secrets are granted per agent and injected only at execution.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/session-core/src/continuation_crypto.rs:1-8"
+    ],
+    "gap": "No baseline record. Approval continuation descriptors are encrypted; connector tokens live server-side in integration-corev2 (INF from the baseline narrative). Check whether users can store secrets for agents/sandboxes and how integration-corev2 stores OAuth tokens.",
+    "strengths": ""
+   },
+   "benefit": "Needed for user-supplied API keys in sandboxes and BYO-model connections (the planned own-connection ZDR waiver).",
+   "approach": "Control Plane (or integration-corev2) secret store with per-org KMS keys; references in run configs; execution-core resolves into sandbox env only for the lease lifetime.",
+   "effort": "M",
+   "dependencies": [
+    "KMS"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Most reference items are desktop keychain concerns.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-028",
+   "name": "Secret and PII redaction in outputs and logs",
+   "description": "Sensitive strings are redacted from tool outputs, logs and telemetry; best designs make leaks impossible by type (RedactedString) or by exact-value registration.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-088",
+    "hermes-architecture-and-surfaces-123"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-088",
+     "hermes-architecture-and-surfaces-123"
+    ],
+    "why": "Cursor's RedactedString type that refuses implicit serialisation (q5) prevents accidental leaks by construction; Hermes registers exact vault values for scrubbing plus regex redaction."
+   },
+   "mechanism": "Wrapper type with Debug/Display/Serialize returning '[redacted]'; explicit expose() at the boundary; exact-value registry for secrets filled at runtime; regex pass on tool results.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-160",
+     "v-modelplane-159"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/scrub.rs:1-8",
+     "Model Plane/go/services/sandbox-manager/internal/redact/redact.go",
+     "Model Plane/rust/services/model-gateway/src/moderation.rs:586"
+    ],
+    "gap": "Regex scrubbing of step payloads and sandbox output, and opt-in PII redaction before provider calls are shipped. Possible improvement: a Rust newtype for secrets (e.g. secrecy::SecretString) used across services, and exact-value registration once a vault exists.",
+    "strengths": "Scrubbing on both Rust and Go sides plus opt-in PII redaction before inference."
+   },
+   "benefit": "",
+   "approach": "Keep; adopt a secret newtype in mp-contracts.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "At parity or ahead.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-029",
+   "name": "Child-process environment and proxy hygiene",
+   "description": "Subprocesses get a filtered environment (provider keys removed, explicit passthrough); project files cannot redirect proxies; shells are not persisted with brokered credentials.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "hermes",
+     "manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-059",
+    "deepseek-harness-architecture-123",
+    "deepseek-transparency-and-customization-057",
+    "hermes-architecture-and-surfaces-121",
+    "manus-computer-control-architecture-061"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-121",
+     "deepseek-transparency-and-customization-057",
+     "codexagent-agent-runtime-and-models-059"
+    ],
+    "why": "Hermes uses one env builder with a provider-key blocklist for every child type; DeepSeek refuses project .env proxy variables."
+   },
+   "mechanism": "Build child env from an allowlist; drop *_API_KEY and tokens; proxy settings only from the trusted launcher.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/sandbox.rs:57,158"
+    ],
+    "gap": "No baseline record. Check that bwrap invocations clear the environment (--clearenv) and pass only an allowlist into code_interpreter/process_* children.",
+    "strengths": ""
+   },
+   "benefit": "Defence in depth for the sandbox.",
+   "approach": "Verify; if missing, add --clearenv + allowlist in sandbox.rs.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Likely already covered by the hermetic design; verify.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-030",
+   "name": "Credential isolation from sandboxes and credential-injecting egress proxies",
+   "description": "Sandboxes never hold real credentials: connector auth stays server-side, and sandboxed CLIs get fine-grained resource grants enforced by an egress proxy that swaps opaque tokens for real ones.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "hermes",
+     "web-manus",
+     "web-claudeai"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-077",
+    "codexagent-plugins-and-extensibility-086",
+    "hermes-architecture-and-surfaces-125",
+    "web-manus-web-product-080",
+    "web-claudeai-web-product-102"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-architecture-077",
+     "hermes-architecture-and-surfaces-125",
+     "web-claudeai-web-product-102"
+    ],
+    "why": "Antigravity's permissioned GitHub grants (binary.action(resource) with org/repo mandatory) enforced at a TLS-intercepting proxy (q5) is the most precise; Hermes's iron-proxy shows the token-swap mechanics."
+   },
+   "mechanism": "Sandbox gets HTTPS_PROXY + CA; proxy maps opaque token -> real credential per host; requests checked against granted resource scopes; blocked requests return a message to the model.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/policy.rs:23-32",
+     "Model Plane/rust/services/execution-core/src/sandbox.rs:210-222",
+     "Model Plane/rust/services/execution-core/src/integration_tools.rs:8-40"
+    ],
+    "gap": "No baseline record (SRC check here). Provider actions run server-side through integration-corev2, so connector credentials never enter the sandbox (INF from the code layout); MpNetworkPolicy::AllowDomains relies on an egress proxy and the executor must fail closed without one. No credential-injecting proxy for sandboxed tools.",
+    "strengths": "Server-side provider actions keep tokens out of model and sandbox."
+   },
+   "benefit": "Needed only when sandboxed code must call authenticated APIs (e.g. git push from a Space workspace).",
+   "approach": "Extend the egress proxy behind AllowDomains with per-lease opaque tokens resolved by sandbox-manager; scope grants per resource.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-11-031"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "TLS interception complexity.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Verevon's architecture already avoids the main risk.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-031",
+   "name": "Sandbox network egress policy tiers",
+   "description": "Admin- and user-selectable network posture for agent sandboxes and browser sessions: off / package managers only / allowlisted domains / all, as policy sets with globs and CIDRs.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "manus",
+     "web-claudeai"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-086",
+    "manus-computer-control-architecture-039",
+    "manus-product-ux-073",
+    "web-claudeai-web-product-101"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-101",
+     "manus-product-ux-073",
+     "cursor-ai-features-086"
+    ],
+    "why": "Claude.ai's four tiers with plan-dependent defaults applied to new sessions (DOC q5) is the clearest product; Manus (SRC) shows admin policy sets in allow/block mode with glob + CIDR applied to sandbox and browser; Cursor lets admins lock local, MCP and cloud egress separately."
+   },
+   "mechanism": "Policy set {mode allowlist|blocklist, patterns[], cidrs[]} per org; tier enum on the sandbox lease; enforced by a proxy (domains) plus a net namespace (off); changes apply to new leases; the model is told the current tier.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/policy.rs:23-46",
+     "Model Plane/rust/services/execution-core/src/sandbox.rs:210-222",
+     "Model Plane/rust/services/model-gateway/src/tool_loop.rs:4356-4358"
+    ],
+    "gap": "No baseline record (SRC check here). MpNetworkPolicy has Disabled and AllowDomains variants, and the code requires fail-closed behaviour without an egress proxy; code_interpreter ships with no network. Not found: an org/user-facing tier setting, a package-manager tier, or a deployed egress proxy (verify).",
+    "strengths": "Fail-closed network policy type already in contracts."
+   },
+   "benefit": "Data analysis that needs pip/npm or public APIs is a common user request; tiers make it safe.",
+   "approach": "capability-core org setting network_tier; sandbox-manager stamps it on the lease; execution-core maps it to MpNetworkPolicy; deploy an egress proxy with a curated package-registry allowlist.",
+   "effort": "M",
+   "dependencies": [
+    "egress proxy deployment"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Package registries are an exfiltration and supply-chain channel; log all egress.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common in references; the contract is half built.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-032",
+   "name": "SSRF guard with DNS-rebinding closure",
+   "description": "Server-owned HTTP paths refuse private, internal and metadata addresses, re-checking at connect time and on every redirect.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-126"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-126"
+    ],
+    "why": "Only reference source; checks at TCP connect and per redirect."
+   },
+   "mechanism": "Resolve -> check IP against deny CIDRs -> pin the address for the connection -> re-validate each redirect.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-161"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/tools.rs:1-10",
+     "Model Plane/go/services/capability-core/internal/api/mcp_dns_revalidator.go"
+    ],
+    "gap": "Shipped for webhooks/remote_trigger, MCP OAuth discovery and MCP DNS revalidation. Verify the same guard covers web_fetch and Quarry fetches.",
+    "strengths": "At parity with the best reference."
+   },
+   "benefit": "",
+   "approach": "Keep; extend to every server-side fetch path.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon equal.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-033",
+   "name": "OS-level sandbox for agent commands and named permission profiles",
+   "description": "Commands run under kernel isolation (bwrap/Landlock/seccomp, Seatbelt, restricted Windows tokens, containers) with named profiles for filesystem roots, deny-read paths and network.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "hermes",
+     "manus"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-067",
+    "codexagent-agent-runtime-and-models-051",
+    "codexagent-agent-runtime-and-models-058",
+    "cursor-ai-features-083",
+    "hermes-architecture-and-surfaces-114",
+    "manus-computer-control-architecture-057"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-057",
+     "codexagent-agent-runtime-and-models-051",
+     "cursor-ai-features-083"
+    ],
+    "why": "Manus's Windows safe mode (dedicated account, restricted token, per-root capability SIDs, persistent WFP block; q5) is the deepest local implementation; Codex's named permission profiles with special paths, globs and deny-read tables are the best policy vocabulary."
+   },
+   "mechanism": "Profile {writable_roots, deny_read, network} -> backend argv (bwrap --ro-bind / Landlock rules / seccomp filter); probe at boot and refuse to run when the backend is unavailable.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/sandbox.rs:1-8,256,402",
+     "Model Plane/rust/services/execution-core/src/policy.rs:1-8",
+     "Model Plane/deploy/seccomp-bwrap.json"
+    ],
+    "gap": "No baseline record in this category; the baseline narrative shows bwrap + Landlock/seccomp with ReadOnly/WorkspaceWrite and a network policy, probed at boot. Gap: isolation is per call inside the execution-core container, with no VM/container per session (deferred SandboxBackend seam).",
+    "strengths": "Kernel-enforced, boot-probed sandbox on the server."
+   },
+   "benefit": "",
+   "approach": "Keep; build the SandboxBackend seam before adopting VM sandboxes (runtime category).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon equal for its hosted model.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-034",
+   "name": "Sandbox enforcement and denial transparency",
+   "description": "Each sandbox result states whether enforcement was full or partial, distinguishes a policy denial from a runner failure with a visible marker, and records structured violations that can become policy amendments.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-054",
+    "deepseek-transparency-and-customization-051",
+    "deepseek-transparency-and-customization-052",
+    "deepseek-transparency-and-customization-169"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-051",
+     "deepseek-transparency-and-customization-052",
+     "codexagent-agent-runtime-and-models-054"
+    ],
+    "why": "DeepSeek (SRC) reports enforcement as a fact per call and matches denial signatures (EROFS, EACCES, EPERM) only after runner-failure rules, fixing a misclassification it documented in a postmortem; Codex records violations centrally and proposes amendments."
+   },
+   "mechanism": "Backend returns {enforcement full|partial, denialSignatures, runnerFailureRules}; result carries sandbox {mode, denied}; a denial marker is appended for the model; violations stored with what/where/why and an optional suggested rule.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/sandbox.rs:1-8",
+     "Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-34"
+    ],
+    "gap": "No baseline record. Check whether code_interpreter/process results tell the model and user that a failure was a sandbox denial (e.g. network disabled) rather than a code error, and whether partial Landlock ABI support is reported.",
+    "strengths": ""
+   },
+   "benefit": "Matches Verevon's honesty/transparency contracts and the DeepSeek reference goal; prevents the model from 'fixing' code that failed due to policy.",
+   "approach": "execution-core: classify bwrap/Landlock denials, attach sandbox{mode, denied, enforcement} to tool results and the trace; render a 'blocked by sandbox' chip in the SPA.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap; strong fit with Verevon's transparency principle.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-035",
+   "name": "Admin agent-policy registry and organisation setting locks",
+   "description": "A typed registry of admin-controllable agent behaviour (allowed modes, browser/MCP/connector toggles, egress, retention, telemetry) with per-key fail-closed values, tighten-only remote config and visible lock states.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-109",
+    "claude-extensibility-and-safety-012",
+    "claude-extensibility-and-safety-013",
+    "claude-extensibility-and-safety-066",
+    "claude-extensibility-and-safety-084",
+    "claude-extensibility-and-safety-085",
+    "claude-extensibility-and-safety-086",
+    "claude-extensibility-and-safety-109",
+    "claude-product-ux-116",
+    "claude-runtime-architecture-081",
+    "claude-runtime-architecture-087",
+    "codexagent-plugins-and-extensibility-070",
+    "cursor-ai-features-093",
+    "web-chatgpt-web-product-128",
+    "web-chatgpt-web-product-132",
+    "web-claudeai-web-product-107",
+    "web-perplexity-web-product-097"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-012",
+     "claude-extensibility-and-safety-013",
+     "codexagent-plugins-and-extensibility-070",
+     "web-chatgpt-web-product-128"
+    ],
+    "why": "Claude's schema-as-source-of-truth registry (183 keys) with an explicit fail-closed value per key, restrictions-before-grants and tighten-only unverified config (all q5 SRC) is unmatched; Codex's requirements allow-lists and ChatGPT's Requirements-vs-Defaults per environment are the best admin UX framing."
+   },
+   "mechanism": "Each key = {schema, default, failClosedValue, scopes, lockable, restrictiveDirection}; resolution merges org requirement (cannot be overridden) over org default over user choice using most-restrictive-wins; unreadable or invalid -> failClosedValue; the UI shows 'managed by your organisation'.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-140",
+     "v-modelplane-163"
+    ],
+    "evidence": [
+     "Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:448-497",
+     "Model Plane/go/services/capability-core/internal/api/capabilities.go:52-76"
+    ],
+    "gap": "Control Plane admin covers members, SSO, org security, trust and quotas, and capability-core has rollout/scopes per capability. Missing: a typed, versioned agent-policy registry (allowed autonomy modes, browser/connector/MCP enablement, egress tier, memory, scheduled agents) with per-key fail-closed values and lock states shown in chat/agent settings.",
+    "strengths": "Capability rollout and scope grants already give admins per-capability control."
+   },
+   "benefit": "Enterprise buyers expect to cap what agents can do; a fail-closed registry prevents silent widening when config breaks.",
+   "approach": "Control Plane owns the registry schema (Rust/Go shared JSON schema); Model Plane reads a signed org policy snapshot at run start (like Space decisions) and clamps; SPA settings render lock states from the same schema.",
+   "effort": "L",
+   "dependencies": [
+    "Control Plane signed policy snapshot"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Schema sprawl; start with 10-15 keys.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Table-stakes for enterprise; Verevon has pieces but no registry.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 13,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-036",
+   "name": "Device-managed configuration delivery (GPO/MDM/bootstrap/helper)",
+   "description": "Policies delivered through OS management (Windows GPO, macOS MDM, /etc files), bootstrap URLs and helper executables, with consent for code-executing keys.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-014",
+    "claude-extensibility-and-safety-015",
+    "claude-extensibility-and-safety-092",
+    "cursor-harness-architecture-131",
+    "hermes-architecture-and-surfaces-131"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-014",
+     "claude-extensibility-and-safety-015"
+    ],
+    "why": "Claude's layered tiers and per-user consent for code-executing delivered keys (q5)."
+   },
+   "mechanism": "Read policy sources in priority order; validate; keys that execute code need user consent.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable to a hosted web product; org policy is server-side.",
+    "strengths": ""
+   },
+   "benefit": "",
+   "approach": "Skip; org policy lives in Control Plane.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Control Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Desktop deployment concern.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-037",
+   "name": "Tool-call policy as code (CEL rules, external decision endpoint)",
+   "description": "Admins govern every tool call with expression rules (allow/deny/require_approval) or delegate to an HTTPS policy decision endpoint that fails closed.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-016",
+    "claude-runtime-architecture-086"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-016"
+    ],
+    "why": "Claude only (SRC, unreleased): up to 100 CEL rules where any deny wins, and an endpoint with onFailure=deny and a timeout."
+   },
+   "mechanism": "Rules {id, condition CEL over (tool, args, session, user), action, reason}; evaluate all, any deny wins; or POST the call to an endpoint with a 1-10 s timeout and onFailure deny.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-138"
+    ],
+    "evidence": [
+     "Model Plane/go/services/capability-core/internal/policy/engine.go",
+     "Model Plane/rust/services/execution-core/src/capability_policy.rs:350-390,741-836",
+     "Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3954"
+    ],
+    "gap": "No baseline record in this category; the baseline narrative shows every dispatch calls capability-core EvaluatePolicy (a central decision point; Allow needs Ed25519-signed evidence; unknown tools fail closed). Missing: admin-authored expression rules over arguments. Capability-before-dispatch with health attestation is partial: 9 capabilities sit in an unattested quarantine baseline and every promotion-ledger row is source_only (v-planned-decisions-138).",
+    "strengths": "Verevon already has the external-PDP architecture Claude is only now adding."
+   },
+   "benefit": "Lets enterprises encode their own rules without Verevon code changes.",
+   "approach": "capability-core: optional CEL (cel-go) rules per org evaluated inside EvaluatePolicy; reasons surfaced on denials.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-11-004"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Rule errors locking users out; validate and dry-run.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Verevon's PDP is a strength; CEL is an add-on.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-038",
+   "name": "Per-connector and per-tool permission policies (allow / ask / block)",
+   "description": "Users and admins set each connector tool to always allow, needs approval or blocked, with graduated read / low-risk / all tiers and write tools defaulting to ask.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-001",
+    "claude-extensibility-and-safety-018",
+    "claude-extensibility-and-safety-129",
+    "cursor-harness-architecture-093",
+    "manus-product-ux-072",
+    "web-chatgpt-web-product-119",
+    "web-claudeai-web-product-099"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-119",
+     "claude-extensibility-and-safety-129",
+     "web-claudeai-web-product-099"
+    ],
+    "why": "ChatGPT's graduated app permissions (Always ask / read / low-risk / all, per connected account) are the clearest UX (DOC q5); Claude's code (SRC q5) defaults all write tools of built-in connectors to ask and pins 8 high-impact tools per connector that can never be set to allow."
+   },
+   "mechanism": "Policy per (org, user, connector, tool) with tiers derived from declared side effects; default ask for writes; a never-allow set per connector that wildcards cannot open; server-side enforcement on each call; team defaults with batch update.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-135"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/integration_tools.rs:8-40,73-102",
+     "Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:125-139",
+     "Model Plane/go/services/capability-core/internal/registry/capabilities_store.go:344-425"
+    ],
+    "gap": "Provider actions are a curated catalogue with capability policy and scopes, and only 8 registry actions are model-executable with written evidence. Missing: a user/admin-facing per-connector, per-tool allow/ask/block setting with graduated tiers; MCP tools are blocked entirely.",
+    "strengths": "Evidence bar for model-executable actions is stricter than any reference."
+   },
+   "benefit": "Connectors (Gmail, Slack, GitHub, Microsoft) are core to Do mode; per-tool control lets users enable them confidently.",
+   "approach": "capability-core: connector_tool_policy table (org default, user override, never_allow set from the catalogue); execution-core reads it in EvaluatePolicy; SPA connector settings page with tier selector.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-11-061 side-effect taxonomy",
+    "integration-corev2 catalogue metadata"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Users choosing 'allow all'; keep never-allow tools.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Prevalent and directly user-visible; Verevon's connectors need it to scale.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-039",
+   "name": "Connector write-path safeguards and scope-aware tool exposure",
+   "description": "Safeguards inside connectors: rate limits and recipient caps on sends, allowlisted HTML, AI-generated headers, content-free audit, tools exposed only when the OAuth scope was granted, natural-language action constraints, account/org binding, shared vs personal connections.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-075",
+    "claude-extensibility-and-safety-132",
+    "claude-extensibility-and-safety-133",
+    "codexagent-agent-runtime-and-models-077",
+    "web-chatgpt-web-product-121",
+    "web-manus-web-product-100"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-133",
+     "claude-extensibility-and-safety-132",
+     "web-chatgpt-web-product-121",
+     "codexagent-agent-runtime-and-models-077"
+    ],
+    "why": "Claude's Microsoft 365 server (q5 SRC) throttles writes (10/60 s), sends (5/5 min) and recipients (100/5 min) per user hash, sanitises HTML, stamps an AI-generated header, logs without content and registers tools only for granted Entra scopes; ChatGPT turns builder-written NL constraints into reviewable rules; Codex separates shared and personal connections for agents."
+   },
+   "mechanism": "Per-user sliding-window buckets keyed by a hashed principal; recipient units charged per send; tools filtered by granted scopes at registration; denials name the missing permission; audit events carry ids and counts, never content.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/postcondition.rs:1-10",
+     "Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60"
+    ],
+    "gap": "No baseline record in this category. Deterministic postcondition read-backs verify provider writes. Not found: per-user send/recipient throttles, scope-aware tool exposure, AI-generated markers on outbound content, NL action constraints, shared vs personal connection model for deployed agents (verify in integration-corev2).",
+    "strengths": "Postcondition verification of effects is ahead of all references."
+   },
+   "benefit": "Bounds damage from a hijacked agent and helps compliance (EU AI Act labelling of AI-generated content).",
+   "approach": "integration-corev2: per-principal write/recipient buckets and scope-filtered action lists; Model Plane surfaces 'missing permission' typed errors; add an AI-generated header option on mail actions.",
+   "effort": "M",
+   "dependencies": [
+    "integration-corev2"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Throttles frustrating bulk use cases; make them org-configurable.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Common pattern; Verevon partly ahead on verification.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-040",
+   "name": "MCP transport-level gate, consent receipts and server hygiene",
+   "description": "One choke point for every MCP tool call with a decision cascade, single-use consent receipts bound to a hash of the exact arguments, reserved internal server names, manifest-pinned prompts, URL-elicitation guards and admin-gated inbound channels.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-027",
+    "claude-extensibility-and-safety-028",
+    "claude-extensibility-and-safety-073",
+    "claude-extensibility-and-safety-074",
+    "claude-extensibility-and-safety-102",
+    "claude-extensibility-and-safety-139"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-073",
+     "claude-extensibility-and-safety-074",
+     "claude-extensibility-and-safety-028"
+    ],
+    "why": "Only Claude (q5 SRC): the gate validates frames, lists tools itself and refuses ambiguous names; the permission layer mints a 120 s single-use receipt keyed by session, tool and SHA-256 of the arguments that the gate spends."
+   },
+   "mechanism": "Wrap MCP transport; reject malformed frames and unlisted tools; on approval mint receipt(session, tool, sha256(canonical args)); the gate executes only on spending a live matching receipt; drop servers whose names collide with reserved prefixes.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/tool_loop.rs:625-645"
+    ],
+    "gap": "MCP tools cannot be invoked by either loop until capability-core provides a durable binding (deliberate). When MCP is enabled, none of this gating exists yet.",
+    "strengths": "Blocking MCP until effects are verifiable is the safe choice."
+   },
+   "benefit": "MCP is how users bring their own tools; Claude's receipt pattern maps directly onto Verevon's exact-effect descriptors.",
+   "approach": "capability-core MCP binding issues per-tool capability ids; execution-core gate with argument-hash receipts reusing approval descriptors; reserved server name prefixes in capability-core.",
+   "effort": "L",
+   "dependencies": [
+    "capability-core MCP binding",
+    "C-t3-11-038"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "MCP servers returning injected content; combine with C-t3-11-022.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Needed before MCP ships; single source.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-041",
+   "name": "Extension, plugin and skill supply-chain security",
+   "description": "Install pipeline for skills/plugins/extensions: private copy, signature verification, org allowlist and security blocklist, trust-tiered static scanning with an un-overridable dangerous verdict, hook trust by hash, and scan-before-activate.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "deepseek",
+     "hermes",
+     "web-claudeai"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-034",
+    "claude-extensibility-and-safety-035",
+    "claude-extensibility-and-safety-037",
+    "claude-extensibility-and-safety-054",
+    "claude-extensibility-and-safety-058",
+    "claude-extensibility-and-safety-141",
+    "claude-product-ux-144",
+    "codexagent-plugins-and-extensibility-039",
+    "codexagent-plugins-and-extensibility-104",
+    "codexagent-plugins-and-extensibility-119",
+    "deepseek-transparency-and-customization-061",
+    "deepseek-transparency-and-customization-062",
+    "deepseek-transparency-and-customization-145",
+    "deepseek-transparency-and-customization-171",
+    "deepseek-transparency-and-customization-172",
+    "hermes-architecture-and-surfaces-066",
+    "hermes-learning-and-memory-048",
+    "web-claudeai-web-product-103"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-034",
+     "claude-product-ux-144",
+     "hermes-architecture-and-surfaces-066",
+     "codexagent-plugins-and-extensibility-039"
+    ],
+    "why": "Claude's hardened install (signature, identity binding, blocklist hash) and server-side scan gate where the previous version stays live until the scan passes (q5); Hermes's trust-tier x verdict matrix; Codex's trusted-hash approval for project and plugin hooks."
+   },
+   "mechanism": "Upload -> copy to private storage -> verify signature/manifest -> hash checked against org allowlist and global blocklist -> static scan (patterns + AST) -> policy matrix (trust tier x verdict) -> activate; previous version serves until pass; hooks run only when their content hash is approved.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No plugin or extension marketplace; skills exist (reattach_skill, skill injection switch) but no install scanning was checked.",
+    "strengths": ""
+   },
+   "benefit": "Needed before user- or org-authored skills/plugins are shared (Codex-style plugin system is in the vision).",
+   "approach": "Model Plane skill registry: scan on upload (pattern + LLM review), version pinning, org allowlist, publisher signatures later.",
+   "effort": "L",
+   "dependencies": [
+    "skills/plugin system (extensibility category)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Scanners give false confidence; state the trust model.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Depends on a plugin system that does not exist yet.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 12,
+    "DOC": 5,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t3-11-042",
+   "name": "Hooks as the policy enforcement point (PreToolUse chain)",
+   "description": "A registered chain of pre-tool hooks enforces workspace fences, write guards and canonicalisation for every tool call, in addition to the approval prompt.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-148"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-148"
+    ],
+    "why": "Claude (SRC): the desktop registers a PreToolUse chain (folder deny, worktree guard, config-root fence, cross-session send guard)."
+   },
+   "mechanism": "Ordered hooks with matchers; each returns allow/deny/ask with a reason; run before permission resolution.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/hook/mod.rs:1-18,113",
+     "Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1923-1927",
+     "Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2032-2057"
+    ],
+    "gap": "No baseline record in this category; the baseline narrative shows a real hook engine (allow/deny/ask, globs) whose rules live in an in-memory gateway registry and are passed only on browser runs; the Do-mode loop passes an empty hook_context.",
+    "strengths": "Hook engine exists in the governed pipeline."
+   },
+   "benefit": "Org policy hooks would apply uniformly to Do runs once wired.",
+   "approach": "Persist hook rules in capability-core (not process memory); pass them into Do-mode hook_context; expose admin-defined hooks via the policy registry.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-11-035"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small wiring fix with policy payoff.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-043",
+   "name": "Privacy modes and training/data-use controls",
+   "description": "User/org privacy levels that decide what may be stored, logged or used for training, by data classification and purpose, signalled on every request and attested by the server.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "web-chatgpt"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-architecture-083",
+    "cursor-ai-features-087",
+    "cursor-ai-features-089",
+    "cursor-ai-features-090",
+    "cursor-harness-architecture-094",
+    "web-chatgpt-web-product-124"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-087",
+     "cursor-ai-features-089",
+     "web-chatgpt-web-product-124"
+    ],
+    "why": "Cursor's purpose-by-classification matrix (q5 SRC) with a privacy header on every request and server attestation of privacy pods; ChatGPT's training defaults for business tiers and consumer opt-out."
+   },
+   "mechanism": "Mode enum; policy(mode, field_class, purpose) -> allow|deny; request header carries mode; server confirms it runs a privacy-mode pod; features that need more data are withheld.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-144",
+     "v-modelplane-162"
+    ],
+    "evidence": [
+     "Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql:21",
+     "Model Plane/rust/crates/mp-contracts/src/retention.rs:1-5"
+    ],
+    "gap": "Privacy tiers route to providers by residency/contract and ZDR is a non-downgradable claim. Missing: a user-visible statement per provider of training/use posture and a field-classification x purpose matrix for logging (verify Control Plane settings).",
+    "strengths": "ZDR claim that requests cannot downgrade and privacy-tier routing are stronger than Cursor's header."
+   },
+   "benefit": "Clear 'your data is never used for training' posture per provider increases B2B trust.",
+   "approach": "Show provider data-use posture in the model picker (from capability-core provider metadata); keep ZDR as the strict mode.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Mostly a disclosure gap on top of strong mechanics.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-044",
+   "name": "Zero Data Retention and residency boundaries",
+   "description": "Per-product or per-org ZDR with clear exclusions, residency for data and inference, and admin notice of what ZDR disables.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-153",
+    "web-chatgpt-web-product-123",
+    "web-claudeai-web-product-105"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-153",
+     "web-chatgpt-web-product-123",
+     "web-claudeai-web-product-105"
+    ],
+    "why": "Claude's per-product ZDR toggle with propagation notice (SRC); ChatGPT and Claude.ai document exactly which features ZDR excludes (DOC)."
+   },
+   "mechanism": "Org/product flag; a feature matrix states what is disabled under ZDR; residency per tenant; admin UI notice that changes take minutes.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-162",
+     "v-chat-agents-ui-131",
+     "v-chat-agents-ui-132",
+     "v-chat-agents-ui-133",
+     "v-planned-decisions-140",
+     "v-planned-decisions-141",
+     "v-planned-decisions-142",
+     "v-planned-decisions-144"
+    ],
+    "evidence": [
+     "Model Plane/rust/crates/mp-contracts/src/retention.rs:1-5",
+     "Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs:1-5",
+     "Model Plane/rust/services/inference-core/src/provider/zdr.rs:1-8",
+     "Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-118",
+     "Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12"
+    ],
+    "gap": "Design is ahead of every reference (one resolver, signed non-downgradable claim, evidence-bound provider attestation, typed localised refusals, one-way org raise at the BFF), but no provider is attested, so every ZDR turn is refused and Temporary chat is unavailable in practice; the own-connection waiver is planned (Z-15 held); the org ZDR switch awaits a live proof.",
+    "strengths": "Best-in-category design: fail-closed propagation across planes, typed refusals, retention receipts."
+   },
+   "benefit": "Unblocking one attested provider turns a paper strength into a shipped differentiator (Temporary chat, ZDR orgs).",
+   "approach": "Operator step: attest one provider (contract evidence + review-by date) in inference-core; run the live proof for the org switch; then ship Temporary chat. Keep the waiver held until reviewed.",
+   "effort": "S",
+   "dependencies": [
+    "provider contract evidence",
+    "Z-40 operator step"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Attesting without real contractual ZDR would be a compliance failure.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Verevon's strongest governance asset is currently unusable; small effort to unlock.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-045",
+   "name": "Retention periods, legal hold, deletion and temporary chats",
+   "description": "Admin-set retention per product, suspension of deletion for legal hold, self-serve deletion, incognito/temporary chats and regulatory deletion tooling.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-043",
+    "web-chatgpt-web-product-125",
+    "web-manus-web-product-081",
+    "web-perplexity-web-product-100"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-043",
+     "web-chatgpt-web-product-125",
+     "web-perplexity-web-product-100"
+    ],
+    "why": "Claude implements policy-driven retention per surface with legal hold and a headless sweep (SRC); ChatGPT and Perplexity document concrete windows and incognito behaviour."
+   },
+   "mechanism": "Retention policy per org and surface; sweep job deletes inactive sessions past the window unless on hold; deletions propagate to search indexes and derived memory; temporary chats skip persistence.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-164",
+     "v-chat-agents-ui-132"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/session-core/src/gdpr.rs:1-8",
+     "Model Plane/rust/services/session-core/src/space_deletion_reconciler.rs:1-8",
+     "Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:6-20"
+    ],
+    "gap": "GDPR org/user erasure and Space deletion reconciliation are shipped; Temporary chat is built but gated off by the missing ZDR attestation. Not found: org-configurable retention windows and legal hold for threads/runs (verify session-core).",
+    "strengths": "Erasure consumers with semantic-memory receipts are solid."
+   },
+   "benefit": "Enterprises require retention windows and legal hold before deploying chat broadly.",
+   "approach": "session-core retention sweeper driven by a Control Plane retention policy (per org, per surface) with a hold flag; propagate deletes to Data Plane indexes and memory.",
+   "effort": "M",
+   "dependencies": [
+    "Control Plane retention policy"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Accidental mass deletion; dry-run and audit.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common enterprise requirement.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-046",
+   "name": "Telemetry privacy and data-flow disclosures",
+   "description": "Telemetry scrubbed through closed vocabularies, consent-separated collection and sending, typed event schemas as the privacy boundary, and consent points that state what data goes where.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "t3code"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-041",
+    "claude-extensibility-and-safety-108",
+    "claude-extensibility-and-safety-113",
+    "claude-product-ux-118",
+    "cursor-ai-features-138",
+    "deepseek-harness-architecture-083",
+    "deepseek-harness-architecture-084",
+    "deepseek-transparency-and-customization-058",
+    "deepseek-transparency-and-customization-059",
+    "deepseek-transparency-and-customization-065",
+    "deepseek-transparency-and-customization-125",
+    "deepseek-transparency-and-customization-129",
+    "deepseek-transparency-and-customization-130",
+    "deepseek-transparency-and-customization-134",
+    "hermes-architecture-and-surfaces-132",
+    "t3code-architecture-025"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-041",
+     "deepseek-transparency-and-customization-130",
+     "hermes-architecture-and-surfaces-132"
+    ],
+    "why": "Claude's scrub framework (q5) hashes third-party tool names, redacts keys/URLs and bounds free text per sink; DeepSeek declares every analytics event at compile time; Hermes separates collect and send consents. Counter-examples: DeepSeek default-on session-log upload and T3 Code hashed provider identity."
+   },
+   "mechanism": "Typed event enum with allowed attributes only; a scrubber per sink; opt-in/opt-out switches with disclosed consequences; consent dialogs list the data flow.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-modelplane-158"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/security_events.rs:1-10"
+    ],
+    "gap": "Security events carry hashes only (shipped). Product analytics and frontend telemetry were not audited; check the SPA and gateway for analytics events and consent switches.",
+    "strengths": "Hash-only security events."
+   },
+   "benefit": "Consistent with ZDR promises; avoids leaking prompts through observability.",
+   "approach": "Typed event registry shared by the SPA and services; scrub at the OTel exporter; Control Plane privacy settings.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Support Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Hygiene; not user-visible.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 13,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-047",
+   "name": "Audit logs, compliance API and SIEM export",
+   "description": "Append-only audit of agent actions, approvals, connector calls and admin changes, exposed through a compliance API and real-time export to SIEM.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "deepseek",
+     "web-chatgpt",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "cursor-ai-features-095",
+    "deepseek-transparency-and-customization-049",
+    "web-chatgpt-web-product-127",
+    "web-perplexity-web-product-098",
+    "web-perplexity-web-product-102"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-127",
+     "web-perplexity-web-product-098",
+     "cursor-ai-features-095"
+    ],
+    "why": "ChatGPT's immutable Compliance Logs Platform plus stateful API with per-category admin keys (DOC); Perplexity streams audit JSON (queries, answers with model/sources, agent actions) by webhook to Splunk/Slack (DOC); Cursor records tool, hook, sandbox and classifier events (SRC). DeepSeek records approvals without actor identity (gap example)."
+   },
+   "mechanism": "Transactional outbox per service -> audit core (append-only, hash-chained) -> query API with scoped admin keys + webhook/SIEM fan-out; each approval event carries actor, decision, scope and evidence ids.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/session-core/src/audit_publisher.rs:1-8",
+     "Model Plane/rust/services/session-core/migrations/0043_audit_outbox_requeue.sql",
+     "Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md",
+     "Model Plane/go/services/capability-core/internal/registry/capabilities_store.go:553"
+    ],
+    "gap": "No baseline record in this category; the baseline narrative shows the session-core audit outbox to Audit Core was never delivered (4,992 events), with a fix built but not deployed; the capability registry has its own audit log. No compliance API or SIEM export found.",
+    "strengths": "Transactional outbox design and a candid postmortem."
+   },
+   "benefit": "Enterprise and regulated customers require an audit trail of AI actions; it also backs ZDR and approval claims.",
+   "approach": "Deploy the outbox fix; Control Plane Audit Core exposes a compliance query API and webhook export; include approval actor/scope and run proof-bundle ids.",
+   "effort": "M",
+   "dependencies": [
+    "Audit Core in Control Plane"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Audit logs must themselves respect ZDR (ids and hashes only).",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Built but undelivered; enterprise blocker.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-048",
+   "name": "Identity, RBAC, SSO/SCIM and spend limits",
+   "description": "Enterprise identity and access: SSO, SCIM, custom roles and groups, domain verification, IP allowlists, per-group/per-member credit caps.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "manus",
+     "t3code",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-architecture-080",
+    "manus-product-ux-074",
+    "t3code-architecture-090",
+    "web-chatgpt-web-product-126",
+    "web-chatgpt-web-product-129",
+    "web-claudeai-web-product-104",
+    "web-manus-web-product-079",
+    "web-perplexity-web-product-099",
+    "web-perplexity-web-product-101"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-126",
+     "web-claudeai-web-product-104",
+     "web-perplexity-web-product-099"
+    ],
+    "why": "ChatGPT's additive RBAC with custom roles, groups and delegated managers (DOC) is the most complete; Claude.ai and Perplexity add group spend limits and IP allowlisting."
+   },
+   "mechanism": "Roles with permission sets combined additively; SCIM group sync maps to roles; spend caps per group/member enforced at the gateway.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-140",
+     "v-modelplane-163",
+     "v-chat-agents-ui-138"
+    ],
+    "evidence": [
+     "Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:448-497",
+     "Model Plane/rust/services/model-gateway/src/org_quota.rs:1-12",
+     "Model Plane/rust/services/model-gateway/src/budget.rs:48",
+     "Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:1-20"
+    ],
+    "gap": "Shipped in Control Plane (members, SSO, org security, quotas) with Model Plane rate limits, org quota and budget checks. Weaknesses: the org quota fails open on an org-core outage and has no reservation; per-member credit caps not verified.",
+    "strengths": "Org quota from Control plus cost-core budget checks and run budgets."
+   },
+   "benefit": "",
+   "approach": "Keep; consider fail-closed (or bounded) quota on org-core outage and per-member caps.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Control Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon at parity.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 6,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-049",
+   "name": "Step-up verification and consumer account safety",
+   "description": "Fresh passkey/security-key proof before sensitive approvals; passkey-only sign-in, parental controls, age prediction, trusted contacts.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-085",
+    "web-chatgpt-web-product-130"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-085",
+     "web-chatgpt-web-product-130"
+    ],
+    "why": "Codex requires a fresh passkey proof for some approvals (SRC); ChatGPT documents consumer account safety (DOC)."
+   },
+   "mechanism": "WebAuthn assertion bound to the approval id before high-risk effects execute.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check Control Plane for WebAuthn/passkeys and whether any approval can require step-up.",
+    "strengths": ""
+   },
+   "benefit": "A strong pairing for payments, external sends and full-access escalation.",
+   "approach": "Control Plane WebAuthn step-up endpoint returning a signed assertion that execution-core verifies before executing NeverAuto effects.",
+   "effort": "M",
+   "dependencies": [
+    "Control Plane WebAuthn"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Friction.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Only 2 sources; valuable later with payments.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-050",
+   "name": "Compliance-regime gating (HIPAA verdicts, org capability taints, placement rules)",
+   "description": "Org capability tags (e.g. hipaa_regulated) latch restricted verdicts that disable whole surfaces, plus rules for where each surface may run and which inference providers are allowed.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "claude-extensibility-and-safety-020",
+    "claude-extensibility-and-safety-021",
+    "claude-extensibility-and-safety-022",
+    "claude-extensibility-and-safety-070",
+    "claude-extensibility-and-safety-072",
+    "claude-runtime-architecture-077"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-021",
+     "claude-extensibility-and-safety-070",
+     "claude-extensibility-and-safety-020"
+    ],
+    "why": "Only Claude (SRC): a sticky HIPAA verdict blocks sharing, cloud hand-off and scheduled cloud tasks with one error type."
+   },
+   "mechanism": "Org taints from the server -> sticky restricted verdict -> a gate function throws a typed error for listed surfaces.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-144"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12",
+     "Model Plane/rust/crates/mp-contracts/src/dataplane_posture.rs:1-5"
+    ],
+    "gap": "Verevon has the same pattern for ZDR (a persistence-free path that disables memory, artifacts, Do mode and approvals) and sovereign/privacy-tier routing, but no general regime tags beyond ZDR and residency.",
+    "strengths": "ZDR feature matrix is an equivalent, fail-closed design."
+   },
+   "benefit": "Generalising to regime tags (health, public sector) would be straightforward later.",
+   "approach": "Add regime tags to the Control-signed org posture; reuse the zdr_features gate pattern.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Single source; Verevon has the pattern.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-051",
+   "name": "Sharing governance",
+   "description": "Org-only sharing by default, admin control of external sharing and invites, revocation. (Supported only by DOC/INF records.)",
+   "prevalence": {
+    "sourcesWith": [
+     "web-claudeai"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "web-claudeai-web-product-106"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-106"
+    ],
+    "why": "Only source (DOC)."
+   },
+   "mechanism": "Share links scoped to the org by default; admin toggles external sharing; revoke all.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-136"
+    ],
+    "evidence": [
+     "Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:709-770"
+    ],
+    "gap": "Shareable links are not built; Space access must never widen an owner-plane ACL. Related: support and foreign-origin threads are already rendered read-only (v-chat-agents-ui-136).",
+    "strengths": ""
+   },
+   "benefit": "Required when share links ship.",
+   "approach": "Design share links in session-core with org-only default, admin policy key and ZDR refusal.",
+   "effort": "S",
+   "dependencies": [
+    "share links (chat category)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Depends on a feature that does not exist.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-052",
+   "name": "Sandboxed rendering of generated content (artifacts, widgets, previews)",
+   "description": "Model-generated HTML and app widgets render in isolated frames/sessions with deny-all permissions, request allowlists and controlled bridges to tools.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-045",
+    "claude-extensibility-and-safety-046",
+    "codexagent-plugins-and-extensibility-049",
+    "hermes-architecture-and-surfaces-135"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-045",
+     "claude-extensibility-and-safety-046",
+     "codexagent-plugins-and-extensibility-049"
+    ],
+    "why": "Claude's artifact renderer (deny-all session, request allowlist, TOCTOU-safe file serving) and artifact-to-connector bridge (declared tool allowlist, destructive confirmation, rate limit) are q5; Codex's MCP App sandbox host logs blocked navigation."
+   },
+   "mechanism": "Render in an opaque-origin iframe (sandbox allow-scripts, no same-origin) with CSP; any tool call from the artifact goes over postMessage to the host, checked against the artifact's declared allowlist and policy, with a card for destructive tools.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-137"
+    ],
+    "evidence": [
+     "Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519"
+    ],
+    "gap": "HTML artifacts render in a srcdoc iframe with allow-scripts and no same-origin. There is no artifact-to-tool bridge (so no bridge policy is needed yet).",
+    "strengths": "Correct opaque-origin isolation."
+   },
+   "benefit": "",
+   "approach": "Keep; if interactive artifacts that call tools are added, adopt Claude's declared-allowlist bridge.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "At parity for what exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-053",
+   "name": "Client shell hardening and link/protocol safety",
+   "description": "Desktop/web client hardening: sandboxed windows, sender-validated IPC, navigation and popup guards, deep-link validation, loopback host trust fences, confirmations for external links and protocols, deceptive-link warnings.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "deepseek",
+     "manus",
+     "t3code"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-081",
+    "claude-extensibility-and-safety-048",
+    "claude-extensibility-and-safety-049",
+    "claude-extensibility-and-safety-103",
+    "claude-extensibility-and-safety-145",
+    "claude-product-ux-115",
+    "claude-runtime-architecture-079",
+    "claude-runtime-architecture-084",
+    "codexagent-plugins-and-extensibility-091",
+    "deepseek-harness-architecture-087",
+    "deepseek-transparency-and-customization-056",
+    "manus-computer-control-architecture-062",
+    "t3code-architecture-029"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-115",
+     "claude-runtime-architecture-079",
+     "claude-extensibility-and-safety-048"
+    ],
+    "why": "Claude covers the most ground (typed IPC with sender validation, navigation guards, link confirmations with 'user@host' deception warnings); most items are Electron-specific."
+   },
+   "mechanism": "For a web SPA: CSP, rel=noopener, an interstitial for external links from model output, warnings for deceptive URLs, no javascript: or custom protocols.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check the SPA markdown renderer for external-link interstitials and protocol filtering. Desktop items do not apply.",
+    "strengths": ""
+   },
+   "benefit": "Model output links are an injection/phishing vector.",
+   "approach": "SPA: link interstitial for model-generated links to new domains; block non-http(s) schemes; CSP review.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Mostly desktop-specific.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 11,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-054",
+   "name": "Service authentication, RPC scope tables and tenancy chokepoints",
+   "description": "Every RPC requires a declared scope and authenticated tenant; per-audience delegated tokens; single-use WebSocket tickets; external surfaces refuse work until authorised.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-115",
+    "hermes-architecture-and-surfaces-130",
+    "t3code-architecture-023",
+    "t3code-architecture-024",
+    "t3code-architecture-076"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-architecture-024",
+     "hermes-architecture-and-surfaces-130",
+     "hermes-architecture-and-surfaces-115"
+    ],
+    "why": "T3 Code's total RPC scope map where a missing scope is a compile error (q5) is the cleanest; Hermes adds single-use 30 s WebSocket tickets and the rule that session ids are not authorisation."
+   },
+   "mechanism": "A total map method -> required scope checked in one interceptor; tokens per audience; WS upgrade via short-lived single-use ticket.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-154",
+     "v-planned-decisions-143",
+     "v-chat-agents-ui-130",
+     "v-modelplane-166",
+     "v-modelplane-167"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/model-gateway/src/auth.rs:1-20",
+     "Model Plane/rust/services/model-gateway/src/grpc.rs:271",
+     "Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:145-356"
+    ],
+    "gap": "Fail-closed RS256/JWKS on every service, authorize_rpc over every RPC and per-audience delegated bearers from the BFF are shipped. Remaining: verified tenant delegation for background workers (per-principal allowlists only) and NATS without TLS/mTLS/workload identity.",
+    "strengths": "Ahead of every reference on service-to-service authority and tenancy."
+   },
+   "benefit": "",
+   "approach": "Keep; close NATS mTLS and verified worker delegation.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Plaintext NATS inside the cluster is the weakest link.",
+   "tier": "n/a",
+   "significance": 4,
+   "rationale": "Verevon's strongest area besides ZDR.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-055",
+   "name": "Device pairing and remote-control trust",
+   "description": "Pairing codes/QR for clients, device-bound login and revocation, hardware attestation of remote sessions, SSH host-key-first prompts, consent before exposing local folders remotely, messaging-gateway DM pairing.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "hermes",
+     "manus",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-extensibility-and-safety-044",
+    "claude-extensibility-and-safety-100",
+    "claude-extensibility-and-safety-101",
+    "hermes-architecture-and-surfaces-129",
+    "manus-computer-control-architecture-064",
+    "t3code-ui-and-multimodel-094"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-044",
+     "t3code-ui-and-multimodel-094",
+     "hermes-architecture-and-surfaces-129"
+    ],
+    "why": "Claude's device-key signing of session binds and triggers (q5); T3 Code's pairing with device list and revoke; Hermes's DM pairing codes with lockout."
+   },
+   "mechanism": "One-time pairing code -> scoped session per device; device list with revoke; hardware-backed key signs sensitive binds.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable to a browser-first hosted product; messaging-channel pairing belongs to the docs-only Channel Plane.",
+    "strengths": ""
+   },
+   "benefit": "Relevant only for a future Channel Plane (Telegram/Slack bots).",
+   "approach": "Skip now; reuse Hermes's pairing pattern when Channel Plane starts.",
+   "effort": "M",
+   "dependencies": [
+    "Channel Plane"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Local/desktop concern; Channel Plane is future.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-056",
+   "name": "Release, update and dependency supply-chain integrity",
+   "description": "Signed releases and updaters, hash-checked installers, upper-bounded and SHA-pinned dependencies and actions, release-age checks, server-driven mandatory updates.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "deepseek",
+     "hermes",
+     "manus",
+     "t3code"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-082",
+    "deepseek-transparency-and-customization-133",
+    "hermes-architecture-and-surfaces-134",
+    "manus-computer-control-architecture-063",
+    "t3code-architecture-077"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-134"
+    ],
+    "why": "Hermes (q5 SRC): every dependency upper-bounded, git URLs and Actions pinned to SHAs, a release-age check. Counter-examples: Antigravity and Manus ship unsigned Windows binaries."
+   },
+   "mechanism": "Lockfiles with exact pins; CI actions by SHA; minimum release age before adoption; signed artifacts with rollback.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-168"
+    ],
+    "evidence": [
+     "Model Plane/scripts/release-artifact.sh"
+    ],
+    "gap": "Artifact v3 tooling exists but no signed candidate or rollback artifact has been built; dependency pinning policy not audited.",
+    "strengths": ""
+   },
+   "benefit": "A signed, reproducible release is a prerequisite for credible security claims to enterprise buyers.",
+   "approach": "Build and sign the release artifact in CI; pin GitHub Actions by SHA; add cargo-deny/govulncheck gates.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Support Plane",
+   "risks": "",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Built tooling, not used.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t3-11-057",
+   "name": "Security engineering process and an honest, explicit trust model",
+   "description": "A published trust model stating which controls are boundaries and which are accident prevention, defensive rules distilled from bugs, invariant tests proven red before fixes, and plain statements of what is not secure.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-088",
+    "deepseek-harness-architecture-089",
+    "deepseek-transparency-and-customization-064",
+    "hermes-architecture-and-surfaces-113",
+    "hermes-architecture-and-surfaces-136"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-113",
+     "hermes-architecture-and-surfaces-136",
+     "deepseek-harness-architecture-088"
+    ],
+    "why": "Hermes's SECURITY.md (q5) says the OS is the only boundary and in-process screens are accident prevention, and requires an invariant test proven red for boundary fixes; DeepSeek keeps an enforced defensive-patterns rulebook."
+   },
+   "mechanism": "SECURITY.md with boundaries, in-scope/out-of-scope; PR rule: security-boundary fixes ship a failing-then-passing invariant test.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-148"
+    ],
+    "evidence": [
+     "Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md",
+     "Model Plane/docs/decisions/ledger.md"
+    ],
+    "gap": "No baseline record; DOC evidence: a decision ledger, postmortems and honesty contracts. Missing: one published trust-model statement for chat/agent users (which controls are boundaries). A third-party audit/certification of the data-protection design is planned only (v-planned-decisions-148).",
+    "strengths": "Postmortem and ledger culture; honesty contracts in the product."
+   },
+   "benefit": "",
+   "approach": "Keep; write a short public trust model for the agent page (boundaries = Control-signed decisions, bwrap sandbox, Quarry execution; heuristics = injection scan).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Support Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon equal on process.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-058",
+   "name": "Model-facing policy awareness and capability-gated prompts",
+   "description": "The model is told the current approval policy and sandbox meaning, policy changes are announced in the conversation, disabled capabilities remove both the tool and its prompt text, and the model is taught not to ask permission via question tools.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "t3code"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-056",
+    "deepseek-transparency-and-customization-050",
+    "t3code-ui-and-multimodel-061"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-050",
+     "t3code-ui-and-multimodel-061",
+     "codexagent-agent-runtime-and-models-056"
+    ],
+    "why": "DeepSeek injects the complete policy meaning and announces changes (SRC, e2e-tested); T3 Code removes tool and prompt text together server-side."
+   },
+   "mechanism": "System prompt section generated from the effective mode bundle; a policy change appends a sourced system note; tool catalogue and prompt are built from the same server-side capability set.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check whether Do-mode prompts include the effective posture/rung and whether disabled tools are also removed from prompt text.",
+    "strengths": ""
+   },
+   "benefit": "Fewer wasted turns asking for permissions the model cannot get; better honesty with the user.",
+   "approach": "model-gateway prompt builder: render posture/rung/network tier from the resolved profile; emit a note on change.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-11-001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Cheap quality improvement.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-059",
+   "name": "Interruption guards for running agents (quit/update warnings, hold to quit)",
+   "description": "Quitting or updating the app warns which running agents and pending approvals would be interrupted; hold-to-quit prevents accidental exits.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-transparency-and-customization-066",
+    "t3code-ui-and-multimodel-067"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-066",
+     "t3code-ui-and-multimodel-067"
+    ],
+    "why": "DeepSeek names what would be interrupted (DOC); T3 Code hold-to-quit (SRC)."
+   },
+   "mechanism": "Ask the host what is running before quit; require hold.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not needed: Verevon runs execute server-side and survive tab close (runs are durable in session-core).",
+    "strengths": "Server-side durable runs make this moot."
+   },
+   "benefit": "",
+   "approach": "Skip.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Desktop-only concern.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-060",
+   "name": "Subagent and side-session governance",
+   "description": "Delegated subagents only use allowlisted model routes recorded per session; side chats run as read-only forks with deny-all prompting and a breach detector.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-152",
+    "deepseek-transparency-and-customization-063"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-152",
+     "deepseek-transparency-and-customization-063"
+    ],
+    "why": "Claude's read-only side-chat forks (q5 SRC) and DeepSeek's per-session subagent model-route allowlist (DOC)."
+   },
+   "mechanism": "Subagent inherits a narrowed capability set and an allowlisted model route list; read-only forks deny all prompts and confine reads.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2331"
+    ],
+    "gap": "No baseline record. Check whether depth-1 subagents inherit the parent's posture and capability set (never wider) and whether their model routes are constrained.",
+    "strengths": ""
+   },
+   "benefit": "Prevents privilege widening through delegation as fan-out research grows.",
+   "approach": "execution-core: subagent capability set = intersection(parent, subagent profile); record model route policy on the run.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Small, defensive.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-11-061",
+   "name": "Declared tool side-effect taxonomy driving policy",
+   "description": "Every tool declares a side-effect class (read, read_sensitive, local_mutation, open_world_mutation, external_effect) and MCP-style hints (readOnly, destructive, idempotent, openWorld) that drive approvals, ledgers and auto-review.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "manus-computer-control-architecture-030"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-030"
+    ],
+    "why": "Manus (SRC) classifies all 22 browser tools into five levels and emits MCP annotations; everything except read/read_sensitive is ledger-worthy."
+   },
+   "mechanism": "Static map tool -> side-effect class + hints in the tool contract; policy and approval routing key off the class, not the name.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-156"
+    ],
+    "evidence": [
+     "Model Plane/rust/services/execution-core/src/permission/mod.rs:229-260",
+     "Frontend Plane/verevonv3/src/shared/actions/action-registry.ts"
+    ],
+    "gap": "The frontend action registry declares risk, approval and reversibility for 168 actions, but execution-core decides risk by substring matching on tool names (delete, write, send, post, exec, ...), which can misclassify (e.g. create_artifact).",
+    "strengths": "Typed action registry with risk/reversibility metadata already exists on the frontend side."
+   },
+   "benefit": "A declared taxonomy makes approvals predictable, enables auto-review and per-tier connector policies, and removes substring misclassification.",
+   "approach": "mp-contracts: SideEffectClass enum on every capability (bound in capability-core's trusted map); execution-core permission uses it instead of substrings; share the same metadata with the frontend registry.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Mislabelling a tool as read; default unknown tools to external_effect.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Foundation for C-t3-11-006, -018 and -038; small effort.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

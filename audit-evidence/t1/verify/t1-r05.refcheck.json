@@ -1,0 +1,108 @@
+[
+ {
+  "finalId": "F-t1-018",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/schema/tables/public/events.sql:15-33 (STORED generated tsvector, simple config, NULL for 8 private kinds)",
+   "C:/dev/buzz/crates/buzz-search/src/query.rs:1-120,145-160,205,247 (community required at type level, websearch_to_tsquery, prefix mode with :* on trailing token, ts_rank_cd)",
+   "C:/dev/buzz/crates/buzz-relay/src/handlers/req.rs:585 (SEARCH_PAGE_SIZE = 100)",
+   "C:/dev/buzz/crates/buzz-relay/src/api/bridge.rs:2238-2256,2376 (search_hit_accepted per-hit predicate: filter match, accessible channel, reader_authorized_for_event)",
+   "C:/dev/qm/src/sessions/postgres-session-store.ts:465,494-495,523,1633 (qm also has a generated tsvector plus to_tsquery over session entries)",
+   "C:/dev/buzz/desktop/src/app/useAppShellKeyboardShortcuts.ts:55-80 (Mod+F searches the current channel, Mod+K searches everything)",
+   "C:/dev/buzz/desktop/src/features/search/ui/useSearchMenuKeyboardNavigation.ts:44 (Backspace on an empty query clears the scope); C:/dev/buzz/desktop/tests/e2e/smoke.spec.ts:622-706 (search-channel-scope-chip)",
+   "extract/slack/dist/main.bundle.cjs at about offset 1336400 (the EDITING_COMMANDS 'find' case focuses the webContents and sends START_SEARCH)",
+   "Teams main-locale-en-us-23ba9acb36586a4b.js.gz via zcat+grep: autosuggest_contextual_search_entry_{channel,chat,community,post}, autosuggest_dcs_find_in_this_{channel,chat,thread}, *_pcs_mode 'View all ... with {{displayName}}'",
+   "scratchpad/tmp/ts/str_ms-teams.exe.txt:41691-41693 (substrate.office.com search/api v1/suggestions, v1/events, v2/init in a CORS preflight handler)",
+   "grokbot features records grokbot-agent-product-051/-072, grokbot-agent-runtime-094 (only agent-side conversation and memory search found)"
+  ],
+  "corrections": "The buzz mechanism is accurate. Small fixes: ranking uses ts_rank_cd, not ts_rank. Full-text mode uses websearch_to_tsquery, and prefix mode builds a to_tsquery with :* on the last token only. In R-t1-04-02, 'Esc or backspace widens' is buzz Backspace-on-empty-query only; I did not find an Esc handler. Prevalence for in-room scoped search with Ctrl/Cmd+F is overstated. GrokBot is in sourcesWith, but its search is agent-side (searching its own conversations and memory), not user-facing in-room scoped search, so drop it: 3 of 5 (buzz, teams, slack). Slack is only partial: its shell routes Find to in-app search (START_SEARCH), but the shipped shell does not show whether that search is pre-scoped to the room. For R-t1-04-01 (full-text search, 4 of 5), qm is confirmed by its own tsvector search over session entries. Slack has no member record and rests on product knowledge. Per-hit re-authorization is verified only in buzz. Teams search runs on a backend service (Substrate) we cannot see, so its permission model cannot be observed and Teams must not be cited for per-hit re-authorization. Teams being best for scope UX is justified, but only at the level of UI strings.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Teams scope list is REA/locale-string evidence only (UI copy), not observed behaviour; could be ring- or license-gated",
+   "Teams search engine is Substrate server-side; suggestions/init/events endpoints observed only as URLs in the shell's CORS preflight handler",
+   "Slack evidence is the desktop shell only (Find to START_SEARCH); scoped search semantics are web-client/server-side and not observed",
+   "qm full-text search exists (SRC), but I did not verify per-hit re-authorization in qm",
+   "Per-hit re-authorization is SRC-verified only in buzz",
+   "REA analyze_javascript_application used only on grokbot node-agent-coordinator (heap-limited partial); the rest is direct source/bundle grep"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-017",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/desktop/src/features/messages/lib/canManageMessage.ts:1-30 (self-author OR owner-of-agent via ownerPubkey; huddle-started immutable; no admin path in this check)",
+   "C:/dev/buzz/crates/buzz-core/src/kind.rs:478-492 (KIND_STREAM_MESSAGE_EDIT 40003 as a separate event)",
+   "C:/dev/buzz/VISION.md:147 ('Soft-deleted events remain in the audit log' is a vision doc statement)",
+   "C:/dev/buzz/schema/tables/public/reactions.sql:1-20 (PK community,event_created_at,event_id,pubkey,emoji; removed_at; unique reaction_event_id)",
+   "C:/dev/qm/src/core/message-revisions.ts:1-60 (system entry kind message_revision, action edited|deleted, keyed by Slack ts; appendEntryOutsideTurn + lease; rendered as <message-edited>/<message-deleted>)",
+   "C:/dev/qm/src/slack/reactions.ts:32-57,155-195,240-259 (REACTION_INSTRUCTION text directive [[react: ...]], MAX_REACTIONS_PER_TURN=5, shouldSurfaceReaction gate, buildReactionTurnText renders a '[Slack reaction] ...' text turn)",
+   "C:/dev/qm/src/slack/directives.ts:1-35 (regex directive extraction from the reply text)",
+   "C:/dev/qm/src/slack/ack-emoji.ts:17,87 (ack emoji with latency logged)",
+   "extract/grokbot/dist/electron-main/proto.cjs: GrokBotFeedbackAction enum UNSPECIFIED/UP/DOWN/SUBMIT/REVERT; ReactToGrokBotMessageRequest{agent_id,entry_id,emoji,session_id}",
+   "extract/grokbot/dist/renderer/assets/index-Bo3NzkuN.js at about offset 1082500 (sand-message-hover-actions with role 'toolbar' and a 'more' popover)"
+  ],
+  "corrections": "Two mechanisms are wrongly attributed. (1) It says qm agents 'emit reactions through a typed tool capped at 5 per turn'. In fact qm uses a text directive in the model reply ([[react: name @ ~id]]) that the Slack adapter parses with a regex and caps at 5. The cluster itself recommended a typed tool as an improvement over qm. Rephrase as 'qm: reply directive, max 5; recommend a typed tool for Verevon'. Inbound reactions reach the agent as a rendered '[Slack reaction] ...' text turn, not a typed {reaction, target_seq, by} object. qm revision entries target the Slack message ts, not a seq. (2) It says 'slack: role=toolbar per message with roving focus and a more-menu'. The role=toolbar evidence is GrokBot (index-Bo3NzkuN.js sand-message-hover-actions). Slack's records cover the rich clipboard and the native context menu only, and roving focus was not verified anywhere. Also: buzz 'soft-deleted events kept in audit' comes from VISION.md (DOC), not code. buzz's client-side permission has no admin branch; admin delete comes only from the Slack/Teams policy docs. qm has no edit or delete UI of its own; it ingests Slack edit/delete events. So qm's place in the 4-of-5 edit/delete count means 'handles edits made on its Slack surface', not 'offers edit/delete'.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "qm reactions and edits are Slack-surface features (qm reuses Slack's reactions and edit events); there is no qm-native reactions table",
+   "Slack and Teams edit/delete and admin policy flags are DOC (help center, learn.microsoft.com) plus Teams locale strings",
+   "buzz audit retention of soft-deleted events is DOC (VISION.md:147), not verified in code",
+   "GrokBot reactions and feedback votes are proto/RPC-schema level (SRC from bundle); wake-on-reaction behaviour not re-verified",
+   "Per-message action toolbar evidence is GrokBot; the more-menu content differs, and GrokBot has no edit/delete"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-012",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/docs/practical-information-flow-for-buzz-agents.md:1-15 (marked 'Draft', Aug 27 2026, proposal for a trusted broker)",
+   "C:/dev/buzz/Cargo.toml:5 (crates/ifc-core is a workspace member); grep finds no other crate depending on ifc-core (unused)",
+   "extract/grokbot/dist/electron-main/main-app.cjs at about offset 1194645 (grok_bot_external_send_labeling_config: a remote-config zod schema with sampleRate, connectors[{name,hosts,sendTools,participants}], labelAutoReviewSends, unsentSampleRate)",
+   "C:/dev/qm/src/resolution/context-filter.ts:1-29 (principalEntitledToScope, filterHistoryForAudience: every audience member must be entitled to entry.scopeLabel)",
+   "C:/dev/qm/src/memory/context-boundary.ts:35-58 (fingerprint of scope plus sorted audience ids; throughSeq jumps to latestSeq when the audience changes)",
+   "C:/dev/qm/src/core/orchestrator/compaction.ts:100-170 (summaryLabel = session scopeId; throughSeq; securityTainted flag)",
+   "C:/dev/qm/src/memory/classification.ts:6-13 (ordinary|unknown|sensitive|restricted, strongest label wins via helper prompt)",
+   "C:/dev/qm/plugins/web-ui/src/memory.ts:236-270 and src/memory/postgres-memory-service.ts:147-148 (PUT with revision, restore with expectedRevision)",
+   "C:/dev/qm/src/resolution/sharing-posture.ts:1-20, sharing-access.ts:45 (isolated|open; isolated wins on compose; requires a human or live ambient origin)",
+   "Teams main-locale-en-us-23ba9acb36586a4b.js.gz via zcat+grep: odsl_chat_agent_hitl_preview_warning_text (review, then Allow to send to the group), odsl_chat_agent_share_response_blocked_text, project_agent_configuration_knowledge_resources_* (incl. 'need to be part of the chat to remove it')",
+   "REA analyze_javascript_application on extract/grokbot/dist/node-agent-coordinator (summary, heap-limited partial)"
+  ],
+  "corrections": "The R-t1-10-02 mechanism (instance bound to one audience, memory with audience labels and membership epochs, subset rule, owner declassify) is written as reference practice, but it exists only in buzz's DRAFT design doc. The ifc-core crate is unused. Label it a proposal (DOC), not shipped behaviour, and do not make buzz the best source for a capability no reference ships. Treat qm as the best-in-class shipped implementation. GrokBot's 'runtime labelling of outbound Slack/Gmail/Outlook sends' is a remote-config (feature flag) schema with sampling rates. The connector list is supplied by the server, and the names Slack, Gmail and Outlook are not in the shipped schema (inference). It samples sends for labelling and review rather than blocking them. In R-t1-07-08, 'audience-safe disclosure 4 of 5 (table-stakes)' is overstated. Shipped audience intersection exists only in qm. Teams has review-then-share UX (strings plus DOC). Slack's model is 'agent reach equals the requester's reach' (DOC), which is weaker and different. buzz is the draft. Rephrase as a differentiator, 1 shipped plus 2 partial. The qm compaction 'tainted flag' is securityTainted, which marks prompt-injection or untrusted input, not audience. Audience safety comes from the summary label being the session scope. 'Derived content takes the maximum label of its sources' is a recommendation. Teams explicitly does not do this for AI output, and qm labels summaries with the session scope. For Teams knowledge scope, 'removal deletes derived knowledge, re-add starts from zero' and 'add requires membership' are DOC. The shipped strings show only that membership is required to remove a source.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "buzz information-flow control is a draft proposal (DOC); ifc-core crate is unused",
+   "GrokBot external-send labelling is a flag-gated remote-config schema with sample rates; connector names are not in the binary",
+   "Teams review-then-share and knowledge-source scoping are REA locale strings plus DOC; Copilot/agent features are likely license-gated and possibly preview (not verified)",
+   "Teams sensitivity-label propagation to AI output is explicitly partial (honest gap)",
+   "qm is the only source with shipped, readable audience filtering, context boundary and labelled memory (SRC, high)",
+   "Slack audience model is DOC-only (docs.slack.dev agent design)"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-005",
+  "verdict": "partial",
+  "checked": [
+   "extract/grokbot/dist/electron-main/main-app.cjs at about offset 1868995 (class h7 extends ConnectError: 'sand box access is blocked by privacy mode', failureMetadata {kind:'no-storage'})",
+   "extract/grokbot/dist/node-agent-coordinator/main.cjs (outcome set includes no_storage, box_blocked, access_denied; maps no-storage failure to display info)",
+   "extract/grokbot/dist/electron-main/main-app.cjs at about offsets 1644167 and 1645291 (analytics: EMt=256 deferred buffer cap; analyticsOptedOut gives a disabled state; flush only with an access token)",
+   "extract/grokbot/dist/electron-main/main-app.cjs (team.privacy_mode.read permission, GetUserPrivacyModeRequest, getSandGhostModeHeaderFromPrivacyMode)",
+   "C:/dev/qm/docs/error-reporting.md:1-25 (opt-in by SENTRY_DSN; 'Events are sent unredacted'; traces 'sent without scrubbing')",
+   "C:/dev/qm/plugins/chassis/src/error-reporting.ts:11-55 (sdk.init with extraErrorDataIntegration depth 8, no beforeSend scrubber)",
+   "cluster C-t1-10-037 member records teams-product-surface-139 (REA locale: privacy_diagnostic_data_viewer) and buzz-architecture-077 (closed label sets), not re-opened in depth",
+   "REA analyze_javascript_application on extract/grokbot/dist/node-agent-coordinator (summary, partial)"
+  ],
+  "corrections": "GrokBot's ZDR block is confirmed for one feature: connecting to the persistent sandbox box ('sand box') under privacy mode raises a typed no-storage ConnectError that the UI maps to a block state. The mechanism's 'every persistent feature checks it at connect or write time' generalises from that single case. Say 'GrokBot blocks its persistent computer (sandbox) under privacy mode with a typed no-storage error'. Telemetry 'consent-gated or scrubbed: 4 of 5 (grokbot, qm, teams, buzz)' is wrong for qm. qm backend error reporting is operator opt-in (on only when a DSN is set), and its docs state events and traces are sent unredacted and unscrubbed. qm is a counter-example (record qm-architecture-139 says the same), not a reference. buzz's evidence is server-side operational metrics with closed label sets, not user consent. Correct to: consent-deferred client analytics 1 of 5 (grokbot, 256-event cap, disabled on opt-out); diagnostic data viewer 1 of 5 (teams, REA strings); closed-label operational metrics (buzz); qm opt-in but unredacted. Teams AI-interaction retention is DOC only.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "GrokBot privacy-mode block is observed for the sandbox/box connect path only (SRC from bundle)",
+   "GrokBot analytics 'consent' is opt-out/activation state plus token gating, not an explicit consent dialog that we saw",
+   "qm sends unredacted error context to Sentry when enabled; cite it as an anti-pattern",
+   "Teams retention controls for AI interactions are DOC (Purview), likely license/enterprise-gated",
+   "buzz telemetry evidence is operational/server metrics, not user-consent gating"
+  ],
+  "confidence": "high"
+ }
+]

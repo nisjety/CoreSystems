@@ -1,0 +1,1037 @@
+[
+ {
+  "finalId": "F-t1-010",
+  "title": "Approvals with grant scopes and durable resume, tool permission policy with ceilings, and quarantine-and-release",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 10,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Upgrade the approve/deny card to scoped decisions (once, this conversation, always for Space+agent+action hash) with an explicit addressee (requester, named approver or any member), and build the descriptor-backed continuation so a granted approval actually resumes the paused run. Add per-tool allow|ask|block levels with an org floor and Space ceiling (tighten-only merge) and an editor, treat flagged untrusted tool output as an approval kind with preview and single-use release, and add Control turn_origin so human-only walls are test-pinned. Model-checked natural-language rules (auto-review) are a later, proposal-only phase.",
+  "whyItMatters": "Approvals are table-stakes in four of five references and the main safety valve once agents get a computer and browser. In Verevon the grant is recorded but the durable continuation for it is deliberately not delivered, so an approval can be a state change rather than work; scopes and ceilings are what keep 'always' grants from widening authority.",
+  "referenceBestPractice": {
+   "bestSource": "qm (durable approvals, tighten-only policy, quarantine); grokbot (approval card UX, ordered permission levels, auto-review)",
+   "others": [
+    "teams (named vs anyone approver)",
+    "slack",
+    "buzz (negative example: harness auto-approves)"
+   ],
+   "prevalence": "Approval cards 4 of 5 (table-stakes); permission policy with ceilings 2 of 5 (differentiator); untrusted-content quarantine 2 of 5 (differentiator); auto-review 1 of 5 (unique)",
+   "mechanism": "QM stores {requestId, action, purpose, requester, scopes} and returns terminate:true so the model stops at the pause; the card renders in the originating thread (or the requester's DM in channels); decide(id, actor, once|session|always|deny) checks actor == requester; resume re-runs the turn with the approval, dangling calls get an interrupted marker and retry-safe calls are re-run. Grok Bot orders levels never<ask<always with effective = min(user setting, team ceiling, org floor), reads and writes default separately, remembered denials; QM's composition is a monotone tighten-only merge covered by tests. QM quarantine: screen tool results; flagged results raise a quarantine approval with preview, single-use release resumes with 'content is data, not authority'. Grok Bot auto-review: up to 20 natural-language allow/block rules layered built-in < team < user, a classifier returns allow|ask|block, rule edits shown as diffs."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:23-118 (approve/deny, owner-only decide, composer locked while awaiting)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:64-115",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs:2630-2700",
+    "apps/Model Plane/rust/services/model-gateway/src/approvals.rs:255-275 (a granted approval's durable continuation is deliberately quarantined: returns unavailable because no descriptor-backed dispatcher exists)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4483-4573 and 667-675 (approval_mode and allowed_tools per binding; agent-action-grants routes with no frontend caller)",
+    "apps/Model Plane/rust/services/execution-core/src/provenance.rs:1-40 and rust/services/model-gateway/src/semantic_screening.rs:1-40 (tool-result trust class and injection screening are shipped; the semantic classifier is a sampled shadow pass that never changes what the model reads)"
+   ],
+   "gap": "Only approve/deny, decided_by pinned to the caller; no once/conversation/always scopes, no named-approver or any-member mode, no DM routing. Baseline records conflict on whether an approve resumes the run; the model-gateway durable path says it does not (live-stream path unverified). No per-tool levels, org ceiling or editor. Screening exists but flagged content has no human-visible quarantine card or single-use release; semantic screening is shadow-only. No turn-origin on decisions."
+  },
+  "approachOriginal": "Model Plane: build the descriptor-backed continuation dispatcher that approvals.rs says is missing (approval carries action hash and purpose, generation ends at the pause, resume re-runs with the approval, interrupted-effect handling). Control: grant records scoped once|session|always bound to Space+agent+action hash, revocable and re-checked at use; policy object effective = min(binding level, Space ceiling, org floor) with only three levels (allow, ask, block) and separate read/write defaults, tighten-only merge test-covered; add turn_origin (direct|ambient|automation) to decisions with negative tests. Frontend: scoped buttons and an addressee line on SpaceApprovalPanel, policy editor in the Agent tab (the existing grant routes already lack a caller). Quarantine as an approval kind fed by the existing provenance trust class, failing closed if the screener is down. Auto-review only as a Model Plane proposal that Control still signs, never for irreversible or credential actions. Adopt the consequence-stated wording from the dropped outbound-call item (R-t1-03-12 (dropped)) for every irreversible effect: the card says what cannot be recalled before the human approves.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Item F-t1-004 (R-t1-07-02) (card surface)",
+   "Control grant records",
+   "Descriptor-backed continuation in session-core/execution-core"
+  ],
+  "planeOwner": "Model Plane (continuation, screening, auto-review proposal); Control Plane (grants, ceilings, turn_origin); Frontend Plane (cards, policy editor)",
+  "risks": "'Always' grants widening authority: bind to Space, agent and action hash, make revocable. Model-judged authorisation can be fooled: proposal only. Policy complexity: keep three levels.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 24,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "S2.7 cross-plane provenance and screening envelope and S3.6 human-only grant mutation in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (screening code is partly built; scoped grants and continuation are not)."
+  },
+  "sourceClusters": [
+   "C-t1-07-035",
+   "C-t1-07-036",
+   "C-t1-07-037",
+   "C-t1-07-038"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-010",
+    "status": "partial",
+    "exactGap": "Shipped: an approve/deny card in the room timeline (SpaceApprovalPanel, decision pinned to the run owner), durable approvals with an encrypted action-bound continuation descriptor and a leaseable approval_delivery_outbox in Session Core, and an execution-core approval_delivery_worker that really resumes three idempotent action kinds (execute_provider_action, book_shipment, tickets.create) while shell, browser_agent and MCP tools fail closed as invalid_continuation. The model-gateway and gateway decide path still returns a deliberate quarantine placeholder (continuation_delivery pending) and the card says approving lets the run continue for every tool. Missing: once, session and always grant scopes with revocation (the panel's own comment explains why only two verbs are offered), named-approver or any-member routing, a per-tool allow/ask/block policy with org floor, Space ceiling and an editor (the Convex binding only has approvalMode auto|require_confirmation|blocked and an allowedTools filter that its own comment calls not the security boundary), a human-visible quarantine card with single-use release (the deterministic injection screen and trust classes exist, semantic screening is shadow-only) and Control turn_origin.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:1-60",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:120-175",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-approvals.ts:70-140 (grep hits: 403 or 404 renders as refused for a non-owner)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:55-200",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:640-680",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/approvals.rs:55-100",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/approvals.rs:235-300",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:1535-1585",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/approval_delivery.rs:1-80",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/continuation_crypto.rs:1-60",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs:755-775",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-120",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1280-1320",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/main.rs:28-33",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4440-4600",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:1-60",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/policy/engine.go:1-180",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4480-4575",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts:325-395",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts:622-640",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:724-725 (grep hit: approval_mode union)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:945-953 (grep hit: read-only display of approval_mode and allowed_tools; no editor found)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/owner_grant_decision.go:1-60",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/owner_effect_reservation.go:88-160",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/moderation.rs:415-470",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs:1-40",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/provenance.rs:20-60",
+     "C:/dev/CoresSystem/apps/Model Plane/scripts/tests/approval-continuation-proof.sh:1-40"
+    ],
+    "reuse": [
+     "Session Core approval_delivery outbox, continuation_crypto descriptor encryption and descriptor validator (approval_delivery.rs, continuation_crypto.rs, orchestration_grpc.rs:755-775).",
+     "Execution-core approval_delivery_worker (claim, started, outcome, acknowledge protocol with postcondition verification) as the place to add further resumable action kinds.",
+     "Control owner_grant_decision.go and owner_effect_reservation.go, which already implement a revocable grant record bound to action and conversation for tickets.create.",
+     "Convex spaceAgentBindings approvalMode and allowedTools plus gateway apply_mention_binding_policy as the binding-level policy store.",
+     "capability-core policy engine (allow, ask, deny from risk level plus durable capability_scopes) and execution-core PermissionMode (Auto, Ask, Deny) as the per-tool decision point.",
+     "model-gateway screen_tool_payload and execution-core TrustClass as the existing flagged-content signal for a quarantine approval kind."
+    ],
+    "constraints": "Control signs authority and Model proposes: a grant scope must be a Control-side record bound to Space, agent and action hash and re-checked at use (the owner-grant and effect-reservation pattern already does this for tickets.create); the model-side engine may only tighten. Space access must not widen an owner-plane ACL, so an 'always' grant may skip the prompt but never the owner-plane authorization at effect time. Under ZDR the continuation descriptor is refused (agent.rs:4558-4575), so ZDR approvals cannot resume by design. Browser and MCP resume is a larger problem the worker explicitly declines, and Quarry must remain the executor for browser actions. capability-core scope grants support only org and global today (policy/engine.go:46-58), so a Space ceiling needs that extended or a Control-side merge.",
+    "approachAdjustment": "Do not describe the dispatcher as missing: it exists in execution-core for three action kinds. The work is (a) widening resumable kinds one at a time with idempotency and postcondition proofs and (b) making the room honest about which approvals will resume by surfacing continuation_delivery on the card instead of the unconditional 'run continues' sentence. Put grant scopes in Control (grant records plus a decision) by generalising the tickets.create owner-grant shape, not in the Model Plane approval row. Build the policy from the existing Convex binding fields and capability-core scope grants with a Space ceiling and org floor and an editor in the Agent tab, rather than a parallel permission store; the existing agent-action-grants routes are tickets.create-only and have no frontend caller.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged overall: scopes, addressee and policy editor are L, while each additional resumable action kind is roughly M. The dispatcher itself is no longer part of the cost.",
+    "verdict": "reword",
+    "verdictReason": "The item says the descriptor-backed continuation dispatcher still has to be built; in code it exists for three action kinds, so the recommendation should be reduced to widening and honest surfacing plus the genuinely absent parts (scopes, addressee, ceilings, editor, quarantine card, turn_origin).",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-010",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/qm/src/slack/approvals.ts:38,243-251 (only requester may decide; ephemeral rejection)",
+     "C:/dev/qm/src/slack/approval-cards.ts:44-48 (threadOnly -> DM routing)",
+     "C:/dev/qm/docs/session-tape-spec.md:99-116 (retrySafe re-run vs interrupt marker on resume)",
+     "C:/dev/qm/src/harness/agent-tools.ts:436,4414-4437 (retrySafe field)",
+     "C:/dev/qm/src/core/orchestrator.ts:2172-2335,3792 (security-screen-release quarantine; 'data, not authority' resume text)",
+     "scratchpad/extract/grokbot/dist/local-exec-daemon/main.cjs SmartModeClassifierDecision enum (UNSPECIFIED|ALLOW|BLOCK), SmartModeClassifierRuleEffect (ALLOW|ASK_FIRST), SmartModeClassifierRuleSource (CUSTOM_RULE|TEAM_RULE)",
+     "scratchpad/extract/grokbot/dist/electron-main/proto.cjs AutoReview* message names (no built-in rule source found)",
+     "C:/Program Files/WindowsApps/MSTeams_26260.1701.5139.3736_x64__8wekyb3d8bbwe/desktop-assets/hashed-assets/main-locale-en-us-23ba9acb36586a4b.js.gz (odsl_hitl_pending_consent_request_all and agent_interaction_allow_button_text present)",
+     "Records slack-product-surface-087 (DOC guidance only), buzz-architecture-045, buzz-product-096, buzz-architecture-111"
+    ],
+    "corrections": "Approval cards are 3 of 5 shipped (Grok Bot, QM, Teams REA strings); Slack is DOC design guidance only (no platform approval protocol) and must not be counted as a shipped approval card. Untrusted-content quarantine is 1 of 5 (QM, unique); Buzz only has prompt-level trust-labelled framing, not quarantine. Grok Bot permission math: evidence shows effective = min(user setting, team ceiling); drop 'org floor' (QM vocabulary). Grok Bot auto-review: rule sources are custom (user) and team only, no 'built-in' layer found; the classifier decision enum is ALLOW|BLOCK while ASK_FIRST is a rule effect, so do not say the classifier returns allow|ask|block. QM tighten-only merge is tested but an admin setter can replace floors. QM sends the approval card to the requester's DM when the conversation is thread-only, not 'in channels' generally.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Grok Bot auto-review model and prompts run server-side; only the client interface is visible",
+     "Grok Bot standing grants are implemented only for messaging subjects (send-imessage) in this build",
+     "Teams HITL consent inferred from localized strings (REA), not a traced flow; 'odsl' prefix meaning unknown",
+     "Slack approvals are DOC guidance only",
+     "QM quarantine depends on a screening classifier that can fail open"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-011",
+  "title": "Personal agents with an owner-controlled access list and add policy, a private assistant beside the room, and configurable room bindings",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 11,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Let each person own a personal agent (visibility owner/org/room, a primary-agent setting, per-user sessions) that can be invited into a room with the owner's consent and is revoked with its owner, plus a private assistant panel inside a Space with a reviewed 'share to room' escalation. Every agent definition gets an access list (owner, manager, collaborator; users first, teams and org later) and an add policy (owner_only, nobody, anyone) edited with an expected-state token; binding an agent needs the room manager role and the agent's add policy. Shared room agents become configurable per binding (model from the org-approved list, language, proactivity, thread policy).",
+  "whyItMatters": "The brief asks for Grok-Bot-style personal agents that work like a person, and a personal Space cannot hold an agent today. Without an owner-controlled access list, a personal agent in a shared room would either be unusable or widen its owner's reach, which the Space authority rule forbids.",
+  "referenceBestPractice": {
+   "bestSource": "grokbot (personal/team agents, primary bot, clone-to-team); teams and slack (private-vs-group assistant panel with escalation); grokbot",
+   "others": [
+    "buzz (personal agents as supervised local processes)",
+    "qm (session scope derived once at admission)",
+    "buzz (add policy owner_only, nobody, anyone)"
+   ],
+   "prevalence": "[R-t1-07-04] Personal agents 3 of 5 (common); shared room agent 3 of 5 (common); private assistant panel 2 of 5 (differentiator); personal-to-team conversion 1 of 5 (unique) [R-t1-02-03] 2 of 5 (grokbot, buzz); differentiator",
+   "mechanism": "[R-t1-07-04] Grok Bot agent record with visibility OWNER|TEAM and a user MAIN_AGENT setting; the primary agent coordinates the owner's other agents and runs a proactive check-in routine; sessions keyed by (agent, user, surface); Team Bots share setup (plugins, routines, memory, computer) with isolated per-teammate sessions and per-person connector accounts; CloneAgentToTeam(personal_secret_names) -> CLONED|UNSUPPORTED|NO_TEAM excludes personal secret names and triages memory promotion. Teams channel agent config: keywords, model preference, default language, proactive help on/off, knowledge sources. Slack/Teams side panel is bound to the current context with a private session and an escalate-to-group dialog that posts a reviewed copy into the room. QM/Buzz derive SessionScope once at admission and use it as the single key for sessions, queues and cancel. [R-t1-02-03] agent_access(agent_id, principal_type user|group|team|link, principal_id, role owner|manager|collaborator) plus agent.add_policy. Binding an agent requires the room's manager role and the agent's policy (owner_only means the actor must be the agent owner). Edits carry expected_state_token; a stale token is refused with a repeat-the-change message; owner and managers are always retained."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Control Plane/user-core/internal/spaces/repository.go:660-673 (a personal Space has exactly one subject by construction; membership replacement refused)",
+    "apps/Application Plane/convex-core/convex/spaceMembers.ts:31-44",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3261-3405 (create-in-room and bind flows for room agents)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:20-132",
+    "apps/Application Plane/convex-core/convex/schema.ts:620-634 (default_thread_policy and knowledge_scope deliberately not stored on the binding)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:143-146 (per-message model picker with privacy-tier resolver)",
+    "apps/Application Plane/convex-core/convex/spaceAgents.ts:486-516 (listInstallableSpaceAgentsForGateway returns every agent definition of the org to a room manager)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3913-3932 (installable list gated only by the caller's room role)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceBindAgentDialog.tsx:26-153",
+    "apps/Application Plane/convex-core/convex/schema.ts:324-364 (agents table read in part: scoped by orgId, no access list or add policy observed)"
+   ],
+   "gap": "[R-t1-07-04] Personal agents absent: no per-user agent, no primary agent, no 'bring my agent into this room', no private panel inside a Space. Room agents are partial: no per-person sessions inside an agent, no per-agent model/language/proactivity configuration, thread policy not stored so room-vs-thread context cannot be chosen, Studio configuration not inherited on bind. [R-t1-02-03] Only the room side is gated. An agent has no owner-controlled access list or add policy, and personal agents cannot exist because a personal Space cannot hold agents."
+  },
+  "approachOriginal": "[R-t1-07-04] Control: do not widen the personal-Space roster (the code comment says that would turn private storage into shared storage); instead model the personal agent as an owner-derived subject whose admission is derived from the owner and revoked with the owner, and let the owner bind it into a shared room through the same Control-decided bind flow used for room agents. Application: agent definition visibility owner|org|room, a MAIN_AGENT user setting, and extra binding fields (model preference, language, proactivity flag, thread policy). Model Plane: derive one session key (agent, room, user|room) at admission and use it for provider sessions, queues and cancel; validate model choice against the org-approved list. Frontend: personal agent home, 'invite my agent' dialog, side panel reusing /chat with Space context whose 'Share to room' goes through review-then-share (item F-t1-012 (R-t1-07-08)). Later: clone-to-team copying only allowlisted fields and requiring per-item confirmation for any memory promotion. [R-t1-02-03] Control Plane: store agent_access and add_policy as authority (agents are already service subjects in space_memberships), and make the bind decision check both the room role and the agent policy. Application Plane keeps the agent definition and a display projection; filter the installable list by the caller's add right. Frontend: access panel on the agent and policy badge in the bind dialog. Coordinate with the agents category on where agent ownership is recorded.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Item F-t1-012 (R-t1-07-08) (audience-safe disclosure and memory)",
+   "Item F-t1-028 (R-t1-07-07) (agent computer) for a full personal agent",
+   "Control owner-derived admission for service subjects",
+   "Item F-t1-002 (R-t1-07-01) (addressing)",
+   "Personal agents (agents category)",
+   "Agent ownership field on agent definitions"
+  ],
+  "planeOwner": "Control Plane (owner-derived admission, access list, add policy); Application Plane (definition and binding schema); Model Plane (session keys, model validation); Frontend Plane (private panel)",
+  "risks": "[R-t1-07-04] A personal agent in a shared room could leak owner-private context: every outbound path must go through audience-safe disclosure and personal memory must never auto-copy into a room. Configuration sprawl: keep safe defaults (mention-only, no tools, require_confirmation). [R-t1-02-03] Collaborator access must not let someone use the owner's connected accounts: tools still need owner-plane grants. Group and link principals must be resolved by Control, not by the browser.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 23,
+   "DOC": 8,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-07-004",
+   "C-t1-07-067",
+   "C-t1-07-006",
+   "C-t1-07-005",
+   "C-t1-07-026",
+   "C-t1-07-028",
+   "C-t1-02-015"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-011",
+    "status": "partial",
+    "exactGap": "Room agents exist end to end (create-in-room, bind an org agent, pause/resume/revoke, agents held in Control as service subjects), and a binding already stores and the gateway already enforces triggerModes, allowedTools and approvalMode (schema.ts:606-678, spaces.rs apply_mention_binding_policy), but no route or dialog edits them and model, language, proactivity and thread policy are deliberately not stored. Personal agents, a primary-agent setting, an agent owner access list and add policy, and a private assistant beside the room are absent: the agents table has only an optional createdBy, listInstallableSpaceAgentsForGateway returns every org definition to any room owner or manager, and Control accepts Application's declared service roster with no per-agent policy check. A personal Space is single-subject by construction and ReplaceMemberships refuses it, so 'bring my agent' cannot be done by widening that roster.",
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:324-423",
+     "apps/Application Plane/convex-core/convex/schema.ts:606-678",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:300-400",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:480-530",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:700-800",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3261",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3433-3535",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3626-3710",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3905-3940",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4483-4503",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceBindAgentDialog.tsx:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/agents/lib/chief-core-routing.ts:1-60",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs:1-40",
+     "apps/Frontend Plane/verevonv3/docs/space-defenition.md:380-392",
+     "apps/Control Plane/user-core/internal/spaces/repository.go:600-733",
+     "apps/Control Plane/user-core/internal/spaces/authority.go:251-300",
+     "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:140-165",
+     "apps/Model Plane/rust/services/model-gateway/src/normalize.rs:80-100"
+    ],
+    "reuse": [
+     "spaceAgentBindings policy fields (triggerModes, allowedTools, approvalMode) and the gateway's apply_mention_binding_policy: only an edit route and UI are missing",
+     "Control space_memberships subject_type='service' rows and the managed_subject_types=['service'] convergence used by confirmSpaceAgentMembershipForGateway",
+     "agents.createdBy as the starting owner link, and the ADR-0002 cross-Space agent registry for 'where is my agent'",
+     "SpaceBindAgentDialog and SpaceCreateAgentDialog, and the user-layer persona route (me/persona) as the model for a per-user setting such as a primary agent"
+    ],
+    "constraints": "Space access never widens an owner-plane ACL: a personal agent in a shared room may use only what the room's audience may see, and owner connected-account tools still need owner-plane grants. Control owns membership and today trusts Application's declared service roster (spaceAgents.ts:709-760), so an add policy stored only in Convex would be advisory and must be evaluated at Control. A personal Space stays single-subject (repository.go:669-675), so a personal agent must be an owner-derived subject rather than a roster widening. No org-approved model list has an owner today (allowed_models is refused as homeless, grpc.rs:150-160; only a process-wide ALLOWED_MODELS env exists, normalize.rs:86-100), so 'model from the org-approved list' needs a Control-owned list first.",
+    "approachAdjustment": "Slice it. First expose the existing binding policy (trigger mode, tools, approval) through a PATCH route and a settings dialog, and add model and language only once the org-approved model list has an owner (shared with F-t1-006). Second, make the agent access list and add policy Control authority enforced at the roster-replace boundary or a new bind decision, because Control performs no per-agent check today; filter the installable list by the caller's add right. Third, personal agents and the private panel, which also depend on an agent-owner link, audience-safe disclosure (F-t1-012) and addressing (F-t1-002). Do not describe room-agent configuration as wholly absent.",
+    "effortRevised": "XL",
+    "effortNote": "Raised from L as one item: slice one is S to M, the Control access list and add policy is M to L, and personal agents with the private panel is XL.",
+    "verdict": "reword",
+    "verdictReason": "Personal agents, the access list and the private panel are absent, but binding-level trigger, tool and approval policy already exists and is enforced, so the item must not call room-agent configuration missing; it also places the add-policy check in a Control path that does not exist yet.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-011",
+    "verdict": "partial",
+    "checked": [
+     "grokbot extract dist/electron-main/proto.cjs: GrokBotAgentVisibility OWNER|TEAM; GrokBotAccessRole UNSPECIFIED|USER|MANAGER; GrokBotAgentAccessPrincipalType USER|GROUP; GrokBotAgentLinkAccess; expected_state_token; SetGrokBotMainAgent; CloneGrokBotAgentToTeamOutcome CLONED|UNSUPPORTED|NO_TEAM; personal_secret_names; kept_private_count",
+     "grokbot renderer index.eager-app-*.js: UI labels Owner, Manager, Collaborator; access-changed retry message; 'Each teammate signs in with their own account'; teammates connect their own plugin accounts",
+     "teams meeting-collaboration-locale (gunzipped): agent_escalate_to_groupchat_dialog_header ('{{appName}} added to the meeting with everyone') and description (now in the meeting chat, interactions visible to everyone); meeting_copilot_group_copilot_chat_privately",
+     "teams main-locale: project_agent_configuration_keywords_*, project_agent_model_preference_label, team_agent_under_construction_tooltip",
+     "C:/dev/buzz/crates/buzz-relay/src/handlers/channel_authz.rs:47-55,95-110 owner_only/nobody policy, self-add bypass",
+     "cluster records slack-product-surface-077/080/093, qm-architecture-001"
+    ],
+    "corrections": "(1) Teams escalate-to-group is meeting-scoped: the dialog adds the agent to the meeting chat so later interactions are visible to everyone; there is no evidence of 'posting a reviewed copy into the room'. Slack has no escalate-to-group evidence (split view is the agent-app DM surface; tray summon is flag-gated). Attribute escalation to Teams meetings only. (2) Grok Bot wire roles are USER|MANAGER; Owner and Collaborator are UI labels; principal types are USER|GROUP with a separate team row and link access. (3) The primary Bot's proactive check-in is UI copy only (no server code visible). (4) Teams channel-agent configuration is from locale keys; Channel Agent is public preview (DOC) and Team Agent shows an 'under construction' tooltip. (5) QM resolves scope once per turn, not 'at admission'; only Buzz derives SessionScope at event admission. (6) Slack personal agent (Slackbot) is DOC/press release, Business+/Enterprise+ plans.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "Teams Channel Agent: public preview; Team Agent: under construction",
+     "Teams escalation: meeting chats only, string-level evidence",
+     "Slack Slackbot personal agent: vendor DOC, plan-gated",
+     "Grok Bot personal/team/clone model: SRC (proto + UI strings), server behaviour not observed"
+    ],
+    "confidence": "medium"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-012",
+  "title": "Audience-safe agent context and memory: source labels, audience-bound memory, owner-signed declassify, review-then-share and explicit room/team knowledge scopes",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 12,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Stamp a source-scope label on every tool result, retrieval chunk and memory record, tag every agent memory write with the Space audience (hash, revision) from the signed decision, fold context against the decision's audience, make compaction summaries inherit labels and cut context when the audience changes, and evaluate retrieval entitlement for the whole audience. Add an owner-signed declassify action, explicit opt-in before a person's personal context is used in a shared room, a private draft with Share-to-room for sensitive answers, and an explicit per-room knowledge list.",
+  "whyItMatters": "Thread storage is audience-bound, but persistent agent memory (including Letta) is scoped by org, user or thread only, so what an agent learned in a private room can surface in a wider one. Personal agents in shared rooms make this a data-governance risk, not a nice-to-have.",
+  "referenceBestPractice": {
+   "bestSource": "buzz; qm (labels, audience fold, context boundary, memory notebook); teams (review-then-share UX, explicit knowledge list)",
+   "others": [
+    "grokbot (runtime labelling of outbound Slack/Gmail/Outlook sends)",
+    "qm (sharing posture: Isolated by default, Open needs owner and room opt-in, live membership re-check)",
+    "teams (sensitivity labels; honest gap: AI output does not inherit controls)",
+    "grokbot (personal-to-team memory promotion)",
+    "buzz (owner-readable core/cold memory split)",
+    "slack"
+   ],
+   "prevalence": "[R-t1-10-02] Agent flow control: 2 of 5 (buzz draft design, grokbot); sharing posture: 1 of 5 (qm); label propagation: 1 of 5 (teams, partial). Differentiator. [R-t1-07-08] Audience-safe disclosure 4 of 5 (table-stakes); context assembly/compaction 4 of 5 (table-stakes); memory 3 of 5 (common); per-room knowledge scope 1 of 5 (unique, Teams)",
+   "mechanism": "[R-t1-10-02] Each agent instance is bound to one audience. Memory entries carry an audience label and a membership epoch; a read is allowed only when the target audience is a subset of the source audience, unless the owner explicitly declassifies. Outbound tool sends are classified internal, external or self and sampled for review. Sharing defaults to Isolated; Open requires an owner opt-in on the resource plus a room opt-in, re-checked against live membership at turn time. Derived content takes the maximum label of its sources. [R-t1-07-08] QM stores a scopeLabel on every transcript entry; filterHistoryForAudience keeps an entry only if all audience members are entitled; a context snapshot fingerprints scope plus sorted audience ids and when it changes throughSeq moves to the latest seq and older entries are dropped from replay; resource handles only if every member is entitled; compaction summaries record throughSeq, scope label and a tainted flag so they cannot leak to a narrower audience. Teams: if entitlement cannot be verified for all recipients the answer is a private draft to the requester with a warning and an 'Allow to send to the group' button; knowledge_resources[] requires membership in the source, removal deletes derived knowledge and re-add starts from zero. QM memory: per-scope revisioned notebook with records {id, text, sensitivity ordinary|unknown|sensitive|restricted, source scope/session}, a helper model classifies and the strictest label wins, recall filtered by audience disclosure policy, editor with compare-and-swap and restore."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Application Plane/convex-core/convex/schema.ts:853-903 (recipient audience snapshots and events) and apps/Control Plane/user-core/internal/spaces/decision.go:145-222 (audience hash and revision bound into decisions)",
+    "apps/Model Plane/rust/services/session-core/migrations/0023_thread_space_context.sql, 0024_thread_recipient_audience_revision.sql, 0025_message_space_audience_context.sql (threads and messages carry Space audience context)",
+    "apps/Model Plane/rust/services/session-core/migrations/0032_space_membership_revocations.sql (revoked members are denied run, thread and memory access)",
+    "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:214-230 (agent_memory has scope run|thread|session|user|org|global, owner and classification, but no space or audience column; 0011 and 0037 add none)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2680 (deny-by-default shared-read gate; the timeline swallows the 403 per the UI baseline)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:39-41,173-175,287-289 (decisions bind recipient_audience_ref, revision and hash)",
+    "apps/Control Plane/user-core/internal/spaces/decision.go:4-60 (Ed25519 signed, effect-bound, short-lived decisions)",
+    "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:70 (memory scope enums are run, thread, workspace, session, user; no space scope)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4291-4390",
+    "apps/Application Plane/convex-core/convex/schema.ts:620-634 (knowledge_scope deliberately not stored on the binding)",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1943-1952 (S3.1: Data owns authored personal/Space memory documents with CAS, history, restore, provenance and explicit shared-to-personal promotion; Model owns learned memory and the resolver)"
+   ],
+   "gap": "[R-t1-10-02] Thread and message storage is audience-bound, but persistent agent memory (including Letta semantic memory) is scoped by org, user or thread only. There is no declassify step, no per-resource 'share into this Space' opt-in, no output label or outbound-send classification. [R-t1-07-08] Audience binding and the transcript read filter by audience revision are in place (baseline narrative). Not confirmed or missing: per-entry source labels on tool results and retrieval chunks, audience-intersection of tool and egress grants, summary labels on compaction, a review-then-share private draft, and any Space/team memory scope or per-room knowledge list. The cited session-core line range did not match the audience logic when spot-checked, so the Session Core and Data v2 retrieval paths still need a code check."
+  },
+  "approachOriginal": "[R-t1-10-02] Model Plane session-core: add space_ref, audience_hash and audience_revision to agent_memory (new migration), set them at write time from the decision claims, filter at retrieval with the subset rule, and treat user or org scope memory read inside a Space as personal context that needs a Control decision. letta-bridge must apply the same filter. Control user-core: add context_shares (resource, Space, owner opt-in, expiry) and a declassify decision type that is owner-signed and audited. Frontend: a panel that shows which personal context the agent may use in this room, with opt-in and declassify. Outbound: integration-corev2 tags each send by recipient domain versus org and writes it to audit. Later phase: Control defines label taxonomy, Data Plane documents and Spaces carry a label, Model computes output label as the maximum of input labels and the Application Plane stores it on the message. [R-t1-07-08] Model Plane Session Core: stamp the source scope on every tool result, retrieval chunk and memory record; filter replay by the decision audience (entry kept only if all members entitled); compaction summary inherits the label and a tainted flag; move throughSeq when the audience hash changes. Data v2 retrieval: evaluate entitlement for the whole audience (intersection) and return handles only if every member is entitled. Frontend: private 'only you can see this' draft with Share to room and a visible 'withheld because a member lacks access' state. Memory and knowledge: follow the S3.1 split (Data v2 owns authored Space/personal memory documents with revision history and explicit shared-to-personal promotion; Model owns learned memory and the resolver) and settle that ADR first because the existing memory enum lives in capability-core; add a space scope keyed by the Control space_ref, records with sensitivity and provenance, a memory tab with restore, a binding knowledge_scope referencing Data v2 collections with a deletion saga on removal. ZDR orgs get no durable memory. Never auto-copy room facts into personal memory.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "audience snapshots (shipped)",
+   "session-core memory migration",
+   "letta-bridge filtering",
+   "F-t1-011 (R-t1-02-03) (agent ownership model)",
+   "F-t1-031 (R-t1-10-05) (audit)",
+   "Data v2 retrieval ACL per principal and per audience",
+   "Session Core entry labels",
+   "Plane-ownership ADR for memory (S3.1)",
+   "Control decision audience hash/revision (exists)"
+  ],
+  "planeOwner": "Model Plane (session-core memory, letta-bridge, compaction, labels); Data Plane v2 (retrieval entitlement); Control Plane (declassify decision)",
+  "risks": "[R-t1-10-02] Memory becomes less useful when partitioned, so declassify must be cheap. Membership epoch changes must invalidate labels correctly. Letta semantic memory may not be partitionable without bridge work. Label taxonomy can be over-applied (everything confidential). [R-t1-07-08] Over-filtering can make answers useless: needs a clear withheld state. Cross-room leakage and ZDR conflict for memory. Must never widen an owner-plane ACL.",
+  "significance": 5,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 3,
+   "SRC": 33,
+   "DOC": 8,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-07-08] S3.1 authored context with split ownership in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1943-1952; knowledge_scope is explicitly deferred in the Application binding schema."
+  },
+  "sourceClusters": [
+   "C-t1-10-026",
+   "C-t1-10-025",
+   "C-t1-10-012",
+   "C-t1-07-003",
+   "C-t1-07-029",
+   "C-t1-07-030",
+   "C-t1-07-031"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-012",
+    "status": "partial",
+    "exactGap": "Audience binding is real for thread and message storage and transcript reads (Control-signed decisions bind audience ref, hash and revision, messages carry audience columns, reads drop rows newer than the decision revision, revoked members are denied), but memory is not Space-aware at all. In Session Core, append_message_in_tx extracts memory candidates from every message that is not conversation-only, including Space posts, and persists them as user-level agent_memory owned by the thread owner (dreaming.rs persist_candidates) and mirrors them to Letta, while search_memory authorizes only against the thread owner and filters by org, user and thread; agent_memory has no space, audience or label column. There are also no per-entry source labels on tool results or compaction summaries, no declassify or personal-context opt-in, no private draft, no audience-intersected retrieval entitlement (Control's shared retrieval decision binds the audience but evaluates the acting member, and Data v2 retrieval-engine has no audience concept) and no Space-binding knowledge scope (knowledge_scope is deliberately not stored; only per-agent-definition knowledgeBindings exist).",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:2632-2665",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:2565-2580",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:5425-5475",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dreaming.rs:739-790",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dreaming.rs:960-1030",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:88-122",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:350-410",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_control.rs:25-34",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:210-235",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0032_space_membership_revocations.sql:1-22",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:66-74",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/letta-bridge/internal/server/server.go:25-34 (per grep output)",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/letta-bridge/internal/agentmemory/client.go:120-160 (per grep output)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs:80-90 (per grep output)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/shared_retrieval_decision.go:1-30",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:166-190",
+     "C:/dev/CoresSystem/apps/Data Plane v2/services/retrieval-engine-rs/src/api/mod.rs:98-279 (grep for audience: only JWT audience constants)",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts:368-395",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts:622-632",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1730-1760",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1940-1952",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1705-1728"
+    ],
+    "reuse": [
+     "Control audience hash and revision already bound into signed decisions, Application audience snapshots, and the per-message audience columns written at append (grpc.rs:2565-2580).",
+     "Session Core audience-revision read predicate (grpc.rs:5455-5461) as the pattern for filtering anything derived from a Space transcript.",
+     "space_membership_revocations (migration 0032) for revoked-member denial.",
+     "MemoryRetention (no durable memory for ZDR callers) and user_memory_controls (memory_control.rs) as existing on/off controls to extend with a per-Space switch.",
+     "Letta bridge already keys by org, user and thread (agentmemory client), so adding a space filter is an extension, not a new service."
+    ],
+    "constraints": "Plane ownership of memory is unsettled by design: the S3.1 ADR gives Data v2 authored Space and personal memory documents and Model Plane learned memory plus the resolver, while agent_memory and the capability-core scope enum (run, thread, workspace, session, user) both live in Model Plane, so settle the ADR before adding a space scope. Space access must not widen an owner-plane ACL: user or org-scope memory read inside a Space needs an owner-signed Control decision, and room facts must never be auto-copied into personal memory. ZDR callers already get no durable memory. Letta must receive the same filter or it becomes the bypass.",
+    "approachAdjustment": "Add a small containment slice before the full labelling design: for Space-bound threads, stop extracting memory candidates into user-level agent_memory and stop Letta indexing (at minimum for non-personal Spaces), and exclude user and org-scope memory recall from shared-room turns until a Control opt-in exists; then tag agent_memory rows with space_ref, audience hash and revision and filter at retrieval. Treat source-scope labels, compaction taint, declassify, private drafts and per-room knowledge lists as the later L phase. Audience-intersection of retrieval entitlement belongs in the Control decision (which today evaluates one acting member), not in Data v2 inferring membership.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged for the full item. The containment slice is M; the labelling and declassify phase spans Session Core, Control, Data v2 and the Letta bridge and is L to XL.",
+    "verdict": "keep",
+    "verdictReason": "Premise confirmed and sharper than described: a Space message is already turned into the thread owner's user-level memory with no Space tag, so the leak vector exists today. Keep, add the containment slice, and consider raising priority.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-012",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/buzz/docs/practical-information-flow-for-buzz-agents.md:1-15 (marked 'Draft', Aug 27 2026, proposal for a trusted broker)",
+     "C:/dev/buzz/Cargo.toml:5 (crates/ifc-core is a workspace member); grep finds no other crate depending on ifc-core (unused)",
+     "extract/grokbot/dist/electron-main/main-app.cjs at about offset 1194645 (grok_bot_external_send_labeling_config: a remote-config zod schema with sampleRate, connectors[{name,hosts,sendTools,participants}], labelAutoReviewSends, unsentSampleRate)",
+     "C:/dev/qm/src/resolution/context-filter.ts:1-29 (principalEntitledToScope, filterHistoryForAudience: every audience member must be entitled to entry.scopeLabel)",
+     "C:/dev/qm/src/memory/context-boundary.ts:35-58 (fingerprint of scope plus sorted audience ids; throughSeq jumps to latestSeq when the audience changes)",
+     "C:/dev/qm/src/core/orchestrator/compaction.ts:100-170 (summaryLabel = session scopeId; throughSeq; securityTainted flag)",
+     "C:/dev/qm/src/memory/classification.ts:6-13 (ordinary|unknown|sensitive|restricted, strongest label wins via helper prompt)",
+     "C:/dev/qm/plugins/web-ui/src/memory.ts:236-270 and src/memory/postgres-memory-service.ts:147-148 (PUT with revision, restore with expectedRevision)",
+     "C:/dev/qm/src/resolution/sharing-posture.ts:1-20, sharing-access.ts:45 (isolated|open; isolated wins on compose; requires a human or live ambient origin)",
+     "Teams main-locale-en-us-23ba9acb36586a4b.js.gz via zcat+grep: odsl_chat_agent_hitl_preview_warning_text (review, then Allow to send to the group), odsl_chat_agent_share_response_blocked_text, project_agent_configuration_knowledge_resources_* (incl. 'need to be part of the chat to remove it')",
+     "REA analyze_javascript_application on extract/grokbot/dist/node-agent-coordinator (summary, heap-limited partial)"
+    ],
+    "corrections": "The R-t1-10-02 mechanism (instance bound to one audience, memory with audience labels and membership epochs, subset rule, owner declassify) is written as reference practice, but it exists only in buzz's DRAFT design doc. The ifc-core crate is unused. Label it a proposal (DOC), not shipped behaviour, and do not make buzz the best source for a capability no reference ships. Treat qm as the best-in-class shipped implementation. GrokBot's 'runtime labelling of outbound Slack/Gmail/Outlook sends' is a remote-config (feature flag) schema with sampling rates. The connector list is supplied by the server, and the names Slack, Gmail and Outlook are not in the shipped schema (inference). It samples sends for labelling and review rather than blocking them. In R-t1-07-08, 'audience-safe disclosure 4 of 5 (table-stakes)' is overstated. Shipped audience intersection exists only in qm. Teams has review-then-share UX (strings plus DOC). Slack's model is 'agent reach equals the requester's reach' (DOC), which is weaker and different. buzz is the draft. Rephrase as a differentiator, 1 shipped plus 2 partial. The qm compaction 'tainted flag' is securityTainted, which marks prompt-injection or untrusted input, not audience. Audience safety comes from the summary label being the session scope. 'Derived content takes the maximum label of its sources' is a recommendation. Teams explicitly does not do this for AI output, and qm labels summaries with the session scope. For Teams knowledge scope, 'removal deletes derived knowledge, re-add starts from zero' and 'add requires membership' are DOC. The shipped strings show only that membership is required to remove a source.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "buzz information-flow control is a draft proposal (DOC); ifc-core crate is unused",
+     "GrokBot external-send labelling is a flag-gated remote-config schema with sample rates; connector names are not in the binary",
+     "Teams review-then-share and knowledge-source scoping are REA locale strings plus DOC; Copilot/agent features are likely license-gated and possibly preview (not verified)",
+     "Teams sensitivity-label propagation to AI output is explicitly partial (honest gap)",
+     "qm is the only source with shipped, readable audience filtering, context boundary and labelled memory (SRC, high)",
+     "Slack audience model is DOC-only (docs.slack.dev agent design)"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-013",
+  "title": "Room attachments and file library: paste, drop and attach through presigned Data Plane documents with Space provenance, scan and typed refusals, plus a Files view",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 13,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Let members paste, drop or attach images, audio, video and files in a room. The gateway checks the room decision and size/type policy and returns a presigned slot against a Data Plane document carrying space_ref, created-in Space, human or agent creator, mime, size and content hash; a complete step scans, hashes and thumbnails and attaches the document id to the entry. Reads are served by id under the room check, refusals are typed, and the Knowledge tab gains a Files view. Space-bound writes use a Control-signed Space decision, not the legacy unscoped chat upload.",
+  "whyItMatters": "Attachments are table stakes in all five references, and a work room without files cannot carry real work. The /chat upload accepts only JSON text with a hard-coded ZDR class and no space_ref, so it cannot simply be reused.",
+  "referenceBestPractice": {
+   "bestSource": "buzz (content-addressed media with metadata stripping); slack (3-step external upload plus malware scan); grokbot (typed size policy and refusal reasons); QM (SRC) for the model; Teams (REA) as the product benchmark",
+   "others": [
+    "teams",
+    "qm",
+    "Buzz (SRC): thumbnails/blurhash and snapshot-based storage accounting",
+    "Slack (DOC)"
+   ],
+   "prevalence": "[R-t1-01-04] 5 of 5 sources (table-stakes) [R-t1-08-03] 4 of 5 sources; table-stakes (some evidence sits in records clustered elsewhere, per the comparator)",
+   "mechanism": "[R-t1-01-04] Step 1: request an upload slot (gateway checks room ACL and size/type policy) and receive a presigned URL plus file_id. Step 2: the client PUTs bytes directly to storage. Step 3: complete: scan for malware, sha256 the content, strip client metadata, generate thumbnail and blurhash, attach to the entry. Reads are by id with a room ACL check. Refusals are typed (empty, too_large, count, type) so the client can explain them. [R-t1-08-03] Direct upload to object storage keyed by sha256, then register a FileArtifact {id, owner_scope, created_in_scope (the room), created_by (human or agent), path, mime, size, sha256}. The room library lists files created in or granted to the room. Teams makes the channel a folder with one storage authority for ACL and compliance; thumbnails are generated asynchronously and quota is counted by an off-path worker."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:82-243",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:14-33",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:54-110",
+    "apps/Data Plane v2/services/documents-api-go/internal/handler/space_import.go:14-60",
+    "apps/Data Plane v2/infra/postgres/migrations/20260907120000_document_space_ref.sql",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1660-1690"
+   ],
+   "gap": "[R-t1-01-04] The room composer has no file input, paste or drop. /api/v1/chat/documents and /extract exist for Chat but Space does not use them; the Knowledge tab only lists documents that already carry space_ref, read-only. [R-t1-08-03] The Knowledge tab lists documents with space_ref read-only and the composer has no attach, upload or file code (grep finds none). The /chat upload accepts only JSON {title, content} text, hard-codes zdr_classification internal and sends no space_ref, so it neither handles binary files nor carries Space authority. The ephemeral extract route (documents.rs:14-33) stores nothing. No raw-bytes object store was found in documents-api-go (grep for presign, PutObject, minio, blob found nothing; the Ingestion-plane imports service was not searched), so retaining original files is a gap to confirm."
+  },
+  "approachOriginal": "[R-t1-01-04] Data Plane v2: document upload accepting space_ref and an entry link, malware scan, hashing and thumbnails. Frontend Plane gateway: routes under /api/v1/spaces/{space_ref}/attachments (slot, complete, read by id) that perform the Control ACL check and typed refusals; bytes never pass through the gateway. Session Core entries reference attachment ids in metadata, never bytes. Frontend: attach button, paste and drop in SpaceRoomComposer, preview chips with per-file progress and refusal messages. Keep one document ACL path so Space membership never grants read of an owner-plane document beyond the attachment itself. [R-t1-08-03] Data Plane documents-api owns bytes or extract plus metadata: space_ref, created_by principal (human|agent), mime, size, sha256, extraction status. Follow the already-built connector-import pattern (plan S1.5): browser sends only a spaceRef, the gateway asks Control for a Space decision, Imports Core runs extraction with a space_import_intent, and Documents API verifies the signed decision (space_import.go). Frontend: attach control in SpaceRoomComposer, Files view inside the Knowledge tab, attachments in messages as document-id pointers resolved under the viewer's own grant. Phase 1 stores the extract (Grok Bot style) and shows a download card only if bytes are retained; phase 2 adds an object store for originals, thumbnails, malware scan and quota. ZDR orgs: use only the ephemeral extract and mark the file session-only. Reuse the viewer registry from F-t1-014 (R-t1-08-02).",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Data Plane document upload accepting space_ref",
+   "Malware scan and thumbnailing worker",
+   "Gateway presign routes with Control ACL check",
+   "F-t1-046 (R-t1-01-07) so agents can use the files",
+   "Control Space decision issuer for documents:write in shared Spaces (the plan's import issuer derives personal-Space membership and import_write_entitled is deny-by-default)",
+   "F-t1-057 (R-t1-08-04) phase 1 so a Space-attached file does not widen the uploader's ACL",
+   "Imports Core extraction path"
+  ],
+  "planeOwner": "Data Plane v2 (documents) with Frontend Plane (gateway presign routes, composer, Files view) and Control Plane (Space write decision)",
+  "risks": "[R-t1-01-04] ACL widening (a room member reading owner-plane documents); ZDR retention of uploaded files; storage cost and abuse limits; malware and decompression bombs. Overlaps category 08 (room file library, C-t1-08-011/012): build one pipeline. [R-t1-08-03] The comparator estimated M assuming the chat upload could be reused; it is text-only and unscoped, so L is more honest. An attachment in a shared room must not grant access beyond the uploader's intent. Malware scanning and ZDR conflict with durable files. Binary storage may not exist yet (needs verification).",
+  "significance": 5,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 6,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-01-04] Owner plane is named as Data Plane documents with space_ref (Knowledge tab already reads documents.space_ref); no Space upload path exists in code. [R-t1-08-03] apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1660-1690 (S1.5 slices 2-4: Data doc/file binding to Space and signed import decisions, source-wired for connector imports). Data side only; no room upload or attachment UI is planned."
+  },
+  "sourceClusters": [
+   "C-t1-01-017",
+   "C-t1-08-011"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-013",
+    "status": "partial",
+    "exactGap": "The room composer has no attach, paste or drop code at all (SpaceRoomComposer.tsx send path 375-470 carries only text, skills and a mentioned agent), and the Space gateway has no upload route. Owner-plane plumbing exists only for connector imports: documents.space_ref is written from a Control-signed import decision (space_import.go:1-90, migration 20260907120000), imports-core persists a space_import_intent only on /import/jobs/source (main.py:271-322) while /import/jobs/upload accepts no Space header (main.py:215-267), and Control issues import decisions only for personal Spaces (personal_thread_decision.go:111-128,261-272). The main /chat composer already has per-turn attachments (prepare-chat-attachments.ts, ephemeral extract via /api/v1/chat/documents/extract) that the room composer does not use, and no original-bytes object store, malware scan or thumbnailing exists in the Data or Ingestion upload path.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:375-470",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:1-40",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1739",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:14-33",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:54-110",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/imports.rs:33-90",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs:440-500",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:310-410",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts:1-45",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts:1165-1210",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:55-60,2085-2125",
+     "apps/Frontend Plane/verevonv3/nginx.conf:31",
+     "apps/Ingestion Plane/imports-core/app/main.py:205-322",
+     "apps/Ingestion Plane/imports-core/app/config.py:85-89",
+     "apps/Ingestion Plane/imports-core/app/parsers.py:1121-1132",
+     "apps/Control Plane/user-core/internal/spaces/personal_import_decision.go:1-130",
+     "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:111-128,261-272",
+     "apps/Data Plane v2/services/documents-api-go/internal/handler/space_import.go:1-90",
+     "apps/Data Plane v2/infra/postgres/migrations/20260907120000_document_space_ref.sql:1-30",
+     "apps/Data Plane v2/services/retrieval-engine-rs/src/api/mod.rs:1659-1665",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs:1-25",
+     "apps/Data Plane v2/services/embedding-engine-rs/src/cas_store.rs:1-16"
+    ],
+    "reuse": [
+     "Main-chat attachment flow: prepareChatAttachments and inlineTextAttachments (read, extract pdf/docx/xlsx/pptx via /api/v1/chat/documents/extract, inline as labelled fences) for a per-turn phase 1 in the room composer",
+     "Connector-import path end to end: gateway personal_import_ingress_decision (spaces.rs:310-410), imports-core space_import_intent plus job-time Control re-authorization, documents-api verifySpaceImportDecision and documents.space_ref",
+     "imports-core multipart upload with extension allowlist, size cap, sha256 and size_bytes metadata, and 409 on ZDR (main.py:215-267, parsers.py:1121-1132)",
+     "SpaceKnowledgePanel and the retrieval-engine space_knowledge listing as the Files view base",
+     "MinIO CAS client patterns already in Model Plane workspace_cas.rs and Quarry cas_store as templates if originals must be retained"
+    ],
+    "constraints": "Space access never widens an owner-plane ACL: the Space document listing already filters by owner_id, org visibility or an explicit grant (retrieval-engine api/mod.rs:1659-1665), so a file one member attaches is NOT readable by other room members unless the upload also records a grant or org visibility for the room audience under the uploader intent. Control import decisions are personal-Space only today, so shared rooms need a new shared-import validator in Control before any durable write. imports-core and Control refuse durable imports under ZDR (main.py:221, personal_import_decision.go:76-78), so ZDR rooms can only use ephemeral per-turn extraction. The gateway buffers the whole multipart body and forwards it (imports.rs:33-70), so bytes do pass through it today; nginx caps bodies at 100m (nginx.conf:31).",
+    "approachAdjustment": "Split the item. Phase 1: per-turn attachments in the room composer reusing prepareChatAttachments (text and extracted office/PDF content inline in the user turn, images as inline attachments), which needs no new backend. Phase 2: durable room files by adding Space intent to the existing multipart upload (accept X-Space-Import-Ingress-Decision on /import/jobs/upload, gateway issues it with source_type upload, Control gains a shared-Space import validator and a room-audience grant) and show the result in the Knowledge Files view. Phase 3, only if originals are required: a Data-owned object store with scan and thumbnails; do not promise a presigned slot flow until that store exists. Drop the claim that the existing chat upload could be reused as is (it is JSON text only, hard-codes zdr_classification internal and carries no space_ref).",
+    "effortRevised": "L",
+    "effortNote": "As written (presigned slots, scan, thumbnails, audio/video) it is XL. Phase 1 is S, phase 2 (durable text-extractable room files) is L because of the new Control shared-import validator and grant model, phase 3 is XL and should be split out.",
+    "verdict": "reword",
+    "verdictReason": "The user-facing feature is absent, but a cheaper per-turn path already exists in the main composer and the Space import pipeline is built for connectors; the item should be rephased around that and corrected on the Control personal-Space limit and the ACL grant requirement.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-013",
+    "verdict": "partial",
+    "checked": [
+     "https://docs.slack.dev/messaging/working-with-files (3 steps: getUploadURLExternal -> HTTP POST bytes -> completeUploadExternal; files scanned for malware before available; no size limits stated)",
+     "C:/dev/buzz/crates/buzz-relay/src/api/media.rs:381-392,500-515,681-700 (relay-membership gate for upload and read; image thumbnail pipeline inline in upload path)",
+     "C:/dev/buzz/crates/buzz-media/src/validation.rs:503-520 (structural metadata-free validation; clients strip, relay rejects)",
+     "C:/dev/qm/src/files/file-artifact-store.ts:15-31 (FileArtifact: ownerScopeId, createdBy, createdInScope?, sha256 nullable)",
+     "records grokbot-agent-product-140 (refusal enum TOO_LARGE, AGENT_FULL, UNSUPPORTED_TYPE...), teams-product-surface-111 (DOC+REA SharePoint/OneDrive), buzz-architecture-093 (snapshot storage accounting)"
+    ],
+    "corrections": "1) 'Reads are by id with a room ACL check' is not what Buzz does: media reads are gated by relay/community membership (NIP-43), not channel membership; the Buzz record itself notes a media read-authorization gap. Present room-ACL-gated reads as Verevon's requirement. 2) The sentence attributing async thumbnails and off-path quota counting to Teams is misattributed: off-path storage accounting (Postgres snapshot by buzz-admin) is Buzz; Buzz thumbnails are produced in the upload pipeline, and no evidence of asynchronous thumbnailing was found in any source. 3) Malware scanning is Slack-only and DOC-only. 4) Presigned direct-to-storage upload is Slack/QM/GrokBot; Buzz uploads go through the relay (Blossom PUT), and Slack's step 2 is an HTTP POST. 5) The step-3 pipeline (scan + sha256 + metadata strip + thumbnail + blurhash) is a composite of several sources, not one reference's flow; label it as the recommended synthesis.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "Slack upload pipeline and malware scan: DOC-only",
+     "Teams file storage model: DOC (Learn limits) + REA locale strings; channel = SharePoint folder, chat = OneDrive",
+     "GrokBot attachments are for bot conversations, with two size tiers; maxStagedAttachments value not located",
+     "QM FileArtifact has no expiry or byte reclamation (its own SECURITY.md)"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-014",
+  "title": "Bring agent-produced artifacts and the shared viewer registry into the Space room",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 14,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Mount the artifact panel that /chat already ships inside the Space room, with a room-level Artifacts list, and persist artifacts emitted by Space runs as shared, revisioned objects. Extract the per-kind viewers into one registry reused by the timeline, the artifacts panel and the Files view, adding lazy DOCX and XLSX preview. Add an artifact-first instruction to Space agent bindings so analyses and documents land as artifacts instead of long posts.",
+  "whyItMatters": "This is the visible proof of the human-plus-agent hybrid: agents deliver work as inspectable objects while the shared timeline stays short. It is mostly reuse of shipped chat code, so it has high impact for moderate effort.",
+  "referenceBestPractice": {
+   "bestSource": "Grok Bot (SRC): a packaged rule routes standalone analyses into a canvas, backed by canvas/document read and write tools; lazy viewers for PDF, DOCX, XLSX, code and Mermaid",
+   "others": [
+    "QM (SRC): validated self-contained HTML playgrounds as typed tool results, offered only to surfaces that can render them",
+    "Slack file previews (DOC)"
+   ],
+   "prevalence": "artifacts in room: 2 of 5; inline viewers: 2 of 5; both differentiators",
+   "mechanism": "Agent tool create_or_update_artifact {id, kind, title, content, version}; a system-prompt rule routes deliverables to it; the server validates HTML (no network, no external assets) before registering; the client shows a side panel with a revision stepper and a sandboxed iframe for HTML; the tool is withheld from surfaces without a renderer. Viewer registry keyed by mime/kind with lazy chunks (pdf worker, docx to HTML, sheet to table, per-language highlighter, Mermaid) and size thresholds that fall back to a download card."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:1-12",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts:1-16",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAttachmentCanvas.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx:782",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/index.ts",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43"
+   ],
+   "gap": "Shipped in /chat only: artifact panel with kind-based viewers, revision stepper, sandboxed HTML iframe, DOCX/PPTX/XLSX export. Artifacts arrive as inline SSE payloads {id, kind, title, content, version}, not as persisted objects. A grep of the Space components finds no artifact panel; the room renders Markdown only. In-browser DOCX/XLSX preview was not seen (INF, not exhaustively checked)."
+  },
+  "approachOriginal": "Frontend Plane: render ChatArtifactPanel (or its extracted core) in the Space room and add a room-level Artifacts list; move the per-kind viewers behind a shared registry used by the Space timeline, artifacts panel and the Files view in F-t1-013 (R-t1-08-03), lazy-loading DOCX/XLSX/PDF viewers and falling back to a download card by size. Model Plane: persist artifacts emitted by Space-bound runs as thread-owned revisions in Session Core under the same shared-read decision as the turn (same id with a higher version is an update, as chat-artifacts.ts already defines), and add an artifact-first rule to Space agent bindings. Add a Promote to canvas action that writes the artifact as a canvas version (F-t1-015 (R-t1-08-01)), matching the plan's idea of promoting selected output through Data artifact APIs (S3.3). Under ZDR keep artifacts session-only and say so in the UI. Keep the existing HTML sandbox.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Shared read of Space turns (deny-by-default per-org space_effect_policies rows per the comparator; not re-verified)",
+   "Session Core artifact persistence",
+   "F-t1-015 (R-t1-08-01) for Promote to canvas"
+  ],
+  "planeOwner": "Frontend Plane (UI); Model Plane Session Core (persistence)",
+  "risks": "Persisted artifacts must follow the same shared-read decision as the turn or they become a read bypass. HTML and PDF artifacts are untrusted, so keep the sandboxed iframe and CSP. Bundle size from lazy viewers. Room turns may already render charts through ChatMarkdown (INF).",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 4,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-08-006",
+   "C-t1-08-013"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-014",
+    "status": "partial",
+    "exactGap": "Model Plane already persists a Space turn's artifacts (latest version per id) in the durable assistant message metadata unless ZDR (sse.rs:4040-4060, session_flow.rs:1505-1508), rehydrates them for revision turns (sse.rs:5300-5350), and the Space shared-read transcript returns that metadata flattened onto each turn (http_routes.rs:7726-7754, spaces.rs:2616-2730). What is missing is all Space UI: the timeline keeps only role, content, agentName and authorSubjectId per turn (SpaceRoomTimeline.tsx:37-62), the composer passes no onArtifact handler (SpaceRoomComposer.tsx:402-470), SpaceTabId has no artifacts tab, ArtifactsPanel and ArtifactViewer live in the chat feature (ChatArtifactPanel.tsx:88,164), there is no DOCX/XLSX preview library (package.json has only katex and mermaid), and there is no room-level aggregate across threads.",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:4040-4060",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5300-5350",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5395-5425",
+     "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs:1490-1510",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7726-7754",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:8479-8530",
+     "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-30",
+     "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:236-262",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2730",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:26-31",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:893-900",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1312-1325",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:37-62",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-470",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:60-131",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:164",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:575-600",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:686-696",
+     "apps/Frontend Plane/verevonv3/package.json:34-35",
+     "apps/Application Plane/convex-core/convex/schema.ts:576-583"
+    ],
+    "reuse": [
+     "ArtifactsPanel (prop-driven: items: ArtifactPanelItem[]) and ArtifactViewer, DiffView, sandboxHtmlDocument and chat-artifacts.ts helpers, extracted rather than rewritten",
+     "Durable artifact metadata already returned by the Space transcript route; no new Model Plane persistence is required for non-ZDR turns",
+     "Space instructions (spaces.instructions, editor/manager/owner write role, composed into every turn) to carry the artifact-first rule instead of a new binding field",
+     "chat history.rs hoisting of metadata.artifacts as the pattern for the Space turn mapper"
+    ],
+    "constraints": "Artifacts are thread-owned Model Plane data read under the same Control shared-read decision as the turn, which the Space transcript route already enforces; do not add a second read path. Under ZDR artifacts are emitted live but not persisted (sse.rs:4048 guards seeding and persistence), so the room artifact list is empty for ZDR turns and the UI must say so. HTML/PDF artifacts are untrusted: keep the sandboxed iframe and CSP. A room-level list across threads needs an owner-plane aggregate (Model Plane session-core read) or N transcript reads; do not build it from Application Plane projections.",
+    "approachAdjustment": "Remove the Model Plane persistence work (\"persist artifacts emitted by Space-bound runs as thread-owned revisions\"): it already happens for any durable non-ZDR thread, and the shared-read route returns it. Rescope to: map Space transcript turns to ArtifactPanelItem, mount ArtifactsPanel as a cockpit tab or aux panel, extract the viewers into a shared registry, add lazy DOCX/XLSX preview, add a room-level aggregate read, and put the artifact-first rule in Space instructions. Space-bound persistence is inferred from the shared chat invoke path (INF), so confirm with one live Space turn before committing.",
+    "effortRevised": "M",
+    "effortNote": "Unchanged. The Model Plane step drops out and a per-thread panel is S, but the viewer registry extraction, lazy office previews and a room-level aggregate keep it at M.",
+    "verdict": "reword",
+    "verdictReason": "The recommendation is still needed (no Space artifact UI), but its Model Plane persistence step already exists, so the item must be rewritten as a frontend plus aggregate-read change.",
+    "confidence": "medium"
+   },
+   "reference": {
+    "finalId": "F-t1-014",
+    "verdict": "partial",
+    "checked": [
+     "scratchpad/extract/grokbot/dist/electron-main/main-app.cjs ~@1265000 (canvas_prompt_text_config fallback skillDescription; text describes a 'Cursor Canvas')",
+     "scratchpad/extract/grokbot/dist/electron-main/main-app.cjs feature flags: grok_bot_canvas_skill default false, grok_bot_documents_ui default false, grok_bot_files_stage default false, grok_bot_library_pages default false, canvas_design_mode default false, shared_canvases default true, cloud_canvas_skill default false",
+     "scratchpad/extract/grokbot/dist/local-exec-daemon/main.cjs (EditCanvas, WriteDocument, WriteDocumentAsset, ReadDocument, ListDocuments as tool-name enum entries)",
+     "scratchpad/extract/grokbot/package.json:93-105 (mammoth, mermaid, pdfjs-dist 5.4.296, xlsx); renderer/assets chunk-fullscreen-file-viewer-body, chunk-file-stage, chunk-document-page",
+     "C:/dev/qm/src/playgrounds/playground.ts:1-48 (validatePlaygroundHtml checks only size <=512000 bytes and non-empty)",
+     "C:/dev/qm/plugins/web-ui/server/index.ts:235-247,1119-1150 (PLAYGROUND_CSP sandbox allow-scripts, default-src/connect-src none)",
+     "C:/dev/qm/test/agent-tools.test.ts:373-379 (miniapp stays unavailable while playground rendering is deferred, for surfaces undefined/web/slack)",
+     "C:/dev/qm/skills-seed/miniapp/SKILL.md:8",
+     "C:/dev/qm git log src/playgrounds (de8a8e08 model playgrounds as typed artifacts)"
+    ],
+    "corrections": "(1) QM's playground/miniapp tool is currently not offered on any surface. A test asserts it stays unavailable on web, slack and default while playground rendering is deferred. Present QM as dormant/deferred code, not a shipping in-room artifact feature. (2) QM's server validation does not enforce no network and no external assets. validatePlaygroundHtml checks only size (512 KB) and emptiness. Isolation is enforced at render time by a strict CSP (connect-src none, default-src none, sandbox allow-scripts), and the miniapp skill prompt asks for no network use. (3) Grok Bot's canvas-first rule is a remote-config fallback string whose text refers to a 'Cursor Canvas'. It is inherited from the Cursor platform (the package is named 'sand'). The Grok Bot canvas skill, documents UI and files stage flags all default to false, so the capability is flag-gated and off by default client-side. EditCanvas/WriteDocument are seen only as tool-name enum entries. (4) The create_or_update_artifact {id, kind, title, content, version} tool, the side panel with a revision stepper, and 'tool withheld from surfaces without a renderer' as a live behaviour were not found in any reference. They are Verevon proposals and must be labelled INF/proposal. (5) Viewer registry claims for Grok Bot (pdf.js, mammoth DOCX, xlsx, mermaid, size fallback) are confirmed SRC.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Grok Bot canvas/document features are flag-gated (default false) and partly inherited from Cursor. Server-side enablement is unknown.",
+     "QM playground is deferred/unregistered. Only its storage, CSP and renderer code exist.",
+     "Slack file previews are DOC-only.",
+     "Artifacts in the room effectively have 0 of 5 references shipping them on by default. Inline viewers: 2 of 5 (Grok Bot SRC, Slack DOC).",
+     "No REA tool was used for this item. Direct grep/node reads of the pre-extracted Grok Bot bundle and the QM repo."
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-015",
+  "title": "Room canvas: a shared, revisioned Space document that humans and agents co-author",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 15,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Add a Canvas tab to the Space cockpit backed by a Data Plane versioned page (Markdown first, block comments and live co-edit later). Every save is an append-only version stamped with the human or agent principal and an expected-head precondition checked in the same transaction, with history, diff and restore. Agents read and write it through a Model Plane document tool under the run's delegated Space decision.",
+  "whyItMatters": "Four of five references have a room document and Verevon has none, so agents must post plans, minutes and decisions as long chat messages and humans have no durable place to co-author with them. Head CAS is what stops an agent run from silently overwriting a human edit once both write to the same artifact.",
+  "referenceBestPractice": {
+   "bestSource": "Slack canvas (DOC) for the document model; Buzz (SRC) for append-only revisions with a server-side expected-head check",
+   "others": [
+    "Teams notes pane and Loop pages (REA)",
+    "Grok Bot room canvases plus file locks and tombstone undelete (SRC)"
+   ],
+   "prevalence": "canvas: 4 of 5 sources, table-stakes; write safety (CAS/locks): 2 of 5, differentiator",
+   "mechanism": "Room-scoped document {doc_id, space_ref, head_revision, body}; each save is a full revision with author principal and expected_head, applied as one INSERT ... WHERE current_head = expected_head that returns a typed conflict (missing, mismatched, not superseding); the losing text stays in history; restore writes a new revision copying an old body. History panel lists revisions newest first with a diff against head. Buzz replaces the whole body under CAS, which is enough for a first version; Slack and Teams add rich blocks, block-anchored comments and CRDT co-edit. Grok Bot adds lock/renew/release with fencing tokens and tombstone undelete with typed outcomes for agent leases."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:1-5",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:35",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:82-243",
+    "apps/Data Plane v2/services/wiki-store-go/internal/handler/wiki.go:87-114",
+    "apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go:359-398",
+    "apps/Data Plane v2/infra/postgres/init.sql:292-330",
+    "apps/Application Plane/convex-core/convex/plannerDocuments.ts:423-470",
+    "apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go:158-200"
+   ],
+   "gap": "No Space-authored document and no Canvas tab (the cockpit has six tabs: chat, work, knowledge, activity, agent, members). The Studio canvas is gateway-memory only and lost on restart. Data Plane wiki-store already has pages, append-only versions with proposed_by_user/proposed_by_agent, a diff route and a proposal/approve flow, but CreateVersion locks the page row and always advances the head (no expected-head precondition, no restore), pages are keyed by workspace_id not Space, and the gateway proxies wiki-store only for operating-map actions. The Convex planner document store keeps an opaque state blob with last-write-wins saveState and no v3 consumer."
+  },
+  "approachOriginal": "Data Plane: extend wiki-store-go as the canvas store (SRC: it already has versions, diff, proposals and RequireDurableWritesAllowed). Add an expected_version_id precondition to CreateVersion with a typed conflict, a restore operation that writes a new version, and a Space binding that resolves SpaceRef to the page workspace through space_retrieval_bindings and verifies a Control Space decision header the way documents-api verifies X-Space-Import-Decision (space_import.go:14-60). The adoption plan already assigns this ownership (S3.1 slice 2: Data owns revisioned Space knowledge documents with CAS, history, restore). Gateway: add /api/v1/spaces/{ref}/canvas routes. Frontend: Canvas tab in SpaceCockpit (extend SpaceTabId), Markdown editor first, history, diff and restore reusing the chat DiffView, conflict banner that shows the losing text. Application Plane: only the Space-to-canvas pointer and presence. Model Plane: a document read/write tool that writes under the run's delegated decision and stamps the agent principal; for human-authored sections route agent writes through the existing proposal/review path. Later phases: block comments, presence via Convex spacePresence, CRDT co-edit (the Convex planner state blob is a possible layer, not the system of record), and agent file leases with fencing tokens only if multi-step agent edits need them.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Control Space decision issuer for document writes in shared Spaces (adoption plan S1.2/S1.5 describe issuers that derive personal-Space membership today)",
+   "F-t1-057 (R-t1-08-04) phase 1: edit role and Space subject in resource_grants",
+   "Application Space-to-canvas pointer",
+   "Model Plane document tool"
+  ],
+  "planeOwner": "Data Plane (wiki-store-go versions); Frontend Plane UI; Application Plane pointer; Model Plane agent tool",
+  "risks": "Canvas text becomes prompt content, so it must be framed as untrusted data (F-t1-032 (R-t1-08-08)). ZDR callers are rejected for every wiki mutation (authctx.go:226), so ZDR orgs get no canvas and the UI must say so. Version-per-save bloat needs debounce or coalescing. Live CRDT co-edit is a large step beyond CAS-with-reload. wiki_pages has no space_ref column, so correctness rests on the binding table.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 5,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1943-1948 (S3.1 slice 2: Data-owned revisioned Space knowledge documents with CAS, history, restore). Backend intent only; the S3.1-S3.6 block is still [~] and no room-visible canvas UI or agent write tool is planned."
+  },
+  "sourceClusters": [
+   "C-t1-08-001",
+   "C-t1-08-002"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-015",
+    "status": "absent",
+    "exactGap": "There is no Space-owned document and no Canvas tab: SpaceTabId has six tabs (SpaceCockpit.tsx:43), the gateway proxies wiki-store only for operating-map routes (knowledge/wiki.rs:25-160), and the Studio canvas is gateway-memory only and lost on restart (studio.rs:1-5,35). Data Plane wiki-store has pages, append-only versions, diff and agent proposals, but CreateVersion takes no expected-head precondition (wiki_repo.go:359-398), there is no restore route (wiki.go:86-112), pages are keyed by workspace_id not space_ref, and wiki-store verifies no Space decision. The Space-to-workspace binding and a read-only listing of the bound workspace's published wiki pages already ship in the Knowledge tab (retrieval-engine api/mod.rs:1659-1807), so only the authoring and write-authority side is missing.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:1-5,35",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/wiki.rs:25,56,80,159",
+     "apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go:359-398",
+     "apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go:400-430",
+     "apps/Data Plane v2/services/wiki-store-go/internal/handler/wiki.go:86-112",
+     "apps/Data Plane v2/services/wiki-store-go/internal/handler/wiki.go:194-214",
+     "apps/Data Plane v2/services/wiki-store-go/internal/model/wiki.go:65-71",
+     "apps/Data Plane v2/services/wiki-store-go/internal/authctx/authctx.go:226-241",
+     "apps/Data Plane v2/services/retrieval-engine-rs/src/api/mod.rs:1659-1807",
+     "apps/Data Plane v2/services/retrieval-engine-rs/src/space_scope.rs:1-12",
+     "apps/Application Plane/convex-core/convex/plannerDocuments.ts:423-470",
+     "apps/Application Plane/convex-core/convex/schema.ts:276-303",
+     "apps/Model Plane/rust/services/execution-core/src/wiki_agent.rs:1-12",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:540-548",
+     "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-30",
+     "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:147-168,261-272",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1943-1948"
+    ],
+    "reuse": [
+     "Data Plane wiki-store-go versions, diff route, wiki_proposals with proposed_by_agent, and the proposal review route (wiki.go:86-112)",
+     "space_retrieval_bindings plus retrieval-engine space_knowledge, which already resolves a Space to its wiki workspace and lists published pages (api/mod.rs:1708-1807)",
+     "Model Plane wiki_propose_edit and wiki_lint tools (execution-core wiki_agent.rs) and the model-gateway /v1/wiki/proposals route for agent edits",
+     "Convex spacePresence for presence; chat DiffView and ChatMarkdown for history, diff and preview",
+     "Thread-owned revisioned artifacts (model-gateway artifacts.rs) as a zero-Data-Plane first step before a shared canvas",
+     "Control shared-Space decision validators (ValidateForSharedThread and siblings) as the template for a shared document-write decision"
+    ],
+    "constraints": "Data Plane owns the document and its ACL. wiki-store authorizes only by org plus scope (wiki.read/wiki.write) and has no per-page ACL, so a room editor writing to an ordinary workspace page would widen owner-plane authority: canvas pages must be Space-owned and wiki-store must verify a Control-signed Space decision (as documents-api does for imports), never trust a client space_ref. Control has no shared-Space document-write validator today: ValidateForImport is personal-Space only (personal_thread_decision.go:261-272), so a new shared-write decision is a Control change. ZDR callers are refused for every wiki mutation (authctx.go:226-241), so ZDR rooms get no canvas and the UI must say so. Agent writes should go through proposals (proposed_by_agent) or a typed principal column, because wiki_page_versions only records proposed_by_user (wiki_repo.go:378).",
+    "approachAdjustment": "Mostly sound. Three corrections: (1) do not describe versions as stamped with a human-or-agent principal: CreateVersion writes the verified principal id into proposed_by_user only (wiki.go:205-206), so add an explicit principal-kind column or keep agent edits on the proposal path; (2) add a Control shared-Space document-write decision and have wiki-store verify it, because no such issuer exists; (3) do not reuse the Convex plannerDocuments store or its space field: that field is a private/shared/collection label, not a Space ref (schema.ts:285), and saveState is last-write-wins (plannerDocuments.ts:423-470). Consider surfacing the existing bound-workspace wiki pages as a read-only Pages section first, since the listing already ships.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged. Phase 1 touches three planes (Data CAS plus Space-decision verification, Control shared-write decision, Frontend tab and editor); live CRDT co-edit would make it XL and should stay out of phase 1.",
+    "verdict": "keep",
+    "verdictReason": "Nothing equivalent exists (no Canvas tab, no Space-scoped authoring path), and the item already places ownership in Data Plane as the adoption plan does; only the principal stamping and the missing Control decision need correcting.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-015",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/buzz/crates/buzz-db/src/store/event.rs:2014-2075 (insert_canvas_head_checked: transaction + advisory canvas lock + SELECT head + compare; statuses Duplicate, RevisionMismatch, RevisionMissing, SupersedeFailed)",
+     "records buzz-product-119, buzz-product-120, buzz-architecture-090 (CanvasHistoryPanel diff/restore, plain Textarea editor)",
+     "extract/grokbot/dist/electron-main/proto.cjs: ReadGrokBotGroupChatCanvasRequest {group_chat_id, store_id, canvas_id} -> {render_bundle_gzip, data_json}; WriteCanvasArgs {contents, canvas_id?, title?}; AcquireAgentStoreFileLockRequest/Response {lock_token, ttl_seconds, expires_at_ms}; FENCED appears only in SandBoxStoreManifestCommitStatus",
+     "records slack-product-surface-100 (DOC), teams-product-surface-113 (REA locale + DOC)"
+    ],
+    "corrections": "1) Buzz CAS is not a single 'INSERT ... WHERE current_head = expected_head': it is a write transaction that takes a per-channel advisory lock, reads the head, compares it with the expected revision and only then inserts; same semantics, different mechanism. 2) 'The losing text stays in history' is overstated: a rejected save is rolled back and not stored; only accepted (later superseded) revisions remain in history. 3) GrokBot room canvases are written by agents through a WriteCanvas tool (full contents, no expected revision) and read by humans as a rendered bundle; human co-authoring is not evidenced. The lock/renew/release and tombstone/undelete RPCs belong to the agent file store, not room canvases, and locks return a lease lock_token with TTL; calling them 'fencing tokens' is an over-reach (FENCED is a sandbox manifest commit status). 4) 'CRDT co-edit' for Slack and Teams is inference: Slack's sync engine is undocumented in the evidence and Teams Loop uses the Fluid Framework (ordered ops); say 'real-time co-editing'. 'Block-anchored comments' for Slack is not in the cited evidence (comments behave like thread replies with resolve). 5) Teams evidence is meeting/chat notes (Loop), a weak analogue of a room canvas.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "Slack canvas is DOC-only; channel canvases were retired in favour of a canvas tab (2025); free plan one canvas per conversation",
+     "Teams notes are REA from locale strings plus DOC",
+     "GrokBot canvases: agent-written, human read-only as far as observed (SRC proto names)",
+     "Write-safety 2 of 5 holds only if GrokBot agent-store locks count; for room canvases specifically Buzz is the only one with CAS"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-016",
+  "title": "Direct messages and group DMs on Space authority, with conversation kind deciding agent scope and history window",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 16,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Add dm and group-DM Space kinds with a fixed roster and a participant_hash that makes the same set of people always resolve to one conversation, hideable per viewer and resurfaced on new activity. Derive the agent scope from the conversation kind (a DM with my agent maps to my personal scope, group DM to a group scope, a room to the room scope) and let the person who adds a member to a group DM choose how much history that member may read.",
+  "whyItMatters": "One-to-one and small-group chat is an immediate Teams/Slack expectation and is absent. Modelling DMs as small Spaces keeps one authority path (Space access never widens an owner-plane ACL), lets a person DM a colleague or an agent, and gives a clear rule for which memory, files and sandbox an agent may use in which conversation.",
+  "referenceBestPractice": {
+   "bestSource": "buzz (DM identity by participant hash); qm (scope mapping by conversation kind); teams (history-sharing choice)",
+   "others": [
+    "slack",
+    "grokbot"
+   ],
+   "prevalence": "DMs 4 of 5 sources (table-stakes); scope by kind 2 of 5 (differentiator); history choice 1 of 5 (unique)",
+   "mechanism": "buzz: an open-DM event lists participants; the server computes participant_hash over the sorted member ids, unique per org, and returns the existing DM if one exists; cap 9 participants; hide is a per-viewer projection cleared when new activity arrives. qm: conversationScope() maps dm to personal(actor), group to group:<ref>, anything else to channel:<ref>; each thread is its own session inside the scope, and memory, files, sandbox and crons attach to the scope. Teams: adding a person to a group chat carries a history choice (none, last N days, all) and a system message narrates it."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2863-2880",
+    "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27",
+    "apps/Application Plane/convex-core/convex/schema.ts:546-556",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs:5340-5360",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2732"
+   ],
+   "gap": "Space kinds are personal|room|project|case in both Control (CHECK constraint) and Convex; the create route accepts only personal and room and refuses the rest. No DM kind, route or one-to-one flow; a personal Space cannot hold other members or an agent. Audience-revision filtering exists (the right primitive) but no adder-chosen history window was found (low confidence, inferred from baseline)."
+  },
+  "approachOriginal": "Control Plane (user-core): extend registered_spaces.space_kind CHECK with dm (and group_dm) in a migration, add participant_hash unique per org, fixed roster with no role escalation, scope derivation (dm with an agent maps to the caller's personal scope; allow an agent binding in a personal Space). Application Plane: add the kind to the Convex spaces.kind union, a per-viewer hide row cleared on new activity, and a sidebar DM section. Gateway: accept the new kinds in the create route (spaces.rs:2873) and reuse the transcript, presence, typing and read paths unchanged. Model Plane: sessions per thread carry the scope ref. History window: the member-add grant carries history_from (none | timestamp | all), enforced in the Session Core read filter (grpc.rs:5340-5360) and in retrieval; narrated by a system entry (F-t1-052 (R-t1-01-10)).",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t1-001 (R-t1-01-01) human-first posting",
+   "Control Space kind registration and membership grant schema change",
+   "F-t1-052 (R-t1-01-10) system messages for narrating member and history changes"
+  ],
+  "planeOwner": "Control Plane (user-core) with Application Plane projections and Model Plane scope refs",
+  "risks": "A DM with an agent must bind to the caller's personal scope or it leaks agent context into shared conversations. Group-DM member add needs the history window enforced in retrieval indexes too. Migration of existing personal Spaces. Hiding a DM must not remove membership.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 5,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-01-002",
+   "C-t1-01-046",
+   "C-t1-01-041"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-016",
+    "status": "absent",
+    "exactGap": "No DM or group-DM path exists: Space kinds are personal|room|project|case in Control's CHECK constraint and validators and in Convex's kind union, and the gateway create route refuses everything except personal and room (spaces.rs:2873-2880); a personal Space is single-subject and cannot hold other members or an agent. The right primitives are present (an audience-revision ceiling on thread and run reads, run_service_grpc.rs:711-718, and non-personal kinds already take the shared decision path), but there is no participant_hash, per-viewer hide, DM sidebar section or adder-chosen history window. Human-to-human conversation is also not possible in today's posting model: every post is a model turn through streamChat, and Session Core's append_message and start_run require the thread's own owner, so a second participant cannot post into the first's thread.",
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:546-556",
+     "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27,51-66",
+     "apps/Control Plane/user-core/internal/spaces/authority.go:14-20,105-112,350-360",
+     "apps/Control Plane/user-core/internal/spaces/repository.go:646-675",
+     "apps/Control Plane/user-core/internal/http/spaces.go:1480-1500",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2850-2900",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:385-470",
+     "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs:695-740",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:4495-4560",
+     "apps/Model Plane/rust/services/session-core/src/auth.rs:480-510",
+     "apps/Control Plane/user-core/internal/spaces/deletion_authorization.go:1-40",
+     "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:383-390",
+     "apps/Frontend Plane/verevonv3/docs/space-defenition.md:380-392"
+    ],
+    "reuse": [
+     "Control registered_spaces and space_memberships with the existing shared decision path (kinds other than personal already resolve as shared)",
+     "The recipient-audience registration outbox and the audience-revision ceiling in Session Core's thread and run reads for the history window",
+     "Space thread-append decision (user-core) as the authority to carry into a non-owner append",
+     "Presence, typing and read-marker paths, which are keyed by Space and subject and need no change",
+     "The isOrganizationRoom explicit-flag precedent if a flag is preferred over a new kind"
+    ],
+    "constraints": "Space access never widens an owner-plane ACL, so a DM must be a Control-registered Space with a fixed roster and the same decision path. 'DM with my agent' must not be a dm Space containing an agent subject: a personal Space stays single-subject (Control refuses to replace its membership, repository.go:669-675), so that case is the personal scope plus an owner-derived personal agent (F-t1-011). History windows must be enforced where content is read (Session Core list filter and retrieval), not in the UI. Space deletion authorization covers personal Spaces only (deletion_authorization.go:17-22), so hide-versus-delete semantics for DMs are undefined.",
+    "approachAdjustment": "Keep the dm and group_dm kind approach, whose plumbing is small (CHECK, two Control validators, Convex union, create route), but sequence it behind human-first, non-owner posting (F-t1-001): Session Core must accept a Control append decision from a non-owner member, because append_message and start_run currently demand OwnerIntent::Mutate, i.e. the thread owner. Correct the evidence pointer: the audience-revision read filter is run_service_grpc.rs:711-718, while grpc.rs:5340-5360 is the agent-skills listing. Model human-with-own-agent as the personal scope rather than as a dm Space with an agent member.",
+    "effortRevised": "L",
+    "effortNote": "L holds only if F-t1-001 carries the Session Core non-owner append work and the sidebar DM section; otherwise this is XL.",
+    "verdict": "keep",
+    "verdictReason": "The gap is real and correctly absent in code, the approach fits Space authority, and only the posting dependency and one mis-cited evidence line need correcting.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-016",
+    "verdict": "confirmed",
+    "checked": [
+     "C:/dev/buzz/schema/tables/public/channels.sql:32-46 (participant_hash, unique (community_id, participant_hash))",
+     "C:/dev/buzz/crates/buzz-db/src/store/dm.rs:50-60,358-380 (compute_participant_hash = sha256 over sorted, deduped pubkeys; open_dm returns existing or creates)",
+     "C:/dev/buzz/crates/buzz-relay/src/handlers/command_executor.rs:470-520 (9-participant cap; adding a member opens a NEW DM because DM sets are immutable)",
+     "C:/dev/buzz/crates/buzz-relay/src/handlers/side_effects.rs:3633-3651 (per-viewer hidden-DM snapshot, owner-only) and desktop/src/features/channels/hiddenDmResurfaceCoordinator.ts",
+     "C:/dev/qm/src/resolution/resolution-service.ts:15-23 (conversationScope: dm->personal(actor), group->group:<ref>, else channel:<ref>)",
+     "Teams main-locale-en-us-23ba9acb36586a4b.js.gz: chat_history_dont_include_chat_history, chat_history_include_chat_history_from_x_days, chat_history_include_chat_history, tmp_messages_addMemberSystemMessage*ShareHistory*, chat_history_access"
+    ],
+    "corrections": "Minor: in Buzz, un-hiding on new activity is driven by the desktop client re-issuing the open-DM command (which clears hidden_at server-side), plus a server-side unhide for moderation notices; it is not an automatic server projection rule. Add that Buzz DM participant sets are immutable: 'adding' someone creates a different DM with no history, the opposite of Teams' add-with-history choice.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "Teams history choice is REA from locale strings (plus DOC limits: 250 per chat); Teams also requires full history access to add an agent to a chat",
+     "Buzz DMs are server-managed channels, not end-to-end encrypted",
+     "QM DMs come through Slack; QM ScopeId is a string 'kind:ref' encoding, copy the semantics not the encoding"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-017",
+  "title": "Message lifecycle and reactions: edit and delete as revision entries (owner-of-agent retract, revisions reach the agent), emoji reactions and a per-message action toolbar",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 17,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Add edited and deleted revision entries in Session Core (never in-place overwrite), allowed for the author, the owner of the authoring agent, or a Space admin under policy, rendered with an edited marker or tombstone and written to audit; when the entry is already in model-visible history, append a message_revision entry so the agent sees the change. Add per-user emoji reactions keyed by (thread, seq) and a hover/focus toolbar (quick reactions, copy, edit, delete, pin, quote, fork); phase 2 makes reactions typed agent events and lets agents react through a capped tool.",
+  "whyItMatters": "Reactions (5 of 5) and edit/delete (4 of 5) are among the most basic room behaviours and are absent from proto, gateway, Convex and UI. QM's revision entries and buzz's owner-of-agent retract make them safe in a room where agents read history.",
+  "referenceBestPractice": {
+   "bestSource": "buzz (owner-of-agent authority, soft-deleted events kept in audit); qm (revision entries to the agent); buzz (reaction table and events); qm (reactions to and from agents); slack (product reference)",
+   "others": [
+    "slack",
+    "teams",
+    "grokbot"
+   ],
+   "prevalence": "[R-t1-01-05] Edit/delete 4 of 5 sources (table-stakes); revision propagation to the agent only in qm (unique) [R-t1-01-06] Reactions 5 of 5 sources (table-stakes); reactions as agent input/output 2 of 5 (differentiator); per-message action surfaces 2 of 5 recorded (common)",
+   "mechanism": "[R-t1-01-05] An edit is a new revision event referencing the target; a delete is a tombstone event; permission is self-author, or viewer owns the authoring agent, or admin; originals stay in an append-only audit store subject to retention. Slack and Teams add admin policy flags (allow user edit / allow user delete). qm appends a message_revision system entry (action, target_seq, text) outside a turn under the session lease, and the prompt builder renders it as <message-edited> or <message-deleted>. [R-t1-01-06] reactions(target_entry, subject, emoji, created_at, removed_at) unique on (target, subject, emoji); toggle is idempotent; counts return with the timeline; a real-time event fires on change. qm: a reaction on an agent entry passes a policy gate (shouldSurfaceReaction) and becomes ambient turn input {reaction, target_seq, by}; agents emit reactions through a typed tool capped at 5 per turn; a cheap helper model can pick an acknowledgement emoji. grokbot adds explicit feedback votes (up, down, submit, revert). slack: role=toolbar per message with roving focus and a more-menu; clipboard writes text/html, text/plain and image in one item."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto:125-135",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-737",
+    "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:1-1028",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:228-231",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:391-411",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:69-72",
+    "apps/Application Plane/convex-core/convex/schema.ts:845"
+   ],
+   "gap": "[R-t1-01-05] No edit or message-delete RPC in Session Core (only whole-thread DeleteThread/DeleteThreads/DeleteSpaceThreads) and no Space route for it; only an owner can delete a whole thread through Chat. Therefore no revision propagation to the agent. [R-t1-01-06] No reaction or emoji anywhere in Session Core, the gateway Space routes, Convex or the Space UI (no matches under apps/Application Plane other than unrelated conversation-core consumers). The only per-post actions are Reply and Pin buttons on the post card (checked this audit); no hover toolbar, context menu or rich copy. A chat feedback route exists (chat.rs:69-72) but the Space feature does not use it."
+  },
+  "approachOriginal": "[R-t1-01-05] Model Plane Session Core: revision entry kind (edited, deleted, target_seq) appended with the Space decision, folded at read time under audience-revision filtering; the prompt builder renders revisions for entries already in model-visible history. Control Plane: org and Space policy flags for edit and delete (with an optional edit window), the authority check for owner-of-agent via the agent binding, and an audit event. Gateway: PATCH/DELETE routes on /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{seq}. Frontend: actions in the message toolbar (this item (R-t1-01-06)) and an edited marker or tombstone row. ZDR: replace content with a tombstone and keep no original beyond retention; send the model only a deleted marker, never the old text. [R-t1-01-06] Application Plane (Convex): spaceReactions table (space_ref, thread_id, entry_seq, subject_id, emoji, removed_at) unique per (entry, subject, emoji); gateway route toggles after the Control membership check; counts ride with the transcript read and a Convex subscription pushes changes; rows hold only an emoji, so they are content-free under ZDR. Frontend: MessageActions component (role=toolbar, roving focus) with the quick-react row, emoji picker, and the more-menu that later hosts edit, delete, pin, quote and fork. Phase 2 Model Plane: reaction-as-input event type gated by Space policy (default off; cap 5 per turn) and a react tool for agents; map thumbs up/down on agent turns to the existing chat feedback route. Defer custom emoji and :shortcode: completion to the composer work; do not add a third-party GIF proxy (data egress).",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t1-001 (R-t1-01-01) Space append path and stable entry seq ids",
+   "Control policy flags and audit event for edit/delete",
+   "Stable entry ids (thread_id, seq) exposed to the UI",
+   "F-t1-001 (R-t1-01-01) so humans can be reacted to as well as agents",
+   "Phase 2 needs a Model Plane reaction event type"
+  ],
+  "planeOwner": "Model Plane (Session Core revisions) with Application Plane (reactions table), Control Plane (policy and audit) and Frontend Plane (toolbar)",
+  "risks": "[R-t1-01-05] Agent context diverges if revisions are not propagated. Compliance retention of originals conflicts with ZDR and must be an explicit per-org rule. Deleting an entry an agent already acted on does not undo its effects; show that in the tombstone. [R-t1-01-06] Reacting to content the reactor cannot read (check audience). Accidental agent wakeups and cost, so the gate defaults off. A reaction must never stand in for a Control approval of an effect. Third-party GIF providers conflict with ZDR.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 14,
+   "DOC": 3,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-01-011",
+   "C-t1-01-012",
+   "C-t1-01-008",
+   "C-t1-01-009",
+   "C-t1-01-010",
+   "C-t1-01-014"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-017",
+    "status": "absent",
+    "exactGap": "Session Core has no edit or delete for a single message (sessions.proto offers only AppendMessage plus whole-thread DeleteThread, DeleteThreads and DeleteSpaceThreads), the gateway Space router has no message PATCH or DELETE, and there is no reaction store in Session Core, Convex or the Space UI. The only per-post actions are Reply and an author-only Pin (thread-level presentation); Chat has a user-message edit that resends, a MessageAction toolbar and a thumbs feedback route (/api/v1/chat/feedback), none used in Spaces. The SPA has no Convex client (the gateway proxies Convex over HTTP with a service key), so reaction push needs a gateway stream or the existing poll, not a Convex subscription.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sessions.proto:18-204",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:640-745",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:370-420",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:891-915",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:970-976",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3445-3460",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:66-72",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/../config.rs:50-51 (application_convex_url, application_convex_service_key)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:5425-5475",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:2565-2600",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:1-40"
+    ],
+    "reuse": [
+     "MessageAction and MessageMenuItem in ChatMessages.tsx (lift to a shared component) for the per-message toolbar.",
+     "Session Core transcript read already selects message id, role, content and author_subject_id and applies the audience-revision predicate, so a revision fold can sit on the same query.",
+     "Control thread:append decision (content-digest bound) for appending a revision entry, and the MESSAGE_APPENDED event pattern for audit.",
+     "Convex spaceReadMarkers.ts as the model for a content-free, gateway-fronted reactions table.",
+     "Chat feedback route for thumbs on agent turns."
+    ],
+    "constraints": "The transcript is append-only in Session Core (messages plus immutable MESSAGE_APPENDED events), so edit and delete must be revision entries folded at read time and the model-visible history rebuilt from that fold. Authority for author, agent-owner or Space-admin retract must come from Control with an audit event. Under ZDR no durable original exists to revise; for others, keeping the original inside a revision conflicts with privacy deletion and needs an explicit per-org rule. Reactions must be content-free (emoji only) in Application Plane, read-checked against the audience, and must never stand in for a Control approval. Deleting an entry an agent already acted on does not undo its effects.",
+    "approachAdjustment": "Make F-t1-001 an explicit dependency: non-owner authorship and per-member appends do not exist yet, and Session Core currently ties appends to the thread owner. Replace 'a Convex subscription pushes changes' with a gateway-pushed event or the existing poll. Split the item into reactions plus toolbar (M: a content-free Convex table behind a gateway route, toolbar lifted from Chat) and revision entries (L: Session Core, Control policy, prompt builder). Expose message id and sequence in the Space transcript DTO, because TranscriptTurn drops them today.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged for the combined item; reactions alone are M and revisions are L.",
+    "verdict": "keep",
+    "verdictReason": "Verified absent end to end (proto, gateway, Convex, UI); the description is accurate and only the push mechanism and the dependency on human posting need correcting.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-017",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/buzz/desktop/src/features/messages/lib/canManageMessage.ts:1-30 (self-author OR owner-of-agent via ownerPubkey; huddle-started immutable; no admin path in this check)",
+     "C:/dev/buzz/crates/buzz-core/src/kind.rs:478-492 (KIND_STREAM_MESSAGE_EDIT 40003 as a separate event)",
+     "C:/dev/buzz/VISION.md:147 ('Soft-deleted events remain in the audit log' is a vision doc statement)",
+     "C:/dev/buzz/schema/tables/public/reactions.sql:1-20 (PK community,event_created_at,event_id,pubkey,emoji; removed_at; unique reaction_event_id)",
+     "C:/dev/qm/src/core/message-revisions.ts:1-60 (system entry kind message_revision, action edited|deleted, keyed by Slack ts; appendEntryOutsideTurn + lease; rendered as <message-edited>/<message-deleted>)",
+     "C:/dev/qm/src/slack/reactions.ts:32-57,155-195,240-259 (REACTION_INSTRUCTION text directive [[react: ...]], MAX_REACTIONS_PER_TURN=5, shouldSurfaceReaction gate, buildReactionTurnText renders a '[Slack reaction] ...' text turn)",
+     "C:/dev/qm/src/slack/directives.ts:1-35 (regex directive extraction from the reply text)",
+     "C:/dev/qm/src/slack/ack-emoji.ts:17,87 (ack emoji with latency logged)",
+     "extract/grokbot/dist/electron-main/proto.cjs: GrokBotFeedbackAction enum UNSPECIFIED/UP/DOWN/SUBMIT/REVERT; ReactToGrokBotMessageRequest{agent_id,entry_id,emoji,session_id}",
+     "extract/grokbot/dist/renderer/assets/index-Bo3NzkuN.js at about offset 1082500 (sand-message-hover-actions with role 'toolbar' and a 'more' popover)"
+    ],
+    "corrections": "Two mechanisms are wrongly attributed. (1) It says qm agents 'emit reactions through a typed tool capped at 5 per turn'. In fact qm uses a text directive in the model reply ([[react: name @ ~id]]) that the Slack adapter parses with a regex and caps at 5. The cluster itself recommended a typed tool as an improvement over qm. Rephrase as 'qm: reply directive, max 5; recommend a typed tool for Verevon'. Inbound reactions reach the agent as a rendered '[Slack reaction] ...' text turn, not a typed {reaction, target_seq, by} object. qm revision entries target the Slack message ts, not a seq. (2) It says 'slack: role=toolbar per message with roving focus and a more-menu'. The role=toolbar evidence is GrokBot (index-Bo3NzkuN.js sand-message-hover-actions). Slack's records cover the rich clipboard and the native context menu only, and roving focus was not verified anywhere. Also: buzz 'soft-deleted events kept in audit' comes from VISION.md (DOC), not code. buzz's client-side permission has no admin branch; admin delete comes only from the Slack/Teams policy docs. qm has no edit or delete UI of its own; it ingests Slack edit/delete events. So qm's place in the 4-of-5 edit/delete count means 'handles edits made on its Slack surface', not 'offers edit/delete'.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "qm reactions and edits are Slack-surface features (qm reuses Slack's reactions and edit events); there is no qm-native reactions table",
+     "Slack and Teams edit/delete and admin policy flags are DOC (help center, learn.microsoft.com) plus Teams locale strings",
+     "buzz audit retention of soft-deleted events is DOC (VISION.md:147), not verified in code",
+     "GrokBot reactions and feedback votes are proto/RPC-schema level (SRC from bundle); wake-on-reaction behaviour not re-verified",
+     "Per-message action toolbar evidence is GrokBot; the more-menu content differs, and GrokBot has no edit/delete"
+    ],
+    "confidence": "high"
+   }
+  }
+ }
+]

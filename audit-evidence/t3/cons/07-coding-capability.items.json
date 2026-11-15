@@ -1,0 +1,545 @@
+{
+  "category": "Coding capability",
+  "items": [
+    {
+      "id": "R-t3-07-01",
+      "title": "Workspace file edit tools for Do mode: governed fs.edit and fs.write on a small shared Rust edit engine",
+      "summary": "Build one small Rust edit engine (unique-match old_string to new_string, whitespace/CRLF-tolerant fallback, did-you-mean errors, replace_all, per-path lock, version guard from the read hash) and expose it as governed fs.edit and fs.write tools in Do mode over the hydrated Space workspace, returning before/after hunks so the existing diff card renders the change. Chat artifacts are deliberately out of scope: exact-quote patching of artifacts was designed, adversarially reviewed and not adopted as v1 (see the gap).",
+      "whyItMatters": "A Do agent cannot change a workspace file except by writing a whole python or sh program through code_interpreter, so every edit to an uploaded project or generated multi-file output is a full rewrite with silent-truncation risk and no reviewable patch. Every coding-capable reference edits in place (table-stakes for agent harnesses), and without it the review, changed-files, preview and diagnostics work below has nothing to act on. It is the foundation for the agent that 'acts like a PC' and writes code, and it keeps each agent change small enough for a human to review, which is Verevon's transparency goal.",
+      "referenceBestPractice": {
+        "bestSource": "Cursor (StrReplace matching ladder, structured result, shared per-file lock)",
+        "others": [
+          "DeepSeek harness (stale-read version guard with a remedy message)",
+          "Antigravity (lazy-edit detection, fuzzy-distance cap, partial success)",
+          "Codex (apply_patch variant of the same capability)",
+          "Claude Code and Manus (str_replace style editors)"
+        ],
+        "prevalence": "3 of 9 sources have detailed records (Cursor, DeepSeek, Antigravity); every coding-capable reference ships an edit tool in some form; table-stakes for agent harnesses",
+        "mechanism": "Schema {file_path first, old_string, new_string, replace_all?}; reject empty or identical strings. Match ladder: exact; then per-line trim with endsWith on the first and startsWith on the last line plus CRLF normalisation; then return a did-you-mean block anchored on the longest line of old_string with +/-2 context lines. More than one hit without replace_all fails and asks for more context. Version guard: read records a content hash per path and the edit is rejected with a remedy if the file was not observed or changed since (DeepSeek FS_NOT_OBSERVED). Apply atomically under a per-path mutex shared by parallel tool calls. Return {changed_line_range, lines_added, lines_removed, whitespace_relaxed} plus a 3-context-line unified diff. Antigravity additionally rejects lazy edits such as an elided 'rest unchanged' comment."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:24-34",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4086",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:183",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4344-4346",
+          "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts:1-30",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/patch-revision-2026-09-29/00-critic-verdict-and-staged-plan.md"
+        ],
+        "gap": "Workspace half: space workspace files can only be changed by writing a whole python or sh program through code_interpreter, and there is no file read, edit or write tool in the Do-mode catalogue (process_tool_defs and code_interpreter are the file-adjacent tools). A grep for apply_patch, str_replace, write_file and edit_file in Model Plane Rust finds only MCP test fixtures, and diff.ts's own header says nothing in the platform produces a patch. Artifact half, already analysed: update_artifact still takes complete replacement content (tool_loop.rs:4344-4346), but a patch-style patch_artifact was designed and adversarially reviewed on 2026-09-29/30 and not adopted as v1 (exact-quoting failure class, 8-10 engineer-days, a new review-reuse policy for the deterministic source checks, a 95% first-try bar). The cheaper Stage 1 (section-only output spliced by Preservation::apply, MODEL_GATEWAY_DATED_POST_SECTION_ONLY on by default) was built and measured at p50 26.7 s and p95 41.6 s on the Terra route, down from a p95 of about 76 s; Stage 2 is 'decide on data'."
+      },
+      "approach": "(1) New Rust crate (for example mp-edit) in the Model Plane Rust workspace with the matching ladder and property tests, no I/O. (2) execution-core runtime_loop/agent.rs: add fs.read (returns a content hash; see R-t3-07-02), fs.edit and fs.write next to process_tool_defs, operating on the hydrated Space workspace directory from ensure_hydrated_workspace (sandbox_lease.rs:183) with the same path confinement as workspace_hydrate::hydrate (no absolute or .. paths). Use the hydrate baseline hash map and the read hash as the stale-read guard. Edits then reach the Space through the existing diff_and_upload and SnapshotSandbox step at lease release (sandbox_lease.rs:495), so no new persistence path is needed. (3) Bind the new tool names in trusted_capability_id (capability_policy.rs:741) to NEW capability ids seeded by a capability-core migration (apps/Model Plane/go/services/capability-core/migrations, cf. 0015_background_process_capability); an unseeded id fails closed. (4) Return before/after hunks so the existing patch card renders them. Do not touch update_artifact now; if the patch-revision plan's Stage 2 is ever triggered, reuse this crate but prefer that plan's 'changed sections plus unchanged-section placeholders' form over oldText quoting, and close its review-reuse items first.",
+      "effort": "M",
+      "dependencies": [
+        "Space workspace lease and hydrate (shipped: sandbox_lease.rs, workspace_hydrate.rs)",
+        "capability-core migration seeding the new capability ids",
+        "Do mode enabled on the product route (OD2 / AGENTIC_SUBSCRIPTION_ENABLED in CHAT_GAP_CLOSURE_PLAN_2026-10-01.md; Do-on-Terra proof A6 covered search, plan and fan-out, not file edits)",
+        "version-token rule for agent file tools proposed in R-t3-06-07 phase C"
+      ],
+      "planeOwner": "Model Plane (execution-core for workspace files, capability-core for governance)",
+      "risks": "Fuzzy matching can apply an edit in the wrong place: record the match tier, never relax when more than one candidate exists, and refuse below a threshold. Paths must stay inside the lease root. Under ZDR no edit text may reach logs or audit (paths and counts only). On the Codex subscription route tool arguments travel as JSON-encoded text inside a constrained proposal schema, and one invalid tool parameter schema killed every Do run on Terra in the A6 proof (defect 1), so keep parameters plain strings and extend the existing every_offered_tool_has_a_parameter_schema_that_is_a_json_object test to the new tools. The Do loop and the inline chat loop must not be merged (apps/Model Plane/CLAUDE.md), so share the crate, not the loop. Value depends on Do mode being switched on and on how much file work users give it.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Not planned for workspace files. Related prior decision for the artifact half (not adopted as v1, Stage 1 shipped): apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/patch-revision-2026-09-29/"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-07-001"
+      ]
+    },
+    {
+      "id": "R-t3-07-02",
+      "title": "Read-only workspace tools for Do mode: versioned fs.read, fs.grep, fs.glob and fs.list over the leased Space workspace",
+      "summary": "Add low-risk, bounded read tools over the hydrated Space workspace: ranged read with line numbers and a content hash, ripgrep-shaped grep (pattern, glob, context lines, head_limit, truncated flag) and glob/list sorted by mtime with sampling over a cap. The read hash feeds the edit tool's stale-read guard.",
+      "whyItMatters": "Agents cannot inspect uploaded projects or multi-file outputs cheaply today; they must write a throwaway program for every look. Reading, searching and editing are one loop in every coding reference, so edits across more than one file are not useful without this. Knowledge search covers Data Plane documents, not workspace files.",
+      "referenceBestPractice": {
+        "bestSource": "Cursor (ripgrep-shaped grep with broad-glob guard, versioned read schema with negative offsets and line numbers)",
+        "others": [
+          "DeepSeek harness (over-cap sampling, truncation flags)",
+          "T3 Code (strict index budgets: 25k entries, 15 s scan, idle eviction)"
+        ],
+        "prevalence": "3 of 9 sources; common",
+        "mechanism": "grep maps onto a bundled ripgrep with workdir-relative paths, output_mode, -A/-B/-C, multiline, head_limit and a truncated flag, and refuses an unbounded broad glob. glob sorts by mtime and samples across top-level directories above the cap. read {path, offset (negative counts from the end), limit, line_numbers} is byte-capped and returns a content hash. All results are bounded by byte caps so one call cannot flood the context."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:24-34",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741-790",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4086",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:183"
+        ],
+        "gap": "There are no grep, glob or read tools over a Space workspace. The model can only shell out inside code_interpreter (hermetic, per call) or use knowledge_search over Data Plane. The governed shell is read-only, human-gated and not offered in Do mode (per the comparator's reading of capability_policy.rs; the shell capability is cap.command.shell)."
+      },
+      "approach": "execution-core: implement fs.read, fs.grep, fs.glob and fs.list in the Do-mode catalogue (runtime_loop/agent.rs) against the hydrated workspace directory, using in-process Rust search (the ignore and grep-searcher crates) or ripgrep in the sandbox image. Cap bytes, lines and files, flag truncation, and skip binary files. Bind them to one new LOW-risk capability id seeded in capability-core (the same shape as cap.process.background) and decide whether the lease needs a dedicated scope like space:processes. Add a secret-file deny list (.env, key and token files) with redaction. Ship together with R-t3-07-01's fs.edit, since the read hash is its version token.",
+      "effort": "S",
+      "dependencies": [
+        "Space workspace lease and hydrate (shipped)",
+        "capability-core migration for the read capability",
+        "R-t3-07-01 for the version token consumer"
+      ],
+      "planeOwner": "Model Plane (execution-core, capability-core)",
+      "risks": "Secret files inside uploaded projects: deny-list and redact. Path traversal and symlinks out of the lease root: confine like workspace_hydrate does and do not follow symlinks (as collect_output_files already refuses). Large repositories: hard budgets on file count and bytes.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-07-008"
+      ]
+    },
+    {
+      "id": "R-t3-07-03",
+      "title": "Changed-files card per turn and run, with line stats and a workspace diff route",
+      "summary": "At the end of each agent turn, diff the leased workspace against its baseline and emit a typed run event listing changed files with status and +/- counts; render it as a compact card under the answer (directory tree, auto-expand only for 5 files or fewer and 200 changed lines or fewer, expansion remembered per message) that opens the existing DiffView. Include artifact revisions in the same card.",
+      "whyItMatters": "Transparency is a stated Verevon value borrowed from the DeepSeek reference: after a Do run the user should see at a glance what changed in their Space before anything is promoted. The change set is already computed at run end but only as hashes, and nothing in the UI shows it.",
+      "referenceBestPractice": {
+        "bestSource": "T3 Code (changed-files section with auto-expand thresholds, single-child directory chain collapse, aggregated stats, per-turn persisted expansion)",
+        "others": [
+          "DeepSeek harness (turn-start vs turn-end snapshots; edit replay)"
+        ],
+        "prevalence": "2 of 9 sources; differentiator",
+        "mechanism": "Snapshot content hashes per path at turn start; at turn end diff the snapshots and emit turn.diff.complete {files:[{path, added, removed, status}]}. UI builds a tree by compacting single-child directories, auto-expands under 5 files and 200 lines, and a click opens the diff panel at that file. Optional replay steps through each edit's old and new text."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:40-66",
+          "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:102",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:436-540",
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:617",
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:642",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2023-2100",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2534"
+        ],
+        "gap": "workspace_hydrate::diff_and_upload already returns ChangedFile {path, content_hash, size_bytes, base_hash}, but it runs only once at lease release and the result goes to SnapshotSandbox, not to the user. code_interpreter's snapshot_file_hashes and collect_output_files see only top-level files and feed download cards. There are no line stats, no per-turn summary across a Do run's tool calls and no file tree; a tool card shows a patch only when one tool returned one. The Frontend gateway has no route to list or diff Space workspace files (INF: spaces.rs only proxies a process read to model-gateway /v1/processes; not searched exhaustively)."
+      },
+      "approach": "execution-core: factor a non-uploading diff out of diff_and_upload and run it at each turn end over the hydrated directory; for text files under a size cap compute added/removed counts against the baseline blob fetched from CAS by hash. Emit a typed workspace.changes run event (paths, status, counts, sizes only, never contents) that session-core persists as a receipt. Frontend gateway: a read route that returns a file's baseline and current text through the Space read decision, as the processes read in spaces.rs does. Frontend Plane: a ChangedFilesCard that reuses DiffView and the diff.ts producer; fold artifact version changes (ChatArtifact.history) into the same card. Edit replay is optional and can follow.",
+      "effort": "M",
+      "dependencies": [
+        "R-t3-07-01 (agents only change many files once they have an edit tool)",
+        "Space workspace manifest and CAS (shipped)",
+        "new gateway read route under the Space read decision"
+      ],
+      "planeOwner": "Model Plane (execution-core, session-core) with Frontend Plane for the card and route",
+      "risks": "Large workspaces: cap file counts and skip binaries. ZDR runs must not persist file contents in the receipt (paths and counts only). Turn-end diffs must not race background processes still writing into the workspace (release_sandbox_lease_if_any kills them first for the final diff; do the same or mark the snapshot as live).",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-07-003"
+      ]
+    },
+    {
+      "id": "R-t3-07-04",
+      "title": "Review gate before promotion: accept or reject agent changes by file or hunk, with rejection feedback sent back to the run",
+      "summary": "Hold a Do run's workspace overlay as pending and let the owner accept or reject per file (later per hunk) or all at once, with a written reason on rejection that is delivered to the agent as the next steering message. Accept calls PromoteWorkspace with the chosen paths; reject reverts them in the overlay. Reuse the same action for restoring part of a prior artifact version.",
+      "whyItMatters": "Fits the authority model (the agent proposes, the owner commits) and gives users control over what lands in durable Space content. Accept/reject is table-stakes in five of nine references. PromoteWorkspace has a client but no caller yet, so this is also its first real use.",
+      "referenceBestPractice": {
+        "bestSource": "Antigravity (accept/reject with FILE|HUNK|ALL scope, written_feedback returned to the trajectory, STALE and CLEARED states)",
+        "others": [
+          "T3 Code (panel scope turn | branch | working tree, persisted per thread, stacked or split)",
+          "Cursor",
+          "Claude desktop",
+          "ChatGPT web"
+        ],
+        "prevalence": "5 of 9 sources; table-stakes",
+        "mechanism": "Agent edits land in a pending layer instead of the durable copy. A review object per step holds per-file unified diffs. A user action produces {is_accept, scope, written_feedback, diffs}. A reject reverts the hunk in the overlay and injects the feedback as the next user turn, and a review goes stale when the file changed since."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts:61-243",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:311-343",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox_manager_client.rs:314-330",
+          "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:40-66",
+          "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:1-6"
+        ],
+        "gap": "Diffs are read-only (unified view, 2,000-line cap, stat-only fallback) and artifacts have a version stepper with a show-changes view. There is no accept/reject, no hunk scope, no rejection feedback to the agent and no review step in front of promotion. SandboxManagerClient::promote_workspace exists and Go sandbox-manager implements PromoteWorkspace, but a grep of execution-core, model-gateway, session-core, orchestrator-core and the SPA src found no non-test caller (the gateway src search found only a read audience in spaces.rs), so whether a run's overlay is ever merged into the Space today is unverified."
+      },
+      "approach": "Phase 1 (file level): treat SnapshotSandbox's changed_files as a pending overlay; add a Frontend gateway route (gateway to model-gateway to sandbox-manager) that lists pending files with diffs and takes accept/reject by path. Accept calls PromoteWorkspace, whose compare-and-swap uses ChangedFile.base_hash; reject drops the paths from the overlay. Deliver the rejection comment to the run with the existing mid-run queued_input mechanism (or as the next user turn if the run ended). Phase 2 (hunk level): compose accepted hunks into a new blob, upload it to CAS and promote that hash against the observed base_hash. Frontend: extend DiffView with hunk selection and a reject-with-comment action; artifact revisions reuse the same control to restore part of an earlier version without any sandbox.",
+      "effort": "M",
+      "dependencies": [
+        "R-t3-07-01",
+        "R-t3-07-03 (pending change list and diff route)",
+        "sandbox-manager PromoteWorkspace (built; confirm its callers and merge semantics)",
+        "R-t3-01-04 for server-side artifact revisions"
+      ],
+      "planeOwner": "Frontend Plane (UI and gateway route) with Model Plane (sandbox-manager, execution-core)",
+      "risks": "A hunk revert on top of later edits needs a three-way merge, so start with the latest turn and file-level scope. A review that sits pending must not hold a lease open beyond its TTL (release_sandbox_lease_if_any uploads at release, so the overlay must outlive the lease). Keep the human gate in front of promotion; never let the agent self-accept.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-07-004"
+      ]
+    },
+    {
+      "id": "R-t3-07-05",
+      "title": "Selection comments and selection-scoped rewrite in the artifact panel, bound to artifact version",
+      "summary": "Let users select text or lines in an artifact (document, code) or a diff row, write a comment or an instruction, and send it with the next message as a typed context part carrying artifact id, version, range and excerpt. A 'rewrite this selection' action asks the model for only the replacement text and splices it into the stored artifact at the client-supplied range, shown as a diff.",
+      "whyItMatters": "Documents, reports and code artifacts are Verevon's core outputs, and users currently describe locations in prose ('change the third paragraph'). Precise steering reduces ambiguous turns and rewrites of the whole artifact, with no IDE surface needed. It is a differentiator against claude.ai and ChatGPT web.",
+      "referenceBestPractice": {
+        "bestSource": "T3 Code (serialised <review_comment> block with path, range, text, diff excerpt and fence language that round-trips into a comment card; one annotation component for diffs, files and PRs)",
+        "others": [
+          "Claude desktop (comments sent to Claude)",
+          "Cursor (Cmd+K StreamCmdK selection rewrite with a streamed inline diff and a terminal variant)"
+        ],
+        "prevalence": "2 of 9 sources for comments (differentiator); selection rewrite is unique to Cursor in this category's records",
+        "mechanism": "An annotatable wrapper over the diff, code or document renderer turns a selection into a draft annotation (Cmd/Ctrl+Enter submits, Esc cancels) and then a composer chip kept in the draft store. On send each comment is serialised to a tagged block with the path, range, text and selected excerpt, which the server passes verbatim to the model; the client parses it back into a card. Selection rewrite sends {range, surrounding context, instruction} and renders the streamed replacement as an inline diff with accept/reject."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:474",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:311-343",
+          "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts:61-243",
+          "apps/Model Plane/rust/services/model-gateway/src/revision_preservation.rs:234",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/patch-revision-2026-09-29/00-critic-verdict-and-staged-plan.md"
+        ],
+        "gap": "A grep of features/chat for getSelection, selectionchange and annotation finds nothing: there is no comment-on-selection or select-and-rewrite in the artifact panel or in DiffView. Revisions are requested in prose and answered by regenerating the artifact (or just the dated-post section, via the shipped Stage 1 section-only lever)."
+      },
+      "approach": "Frontend Plane first: a selection toolbar in ChatArtifactPanel (markdown and code views) and on DiffView rows producing a typed context item {artifact_id, version, range, excerpt, comment}. Build it on the single typed-selection context path proposed in R-t3-01-10 and R-t3-01-11 rather than a second one; model-gateway renders it as a tagged block any provider can read and records the artifact id and version so the edit lands on the right revision. The rewrite action sends {artifact id, version, range, instruction}; the model returns only the replacement text and the gateway splices it byte-exact into the stored content, the same shape as Preservation::apply (revision_preservation.rs:234) and the shipped section-only lever. This avoids the oldText quoting failure class that sank patch_artifact in the patch-revision review, because the range comes from the client, not from the model quoting text. The spliced full text then goes through the existing artifact checks as any revision does; the review-reuse scope stays the existing one (the plan's D2 says not to derive scope from an edit yet). DiffView renders the result.",
+      "effort": "S",
+      "dependencies": [
+        "R-t3-01-10 and R-t3-01-11 (typed context items and selection actions)",
+        "artifact version ids in the client (exist)",
+        "owner decision D2 in the patch-revision plan only if review reuse is ever derived from the selection"
+      ],
+      "planeOwner": "Frontend Plane (with a content-part renderer and a range-splice revision path in model-gateway)",
+      "risks": "A comment bound to a stale version: store id and version with each comment and warn when the artifact has moved on. Some rewrites need context outside the selection, so fall back to a normal turn. A splice that changes a heading, table header or status wording can shift meaning outside the selection; the full-document checks must still run (the patch-revision critic found such escapes). Avoid building the selection layer twice alongside R-t3-01-11.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-07-005",
+        "C-t3-07-013"
+      ]
+    },
+    {
+      "id": "R-t3-07-06",
+      "title": "Review as a run: read-only reviewer subagent with strict P0-P3 findings, merged with the deterministic source checks",
+      "summary": "Add a 'review this' run for an artifact revision, a workspace turn diff or attached files. A read-only reviewer subagent returns findings in a validated schema (title, body, priority P0-P3, confidence, location, plus overall correctness) and may report nothing. Deterministic findings from source_validation.rs are merged into the same schema and card, and 'apply fix' sends a finding back as a scoped edit turn.",
+      "whyItMatters": "A trustworthy, located second pass is useful for code, reports and contracts alike, and four of nine references ship a review run. Verevon already has a rare strength here (deterministic checks of numbers, dates, word counts and revision preservation against sources); putting both reviewers behind one findings card makes that strength visible and consistent.",
+      "referenceBestPractice": {
+        "bestSource": "Codex (review/start with four targets, inline or detached delivery, steering disabled during review, strict findings JSON and a 'report only what the author would fix' standard)",
+        "others": [
+          "Claude desktop (best findings-card UX: walkthrough, apply fix, rerun)",
+          "Cursor",
+          "Antigravity"
+        ],
+        "prevalence": "4 of 9 sources; common",
+        "mechanism": "review/start {target, delivery, threadId} spawns a read-only sandboxed reviewer with a target-specific prompt (uncommitted changes, merge-base diff, a commit, or custom instructions). Output is held to a schema {findings[{title, body, confidence_score, priority, code_location}], overall_correctness, overall_confidence_score}; an explicit-only review skill enforces 'no invented findings'. The UI renders a findings card and 'apply fix' sends a finding back as a scoped edit turn."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:1-3",
+          "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:2113",
+          "apps/Model Plane/rust/services/model-gateway/src/revision_preservation.rs:1-3",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:742-744"
+        ],
+        "gap": "There is no code or generic review run and no findings card. The existing source-bound review is automatic, document-only and reports inside the drafting flow rather than as a user-invokable, located, prioritised review. Subagents exist (subagent.* tools are bound to cap.agent.spawn) but there is no review profile."
+      },
+      "approach": "Model Plane: a review subagent profile with a read-only capability set (fs.read, fs.grep, read_artifact; no edit or process tools) and a findings JSON schema enforced through the structured-output path; drop findings without a location or below a confidence threshold. Targets: artifact revision diff, Space workspace turn diff (R-t3-07-03), attached code or documents. Map deterministic source_validation findings into the same schema as high-confidence items. Frontend Plane: a findings card with priority chips and 'apply fix', which sends a scoped revision turn: for artifacts through the selection-bound range splice in R-t3-07-05, for workspace files through R-t3-07-01's fs.edit.",
+      "effort": "M",
+      "dependencies": [
+        "subagent tools (shipped)",
+        "R-t3-07-02 for workspace targets",
+        "R-t3-07-03 for workspace diff targets",
+        "R-t3-07-05 (artifact apply fix) and R-t3-07-01 (workspace apply fix)"
+      ],
+      "planeOwner": "Model Plane (model-gateway, execution-core) with Frontend Plane for the card",
+      "risks": "False positives erode trust: enforce the 'only what the author would fix' standard, a confidence floor and a reviewer that cannot write. Reviewer cost doubles the work on big diffs, so make it explicit-only and budgeted. Keep deterministic and model findings visibly distinct.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-07-014"
+      ]
+    },
+    {
+      "id": "R-t3-07-07",
+      "title": "Multi-file app build and preview: static web bundles first, built output next, screenshots through Quarry",
+      "summary": "Let agents ship a small multi-file web app or dashboard safely. Phase 0: a multi-file static bundle artifact (HTML plus CSS/JS files, no build) rendered in the existing sandboxed iframe. Phase 1: build inside the Space sandbox with a pinned, pre-baked toolchain and serve the dist output from a per-run isolated origin through the Frontend gateway. Phase 2: dev-server ports and authenticated previews, which belong to R-t3-06-10. UI screenshots of the preview are taken through Quarry.",
+      "whyItMatters": "'Build me a small app or dashboard' is a headline use case for claude.ai, ChatGPT and Manus, and Verevon's agents can only produce single-file HTML. A safe preview extends an existing strength (sandboxed HTML artifacts) to multi-file outputs and closes a visible gap against the references.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (dev-server candidate detection, explanations for cold starts and port conflicts, request throttling, ask-Claude fallback)",
+        "others": [
+          "Manus (checkpoint previews and webdev LSP presets)",
+          "ChatGPT web (preview of built apps, DOC)",
+          "Claude.ai web (artifacts shared between code and chat, DOC)"
+        ],
+        "prevalence": "4 of 9 sources; common",
+        "mechanism": "The workspace declares a start command and port, or the agent detects them, and the sandbox runs it. A reverse proxy exposes the port to a sandboxed iframe on a per-run origin. Checkpoints snapshot the workspace and serve a static build for comparison, and a screenshot tool captures the preview for the model."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:503-518",
+          "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:33-48",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4089",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741-790"
+        ],
+        "gap": "Single-file HTML artifacts render in an iframe with sandbox=allow-scripts and no same-origin, with a version stepper. The artifact kinds are code, document, html, spreadsheet, file and image, so there is no multi-file project kind. The Space sandbox has no network and no port exposure (process_start: 'NO NETWORK, read-only system'), and there is no build step, dev-server preview or screenshot-of-preview loop."
+      },
+      "approach": "Phase 0 (INF, no new infrastructure): a bundle artifact kind carrying a files map, composed into one srcdoc (or blob URLs) for the existing sandboxed iframe, with the no-same-origin rule unchanged. Phase 1: execution-core builds the leased workspace with a pinned toolchain from a pre-baked image (R-t3-06-08), since the sandbox cannot install dependencies, then publishes the dist folder to a per-run isolated origin served by the Rust gateway with a strict CSP and no cookies. Phase 2: hand over to R-t3-06-10 for ports and authenticated preview URLs. Screenshots of any preview go through Quarry (the Model proposes, Quarry executes), never a Model Plane browser.",
+      "effort": "L",
+      "dependencies": [
+        "R-t3-07-01 and R-t3-07-02",
+        "sandbox toolchain image (R-t3-06-08)",
+        "isolated preview origin in the Rust gateway",
+        "R-t3-06-10 for dev-server ports and authenticated previews",
+        "Quarry browser grants for screenshots (R-t3-06-01)"
+      ],
+      "planeOwner": "Model Plane (execution-core, sandbox-manager) with Frontend Plane gateway for the preview origin",
+      "risks": "Serving untrusted code needs strict per-run origins, a CSP and no cookies; keep allow-same-origin out. ZDR runs must not persist builds beyond the lease. A networkless build only works for projects whose dependencies are vendored or pre-baked, which limits what 'build' can mean at first.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 2,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-07-019"
+      ]
+    },
+    {
+      "id": "R-t3-07-08",
+      "title": "Post-write diagnostics for generated code (execute decision H11 instead of an LSP bridge), once a concrete need appears",
+      "summary": "After a code artifact is created or revised, or after a successful fs.edit or fs.write in a Space workspace, run cheap syntax and lint checks inside the existing hermetic sandbox, compare against the pre-edit baseline so only newly introduced errors are reported, append them to the tool result, and allow one bounded auto-repair round under the run budget. Start with checks the current sandbox already has (Python compile, sh -n, JSON/YAML parse) and add pre-baked toolchains only if demand shows up.",
+      "whyItMatters": "Code and structured files produced in chat and agent runs would compile and parse more often without user round-trips, under the same governance as other sandbox work. The best references feed diagnostics back automatically, and Verevon already decided this is the right design (H11), but its own plan defers it as low value until a concrete user need exists. Verevon is not an IDE, so keep it small.",
+      "referenceBestPractice": {
+        "bestSource": "Cursor (shadow workspace computing lints for a change without touching the user's files, plus an explicit ReadLints tool with a 10 s timeout)",
+        "others": [
+          "Antigravity (auto-fix without a prompt and a verification mode that runs tests and builds)"
+        ],
+        "prevalence": "2 of 9 sources; differentiator",
+        "mechanism": "After each successful edit run the language toolchain on the changed files in the sandbox within a time budget (tsc, eslint, ruff, cargo check or go vet by extension). Diff the diagnostics against the pre-edit baseline and attach only new errors to the edit tool result, or expose read_lints. When new errors exist, inject a short notifying prompt for one bounded repair round. Verification mode runs declared test and build commands and reports pass or fail as a step."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1-30",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/post_mutation.rs:1-40",
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:24-34",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4086"
+        ],
+        "gap": "Only a typed LspQuery pass-through to an external bridge exists; with LSP_BRIDGE_URL unset it returns Unimplemented and it is not offered to the agent (lsp.rs:20). H11 ('post-write diagnostics for code artifacts instead of deploying an LSP bridge', effort S) sits in Wave 6, whose exit criteria say to revisit it only on a concrete user need, and the owner-decision default OD18 recommends skipping it (CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:270, 276, 504). There is no workspace edit tool to hook diagnostics onto yet (R-t3-07-01). The agent loop already has an in-loop post-write hook shape (post_mutation.rs appends a verdict line to a write's tool output, is off by default and never turns a success into an error) that a diagnostics step can copy."
+      },
+      "approach": "Two seams, one checker. (1) model-gateway inline loop (tool_loop.rs; the plan notes the inline and agentic loops must not be merged): after create_artifact or update_artifact of kind code, run the check through the existing code_interpreter path and append new errors to the artifact tool result. (2) execution-core runtime_loop: after fs.edit and fs.write succeed, add a step modelled on post_mutation.rs (opt-in flag, bounded deadline, an 'inconclusive' verdict on outage, never converts a successful edit into an error). Run checks in the same bwrap profile as code_interpreter (no network, read-only rootfs); phase 1 uses what the sandbox already runs (Python compile, sh -n, JSON and YAML parse), phase 2 adds pre-baked toolchains to the sandbox image (shared with R-t3-06-08) only if demand appears. Diff diagnostics against the pre-edit result, report only new errors with file and line, and allow one repair round counted against the run budget. Do not build the LSP bridge; leave lsp.rs dormant.",
+      "effort": "S",
+      "dependencies": [
+        "R-t3-07-01 for the workspace seam (the code-artifact seam has no dependency)",
+        "sandbox image with toolchains (R-t3-06-08 for per-Space images) for phase 2",
+        "run budget (shipped)"
+      ],
+      "planeOwner": "Model Plane (model-gateway for code artifacts, execution-core for workspace edits)",
+      "risks": "Value depends on how much real code work Verevon sees compared with documents and data; the owner-decision default is to skip until a concrete need appears, so revisit rather than schedule. Toolchain image size and cold-start time: the networkless sandbox cannot install dependencies, so project-level type checks fail unless pre-baked or cached. A wrong diagnostic can mislead the model (post_mutation.rs documents the same risk), so label results as advisory.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 2,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Task H11 in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (lines 270, 276, 504): deferred to Wave 6, revisit only on a concrete user need; OD18 default is to skip. Downgraded from the comparator's recommended tier for this reason"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-07-006"
+      ]
+    },
+    {
+      "id": "R-t3-07-09",
+      "title": "Optional apply_patch patch format on fs.edit, enabled only where a provider can use it",
+      "summary": "After R-t3-07-01 ships, measure first-try edit success per model route. If the Codex-family route shows avoidable failures, accept a second argument form on fs.edit: a Codex-style patch (Begin/End Patch, Add/Delete/Update File, Move to, @@ context hunks) parsed and applied by the same Rust crate, with errors that name the valid headers. Offer the grammar-constrained freeform tool only on providers that support it.",
+      "whyItMatters": "The default route uses a GPT-5.6-class Codex model family trained on apply_patch, so a native patch form could raise first-try success and cut retries. However the subscription route cannot carry a freeform tool today, so the benefit is uncertain until measured.",
+      "referenceBestPractice": {
+        "bestSource": "Codex (Lark-grammar-constrained freeform apply_patch tool, shell-heredoc interception, line-ending preservation, streaming patch events)",
+        "others": [
+          "Cursor (switches edit tools by model vendor in production: apply_patch for GPT-5 family, Write plus StrReplace for others)"
+        ],
+        "prevalence": "2 of 9 sources; differentiator",
+        "mechanism": "The tool catalogue builder switches on model family: gpt-5 and codex models register apply_patch as a freeform grammar-constrained tool, other families get write plus str_replace. Update hunks locate context with a seek_sequence (exact, then rstrip, then trim, then unicode-normalised). A shell command whose heredoc parses as a patch is refused with 'rerun as apply_patch'. Both paths emit the same before/after result and diff event."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:26",
+          "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription_tools.rs:1-45",
+          "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs"
+        ],
+        "gap": "No edit tool exists at all (R-t3-07-01), so there is no vendor variant. On the Codex subscription route, tools are not native: the adapter sends a 'tool-proposal protocol' and a constrained JSON output schema {content, toolCalls[{name, arguments as JSON-encoded text}]}, and says Integration Core never executes tools (codex_subscription_tools.rs:1-2, 38-45). A grep of inference-core for freeform, grammar or custom tool types finds nothing, so a grammar-constrained freeform tool would need a contract change as well as a provider change."
+      },
+      "approach": "Step 1: add an optional patch string argument to fs.edit, parsed by the same mp-edit crate; it works inside the JSON-encoded arguments of the subscription route, with escaped newlines the main risk. Step 2 (only if evaluation justifies it): extend the ToolDefinition contract in apps/Model Plane/proto and the OpenAI provider adapter with a freeform tool type, and register it only for providers that report support in ProviderCapabilities. Gate both steps on an edit-success evaluation per route.",
+      "effort": "M",
+      "dependencies": [
+        "R-t3-07-01",
+        "provider capability flag for freeform or grammar tools (step 2)",
+        "an edit-success evaluation harness"
+      ],
+      "planeOwner": "Model Plane (inference-core, model-gateway)",
+      "risks": "Two edit surfaces to test and keep in sync; JSON-escaped multi-line patches on the subscription route may fail more often than plain old/new strings, which would make this a net loss there. Downgraded from the comparator's recommended tier because the main route cannot carry a native freeform tool (INF from codex_subscription_tools.rs).",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-07-002"
+      ]
+    },
+    {
+      "id": "R-t3-07-10",
+      "title": "Best-of-N parallel attempts with side-by-side compare and keep-one",
+      "summary": "Let a user fan one workspace or artifact task out to N models or seeds as child runs on separate workspace overlays, show the results side by side, and apply only the chosen one while the other overlays are discarded.",
+      "whyItMatters": "A natural power-user feature for a multi-model product, and a use of the review gate and overlay model Verevon already has. Cost multiplies, so it must be opt-in and budgeted.",
+      "referenceBestPractice": {
+        "bestSource": "Cursor (planBestOfN and runBestOfNFanout with sibling undo)",
+        "others": [],
+        "prevalence": "1 of 9 sources; unique",
+        "mechanism": "A parent run spawns N child runs (different models or seeds) on copies of the workspace. Results are shown side by side, and applying one discards the sibling overlays."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:436-540",
+          "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:40-66",
+          "apps/Model Plane/docs/decisions/ledger.md:1821-1827"
+        ],
+        "gap": "A search of the frontend and Model Plane for best-of-N and compare-models found nothing (comparator). Verevon has multi-model routing and subagent fan-out (research_fan_out) but no user-facing parallel attempts. Decision-ledger entry 2026-08-24 rejects git-worktree-style per-agent filesystem isolation and caps a run's delegation at subagent::MAX_TOTAL_CHILDREN = 8, and whether a child run gets its own lease and workspace overlay is unverified."
+      },
+      "approach": "Model Plane: reuse subagent child runs with per-model routing, each attempt with its own lease and overlay (so the pending-overlay model from R-t3-07-04 applies per child). This needs a new decision-ledger ruling first, because the 2026-08-24 entry rejects per-agent filesystem isolation, and N is bounded by the child ceiling. Build it on the Model Council fan-out proposed in R-t3-03-10 rather than separately. Frontend: a side-by-side compare using the changed-files card, with 'keep this'. Apply through the review gate and cost-core budgets.",
+      "effort": "M",
+      "dependencies": [
+        "R-t3-07-03 and R-t3-07-04 (overlays and review gate)",
+        "R-t3-03-10 (Model Council fan-out)",
+        "cost plane budgeting",
+        "a decision-ledger ruling that supersedes or scopes the 2026-08-24 no-isolation decision"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "N times the cost; it must respect per-org budgets and ZDR on every provider leg. Single-source evidence and in tension with an existing ledger decision; defer until the review gate exists.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-07-020"
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t3-07-018",
+      "reason": "Duplicate of R-t3-06-06 (live computer panel with a read-only terminal viewer fed by process output, with 'add to chat' from terminal selection) and R-t3-06-05 (model-facing PTY sessions); an interactive user shell would widen authority, and the /init and hook parts are IDE or Claude-Code specific, so no separate coding-capability item is warranted."
+    }
+  ],
+  "strengthsToKeep": [
+    "Hermetic code interpreter bound to a LOW-risk capability (bwrap, read-only rootfs, no network, size caps, file in and out): apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:24-34 and capability_policy.rs:741-790. Governed per tool, and an unseeded capability id fails closed, which is stricter than the permission prompts in the references.",
+    "Space-scoped durable workspace on a lease: hydrate from a CAS manifest, diff_and_upload with base_hash for compare-and-swap, SnapshotSandbox and PromoteWorkspace (apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:183, workspace_hydrate.rs:40-102, workspace_cas.rs). It does the job of Manus-style retained git worktrees without assuming git, which fits a non-IDE product (cluster C-t3-07-022, not a gap).",
+    "One shared DiffView for tool patches and artifact revisions with an honest stat-only fallback above 2,000 lines, plus a version stepper with a show-changes view (apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts:61-243, features/chat/components/ChatArtifactPanel.tsx:311-343).",
+    "Sandboxed HTML artifact rendering with sandbox=allow-scripts and deliberately no same-origin, at parity with claude.ai artifacts and documented as a security requirement (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:503-518).",
+    "Deterministic source-bound drafting review and byte-exact protected-section revision preservation (apps/Model Plane/rust/services/model-gateway/src/source_validation.rs, revision_preservation.rs). No reference source has an equivalent for documents; keep it and surface it through the findings card in R-t3-07-06.",
+    "A Verevon-specific answer to the full-rewrite cost of document revisions: section-only output for the recognised dated-post revision, spliced byte-exact by Preservation::apply (lever MODEL_GATEWAY_DATED_POST_SECTION_ONLY, on by default in apps/Model Plane/deploy/docker-compose.yml:346; latency_levers.rs:58). Measured live on the Terra route at p50 26.7 s and p95 41.6 s versus a p95 of about 76 s before (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/patch-revision-2026-09-29/00-critic-verdict-and-staged-plan.md, section 7). Do not replace it with exact-quote patching of artifacts without reopening that review.",
+    "Build discipline visible in that plan folder: a design (patch_artifact) was put through an adversarial review before any code, which found a section-loss regression no oracle would have caught and redirected the work to a cheaper stage. Apply the same review to the workspace edit tool and the review gate.",
+    "Durable background-process registry (process_start, read, stdin, signal, list) under one capability with TTL and count limits (apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4086, capability_policy.rs:780-789), ahead of most web chat products. It lacks only a terminal-style renderer, which R-t3-06-06 covers.",
+    "Tool-proposal protocol on the Codex subscription route: the broker never executes tools, and Model Gateway validates and authorizes every action before dispatch (apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription_tools.rs:1-2). Keep that boundary when adding edit tools.",
+    "AI follow-up chips (follow_ups SSE event, session-only) are the equivalent of ChatGPT's composer prediction (apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:420-427); the ghost-text prefill variant is not worth building (cluster C-t3-07-025)."
+  ]
+}

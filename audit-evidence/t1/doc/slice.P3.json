@@ -1,0 +1,874 @@
+[
+ {
+  "finalId": "F-t1-018",
+  "title": "Permission-checked message search: Session Core index with per-hit re-authorization and ZDR exclusion, in-room scoped search on Ctrl/Cmd+F and open-in-context",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 18,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Add a keyword index over Space thread messages in Session Core and a SearchSpaceMessages call plus gateway route; the index only proposes candidates, every hit is re-authorized against the Control room-read decision and audience revision, and ZDR or privacy-restricted turns are never indexed. In the room, Ctrl/Cmd+F opens a search with a removable scope chip (room, thread, person, global), and hits open in context through thread and entry deep links plus cursor paging of the thread list.",
+  "whyItMatters": "There is no message, thread or room search at all; four references treat permission-aware search as table stakes, and a room people work in for months is unusable without it. The index must not ship before Session Core enforces ZDR.",
+  "referenceBestPractice": {
+   "bestSource": "buzz; teams",
+   "others": [
+    "teams",
+    "qm",
+    "slack",
+    "buzz",
+    "grokbot"
+   ],
+   "prevalence": "[R-t1-04-01] 4 of 5 sources; table-stakes [R-t1-04-02] 4 of 5 sources; table-stakes",
+   "mechanism": "[R-t1-04-01] Postgres STORED generated tsvector column (simple config) on the message table with a GIN index; sensitive kinds produce a NULL tsvector so they never match; every query requires a tenant/community id. The engine reads candidates in pages of about 100 ordered by ts_rank, re-fetches each through a scoped fetcher and applies the access predicate per hit, so a page can be shorter than the limit. A prefix mode (to_tsquery with :*) serves typeahead. Teams adds suggestions, search-history and click-feedback endpoints and a query-alteration (spelling) field, which inform the API shape only. [R-t1-04-02] Teams offers channel, chat, community, thread, post and a people-centred scope (files, messages, images with a person), each discoverable from autosuggest with a shortcut hint. Slack routes the native Find command to in-app search; buzz shows a removable scope chip. Esc or backspace on the chip widens to global search; people-centred mode filters by author or participant id."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:39-45",
+    "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:74",
+    "apps/Frontend Plane/verevonv3/src/shared/api/search-client.ts:78-130",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2736",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:200",
+    "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:157-181",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:89-99",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:346-360",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:326"
+   ],
+   "gap": "[R-t1-04-01] No Space, thread or message search route or index exists. Gateway search.rs routes are web, image, video, suggest and answer (Quarry-backed) only (SRC, re-read in this step), and conversation search exists only for the support inbox. The pieces a hit needs to open in context are also missing (see this item (R-t1-04-02)). [R-t1-04-02] Only a client-side filter over room names and the selected room's thread titles and previews exists. It never searches message bodies, other rooms, one thread or a person, and Ctrl+F is not routed to it. Thread deep links (?thread_id=) are generated in activity-grammar.ts but no code under src/features/spaces reads a search param (grep in this step), and the thread list has no paging, so a hit could not be opened in context."
+  },
+  "approachOriginal": "[R-t1-04-01] Session Core (Model Plane): add a generated tsvector plus GIN index over message text on origin=space threads, NULL for turns stamped ZDR or privacy-restricted; add gRPC SearchSpaceMessages(space_id, query, filters{authors, since, until, is, has}, cursor) returning {thread_id, message_seq, snippet with highlights, author, ts}. Candidates are paged by rank and filtered with the same audience-revision predicate the room transcript read already uses (spaces.rs space_thread_transcript, which Session Core enforces by dropping rows newer than the decision revision). Gateway adds GET /api/v1/spaces/{ref}/search that obtains the Control read decision exactly as the transcript route does and forwards it; client-supplied scope is never trusted. Start keyword-only; evaluate stemming for Norwegian/English mixes (simple config has none). [R-t1-04-02] Frontend Plane: scope chip plus Ctrl/Cmd+F handler in SpacePage calling the this item (R-t1-04-01) gateway route with space_id (and thread_id or author filters). Keep the sidebar filter for instant title matching and fall through to server results. Make SpacePage consume ?thread_id=&seq= (scroll to and highlight the message) and add cursor paging with jump-to-message to the thread read path. Offer a fallback to the browser find bar when in-app search is unavailable.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Session Core must act on the ZDR claim (baseline: decoded but ignored today); do not ship the index before this",
+   "Reuse of the Control room-read decision and audience-revision predicate (spaces.rs:2616-2736)",
+   "Non-owner reply fix if search should also cover replies by other members",
+   "Thread list cursor paging and deep-link consumption in SpacePage"
+  ],
+  "planeOwner": "Model Plane (Session Core index and search) with Frontend Plane (gateway route, search UI) and Control Plane (read decision)",
+  "risks": "[R-t1-04-01] Indexing content that ZDR forbids persisting; search treated as an access boundary instead of a candidate source (always post-filter); revocation lag because membership_changed is plain, lossy NATS; no stemming with the simple config. [R-t1-04-02] Overriding browser Ctrl+F annoys users if in-app search is weaker; a deep link to a message the viewer can no longer read must fail closed.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 5,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-04-001",
+   "C-t1-04-003"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-018",
+    "status": "absent",
+    "exactGap": "There is no Space message, thread or room search: the gateway search router serves only web, similar, suggest, images, videos, suggestions and answer; Ctrl/Cmd+K opens GlobalSearchDialog over Data v2 knowledge plus client-side chat history; and the sidebar filter matches only room names and the selected room's thread titles and previews. Session Core has no tsvector or GIN index on messages (Data v2 retrieval-engine-rs has one, but for documents) and no SearchSpaceMessages RPC, the Space thread list takes only a limit with no cursor, and ?thread_id= deep links are never consumed, so a hit could not open in context. The ZDR blocker the item names is already cleared in code, because Session Core refuses durable writes from ZDR callers and so never stores ZDR content to index.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:30-45",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:112-135",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:366-395",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs:255-340",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:80-110",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:945-960",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2606-2700",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:5425-5475",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0035_message_author_attribution.sql:15-21",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/auth.rs:276-285",
+     "C:/dev/CoresSystem/apps/Data Plane v2/services/retrieval-engine-rs/src/search/sparse.rs:185-205",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:135-175",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:190-206"
+    ],
+    "reuse": [
+     "Session Core audience-revision read predicate (grpc.rs:5455-5461) for per-hit filtering.",
+     "The Space-scoped shared read decision used by space_thread_transcript (spaces.rs:2606-2700), which is requested per Space rather than per thread and so can authorize a room-wide query.",
+     "idx_messages_author_subject (migration 0035) for a 'from person' filter.",
+     "CoreSidebarSpacesPanel title filter for instant client-side matching with server results as fallthrough.",
+     "Data v2 sparse.rs websearch_to_tsquery plus ts_rank_cd as a reference for the query shape only."
+    ],
+    "constraints": "Message text is owned by Session Core: do not copy transcripts into Data v2 or Convex for search, because that creates a second durable store of Space content (and a ZDR problem). The index only proposes candidates; every hit is re-filtered by the audience-revision predicate and a fresh Control read decision, and revoked members stay denied (revocations arrive over plain NATS events, so check on every query). Postgres 'simple' text config has no Norwegian stemming, so start keyword-only. A deep link to a message the viewer can no longer read must fail closed.",
+    "approachAdjustment": "Remove the ZDR prerequisite (already enforced by the Session Core write refusal) and keep the first slice keyword-only. Use one Space-scoped read decision per query, as space_thread_transcript does, instead of per-thread decisions. Ship the thread-list cursor and the ?thread_id=&seq= deep link in the same slice as the search UI, otherwise hits cannot open in context. Author filters are cheap because messages already store author_subject_id.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged.",
+    "verdict": "keep",
+    "verdictReason": "Verified absent in Session Core, gateway and UI; the item is accurate and its ZDR dependency is already met, so only the approach notes change.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-018",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/buzz/schema/tables/public/events.sql:15-33 (STORED generated tsvector, simple config, NULL for 8 private kinds)",
+     "C:/dev/buzz/crates/buzz-search/src/query.rs:1-120,145-160,205,247 (community required at type level, websearch_to_tsquery, prefix mode with :* on trailing token, ts_rank_cd)",
+     "C:/dev/buzz/crates/buzz-relay/src/handlers/req.rs:585 (SEARCH_PAGE_SIZE = 100)",
+     "C:/dev/buzz/crates/buzz-relay/src/api/bridge.rs:2238-2256,2376 (search_hit_accepted per-hit predicate: filter match, accessible channel, reader_authorized_for_event)",
+     "C:/dev/qm/src/sessions/postgres-session-store.ts:465,494-495,523,1633 (qm also has a generated tsvector plus to_tsquery over session entries)",
+     "C:/dev/buzz/desktop/src/app/useAppShellKeyboardShortcuts.ts:55-80 (Mod+F searches the current channel, Mod+K searches everything)",
+     "C:/dev/buzz/desktop/src/features/search/ui/useSearchMenuKeyboardNavigation.ts:44 (Backspace on an empty query clears the scope); C:/dev/buzz/desktop/tests/e2e/smoke.spec.ts:622-706 (search-channel-scope-chip)",
+     "extract/slack/dist/main.bundle.cjs at about offset 1336400 (the EDITING_COMMANDS 'find' case focuses the webContents and sends START_SEARCH)",
+     "Teams main-locale-en-us-23ba9acb36586a4b.js.gz via zcat+grep: autosuggest_contextual_search_entry_{channel,chat,community,post}, autosuggest_dcs_find_in_this_{channel,chat,thread}, *_pcs_mode 'View all ... with {{displayName}}'",
+     "scratchpad/tmp/ts/str_ms-teams.exe.txt:41691-41693 (substrate.office.com search/api v1/suggestions, v1/events, v2/init in a CORS preflight handler)",
+     "grokbot features records grokbot-agent-product-051/-072, grokbot-agent-runtime-094 (only agent-side conversation and memory search found)"
+    ],
+    "corrections": "The buzz mechanism is accurate. Small fixes: ranking uses ts_rank_cd, not ts_rank. Full-text mode uses websearch_to_tsquery, and prefix mode builds a to_tsquery with :* on the last token only. In R-t1-04-02, 'Esc or backspace widens' is buzz Backspace-on-empty-query only; I did not find an Esc handler. Prevalence for in-room scoped search with Ctrl/Cmd+F is overstated. GrokBot is in sourcesWith, but its search is agent-side (searching its own conversations and memory), not user-facing in-room scoped search, so drop it: 3 of 5 (buzz, teams, slack). Slack is only partial: its shell routes Find to in-app search (START_SEARCH), but the shipped shell does not show whether that search is pre-scoped to the room. For R-t1-04-01 (full-text search, 4 of 5), qm is confirmed by its own tsvector search over session entries. Slack has no member record and rests on product knowledge. Per-hit re-authorization is verified only in buzz. Teams search runs on a backend service (Substrate) we cannot see, so its permission model cannot be observed and Teams must not be cited for per-hit re-authorization. Teams being best for scope UX is justified, but only at the level of UI strings.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Teams scope list is REA/locale-string evidence only (UI copy), not observed behaviour; could be ring- or license-gated",
+     "Teams search engine is Substrate server-side; suggestions/init/events endpoints observed only as URLs in the shell's CORS preflight handler",
+     "Slack evidence is the desktop shell only (Find to START_SEARCH); scoped search semantics are web-client/server-side and not observed",
+     "qm full-text search exists (SRC), but I did not verify per-hit re-authorization in qm",
+     "Per-hit re-authorization is SRC-verified only in buzz",
+     "REA analyze_javascript_application used only on grokbot node-agent-coordinator (heap-limited partial); the rest is direct source/bundle grep"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-019",
+  "title": "Let room agents call Space actions themselves (agent self-API with run-bound grants)",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 19,
+  "wave": "W3",
+  "quickWin": true,
+  "summary": "Admit a vetted subset of the typed spaces.* actions, plus new agent-oriented ones (create thread, post card, schedule follow-up, pin or rename a thread, pause self), to the model-executable set so a room agent can do what a human member can without a bespoke tool per action. Model Plane consumes the Frontend action registry as a staged-disclosure tool catalogue, Control Plane mints run-bound capability grants, and the gateway dispatcher re-checks the delegating human's ACL on every call; risky actions route to the existing in-room approval card.",
+  "whyItMatters": "This is the core of 'agents that work like a human': today a room agent can only talk, because none of the 14 registered spaces.* actions is model-eligible. qm and buzz show the payoff (agents organise threads, schedule their own follow-ups, invite or pin) and Verevon already has the right catalogue shape (typed registry with risk level and owner plane per action), so the cost is low relative to the value.",
+  "referenceBestPractice": {
+   "bestSource": "qm",
+   "others": [
+    "buzz"
+   ],
+   "prevalence": "2 of 5 sources; differentiator (absent from the human-chat incumbents)",
+   "mechanism": "qm serves a discoverable /v1/apis catalogue: API families with guidance text and eligibility predicates (role, feature flag). The runtime signs a capability token per durable run (claims: org, principal, session, run attempt, expiry; 48 h default) sent as x-agent-capability, and every handler re-verifies the principal's authority per call, so admin work reuses the same handlers. Buzz mirrors every action as a JSON-in/JSON-out CLI subcommand over signed events, the most ergonomic shape for shell-driven agents."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:126-135",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1991-2145",
+    "apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:1-20",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4885-4925",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2000-2006"
+   ],
+   "gap": "MODEL_EXECUTABLE_ACTION_IDS holds 8 entries (tickets.create, inbox.*, chat.*, org.*) and none of the 14 spaces.* actions. The admission bar is strict by design: owner-issued durable receipt, idempotent fencing and forged-call denial proven on both sides (SRC, model-eligibility.ts header). Model Gateway's inline read lane deliberately has no write actions because it has no approval gate. The Space action catalogue endpoint is human-only with no UI consumer, and there is no run-bound grant for agent-originated Space actions. Several existing actions (add/remove member, revoke agent, request deletion) must stay human-only; the plan (S3.6) says agents may request use but never change future authority. The most agent-useful actions (create thread, schedule follow-up) are not registry actions yet (INF)."
+  },
+  "approachOriginal": "Model Plane (capability-core / execution-core): list eligible registry actions to the agent with staged disclosure (as mcp_catalog does) and dispatch them through the governed agentic path, not the read-only inline loop. Control Plane: add a run-bound grant decision (principal, Space, run id, action allowlist, expiry) following the existing model.cron.create / model.cron.fire decision pattern. Frontend gateway dispatcher: accept the grant, re-derive the delegating human's membership from Control and audit exactly like a UI call. Admit actions one at a time under the model-eligibility.ts bar, starting with low-risk idempotent ones (update_thread_presentation, set_agent_state for itself, new create_thread and schedule actions); keep membership, role, deletion and credential-grant changes human-only and send medium/high-risk calls to the approval card via approval continuation. Optional later: a thin JSON CLI for sandboxed agent computers (buzz style) over the same dispatcher.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Per-action admission under the model-eligibility.ts bar (owner receipt, idempotency, forged-call denial)",
+   "Control run-bound capability-grant decision",
+   "Approval continuation (resume after approve)",
+   "New agent-oriented spaces.* actions in the registry"
+  ],
+  "planeOwner": "Model Plane (catalogue and dispatch); Control Plane mints grants; Frontend Plane owns the action registry",
+  "risks": "Prompt injection driving membership, role or visibility changes; destructive actions must stay approval-gated and audited; Space access must never widen the owner-plane ACL, so the grant must intersect with the delegating human's authority on every call.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 7,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-06-002"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-019",
+    "status": "partial",
+    "exactGap": "A governed agent-to-owner action pipeline is built end to end for exactly one action, tickets.create: Control model-action-view and run-action-decision plus owner-effect reservation (run_action_decision.go:340-347, model_action_view.go:18-26), Capability Core advertising (capability-core model_action_view.go:21-32), the execution-core adapter (ticket_tools.rs) and approval continuation, all hard-coded to that one action and schema hash. MODEL_EXECUTABLE_ACTION_IDS has 8 entries and none of the 14 spaces.* registry actions (model-eligibility.ts:126-135, action-registry.ts:1991-2134); the Space actions catalogue is human-only (spaces.rs:4880-4925). Room agents are also born tool-less and confirmation-only, which strips tools and agentic mode on mention turns (spaceAgents.ts:540-565, spaces.rs:4519-4535).",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:1-20,126-135",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1991-2134",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:100-140",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.ts:1-60",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:665-675",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4480-4573",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4880-4935",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:1-60",
+     "apps/Control Plane/user-core/internal/spaces/run_action_decision.go:1-140",
+     "apps/Control Plane/user-core/internal/spaces/run_action_decision.go:340-347",
+     "apps/Control Plane/user-core/internal/spaces/owner_effect_reservation.go:1-60",
+     "apps/Control Plane/user-core/internal/spaces/model_action_view.go:1-90",
+     "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:278-296",
+     "apps/Model Plane/go/services/capability-core/internal/api/model_action_view.go:1-60",
+     "apps/Model Plane/rust/services/execution-core/src/ticket_tools.rs:1-60",
+     "apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:1-40",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:149",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:540-565"
+    ],
+    "reuse": [
+     "Control RunActionDecision (run id, thread, Space ref, subject, schema hash, payload digest, idempotency key, audience revision, expiry) and OwnerEffectReservationCommitment: the existing per-call, run-bound authority, to be generalized instead of inventing a new grant type",
+     "tickets.create pipeline (ticket_tools.rs, capability-core model_action_view.go, execution-core approval continuation and approval_delivery_worker) as the template for each admitted action",
+     "Owner-issued agent-action-grants routes per conversation (spaces.rs:665-675) as the human-granted standing allowance",
+     "SpaceApprovalPanel and orchestration approvals as the in-room approval card",
+     "Model-Plane-owned operations (thread presentation lives in model-gateway/session-core) as same-plane tools that need no cross-plane grant"
+    ],
+    "constraints": "Model proposes, owner executes: each admitted action needs an owner-side endpoint that verifies a Control run-action decision and rechecks its own ACL (the run's thread authorization is explicitly not authority for a target resource, run_action_decision.go:19-22). Capability Core deliberately uses a server-owned schema, not a Frontend registry copy (capability-core model_action_view.go:29-32), so the Model Plane must not consume the Frontend action registry. Membership, role, deletion and credential-grant changes stay human-only (plan S3.6: agents may request use, never change future authority). Room agents are tool-less and confirmation-only by default and a run belongs to the member who started it, so approvals are decided by the run owner. ZDR forbids durable owner actions (personal_thread_decision.go:292-294).",
+    "approachAdjustment": "Do not mint a new 'run-bound capability grant'; extend the existing run-action decision: add one runActionTarget entry per action (today only tickets.create is approved), generalize model-action-view and Capability Core from one fixed action to a server-owned list, and add an owner endpoint per owning plane. Do not have the Model Plane consume the Frontend registry: the registry feeds the browser (agent-tools.ts), while the Model Plane holds its own pinned schemas. Phase it: first Model-Plane-owned tools bound to the run's own thread (rename or pin the thread, post a card), which need no cross-plane decision; then Application-owned ones (pause self) and orchestrator-owned ones (schedule follow-up) through the run-action path. Also make binding policy editable, otherwise no room agent can use tools at all.",
+    "effortRevised": "L",
+    "effortNote": "Raised from M. Each action needs an owner endpoint, a Control decision target, a pinned schema and an execution-core adapter, and the single-action machinery must first be generalized.",
+    "verdict": "reword",
+    "verdictReason": "The capability is genuinely missing for Spaces, but a run-bound decision mechanism already exists for one action and the item's grant and registry-consumption design conflicts with it; rewrite as generalizing that pipeline in phases.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-019",
+    "verdict": "confirmed",
+    "checked": [
+     "C:/dev/qm/src/api/agent-api-catalog.ts:1-60,130-134,177-221,784-817 (families with guidance + when predicate on isAdmin/swarmsEnabled; GET /v1/apis)",
+     "C:/dev/qm/src/api/routes/surface.ts:1379 (GET /v1/apis route)",
+     "C:/dev/qm/src/auth/capability-token.ts:9,61-170 (DEFAULT_SANDBOX_CAPABILITY_TTL_HOURS=48; claims actorId, scopeId, orgId, optional sessionId/runId/runAttempt/runLeaseToken, exp)",
+     "C:/dev/qm/docs/capability-tokens.md:1-50 (48 h turn tokens, optional deflate compression behind CAPABILITY_TOKEN_COMPRESSION, exp:0 option)",
+     "C:/dev/qm/src/harness/agent-tools.ts:3315-3350 and C:/dev/qm/src/tools/admin.ts:1-40 (admin resource tool wraps /v1/admin HTTP routes; whoami-only fallback)",
+     "C:/dev/buzz/crates/buzz-cli/src/lib.rs:1-60,113 (exit codes 0-5, JSON CLI) and C:/dev/buzz/crates/buzz-cli/src/client.rs:78-107 (NIP-98 signed HTTP auth)"
+    ],
+    "corrections": "Say the token is minted per turn (sandbox turn token, 48 h default, configurable including no-expiry) and only optionally carries run id/attempt/lease; swarm operations are the ones that require a real durable run. Claims are actorId/scopeId/orgId (+ optional session/run fields), not literally 'principal'. Buzz: say 'about 25 CLI command groups covering most platform actions' rather than 'every action'; the CLI authenticates with NIP-98 signed HTTP auth events.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "qm feature-gated families (admin-only, swarmsEnabled); token compression is off by default (env switch)",
+     "Buzz 'everything a human can do' comes from VISION.md intent; code shows about 25 command groups",
+     "Admin authority recheck inferred from the admin tool routing through the /v1/admin handlers (SRC), not separately tested here"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-020",
+  "title": "Room-scoped agent browser: space_ref on browser runs, a live preview card that expands to an interactive view, hand-off and take-over with a control indicator",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 20,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Add a space_ref to the browser run start request and authorize it with a Control decision for the room audience, show browser steps and evidence as room cards, and let the room watch the session as a glanceable preview card that expands to an interactive modal (screen switcher, 'control: agent | you' badge, idle pause) in the AuxPane. Add a hand-off request (id plus instruction), Take control and I'm done, and bot-wall detection that hands off instead of retrying. Quarry still executes every action; the Model only proposes.",
+  "whyItMatters": "The brief asks for agents that work like a person with their own browser. Browser runs exist and the gateway already serves live frames with human takeover, but nothing is Space-scoped, so the room cannot see, attribute or govern the agent's browsing.",
+  "referenceBestPractice": {
+   "bestSource": "qm (browser model grant); grokbot (hosted browser, live takeover, bot-wall detection); Grok Bot (preview card to interactive modal, multi-screen, control owner badge)",
+   "others": [],
+   "prevalence": "[R-t1-07-06] Agent browser 2 of 5 (differentiator); live view and take-over 1 of 5 (unique); teach by demonstration 1 of 5 (unique) [R-t1-12-08] 1 of 5 (Grok Bot); unique",
+   "mechanism": "[R-t1-07-06] QM core mints a capability token {browserModel, browserAccount, aud browser-model}; the browser runner calls an OpenAI-style completions endpoint at core, so it never holds a provider key; 409 if the person's account or model changed; sign-in profiles are held as credentials and shown only in DMs. Grok Bot classifies bot-check walls from URL/title and hands off instead of retrying; LiveState carries box_handoff_request_id plus an instruction; EndHandoff trigger BUTTON|VIEWER_CLOSED|DISMISSED; the live view is an embedded noVNC page with token-to-header injection, phase reporting and pause when hidden. Grok Bot teach mode: recording START|SAVE|DISCARD, the saved recording is sent as a message with initiator TEACH_RECORDING so a skill is authored in chat. [R-t1-12-08] Computer view modes {preview, interactive}: preview is a periodic frame or low-rate VNC stream in a card; the modal is interactive VNC with a screen switcher and a control-owner badge (agent or you); an idle pause with wake and retry; a REC overlay while recording."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:425-441 (space_id is always an empty string; BrowserRunStartRequest has no Space field; comment names this as a known follow-up)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497,624 (takeover exists only on the dashboard)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497 (browser with human takeover, dashboard only)",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:551-569 (run screenshots, run console only)"
+   ],
+   "gap": "[R-t1-07-06] Browser-agent runs are not Space-scoped, so no room audience decision, no cost or activity attribution to the room, no browser cards and no live session reachable from a Space. No hand-off request primitive and no bot-wall classification. [R-t1-12-08] Nothing is reachable from a Space and there is no per-agent computer; the takeover browser and run screenshots are reusable building blocks only."
+  },
+  "approachOriginal": "[R-t1-07-06] Model Plane model-gateway: add space_ref to BrowserRunStartRequest and thread it into the run's Space context (the chat/invoke path already does this via ThreadSpaceContext). Control: a browser-run decision bound to the room audience hash/revision; Model proposes browser actions and Quarry-v2 executes or rejects them under the grant (architecture rule). Ingestion/Quarry: expose the live session stream to authorized room members; classify bot-check walls into a hand-off event. Model Plane raises hand-off requests {id, instruction}. Frontend: mount BrowserChrome in the room with Take control / Done and show evidence screenshots in cards (item F-t1-004 (R-t1-07-02)); restrict takeover to the requester or owner. Sign-in sessions stay DM/owner-only and are never shared into a room. Phase 3: Quarry records action traces that the Model converts into a skill (teach by demonstration), excluding secrets and honoring ZDR. [R-t1-12-08] Frontend Plane card plus modal in the AuxPane. Model proposes browser actions, Quarry executes or rejects them under BrowserBroker grants; the preview streams frames Quarry exposes, and takeover requires a human grant. Show only to members entitled to read the run, never share credentials across members, and do not retain frames beyond policy.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Item F-t1-004 (R-t1-07-02) (cards)",
+   "Item F-t1-012 (R-t1-07-08) (audience-safe disclosure)",
+   "Item F-t1-010 (R-t1-07-05) (approvals before effectful browser steps)",
+   "Quarry live session stream",
+   "Per-agent browser or sandbox capability (agents category)",
+   "Quarry frame streaming",
+   "AuxPane shell (F-t1-001 (R-t1-12-01))"
+  ],
+  "planeOwner": "Ingestion Plane (Quarry live view, execution, bot-wall classification); Model Plane (space_ref, hand-off requests); Control Plane (room-audience decision); Frontend Plane (preview card, modal)",
+  "risks": "[R-t1-07-06] Browsing with one member's session in a shared room; recordings may capture secrets (ZDR); who in the room may take control. [R-t1-12-08] Frames may contain sensitive or ZDR data, so respect privacy tier and read entitlement and never copy frames to retention paths; takeover must not widen what the room can do.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 15,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-07-06] Named as the next step in the code comment at apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:430-441 (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md section 3.5); teach-by-demonstration is an intent in VEREVON_UI_COWORK_RESEARCH_2026-08-13.md per cluster evidence."
+  },
+  "sourceClusters": [
+   "C-t1-07-049",
+   "C-t1-07-047",
+   "C-t1-07-048",
+   "C-t1-12-021"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-020",
+    "status": "absent",
+    "exactGap": "No room-scoped browser exists: BrowserRunStartRequest has no Space field and the browser_agent step always sends an empty space_id (browser_run.rs:87-122,425-441), so there is no room audience decision, no cost or activity attribution to the room, no browser card and no live session reachable from a Space. Several parts the item calls missing already exist outside Spaces: human takeover with an agent/human control chip and frame stream routes for the dashboard browser (BrowserChrome.tsx:497,624,1228-1236; browser.rs:265-290,371-445,700-715), per-action HITL gating for risky browser actions in execution-core (browser_risk.rs:1-60), and Quarry challenge classification for captcha, access-denied, login, consent and rate-limit pages (observation.rs:154-200) that nothing in execution-core or the UI consumes. Run-level require_approval is rejected with browser_approval_continuation_unavailable (browser_run.rs:70-80).",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:70-80",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:87-122",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:128-200",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:400-441",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1-60",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:154-200",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1-23",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:265-290",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:371-445",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:700-715",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:624",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1228-1236",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:25-40",
+     "apps/Control Plane/user-core/internal/spaces/space_capability_decision.go:1-70",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:540-565",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4519-4535"
+    ],
+    "reuse": [
+     "Dashboard BrowserChrome takeover (control chip, human_takeover mode) and gateway browser control, frames/stream and frames/ws routes",
+     "execution-core browser_risk.rs per-action HITL gates and the browser_action_approval_required / browser_action_decided events, surfaced through SpaceApprovalPanel",
+     "Quarry classify_challenge output (ChallengeSignal) as the source of the hand-off event; the consumer in execution-core and the UI is the missing piece",
+     "Control space_capability_decision.go (model.space.capability_profile) as the template for a Space browser-run decision, and the Browser Broker grant validation in browser_run.rs for the audience-bound grant",
+     "BrowserProfileScope (ephemeral, user_private, org_shared, run_scoped) with the ZDR persistent-profile guard in browser.rs"
+    ],
+    "constraints": "Model proposes browser actions and Quarry executes or rejects them under a Browser Broker grant; grants are broker-signed and the request cannot widen the domain policy (browser_run.rs:128-200). A Space run needs a Control decision bound to the room audience hash and revision before any grant is issued, and sessions must be forced to ephemeral or run-scoped profiles so a member's signed-in profile is never shared into a room. Browser runs are owner-bound (Quarry owner projection) and approvals belong to the run starter, so takeover must be restricted to the requester or an owner. Room agents are born tool-less and confirmation-only, so the binding policy must explicitly allow a browser tool. Run-level require_approval is unsupported (continuation unavailable), so approvals must use the per-action HITL path. ZDR: no frame retention, no persistent profile.",
+    "approachAdjustment": "Correct the baseline: bot-wall classification (Quarry), per-action approvals (execution-core) and a takeover toggle (dashboard) exist; the missing work is (1) plumb space_ref through BrowserRunStartRequest into ExecuteStepRequest.space_id (the code comment names it as the follow-up) with a Control Space browser decision, (2) teach execution-core to turn a Quarry ChallengeSignal into a hand-off request instead of retrying, (3) a Space-audience-authorized frame stream, and (4) the room card and expandable view reusing BrowserChrome. Do not rely on run-level require_approval. Keep sign-in profiles owner-only.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged. Space plumbing and cards are M, the live preview with takeover, hand-off events and audience-authorized streaming bring it to L; teach-by-demonstration is a separate XL.",
+    "verdict": "reword",
+    "verdictReason": "The room-scoped browser is absent, but the item's baseline wrongly says there is no hand-off or bot-wall classification and omits the existing takeover, HITL and challenge-signal building blocks that cut the real scope.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-020",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/qm/src/api/routes/browser-model.ts:28-64 (403 without grant or in strict posture, 409 on account/model change, 422 branch)",
+     "C:/dev/qm/skills-seed/browse/SKILL.md:41-49,133-135 (CDP_URL + LIVE_VIEW, sign-ins and profiles DM-only, profile-less in channels)",
+     "scratchpad/extract/grokbot/dist/electron-main/proto.cjs (EndGrokBotBoxHandoff, GrokBotBoxHandBackTrigger BUTTON|VIEWER_CLOSED|DISMISSED)",
+     "scratchpad/extract/grokbot/dist/electron-main/main-core.cjs (SAND-E0417 botBlock, retryable false, withBotBlockDetection from URL + title)",
+     "scratchpad/extract/grokbot/dist/renderer/assets/index.eager-app-CY939ORZ.js (strings: You're in control; Screen paused while you're away; Wake)",
+     "scratchpad/extract/grokbot/dist/renderer/assets/chunk-computer-screen-preview-rMnqczxJ.js (states live/stream/asleep/sleeping/wake/waking/retry/recording/unreachable)",
+     "scratchpad/extract/grokbot/dist/electron-main/main-app.cjs flags (cloud_agent_desktop_lease default true, local_computer_use/mac_computer_use default false)",
+     "Records grokbot-agent-product-019/020/022/116, grokbot-agent-runtime-018/019/020/111/129 re-read for cited offsets"
+    ],
+    "corrections": "(1) Live view with human takeover is not unique to Grok Bot. QM's browse skill hands the person the provider's LIVE_VIEW link to finish sign-in walls, then re-runs. That makes 2 of 5, with Grok Bot best-in-class (embedded noVNC, explicit hand-back RPC). (2) 'Grok Bot hands off instead of retrying on bot walls' is partly INF. Only the non-retryable botBlock classification is SRC; the link from botBlock to the handoff flow was not traced. (3) A preview that is a periodic frame or low-rate VNC stream was not verified. The preview chunk only shows live/stream/asleep/wake/retry states. (4) QM sign-in profiles are used only in DMs; 'shown only in DMs' should say 'used only in DMs'. (5) space_ref on browser runs and a room-scoped preview card are Verevon proposals (INF). No reference ties browser runs to a shared multi-human room.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "QM's agent browser is a prompt-level skill that depends on an org provider key (Kernel, Anchor or Browserbase). It is not core product UI, and its availability is configuration-dependent.",
+     "Grok Bot is built on the Cursor sand platform (Cursor backend error text, /opt/cursor recording staging). The Box is a cloud VM, and local/mac computer-use flags default to false.",
+     "Grok Bot teach mode evidence is protos, strings and chunk names (SRC strings). End-to-end skill authoring was not traced.",
+     "Control-owner badge evidence is the You're in control / Take control strings. An agent-side badge string was not separately confirmed.",
+     "No REA tool was used for this item. Direct reads of the pre-extracted Grok Bot bundle and the QM repo."
+    ],
+    "confidence": "medium"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-021",
+  "title": "Agent computer confinement: real network enforcement and resource caps, audience-bound egress, one SSRF-safe connector",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 21,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Finish the agent-computer boundary. First, make egress real: run processes whose policy allows domains in a network namespace whose only route is the egress proxy (today the executor only checks that a proxy variable is set), add cgroup or rlimit caps, apply the seccomp or Landlock layers that the code comments name, and require a sandbox-manager lease for every Space agent. Second, compute an effective egress allowlist per room from the audience snapshot (intersection of members' lists, union of denies), bind it into the signed decision and enforce it in Quarry and the sandbox proxy with audited allow and deny. Third, share one SSRF-safe connector for unfurls, webhooks and agent fetches.",
+  "whyItMatters": "Grok-Bot-style agent computers are part of the Space vision, and confinement is the real security boundary under every softer control. A room-aware egress rule fits 'Space access never widens an owner-plane ACL': an agent acting for a room must not reach a destination any member's org forbids.",
+  "referenceBestPractice": {
+   "bestSource": "grokbot",
+   "others": [
+    "qm (audience-intersection egress, audited)",
+    "buzz (SSRF-safe connector with IP pinning)"
+   ],
+   "prevalence": "Sandbox confinement: 1 of 5 (grokbot); egress policy: 2 of 5 (grokbot, qm); SSRF-safe fetch: 2 of 5 (buzz, grokbot). Differentiator.",
+   "mechanism": "A launcher takes a declarative policy {type: readonly or workspace read-write, writable roots, network: none or proxy}; on Linux it uses bubblewrap, Landlock and seccomp plus a cgroup v2 attach per process with OOM reset, and file APIs resolve real paths and refuse anything outside the root. For rooms, audienceEgressFloor intersects every member's allowlists and unions denies, binds the result to the turn and logs decisions at the proxy. SSRF: resolve the host, require a global unicast address (reject private, loopback, link-local, CGNAT, mapped and NAT64 forms), connect to the pinned IP with the original SNI, re-validate on redirects."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/executor.rs:18-30 and :113-183 (shell runs under a ReadOnly, no-network default; ReadOnly and WorkspaceWrite refuse to spawn unsandboxed; AllowDomains only requires that HTTPS_PROXY or ALL_PROXY is set)",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:14-20, :210-227 (bubblewrap with unshare pid, uts, ipc and new-session; AllowDomains keeps the network up and relies on an external proxy being honoured; wrap_command is a passthrough on hosts without bwrap, which the executor then refuses for restricted policies)",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:24-45 (host /proc stays visible because the container runs with no capabilities; documented trade-off)",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:6 and policy.rs:15 (Landlock and seccomp named only in comments; a grep found no seccomp, Landlock, cgroup or rlimit code)",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:20-37 (the inline chat code path has no run-end signal; its lease expires only by TTL and workspace edits are lost)",
+    "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go:262-290 (limits are live-process counts and output size, not CPU or memory)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs and apps/Frontend Plane/verevonv3/apps/gateway/tests/ssrf_forward_not_fetch.rs (exist; not read in depth)"
+   ],
+   "gap": "Filesystem confinement fails closed, which is good. The gaps are: domain allowlisting is advisory for any process that ignores proxy settings, there are no CPU, memory or pid caps and no syscall filter, a lease is not mandatory for Space agents, egress is not computed from the room audience, and there is no single SSRF-safe connector (unverified)."
+  },
+  "approachOriginal": "Model Plane execution-core: for AllowDomains use a netns whose only reachable address is the egress proxy (without CAP_SYS_ADMIN this needs a design spike, so test on the production image), add rlimit or cgroup caps per spawn, and apply a seccomp profile; make a sandbox-manager lease mandatory for Space agents and release it on run end. Control Plane user-core: add effective_egress to the effect policy computed from the audience snapshot and bind it into the decision. Quarry (Ingestion Plane) and the sandbox proxy enforce it and write allow and deny events to audit. A shared Rust connector crate in Quarry (resolve, check, pin, re-validate redirects) is reused by the gateway link-preview path and execution-core web tools.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "sandbox-manager leases",
+   "Quarry egress proxy",
+   "audience snapshots",
+   "F-t1-006 (R-t1-10-09) (admin policy fields)",
+   "F-t1-031 (R-t1-10-05) (audit)"
+  ],
+  "planeOwner": "Model Plane (execution-core, sandbox-manager) with Ingestion Plane (Quarry) and Control Plane (egress floor)",
+  "risks": "Network namespace plus proxy plumbing is hard without extra capabilities. Over-restriction in large rooms needs clear refusal text. Production kernel behaviour differs from dev hosts. Keep Model proposes, Quarry executes.",
+  "significance": 5,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 17,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Partly: apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md (sandbox lease) and the S6.2 matrix (SSRF) in VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md. Audience-intersection egress is not planned."
+  },
+  "sourceClusters": [
+   "C-t1-10-022",
+   "C-t1-10-023",
+   "C-t1-10-032"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-021",
+    "status": "partial",
+    "exactGap": "Filesystem confinement is real and fails closed (bubblewrap read-only root, cleared environment, pid, uts and ipc unshare, unsandboxed spawn refused for ReadOnly and WorkspaceWrite), the container runs a scoped seccomp deny-list profile (deploy/seccomp-bwrap.json), the production overlay drops all capabilities, and both code_interpreter and the background process host hard-code MpNetworkPolicy::Disabled (--unshare-net), so no Space agent code path has network today; AllowDomains is checked only by the presence of HTTPS_PROXY or ALL_PROXY and no proxy is configured in the Model Plane compose files. Missing: CPU, memory and pid caps or rlimits (only a wall-clock timeout and a 64 KiB output cap exist, sandbox-manager limits count live processes and output bytes, and the Model Plane deploy compose files set no memory, cpu or pid limits), a network-namespace-with-proxy design for AllowDomains, any per-room egress allowlist (Control's Space capability decision has only a coarse space:egress permission), and a lease is mandatory only for Space-scoped code_interpreter (fails closed through ensure_sandbox_lease), not for every Space agent. The SSRF part is already the architecture: Quarry owns dns_guard, a deny-by-default DNS-pinned browser egress proxy and redirect re-validation, and the gateway forwards URLs instead of dialing them (public_url.rs with the ssrf_forward_not_fetch test), with a documented decision against a shared crate.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox.rs:1-60",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox.rs:150-230",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs:60-200",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/process_host.rs:417-431",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:575-581",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-60",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:106-151",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs:1380-1400",
+     "C:/dev/CoresSystem/apps/Model Plane/deploy/seccomp-bwrap.json:1-30",
+     "C:/dev/CoresSystem/apps/Model Plane/deploy/docker-compose.yml:1000-1016",
+     "C:/dev/CoresSystem/apps/Model Plane/deploy/docker-compose.production.yml:1-20",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/process/store.go:255-290",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/space_capability_decision.go:1-60",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/space_capability_decision.go:120-175",
+     "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:1-40",
+     "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:95-125",
+     "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs:1-30",
+     "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-tls/src/redirect_policy.rs:1-40",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/public_url.rs:1-40",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/tests/ssrf_forward_not_fetch.rs:1-30"
+    ],
+    "reuse": [
+     "Control SpaceCapabilityIntent and the space:egress permission (space_capability_decision.go) as the existing, signed per-Space egress switch to extend.",
+     "Quarry browser_egress_proxy.rs, dns_guard.rs and redirect_policy.rs as the sanctioned egress and SSRF boundary.",
+     "execution-core executor.rs require_requested_isolation_for, which every spawn path already runs.",
+     "sandbox_lease.rs plus sandbox-manager leases for the per-run workspace and TTL.",
+     "deploy/seccomp-bwrap.json and the production hardened-service overlay as the container baseline."
+    ],
+    "constraints": "Model proposes, Quarry executes: agent web access should keep going through Quarry (egress proxy, receipts) rather than giving the sandbox a general network. A network namespace routed only through a proxy normally needs capabilities the container deliberately lacks (sandbox.rs:24-45 records CapEff=0), so it is a design spike on the production image. Egress authority must be a Control-signed decision claim enforced by Quarry or the proxy, and an intersection of members' lists needs the audience snapshot that Control holds, not Model Plane. A shared SSRF connector crate was deliberately rejected (dns_guard.rs module doc; QM improvement plan SSRF-2), so use forward-to-Quarry plus the existing regression test. ZDR is compatible: scratch execution is credential-free and ephemeral.",
+    "approachAdjustment": "Split the item: (1) per-spawn resource caps (prlimit or rlimit in the spawn wrapper, or container-level cgroup limits in compose), the only gap that bites today; (2) defer AllowDomains netns plus proxy and per-room egress until a feature actually needs sandbox network, because the default is already no network and Quarry is the sanctioned path; (3) replace 'one shared SSRF-safe connector crate' with 'any new unfurl or webhook goes through a Quarry endpoint and the gateway forward-don't-fetch test' (no link unfurl exists in the gateway today); (4) extend the existing Control space:egress decision before inventing effective_egress.",
+    "effortRevised": "M",
+    "effortNote": "L to M for what is worth doing now (resource caps, one cross-plane lease rule). The netns-with-proxy and audience-intersection egress remain L and should be deferred behind a concrete need.",
+    "verdict": "reword",
+    "verdictReason": "Partly misdescribes current state: network is already off by default for every Space code path, a container seccomp profile and production hardening exist, the lease is already required for Space code_interpreter, and the SSRF boundary is already Quarry with a documented decision against a shared crate. The genuinely open gap is resource caps.",
+    "confidence": "medium"
+   },
+   "reference": {
+    "finalId": "F-t1-021",
+    "verdict": "partial",
+    "checked": [
+     "scratchpad/extract/grokbot/dist/local-exec-daemon/main.cjs: win32 'proxy-only, no filesystem sandbox' message, '--preflight-only -- /bin/true', workspace_readwrite policy builder with networkPolicy/networkPolicyStrict, SandboxUnsupportedError, CURSOR_WORKLOAD_CGROUP with /sys/fs/cgroup path regex, cgroup.procs + oom_score_adj spawn prefix",
+     "grep for bubblewrap|bwrap|landlock|Landlock|seccomp across scratchpad/extract/grokbot/dist: 0 hits; dist/native contains only sand-webauthn-signer.exe (no sandbox helper binary shipped)",
+     "REA analyze_javascript_application on scratchpad/extract/grokbot/dist/local-exec-daemon (directory, summary; parent ev_2c385ca123dd86dc8aff742f46fadd22c4c868d2d2d7795e6898b38881c1da77; partial coverage, worker heap limit)",
+     "C:/dev/qm/src/resolution/audience-floor.ts:1-60 (allow intersection, deny union)",
+     "C:/dev/qm/src/config.ts:1258-1300 (fail-open warnings when per-backend egress proxy URL missing; backends sprites/e2b/modal/do-managed-agents/smolmachines)",
+     "C:/dev/qm/SECURITY.md:167-169 (egress enforcement conditional; deployment-runtime egress not built)",
+     "Records grokbot-agent-product-145 (link-preview SSRF re-validates redirects), buzz-product-157 (webhook redirects disabled, enumerated deny)"
+    ],
+    "corrections": "Remove 'bubblewrap, Landlock and seccomp': no such strings exist in the shipped Grok Bot code and the sandbox helper binary is not shipped, so the enforcement mechanism is unknown (only the policy JSON contract, a Linux kernel preflight and macOS support are visible). State that on Windows the helper is network-proxy-only with no filesystem isolation. The cgroup step only attaches spawned processes to an externally provided workload cgroup (env-gated, Linux Box) and resets oom_score_adj; it does not itself set resource caps. 'Sandbox confinement 1 of 5' undercounts: QM also runs agents in hosted sandbox backends (E2B, Modal, Sprites, DO, smolmachines) with an optional egress proxy. QM egress is fail-open when the backend proxy URL is unset, and auditing exists only where the backend supports it. SSRF: Grok Bot link previews pin IP + SNI and re-validate up to 5 redirects; Buzz pins IP but disables redirects for webhooks; do not merge these into one source's mechanism.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Grok Bot sandbox enforcement binary not shipped; only the client contract is observable (contract SRC, enforcement INF)",
+     "Grok Bot filesystem sandbox unsupported on Windows (proxy-only)",
+     "QM egress enforcement conditional per backend, fail-open if proxy URL missing",
+     "Buzz SSRF guard is enumerated-deny (unlisted special ranges pass)"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-022",
+  "title": "Room administration basics: change and choose member roles with an owner guard, rename, topic, archive and restore, and keep the organization room roster in sync",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 22,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Add a per-member role change and a role choice on add (viewer, editor, manager, owner) instead of the fixed editor grant, with Buzz-style pure guard functions (canGrant, canChangeRole, canLeave, last-owner rule) and table tests. Let managers rename a room and edit its topic, archive and unarchive it (read-only archive), and let owners or org admins delete it with a restore window once shared-room deletion lands on the saga (see the retention item). Run the existing syncAllOrganizationRooms on a schedule and on org membership changes so new members appear in the organization room and removed members leave it.",
+  "whyItMatters": "Control already has viewer/editor/manager/owner roles and lifecycle states, but no route or UI changes a role, shared rooms cannot be renamed or archived, and the organization room's roster is never re-synced after provisioning. These are small, visible gaps that every chat product closes.",
+  "referenceBestPractice": {
+   "bestSource": "buzz",
+   "others": [
+    "slack (richest role set: primary owner, owner, admin, member, two guest tiers)",
+    "qm (separate read, write, manage predicates per scope kind)",
+    "teams",
+    "grokbot",
+    "teams (30-day restore window)",
+    "qm (agent-led onboarding recorded in the agent notebook)"
+   ],
+   "prevalence": "[R-t1-02-01] 5 of 5 sources have graded roles; 3 of 5 (buzz, slack, qm) have record-level evidence in this category; table-stakes [R-t1-02-04] 2 of 5 (buzz, teams); common [R-t1-02-06] 2 of 5 (buzz, qm); differentiator",
+   "mechanism": "[R-t1-02-01] Closed role enum with rank. canGrant(actor, target_role) requires actor rank >= target rank and actor >= manager; canChangeRole refuses demoting the last owner; canLeave refuses the sole owner. The role write runs in one transaction with a membership-revision check (TOCTOU-safe). Read, write and manage are separate predicates per room kind. [R-t1-02-04] room.state in {active, archived, deleted(restore_until)}. Rename and topic are metadata edits with role checks (topic by any member, name by admins in Buzz). TTL rooms: ttl_deadline = last durable event + ttl_seconds, advanced by a deferred trigger; a sweeper archives expired rooms. [R-t1-02-06] ensure_starter_rooms(org) with deterministic ids; on member join, add to default rooms and optionally trigger a welcome agent run that opens a welcome thread and closes it when introductions are done."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Application Plane/convex-core/convex/spaceMembers.ts:45-96 (addSpaceMemberForGateway inserts role: \"editor\" at line 85; no role argument)",
+    "apps/Application Plane/convex-core/convex/spaceMembers.ts:98-120 (remove refuses to remove the registered owner)",
+    "apps/Control Plane/user-core/internal/spaces/repository.go:612-733 (ReplaceMemberships already honors a declared role per subject, never revokes the owner by absence, advances membership_revision only on real change)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-735 (route table has POST /members and DELETE /members/{member_id} only; no PATCH or role route)",
+    "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:51-66 (space_memberships; role check at line 63: viewer|editor|manager|owner)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx:20-30",
+    "apps/Application Plane/convex-core/convex/schema.ts:546-604 (spaces.lifecycle union has no archived state; table has name only, no topic)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-735 (only personal-Space deletion-requests exist; no rename, topic, archive or restore route)",
+    "apps/Control Plane/user-core/internal/spaces/deletion_authorization.go:17-22",
+    "apps/Control Plane/user-core/internal/http/server.go:346-349 (deletion-policy and legal-hold endpoints exist as service-only routes)",
+    "apps/Application Plane/convex-core/convex/spaces.ts:1440-1445 (the only trigger: roster sync is scheduled when the room moves pending_registration to active)",
+    "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:135-147 (syncAllOrganizationRooms is defined but has no caller; no crons file in convex-core/convex)",
+    "apps/Application Plane/convex-core/convex/spaces.ts:298-345 (ensureOrganizationRoomForGateway returns the existing room without re-syncing)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacesIndexPage.tsx:62-113"
+   ],
+   "gap": "[R-t1-02-01] Roles exist in the authority schema and in the declarative roster endpoint, but nothing lets a user change a member's role or choose one on add; no pure guard functions; no ownership transfer. [R-t1-02-04] Lifecycle states and per-plane deletion receipts exist, but only personal Spaces can be deleted. Shared rooms have no rename, topic, archive or restore. [R-t1-02-06] Provisioning is idempotent, but later org joins and removals are not propagated to the organization room. Impact beyond the missing trigger is inferred (INF); an external operator invocation of the action was not found in the repository."
+  },
+  "approachOriginal": "[R-t1-02-01] Application Plane (convex-core spaceMembers.ts): add changeSpaceMemberRoleForGateway that updates spaceMemberGrants.role, and an optional role on addSpaceMemberForGateway; both then redeclare the full roster through the existing roomMembersForControl -> Control replace-memberships path (managed_subject_types [\"user\"], so agents are untouched). Gateway: PATCH /api/v1/spaces/{space_ref}/members/{member_id}, gated by the caller's room role from Control. Frontend: role picker in SpaceMemberControls. Put the rank rules in one pure function with table tests and enforce them both in the Convex mutation and in Control's replace endpoint, so the authority plane does not simply trust the declaring plane (INF). Decide owner transfer separately: it touches spaces.ownerExternalAuthId and registered_spaces.owner_principal_id. [R-t1-02-04] Application Plane: add spaces.topic and an archived lifecycle value or archivedAt, plus rename and topic mutations gated by manager or owner. Control Plane: add an archived registration_state so decisions deny new writes but allow reads, extend deletion authorization to room kind (owner, or org admin for orphaned rooms) with a restore_until window, and keep legal hold blocking deletion. Gateway and Frontend: PATCH room settings, archive/unarchive and delete controls in the room header. TTL sweeper later. [R-t1-02-06] Application Plane (convex-core): add convex/crons.ts calling syncAllOrganizationRooms every few minutes as a reconcile, and subscribe to the org membership-changed event to call syncOrganizationRoom for that org immediately. The existing action is declarative (Control converges the roster and deactivates absent members), so this also revokes. Keep members mapped to editor as the code already does. Optional later: a welcome agent run through the normal bind and turn path.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Org admin capability for orphaned rooms (F-t1-006 (R-t1-02-05))"
+  ],
+  "planeOwner": "Control Plane (role and lifecycle enforcement) with Application Plane (room grant list, org-room sync) and Frontend Plane (Members tab)",
+  "risks": "[R-t1-02-01] A demotion must invalidate in-flight signed decisions; rely on the authority revision already bound into decisions. Convex edit and Control declaration are two steps, so keep the declaration idempotent and retried. Control's 017 header says Control owns membership while the editable list lives in Convex; keep Control as the final check. [R-t1-02-04] Deleting a shared room must cascade receipts across planes and honour the retention class and legal hold; ZDR orgs need immediate purge semantics rather than a restore window. [R-t1-02-06] Event loss on plain NATS is covered by the periodic reconcile. Sync cost grows with org count and size; page the org-core member list and batch rooms.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 16,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-02-007",
+   "C-t1-02-026",
+   "C-t1-02-025"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-022",
+    "status": "partial",
+    "exactGap": "Control already stores and converges viewer|editor|manager|owner roles with an owner guard (repository.go:646-733), but Application can only grant 'editor' (spaceMemberGrants.role is a literal, schema.ts:831, spaceMembers.ts:85), the gateway has only POST /members and DELETE /members/{id} (spaces.rs:677-682) and SpaceMemberControls has no role control. The Convex spaces row has a name but no topic, its lifecycle union and Control registration_state have no archived value, and room deletion is not authorized (the deletion policy admits personal Spaces only), so rename, topic, archive and restore do not exist. syncAllOrganizationRooms has no caller and convex-core has no crons file, so the organization room's roster is declared once at activation (spaces.ts:1441) and never re-synced even though a durable org member_changed consumer already runs (nats-subscriber.js:305-316, nats.ts:221).",
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/spaceMembers.ts:1-135",
+     "apps/Application Plane/convex-core/convex/spaceMembers.ts:138-168,221-254",
+     "apps/Application Plane/convex-core/convex/schema.ts:546-604",
+     "apps/Application Plane/convex-core/convex/schema.ts:821-836",
+     "apps/Application Plane/convex-core/convex/spaces.ts:286-362,443-459,1425-1452",
+     "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:1-150",
+     "apps/Application Plane/convex-core/convex/nats.ts:221-260",
+     "apps/Application Plane/convex-core/nats-subscriber.js:300-330,443-447",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-738",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3433-3535",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx:1-60",
+     "apps/Control Plane/user-core/internal/spaces/repository.go:600-733",
+     "apps/Control Plane/user-core/internal/spaces/repository.go:828-852",
+     "apps/Control Plane/user-core/internal/spaces/authority.go:251-300",
+     "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:5-30,51-66",
+     "apps/Control Plane/user-core/internal/spaces/deletion_authorization.go:1-40",
+     "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:1706-1716"
+    ],
+    "reuse": [
+     "Control ReplaceMemberships (honors a declared role per subject, never revokes the owner by absence, advances revisions only on real change)",
+     "spaceMemberGrants, roomMembersForControl and the gateway sync_room_members declaration path",
+     "syncOrganizationRoom, syncAllOrganizationRooms and listActiveOrganizationRooms, plus the durable member_changed consumer (nats:onOrganizationMembershipProjectionChanged) as the event hook",
+     "Application lifecycle transition and outbox machinery (transitionLifecycle, spaceLifecycleEvents) for an archived state",
+     "SpaceMemberControls and the gateway's room-role gate (require_space_agent_grant_role) as the UI and authorization shell"
+    ],
+    "constraints": "Control owns membership and role; Application's list is intent only, and the replace-memberships request carries no acting subject (MembershipReplacement has only space_ref, members and managed types), so rank rules such as canGrant and last-owner cannot be enforced at Control through the current declarative PUT; use a per-member grant or change-role endpoint that carries the acting subject, or add the actor to the contract. A demotion advances membership and authority revisions only on a real change, which is what invalidates in-flight signed decisions. Archive must be a Control registration_state that denies writes and allows reads, not a UI flag, and room delete with a restore window needs the retention and deletion saga, which authorizes personal Spaces only and must honor legal hold and ZDR immediate purge. The organization room's roster stays derived from org-core (everyone maps to editor), so role editing must exclude it. Control already requires an active org membership at resolution time (repository.go:828-852), so removed members lose access live and the roster sync gap is mostly that new members never appear.",
+    "approachAdjustment": "Split the bundle. The genuine quick wins are the organization-room reconcile (a convex crons file calling syncAllOrganizationRooms plus a hook in the existing member_changed handler) and rename or topic. Role change and archive need Control contract changes (per-member endpoint with the acting subject, an archived registration_state with decision gating) and are M to L. Drop 'delete with a restore window' from this item until the deletion saga covers shared rooms.",
+    "effortRevised": "L",
+    "effortNote": "Raised from M: role change and archive each touch Control's contract and state machine; only the reconcile and rename or topic remain quick wins (S each).",
+    "verdict": "reword",
+    "verdictReason": "Every claim checks out against code, but the item bundles two true quick wins with Control-contract changes and a deletion dependency, and its quickWin label and M estimate should apply only to the reconcile and rename or topic slices.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-022",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/buzz/crates/buzz-relay/src/handlers/channel_authz.rs:59-175 (is_sole_owner, decide_self_departure, decide_put_user)",
+     "C:/dev/buzz/crates/buzz-core/src/channel.rs:102-140 (MemberRole, is_elevated = Owner|Admin)",
+     "C:/dev/buzz/crates/buzz-db/src/store/channel_members.rs:36-48,495-505 (advisory membership lock, transactional check-then-insert)",
+     "C:/dev/buzz/NOSTR.md:56 (kind 9002: name/about owner/admin, topic/purpose any member)",
+     "C:/dev/buzz/schema/tables/public/channels.sql:33-48 (ttl_seconds, ttl_deadline, expiry index)",
+     "C:/dev/buzz/crates/buzz-db/src/store/channel.rs:772-800 (reap_expired_ephemeral_channels) and crates/buzz-relay/src/main.rs:1153 (reaper loop)",
+     "C:/dev/buzz/desktop/src-tauri/src/commands/channels.rs:23-42,388-460 (STARTER_CHANNELS, deterministic UUID, ensure_starter_channels Tauri command)",
+     "C:/dev/buzz/desktop/src/features/onboarding/hooks.ts:88-92 and welcomeKickoff.ts:1-40 (client-side onboarding, startManagedAgent)",
+     "records teams-product-surface-035 (DOC/REA 30-day restore), slack-product-surface-019 (DOC), qm-product-016, qm-product-027"
+    ],
+    "corrections": "1) Buzz has no 'actor rank >= target rank' rule: is_elevated() is Owner|Admin, so an Admin may grant Owner; elevated grants on ADD are checked only in private channels (role CHANGES of existing members are checked on every visibility). Say 'elevated roles (owner/admin) can only be granted or changed by an owner/admin; the sole owner cannot be demoted, removed or leave'. 2) The TOCTOU guard is a per-channel Postgres advisory lock held across the transactional check-then-write, not a 'membership-revision check'. 3) Starter rooms and the welcome agent are client-orchestrated in the Buzz desktop app during onboarding (Tauri command ensure_starter_channels creates-or-joins #general/#welcome-everyone; the kickoff starts locally managed agents), not a server-side 'on member join' hook; present server-side ensure_starter_rooms(org)+auto-join as Verevon's design, not as what Buzz does. 4) room.state {active, archived, deleted(restore_until)} is a synthesis: Buzz has archive/unarchive/delete and TTL auto-archive; the restore window comes from Teams (DOC, 30 days). 5) Lifecycle prevalence 2 of 5 (buzz, teams) undercounts: Slack supports archive, rename and topic (public product behaviour, INF/DOC; not captured in a record), so at least 3 of 5.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Slack role set is DOC-only (help center), not REA",
+     "Teams 30-day restore is DOC (Learn limits note) plus locale-string REA",
+     "Buzz onboarding/starter rooms are desktop-client choreography; the Buzz doc itself lists open failure classes",
+     "TTL rooms (sliding deadline + reaper) are SRC-confirmed and Buzz-unique"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-023",
+  "title": "Enterprise identity: stop the fake-success SCIM stub, real SCIM 2.0 with deprovisioning that suspends a person's agents, per-org SSO enforcement and domain verification; linked identities later",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 23,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "First make the SCIM intake stop acknowledging requests it does not apply. Then build SCIM 2.0 Users and Groups in Control so IdP deactivation revokes sessions, removes Space memberships and suspends the agents that person owns; make SSO a per-org setting (domain verification, enforce-SSO flag, break-glass owner, domain allowlist and auto-join) with a typed session state in the UI. A later slice adds principal links so a person's sign-ins and external chat identities resolve to one principal.",
+  "whyItMatters": "SSO and SCIM are table stakes for enterprise buyers in four references. Today SSO sits behind a global flag and the SCIM stub returns success without applying anything, so a deprovisioned employee silently keeps access and their agents keep acting: a real governance risk.",
+  "referenceBestPractice": {
+   "bestSource": "teams; slack (SSO and SCIM), qm (principal links, actor gates)",
+   "others": [
+    "qm (principal links: flat, evidence-recorded, reversible, no privilege creation)",
+    "slack",
+    "buzz",
+    "teams (auth state machine, M365 group sync)",
+    "grokbot (user-facing Slack link flow)"
+   ],
+   "prevalence": "[R-t1-10-04] SSO and identity federation: 4 of 5 (buzz, teams, qm, slack); table-stakes. SCIM is the usual enterprise companion. [R-t1-02-09] SSO methods 2 of 5 (common); SCIM 1 of 5 (unique here, enterprise suite feature); linked identities 2 of 5 (differentiator); allowlists 2 of 5 (differentiator)",
+   "mechanism": "[R-t1-10-04] OIDC or SAML service provider with per-org IdP configuration and home-realm discovery by email domain; SCIM 2.0 /Users and /Groups endpoints drive membership and deprovisioning; principal links map several subjects to one canonical principal with recorded evidence and no privilege inheritance. [R-t1-02-09] Per-org sign-in policy {methods, default IdP, enforce SSO}; typed session auth state (up, interaction_required, licence_error, sign_in_restricted, unredeemed_invite). SCIM 2.0 /Users and /Groups per org with an org-scoped bearer token; deactivate revokes sessions and all Space memberships; group membership maps to a team. principal_links(person_id, provider, subject, evidence, created_by, revoked_at) with a cached canonicalPerson() resolver; links never carry admin rights and unlinking is immediate. Allowlist(org_id, kind email|domain, value) checked at sign-up, invite claim and agent invocation."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Control Plane/auth-core/src/auth/auth.ts:1005-1030 (better-auth sso plugin only when SSO_ENABLED is 'true'; the provisionUser hook only logs)",
+    "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1237-1275 (inbound /api/v1/scim/v2/* authenticates a bearer token, stores a webhook event and publishes verevon.ingestion.integration.scim_event_received; no user or group is created or changed)",
+    "apps/Ingestion Plane/integration-corev2/internal/api/server.go:2758-2776 (replies 201 to POST, 204 to DELETE and an empty list to GET regardless of what was requested)",
+    "apps/Ingestion Plane/integration-corev2/internal/db/migrations/0005_scim_tokens.sql and server.go:1133-1230 (durable per-org hashed bearer tokens, create and revoke audited)",
+    "A search of apps/Control Plane for scim_event_received or SCIM handling found no consumer",
+    "apps/Control Plane/auth-core/src/auth/auth.ts:1018-1030 (better-auth sso() enabled only when SSO_ENABLED=true)",
+    "apps/Control Plane/auth-core/src/auth/auth.ts:835-845",
+    "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:34-48",
+    "no SCIM code found in auth-core, user-core or org-core (backend baseline v-space-backend-033)"
+   ],
+   "gap": "[R-t1-10-04] SSO is behind a global flag with no per-org enforcement or domain verification. SCIM exists only as a token-managed intake that acknowledges requests without applying them, so deprovisioning silently does nothing and no provisioning reaches org membership or Space memberships. [R-t1-02-09] Passkeys, 2FA, email OTP and generic OAuth exist. Not verified: per-org SSO enforcement, domain verification and a typed auth state. SCIM and IdP group sync are absent. Principal linking exists only as an ADR."
+  },
+  "approachOriginal": "[R-t1-10-04] Control Plane owns identity. Add per-org IdP config, domain verification and an enforce-SSO flag in auth-core and org-core, and implement SCIM 2.0 Users and Groups in org-core: create, update and deactivate map to org membership, after which Control publishes the existing membership_changed event (Space memberships and session-core revocations already consume it) and auth-core revokes sessions. Deactivation also suspends owned agents using the suspension from F-t1-043 (R-t1-10-03). Reuse or re-home the per-org SCIM token store from integration-corev2. Immediately, make the integration-corev2 SCIM route return 501 so no IdP believes it succeeded. Group to Space mapping goes through the existing roster declaration. [R-t1-02-09] Control Plane: auth-core and org-core settings for per-org SSO policy, domain verification (DNS) and allowlist or auto-join; a SCIM service in org-core writing org membership, after which Control publishes membership_changed (Space memberships and Session Core revocations already consume it); principal_links owned by Control with OAuth proof as evidence, with integration-corev2 resolving provider subjects through Control instead of keeping its own mapping. Expose a typed session state to the gateway. Sequence: SSO and domains, then durable membership events and SCIM, then links once the Channel Plane starts.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t1-043 (R-t1-10-03) (suspension cascade)",
+   "agent to owner principal link",
+   "Durable membership-change delivery (F-t1-048 (R-t1-02-02))",
+   "Teams (F-t1-054 (R-t1-02-07)) for SCIM groups",
+   "Channel Plane for external links",
+   "integration-corev2 provider identities"
+  ],
+  "planeOwner": "Control Plane (auth-core, org-core, user-core)",
+  "risks": "[R-t1-10-04] Group to Space mapping semantics and partial-deprovision races. IdPs expect idempotent PATCH behaviour and precise error codes. Misconfigured domain verification can lock out an org. [R-t1-02-09] Enforcing SSO can lock owners out; keep a break-glass owner path. Deprovisioning is currently best-effort over plain NATS, so a lost event would leave a deprovisioned user in rooms. A wrong principal link is an impersonation bug; audit every link. Domain verification must be real to prevent takeover.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 19,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-02-09] Principal links only: QM adoption plan S5.1 ADR; external surfaces under apps/Channel Plane/docs (docs-only)"
+  },
+  "sourceClusters": [
+   "C-t1-10-034",
+   "C-t1-02-003",
+   "C-t1-02-004",
+   "C-t1-02-035",
+   "C-t1-02-005"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-023",
+    "status": "stub",
+    "exactGap": "The only SCIM code is a fake-success intake in the Ingestion Plane: /api/v1/scim/v2/* authenticates a per-org bearer token, stores a webhook event, publishes scim_event_received and answers 201, 204 or an empty list without creating or changing anyone (integration-corev2 server.go:1237-1275, 2758-2790), and no Control Plane service consumes the event or implements Users or Groups. SSO is the better-auth plugin enabled only by the global SSO_ENABLED flag with no per-org enforcement or verification flow wired, and Settings honestly shows 'not configured' (auth.ts:1019-1030, WorkspaceSettingsPage.tsx:1238-1250). Unconnected substrate exists in Control: sso_provider rows with organization_id and domain, org-core organization_domains (pending|verified|revoked, auto_invite flag, one verified owner per domain) with no verification handler, org_tenant_links, a 'suspended' member status, and session-revoke APIs.",
+    "evidence": [
+     "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1128-1160",
+     "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1225-1290",
+     "apps/Ingestion Plane/integration-corev2/internal/api/server.go:2713-2790",
+     "apps/Control Plane/auth-core/src/auth/auth.ts:995-1040",
+     "apps/Control Plane/auth-core/auth-schema.ts:101-110",
+     "apps/Control Plane/auth-core/src/grpc/auth/v1/auth.ts:188-200 (grep hit: RevokeSession and RevokeAllSessions contracts)",
+     "apps/Control Plane/org-core/internal/org/types.go:164-173,222-247",
+     "apps/Control Plane/org-core/migrations/011_verified_organization_domains.up.sql:1-30",
+     "apps/Control Plane/org-core/internal/org/repository.go:670-700",
+     "apps/Control Plane/org-core/internal/org/domain_invitation_policy.go:1-35",
+     "apps/Control Plane/user-core/internal/spaces/repository.go:828-852",
+     "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:34-62",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:170-215,540-548,1238-1250"
+    ],
+    "reuse": [
+     "org-core organization_domains table, DomainInvitationEligible policy and the one-verified-owner unique index for domain verification and allowlist or auto-join",
+     "better-auth sso_provider (organization_id, domain, oidc/saml config) behind the existing sso() plugin and organizationProvisioning hooks",
+     "org-core OrgMember.status 'suspended' and OrgTenantLink for Microsoft tenant resolution",
+     "auth-core RevokeSession and RevokeAllSessions plus the membership_changed to Session Core revocation chain",
+     "integration-corev2 scim_tokens store (hashed per-org bearer tokens, audited create and revoke) as a model to re-home"
+    ],
+    "constraints": "Identity lifecycle is Control-owned, but the SCIM endpoint sits in the Ingestion Plane, so an Ingestion-published event must not drive org membership; re-home the endpoint and token store to org-core rather than bridging over NATS. Space access already requires an active org membership at Control (repository.go:828-852), so flipping a member to suspended or removed cuts new Space decisions at once; the remaining gaps are in-flight runs (revocation events ride plain NATS), the organization room's roster rows (never re-synced, see F-t1-022) and agent owner links, which Control does not hold (agents.createdBy is optional and Convex-side). Enforcing SSO needs a break-glass owner, domain verification must be real because the org-core table itself says a Brreg match is not proof, and external-identity principal links wait for the docs-only Channel Plane.",
+    "approachAdjustment": "Lead with the one-line safety fix: make the integration-corev2 SCIM data routes refuse (501) so no IdP believes a deprovision succeeded. Then build on organization_domains (add the DNS or IdP verification flow, an enforce-SSO flag and a break-glass owner there) and the sso_provider organization and domain columns instead of new per-org stores, and implement SCIM Users in org-core mapping deactivate to member status suspended. Treat the suspend-the-person's-agents cascade as dependent on an agent-owner link in Control (F-t1-043), and leave Groups and principal links for later slices.",
+    "effortRevised": "XL",
+    "effortNote": "Raised from L as one item: the 501 fix is S, per-org SSO with domain verification is M, SCIM Users is L, Groups and agent suspension add L; recommend splitting.",
+    "verdict": "reword",
+    "verdictReason": "SCIM is a fake-success stub in the wrong plane and SSO is flag-only, so the gap is real, but the item misses the existing org-core domain, tenant-link and suspended-status substrate and should lead with the S-sized refusal fix.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-023",
+    "verdict": "partial",
+    "checked": [
+     "https://slack.com/help/articles/212572638 (SCIM: Business+ and Enterprise plans only; create/deactivate members; IdP group sync; SCIM version not stated)",
+     "scratchpad/tmp/ts/bundle_enums.txt:138 UserAuthState Up|InteractionRequired|...|LicenseError|SignInRestriction|UnRedeemed|...; str_ms-teams.exe.txt LicenseError, UnRedeemed, hrd.svc.cloud.microsoft (4 hits)",
+     "C:/dev/qm/docs/principal-links.md:13-38 (link never creates an admin; evidence; admin-only); C:/dev/qm/src/identity/principal-links.ts exists",
+     "C:/dev/qm/src/slack/allow-from.ts:22 createActorGate used only in src/slack/index.ts:96",
+     "slack extract dist/main.bundle.cjs: signInMethod (8 hits), platform-native-direct-saml (1)",
+     "cluster records buzz-architecture-073 / buzz-product-153 (NIP-FI relay side; client flow planned; no SAML/SCIM)"
+    ],
+    "corrections": "(1) Teams is not a SCIM reference: Teams relies on Entra ID provisioning; its best-in-class evidence is the native OneAuth/WAM client broker and HRD against Microsoft's own identity cloud, not a per-org IdP service-provider pattern. Name Slack (DOC) as the SCIM reference and say SCIM is Business+/Enterprise plan-gated. (2) The Slack help article does not state the SCIM version; 'SCIM 2.0' needs Slack API docs or should be phrased as Verevon's choice. (3) 'unredeemed_invite' is an interpretation of Teams' UserAuthState UnRedeemed (INF). (4) Allowlist 'checked at sign-up, invite claim and agent invocation' is a design extrapolation: QM's actor gate only filters Slack ingress (mentions, DMs, reactions) and Buzz's is a relay pubkey allowlist. (5) SSO 4/5 counts Buzz, whose federated identity is relay-side only with shadow/enforce modes and a client flow marked planned, and no SAML; count Buzz as partial. (6) Deprovisioning that suspends a person's agents is Verevon design, not a reference behaviour.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Slack SCIM and SSO are DOC and Business+/Enterprise plan-gated",
+     "Slack direct-SAML sign-in method is a darwin-only managed preference (SRC)",
+     "Teams identity facts are native strings/RPC names only",
+     "QM principal links are SRC+DOC (verified docs and file)"
+    ],
+    "confidence": "medium"
+   }
+  }
+ },
+ {
+  "finalId": "F-t1-024",
+  "title": "Client resilience: root and per-region error boundaries, lazy-chunk recovery, a boot watchdog, and a build id with stale-tab reload and contract guard",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 24,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Wrap the app in a root error boundary plus per-region boundaries (navbar, Space cockpit, side panels, run console) that show a classified failure card (render error, stale-deploy chunk failure, session expired, gateway unreachable) with Reload and Retry; reload once on a chunk-preload failure with a loop guard; add a boot watchdog. Expose a build id (Vite define plus a no-store version.json) and a minimum-client/contract version from the gateway, show a non-blocking 'new version, reload' banner, and force reload only on a contract mismatch after drafts are saved.",
+  "whyItMatters": "The code itself states there is no Suspense or ErrorBoundary, so one render error blanks a Space that people keep open all day, and a tab open across a deploy keeps an old bundle whose lazy chunks can 404. Both are cheap to fix and immediately visible to users.",
+  "referenceBestPractice": {
+   "bestSource": "teams (diagnosis-specific error curtain with Restart / Repair / Open on web); grokbot (per-feature minimum client versions with a machine-readable update-required hint)",
+   "others": [
+    "slack (fatal-exception and unresponsive-window dialogs with telemetry flush)",
+    "grokbot (single restore lifecycle with a 30 s stuck detector that reports the stage reached)",
+    "teams (staged nag-then-block staleness policy, DOC only)"
+   ],
+   "prevalence": "[R-t1-11-02] 3 of 5 sources (slack, teams, grokbot) = common; every native reference invests heavily here. [R-t1-11-04] 2 of 5 sources (grokbot, teams) = differentiator.",
+   "mechanism": "[R-t1-11-02] Root boundary catches render and chunk-load failures and shows a curtain with a classified cause and actions; watchdog timers on boot stages emit \"stuck at stage X\" telemetry; hang detection offers wait or reload; safe-mode switches. [R-t1-11-04] Remote config {min_version, feature_min_versions, max_age_days}; API responses carry a CLIENT_UPDATE_REQUIRED hint when a stale client calls a gated feature; the UI turns the hint into a banner or forced reload."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts:5",
+    "apps/Frontend Plane/verevonv3/src/index.tsx:1-22",
+    "apps/Frontend Plane/verevonv3/src/app/App.tsx:8-37",
+    "apps/Frontend Plane/verevonv3/nginx.conf:102-110",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:546-550",
+    "apps/Frontend Plane/verevonv3/index.html:1-15",
+    "apps/Frontend Plane/verevonv3/src/shared/api/sse.ts:25-47",
+    "apps/Frontend Plane/verevonv3/vite.config.ts:20",
+    "apps/Frontend Plane/verevonv3/nginx.conf:102-105",
+    "apps/Frontend Plane/verevonv3/nginx.conf:131-133"
+   ],
+   "gap": "[R-t1-11-02] The createResource shim comment states the app has zero Suspense/ErrorBoundary usage, and src/index.tsx renders <App/> directly. A grep over src (excluding demo) for ErrorBoundary, Errored, Loading, unhandledrejection and vite:preloadError finds only that comment. About 30 routes are lazy() imports, and nginx answers a missing hashed .js file with 404 (try_files $uri =404), so a stale chunk after deploy has no recovery path. Only per-feature typed error states exist (for example budget_exceeded in the Space composer). [R-t1-11-04] No build id or version is exposed to the client (comparator grep for buildId, __APP_VERSION__, version.json found nothing; my grep of import.meta.env use shows only demo, captcha and gateway-url toggles). A tab open across a deploy keeps the old bundle, lazy chunks can 404, and there is no \"reload\" prompt. The SSE reader already supports Last-Event-ID resume, which is a natural hook for the version check."
+  },
+  "approachOriginal": "[R-t1-11-02] Frontend Plane: use the boundary primitive of the Solid version in use (the shim comment names Errored/Loading for Solid 2) at the root and around each shell region; failure card component with i18n copy keyed by error code (reuse shared/i18n/errors.ts) and a request id; window listener for the Vite preload-error event that reloads once (sessionStorage guard) and otherwise shows the card; boot-stage recorder posting to the existing gateway observability route (apps/gateway/src/domains/monitoring.rs). Report action uses the ids-only flow in F-t1-079 (R-t1-11-08). [R-t1-11-04] Frontend Plane: Vite build id injected at build, emitted as /version.json (Cache-Control: no-store; add an explicit nginx location, because json files currently fall through to the SPA fallback at nginx.conf:131-133 with no cache header, and give index.html no-cache too); gateway adds an X-Verevon-Client-Min header (or /api/v1/client-config) next to the existing envelope; SPA store compares on visibilitychange and SSE reconnect, shows the banner, and hard-reloads on a contract-version mismatch after the draft store flushes. An optional \"What is new\" entry can render once per build id from the deploy pipeline (low value, one-day follow-on).",
+  "effortOriginal": "S",
+  "dependencies": [
+   "F-t1-079 (R-t1-11-08) (report action; can ship later)",
+   "Persistent composer drafts (F-t1-032 (R-t1-01-08)) before any forced reload"
+  ],
+  "planeOwner": "Frontend Plane",
+  "risks": "[R-t1-11-02] Boundaries that swallow errors silently; always report with a request id. Auto-reload must not lose an unsent composer draft (see F-t1-032 (R-t1-01-08)). [R-t1-11-04] Forced reloads during typing lose drafts; version skew between the gateway and Space event schemas must be a deliberate contract version, not the build hash.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 10,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-11-024",
+   "C-t1-11-008"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-024",
+    "status": "absent",
+    "exactGap": "The production app has no ErrorBoundary/Errored, Loading/Suspense, vite:preloadError, unhandledrejection or boot-watchdog code: index.tsx renders App directly, about 30 routes are lazy() imports (App.tsx:1-37), and the only trace is the shim comment saying the app has zero Suspense/ErrorBoundary usage (create-resource-compat.ts:3-9). nginx answers a missing hashed asset with 404 (nginx.conf:103-114) and serves index.html and any version.json with no cache header (nginx.conf:132-133), vite.config.ts defines no build id, and no client-version or contract header exists at the gateway (main.rs:213-221 only reports the server revision at /version). Only per-feature typed error states exist (for example SpaceRoomComposer onError, :458-467, and the code-keyed copy in shared/i18n/errors.ts).",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts:3-9",
+     "apps/Frontend Plane/verevonv3/src/index.tsx:1-22",
+     "apps/Frontend Plane/verevonv3/src/app/App.tsx:1-60",
+     "apps/Frontend Plane/verevonv3/nginx.conf:103-114",
+     "apps/Frontend Plane/verevonv3/nginx.conf:132-133",
+     "apps/Frontend Plane/verevonv3/nginx.conf:31",
+     "apps/Frontend Plane/verevonv3/vite.config.ts:1-60",
+     "apps/Frontend Plane/verevonv3/index.html:1-15",
+     "apps/Frontend Plane/verevonv3/package.json:26-36",
+     "apps/Frontend Plane/verevonv3/node_modules/solid-js/dist/solid.js:1117",
+     "apps/Frontend Plane/verevonv3/src/shared/api/sse.ts:25-60",
+     "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts:1-40",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:458-467",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:1-60",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/observability.rs:1-60",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:205-221"
+    ],
+    "reuse": [
+     "Solid 2 rc.0 exports Errored, Loading and createErrorBoundary (solid.js:1117), the primitives the shim comment says the app lacks",
+     "shared/i18n/errors.ts code-to-copy seam and ApiError/extractError (sse.ts, http.ts) for classified failure cards",
+     "SSE reader Last-Event-ID resume (sse.ts:25-60) as the reconnect hook for a version check",
+     "Gateway /version (main.rs:213-221) already reports the deployed revision and build date; gateway Prometheus metrics (observability.rs) for server-side counters"
+    ],
+    "constraints": "Frontend Plane only, but a forced reload must not drop an unsent composer draft, so it depends on the draft store. Telemetry must not carry message content or user data and must respect ZDR (ids only). The browser reaches the gateway only through nginx /api/ and /health (nginx.conf proxy locations), so a gateway /version at the root is not reachable by the SPA without a new /api route.",
+    "approachAdjustment": "Fix one pointer: apps/gateway/src/domains/monitoring.rs is Quarry change-monitoring (URL check, latest, history), not an observability sink, and observability.rs only exposes server Prometheus metrics. There is no client error or boot-stage endpoint and no global request-id in the envelope, so add a small ids-only client-diagnostics route under /api/v1 (or drop the boot-stage recorder from this item) and add request-id middleware if the failure card must show one. Everything else in the approach (root and region boundaries with Errored, one-time reload on chunk-preload failure with a sessionStorage guard, version.json with no-store plus an explicit nginx location and index.html no-cache, gateway min-client header or client-config, non-blocking banner, forced reload only on contract mismatch) is sound.",
+    "effortRevised": "M",
+    "effortNote": "Raised from S. Boundaries plus chunk recovery plus a build-id banner is S; the gateway contract-version header, a client-diagnostics route and draft-safe forced reload make the full item M.",
+    "verdict": "reword",
+    "verdictReason": "Nothing of this exists in production code, so the recommendation stands, but it points at the wrong gateway route for observability and understates effort.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t1-024",
+    "verdict": "partial",
+    "checked": [
+     "C:/Program Files/WindowsApps/MSTeams_26260.1701.5139.3736_x64__8wekyb3d8bbwe/locale/generated-touchdown/en-us/desktop.json (error_curtain_* body/label keys for cert, proxy, policy, corrupt_package, resource, os, runtime_version; unresponsive_renderer_button_wait/trace/restart)",
+     "scratchpad/extract/slack/dist/main.bundle.cjs (webContentsTimeoutDialogEpic; fatal JS exception handler string)",
+     "scratchpad/extract/slack/dist/resources/locales/en/desktop_messagebox_en_GB.json (stopped responding / Keep waiting / Restart & report issue / trouble loading)",
+     "scratchpad/extract/grokbot/dist/renderer/assets/index.eager-app-CY939ORZ.js (client/restore-failed, sand-client-restore-stuck timeoutMs 3e4, client_restore event with stage/generation/elapsedMs)",
+     "scratchpad/extract/grokbot/dist/electron-main/main-app.cjs (sand_min_client_version schema and fallbacks; SAND_CLIENT_UPDATE_REQUIRED header -> updateSink.noteBackendUpdateRequirement -> checkForUpdates trigger backend_gate; getMinimumVersion/getMaxAgeDays consumers)",
+     "C:/dev/buzz/desktop/src/app/RootErrorBoundary.tsx:1-60 and desktop/src/main.tsx:87-108 (root render boundary with Reload)",
+     "grep for ErrorBoundary/ChunkLoadError/vite:preloadError in C:/dev/buzz and C:/dev/qm"
+    ],
+    "corrections": "(1) Prevalence of crash/render recovery is 4 of 5, not 3: buzz also has a root React error boundary that shows a 'Buzz failed to start' screen with a Reload button (desktop/src/app/RootErrorBoundary.tsx). That makes it table stakes. QM: none found. (2) The Teams hang toast has Wait / Trace / Restart. desktop.json has no Reload button string. (3) The Teams error curtain is a native-shell screen for when the web client fails to start. It is not a render/chunk error boundary. No reference showed per-region boundaries, lazy-chunk recovery, or a build-id stale-tab reload: those parts of the title are Verevon proposals and must be labelled INF. (4) Grok Bot has no generic feature_min_versions map. Remote config sand_min_client_version has fixed fields: min_version, backend_min_version, novnc_port_token_min_version, hosted_mcp_oauth_callback_min_version, max_age_days (default 14). Only min_version and max_age_days have client-side consumers. The per-feature fields appear only in the schema and fallback, so their enforcement is presumably server-side (INF). (5) SAND_CLIENT_UPDATE_REQUIRED arrives as ConnectError metadata and starts an auto-updater check (trigger backend_gate). A 'banner or forced reload' was not observed.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Teams staged nag-then-block staleness policy is DOC-only (Learn teams-client-update). The shell strings only show an update toast.",
+     "Teams curtain and repair are native (work when WebView2 fails). Many Teams recovery behaviors are ECS-flag controlled (enableTeamsRepair, enableUserInitiatedRepair, ...).",
+     "Slack crash-integrity restart path is behind the crash_integrity_check flag. The unresponsive timeout is 5 s, or 15 s with the extended_unresponsive_timeout flag.",
+     "Grok Bot per-feature version floors: schema-level evidence only, enforcement not observed client-side.",
+     "No REA tool was used for this item. Evidence was re-read directly from the installed Teams locale JSON and the pre-extracted Slack and Grok Bot bundles."
+    ],
+    "confidence": "high"
+   }
+  }
+ }
+]

@@ -1,0 +1,190 @@
+{
+  "verdict": "Trustworthy and close to ready to hand to the team. Every sampled Verevon-side claim matches verification.verevon (exactGap, constraints, approachAdjustment), and all ~45 code citations I opened in C:/dev/CoresSystem support the sentences that cite them. Examples: the session:{id} grant at browser.rs:1235, the in-memory grant Store at grant.go:61-71, the fall-through Ok(None) at agent_routes.rs:280, the org-less search cache key at search.rs:209-226, the debug URL log under ZDR at change_routes.rs:632-637, the env-gated LlmPlanner, the change_monitor-only workflowFor, ModelPlaneInvokeRequest with no schema or zdr, screenshot/pdf None in pipeline.rs, the org-less Webhook struct and the scrape UsageEvent carrying final_url under ZDR. All 22 Priority cards with a 'partial' reference verdict have taken in their reference corrections and use the corrected prevalence. None still states a refuted mechanism, such as a Firecrawl reaper, a Codex evaluate approval gate, an LRU registry, a Firecrawl browser pool, a Firecrawl allowlist guardrail or Firecrawl profile encryption. The numbers I spot-checked (40k snapshot cap, 25 steps, 2000 chars per pattern, 8 s robots timeout, 5-minute cron minimum, Apify 10 s minimum, 4 credits per format, MAX_ACTIONS 50, 7680x4320, Aside 32 ms/5 s waitForReady, 1440x900 viewport, Apify 11 webhook retries) all trace to SRC/DOC records. The six demoted items appear only in the Nice-to-have section, each with its demotion reason. No blockers. The issues are a cross-card contradiction about where OpenAPI generation lives (F-t2-005 vs F-t2-064/075), a 'how to build' that drops a verified approach detail (F-t2-009 [Content_Types].xml), a few overstatements or mis-attributions ('every reference', 'both browser references', 'one-file'), one mixed provenance tag, one 'demoted' label on an item whose tier did not change, and small duplication and sequencing tensions. All are fixable with the exact patches below.",
+  "checked": [
+    "Tier changes: all 6 items whose originalTier differs from finalTier (F-t2-054, 057, 061, 063, 064, 065, recommended -> nice-to-have) confirmed in sec-50-n.md with demotion reasons matching verdictReason; no Recommended section still carries them",
+    "Priority cards with reference verdict 'partial': all 22 (F-t2-001..010, 013..024) compared sentence by sentence against reference.corrections, caveats and prevalenceCorrect; F-t2-011 and 012 (confirmed) also read",
+    "Verevon claims of all 24 Priority cards compared with verification.verevon exactGap/constraints/approachAdjustment",
+    "Code citations opened in C:/dev/CoresSystem for 20 Priority cards (2-3 locations each for 001, 002, 003, 006, 007, 010, 011, 013, 014, 016; 1-2 for 004, 005, 008, 009, 012, 015, 017, 018, 019, 020, 021, 022, 023, 024); all supported",
+    "8 random Recommended cards (F-t2-025, 028, 032, 036, 041, 046, 052, 059) against verification and evidence, with code spot-checks (rate_limit.rs, DashboardComposer.tsx, lease_pool.rs, store.go Webhook, routes.rs scrape UsageEvent)",
+    "11 Nice-to-have entries: 5 random (F-t2-066, 069, 072, 074, 076), plus 075 and 077 (verdict 'demote' but tier unchanged), plus the 6 demoted items",
+    "Reference numbers and mechanisms grepped in *.features.json, *.deep.md, cat/*.refs.json and verify/*.refcheck.json (about 20 figures)",
+    "All 96 [F-...](#F-...) cross-references in the 7 section files: anchor/label match, and target title from _titles.json checked against the topic of each use",
+    "Cross-card contradictions (planned vs absent, ownership of shared work, priority level of shared changes)"
+  ],
+  "issues": [
+    {
+      "id": 1,
+      "severity": "major",
+      "file": "sec-30-p1.md",
+      "where": "F-t2-005, How to build it in Verevon",
+      "problem": "The Priority card sends OpenAPI generation to F-t2-064 ('openapi.yaml is hand-maintained, which F-t2-064 addresses'). Verification moved that slice the other way: OpenAPI generation from Rust types plus a CI route-coverage check was merged into F-t2-005, and F-t2-064 was demoted to a conditional Nice-to-have. The F-t2-064 entry in sec-50-n.md itself says 'keep OpenAPI generation with a route-coverage check inside F-t2-005'. Together the two cards point at each other, so no card owns the work.",
+      "evidence": "items.verified.json F-t2-064 verification.verevon.approachAdjustment says to keep only 'generate OpenAPI from the Rust request/response types plus a CI route-coverage check' and merge it into F-t2-005, noting it also fixes the 46-path drift. sec-50-n.md F-t2-064 entry says to keep OpenAPI generation 'inside [F-t2-005]'.",
+      "patch": {
+        "find": "openapi.yaml is hand-maintained, which [F-t2-064](#F-t2-064) addresses.",
+        "replace": "openapi.yaml is hand-maintained; verification moved the OpenAPI-generation slice with a CI route-coverage check from [F-t2-064](#F-t2-064) into this item."
+      }
+    },
+    {
+      "id": 2,
+      "severity": "minor",
+      "file": "sec-50-n.md",
+      "where": "F-t2-075",
+      "problem": "Deprecation flags are to be folded into 'the OpenAPI work of F-t2-064', but that OpenAPI work now sits in F-t2-005 (see issue 1). F-t2-064 is a demoted, conditional MCP/connector item, so this link points readers at the wrong owner.",
+      "evidence": "F-t2-064 approachAdjustment merges OpenAPI generation into F-t2-005. F-t2-075 approachAdjustment (folding into F-t2-064) was written against the pre-split F-t2-064.",
+      "patch": {
+        "find": "fold deprecation flags into the OpenAPI work of [F-t2-064](#F-t2-064)",
+        "replace": "fold deprecation flags into the OpenAPI-generation work, which now sits in [F-t2-005](#F-t2-005) (moved there from [F-t2-064](#F-t2-064))"
+      }
+    },
+    {
+      "id": 3,
+      "severity": "minor",
+      "file": "sec-30-p2.md",
+      "where": "F-t2-009, How to build it in Verevon",
+      "problem": "The build step says only 'add the zip-header check'. The verified approachAdjustment asks for a zip check with [Content_Types].xml so Office files are told apart from plain zips. A bare PK 03 04 sniff would send every zip archive to the DOCX parser, and the card's What to build also says archives get an unsupported_media skip. The reference correction (Firecrawl does not look for [Content_Types].xml) is about Firecrawl, not about what Verevon should do.",
+      "evidence": "items.verified.json F-t2-009 verification.verevon.approachAdjustment: 'add the zip-with-[Content_Types].xml check for Office files; route PDF and DOCX only'. The card's line 7 says archives get a typed unsupported_media skip.",
+      "patch": {
+        "find": "add the zip-header check,",
+        "replace": "add the zip-header check confirmed by a `[Content_Types].xml` entry so plain zip archives are not sent to the DOCX parser,"
+      }
+    },
+    {
+      "id": 4,
+      "severity": "minor",
+      "file": "sec-30-p1.md",
+      "where": "F-t2-003, Why it matters",
+      "problem": "'Phase 1 is a one-file fix plus a test' contradicts the card's own Phase 1. That phase promotes the private CacheAdmission (knowledge/quarry.rs) to a shared module, calls it in search.rs, and re-keys the scrape-preview cache, so it touches at least three gateway files.",
+      "evidence": "Card 'What to build' Phase 1. items.verified.json F-t2-003 approachAdjustment says 'move the private CacheAdmission to a shared module, call it in search_web ... and also key the scrape-preview cache by org and request variant'. CacheAdmission is at knowledge/quarry.rs:213-280.",
+      "patch": {
+        "find": "Phase 1 is a one-file fix plus a test.",
+        "replace": "Phase 1 is a small gateway-only change plus a test."
+      }
+    },
+    {
+      "id": 5,
+      "severity": "minor",
+      "file": "sec-30-p1.md",
+      "where": "F-t2-003, Quick win",
+      "problem": "The same overstatement as issue 4 appears in the Quick win line ('one gateway file').",
+      "evidence": "Same as issue 4.",
+      "patch": {
+        "find": "one gateway file, existing helpers",
+        "replace": "a small gateway-only change, existing helpers"
+      }
+    },
+    {
+      "id": 6,
+      "severity": "minor",
+      "file": "sec-30-p3.md",
+      "where": "F-t2-024, Why it matters",
+      "problem": "'Both browser references keep secrets out of the model' credits the Codex in-app browser with the browserAuth handoff. The reference correction re-attributes that flow to the hosted Codex Cloud Browser: the shipped desktop in-app browser does not advertise the capability. The card's own references paragraph states this correctly, so the Why paragraph contradicts it.",
+      "evidence": "items.verified.json F-t2-024 verification.reference.corrections, point 1 ('Say Codex Cloud Browser, not Codex in-app browser'), and caveat 1.",
+      "patch": {
+        "find": "Both browser references keep secrets out of the model.",
+        "replace": "Aside and the hosted Codex Cloud Browser (not the shipped desktop in-app browser) keep secrets out of the model."
+      }
+    },
+    {
+      "id": 7,
+      "severity": "minor",
+      "file": "sec-30-p3.md",
+      "where": "F-t2-020, What the references do",
+      "problem": "'Some form of persistent browser state exists in every reference' overstates the corrected prevalence. Firecrawl (via Hangar) and Codex are SRC, Aside is only INF, and the correction calls Apify's SessionPool 'only a weak analogue of a named profile'. The rest of the sentence already says so, so the 'every reference' lead-in contradicts it.",
+      "evidence": "items.verified.json F-t2-020 verification.reference.corrections, point 5.",
+      "patch": {
+        "find": "Some form of persistent browser state exists in every reference,",
+        "replace": "Some form of persistent browser state exists in 3 of 4 references (Firecrawl through Hangar, Codex, and Aside [INF]), with only a weak analogue in Apify,"
+      }
+    },
+    {
+      "id": 8,
+      "severity": "minor",
+      "file": "sec-30-p2.md",
+      "where": "F-t2-015, What the references do",
+      "problem": "Provenance tag error. The sentence on rich input ends with a single [DOC] tag, but its Aside claims (trusted CDP input with modifiers, insertText, file-chooser interception, download events) are SRC from the daemon blob, and Codex's clipboard bridge is SRC. Only Codex's held-click, drag and paste action set is doc-backed.",
+      "evidence": "items.verified.json F-t2-015 verification.reference.caveats: 'Codex AX action set (held clicks, drag, paste formats) is DOC-backed (plugin docs/api.json); clipboard bridge is SRC' and 'Aside evidence comes from the daemon Node SEA blob (SRC)'.",
+      "patch": {
+        "find": "are Codex-specific, and its action set is doc-backed [DOC].",
+        "replace": "are Codex-specific [SRC for Aside, from the daemon blob]; Codex's held-click, drag and paste action set is doc-backed [DOC], while its clipboard bridge is [SRC]."
+      }
+    },
+    {
+      "id": 9,
+      "severity": "minor",
+      "file": "sec-30-p2.md",
+      "where": "F-t2-013, What the references do",
+      "problem": "The card says Firecrawl exposes an interactive live-view URL 'on agent sessions'. The verified caveat places interactiveLiveViewUrl on Firecrawl's hosted browser sessions, where a human can interact with the agent's session. Firecrawl has no 'agent session' object.",
+      "evidence": "items.verified.json F-t2-013 verification.reference.caveats: 'Firecrawl browser sessions expose an interactiveLiveViewUrl (human can interact with the agent's session)'.",
+      "patch": {
+        "find": "on agent sessions [SRC].",
+        "replace": "on its hosted browser sessions, so a human can act in the agent's session [SRC]."
+      }
+    },
+    {
+      "id": 10,
+      "severity": "minor",
+      "file": "sec-50-n.md",
+      "where": "F-t2-075",
+      "problem": "The entry says 'demoted', but F-t2-075 kept its tier (originalTier and finalTier are both nice-to-have). The section intro defines 'demoted' as 'the verification pass changed the tier', so the label is wrong. Verification narrowed and split the item, but did not demote it.",
+      "evidence": "items.verified.json F-t2-075: originalTier nice-to-have, finalTier nice-to-have (verdict 'demote' with no tier change). sec-50-n.md intro: 'where a note says \"demoted\", the verification pass changed the tier'.",
+      "patch": {
+        "find": "Cheap insurance, demoted because the code contradicts its premises.",
+        "replace": "Cheap insurance; verification narrowed it (its tier was already nice-to-have) because the code contradicts its premises."
+      }
+    },
+    {
+      "id": 11,
+      "severity": "minor",
+      "file": "sec-40-r1.md",
+      "where": "F-t2-036, Verevon today and approach",
+      "problem": "Cross-card prioritisation contradiction. F-t2-036 calls the evaluate sensitive-allowlist change 'low-priority hardening', but the same change is Priority F-t2-002 (W1, quick win), which itself frames it as defense-in-depth. A reader cannot tell which tier governs it.",
+      "evidence": "_titles.json F-t2-002: tier priority, wave W1. F-t2-036 approachAdjustment demotes the allowlist change only within F-t2-036's own scope.",
+      "patch": {
+        "find": "so that allowlist change is low-priority hardening.",
+        "replace": "so that allowlist change is defense-in-depth and is tracked in [F-t2-002](#F-t2-002), not here."
+      }
+    },
+    {
+      "id": 12,
+      "severity": "minor",
+      "file": "sec-40-r2.md",
+      "where": "F-t2-046, Verevon today and approach",
+      "problem": "F-t2-046 and F-t2-025 both prescribe the same per-org permits or semaphore in front of RuntimeLeasePool without referencing each other. This invites duplicate implementation.",
+      "evidence": "sec-40-r1.md F-t2-025 says 'per-org permits in RuntimeLeasePool plus a cap on agent runs'; sec-40-r2.md F-t2-046 says 'add a per-org semaphore before RuntimeLeasePool'. Both verification approachAdjustments name RuntimeLeasePool.",
+      "patch": {
+        "find": "add a per-org semaphore before RuntimeLeasePool.",
+        "replace": "add a per-org semaphore before RuntimeLeasePool, the same per-org permits as [F-t2-025](#F-t2-025), built once."
+      }
+    },
+    {
+      "id": 13,
+      "severity": "minor",
+      "file": "sec-50-n.md",
+      "where": "F-t2-076",
+      "problem": "The approach still presents executing WebMCP descriptors as planned work. The verification demotes WebMCP to a research spike, because the CDP WebMCP domain is experimental and real sites do not yet publish tools. It also puts a per-org live-run cap and a page-scoped viewport ahead of child browser runs, and the entry omits both.",
+      "evidence": "items.verified.json F-t2-076 verification.verevon.approachAdjustment: 'add a per-org live-run cap in Quarry, and first make viewport page-scoped ... Keep WebMCP as a research spike only ... do not schedule it until real sites publish tools'.",
+      "patch": {
+        "find": "and execute any WebMCP descriptor as a fenced, one-shot-approved Quarry action [SRC].",
+        "replace": "add a per-org live-run cap and a page-scoped viewport first, and keep WebMCP a research spike (the CDP WebMCP domain is experimental [INF]) until real sites publish tools, after which a descriptor would run as a fenced, one-shot-approved Quarry action [SRC]."
+      }
+    },
+    {
+      "id": 14,
+      "severity": "minor",
+      "file": "sec-40-r1.md",
+      "where": "F-t2-029, Dependencies and risks (with sec-30-p1.md F-t2-004)",
+      "problem": "Circular sequencing. F-t2-004 defers the ZDR sampler to 'Phase 2 (M), once spans exist (F-t2-029)', and F-t2-029 says 'Spans wait for the ZDR sampler in F-t2-004'. Both come from verification, but read together neither can start. One card should state that the sampler ships in the same change as the first span vocabulary.",
+      "evidence": "sec-30-p1.md F-t2-004 What to build, and sec-40-r1.md F-t2-029 Dependencies. items.verified.json F-t2-004 approachAdjustment ('only once spans exist (F-t2-029)') and F-t2-029 constraints ('spans must wait for the ZDR sampler (F-t2-004)').",
+      "patch": null
+    },
+    {
+      "id": 15,
+      "severity": "minor",
+      "file": "sec-30-p2.md",
+      "where": "F-t2-009 heading",
+      "problem": "The card heading ('Route PDFs and Office files ...') differs from the verified title in _titles.json ('Route PDFs, Office files and images ...'). The card's wording is the more accurate one, since images get a typed skip. But the appendix index and any title-based cross-reference built from _titles.json will not match the card. Align _titles.json and the index to the card heading, or the reverse.",
+      "evidence": "doc/_titles.json F-t2-009 title vs sec-30-p2.md line 2. Verification says images.rs is not an image parser.",
+      "patch": null
+    }
+  ]
+}

@@ -1,0 +1,109 @@
+[
+ {
+  "finalId": "F-t2-008",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/lib/browser-billing.ts:1-23 (120/420/+120 ZDR credits per hour, min ceil(rate/60))",
+   "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:155-215 (createBrowserSession: autumnService.checkCredits on TTL estimate -> 402; reserveExternalSlot -> 429; updateKeylessBrowserCredits only for keyless)",
+   "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:390-440 (reserveBrowserPromptCredits: credit check at interact rate for full TTL, marks prompt use under row lock)",
+   "C:/dev/firecrawl/apps/api/src/lib/browser-sessions.ts:70-106 (withLockedBrowserSession SELECT ... FOR UPDATE; settleBrowserSessionOnce; listUnsettledHangarSessions sweep)",
+   "C:/dev/firecrawl/apps/api/src/lib/cost-tracking.ts:1-57 (CostTracking limit + CostLimitExceededError)",
+   "grep 'new CostTracking(' over C:/dev/firecrawl/apps (every construction passes no limit; only a remote smartScrape error string maps to CostLimitExceededError)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:311-385 (limit = min(remainingCredits, limit); original only logged; maxConcurrency capped to team limit; crawlTtlHours flag default 24)",
+   "https://docs.apify.com/sdk/js/docs/guides/pay-per-event (ChargeResult fields; platform aborts run automatically at max total charge)"
+  ],
+  "corrections": "1) Firecrawl's browser-session create does NOT hold/reserve the estimated cost for paying teams: it runs an Autumn credit CHECK for the full TTL (402 if short) and reserves only a concurrency slot; a debit-ahead exists only for keyless/free usage (updateKeylessBrowserCredits). Rephrase 'reserve then settle and release the remainder' as 'admission check at full TTL, settle actual duration exactly once under a row lock, refund keyless pre-debits'. 2) CostTracking's throwing limit exists as a class feature, but no OSS caller sets a limit (all 'new CostTracking()'); do not present it as an enforced per-request budget in Firecrawl. 3) At crawl submit Firecrawl stores only the clamped limit; the requested limit is logged, not stored on the job. 4) Apify: when max total charge is reached the platform aborts the run automatically and charge()/pushData stop; there is no documented 'finish current step, persist partial results, budget-exhausted status' - that is a Verevon design proposal (INF). 5) Firecrawl's rate classes are plain browser vs session-that-used-a-prompt (whole session re-rated) plus a ZDR surcharge; 'human vs AI-driven' is an interpretation.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Apify half is DOC-only (pay-per-event SDK, run cost display); not observed in code",
+   "Firecrawl CostTracking limit is dormant in OSS (never set); enforcement may exist only in hosted services (INF)",
+   "Firecrawl 420 credits/hour interact rate is in code only; public pricing shows 2 credits/min",
+   "Browser sessions require HANGAR_URL (hosted browser service); self-hosted Firecrawl lacks them"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-019",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/llmExtract.ts:36-62 (selectModelForSchema: gpt-4o-mini default, gpt-4.1 when $ref/$defs)",
+   "llmExtract.ts:108-150 (normalizeSchema: recurses into $defs/anyOf, required = all keys, additionalProperties:false; $ref not resolved)",
+   "llmExtract.ts:480 (maxContentTokens = 0.8 * maxInputTokens)",
+   "llmExtract.ts:560-575, 870-910 (fallback to gpt-4.1-mini only on quota/rate-limit errors)",
+   "llmExtract.ts:678-770 (experimental_repairText + LLM JSON repair pass)",
+   "llmExtract.ts:1343-1380 (performSummary: trimToTokenLimit + summarization system prompt)",
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/query.ts:25-62, 88-130, 190-240 (question/highlights: fine-tuned gpt-oss-20b on Fireworks, contextTokens 131072 with 16384 reserved, or Gemini flash-lite freeform; token-based trimming with 'page too long' warning)",
+   "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:20,170-215 (json +4, question/query +4, highlights +4 credits per page)",
+   "C:/dev/firecrawl/apps/api/src/lib/deprecations.ts:18-35 and routes/v2.ts:396,406 (v1/v2 extract deprecated, replacement /v2/scrape json format)"
+  ],
+  "corrections": "1) normalizeSchema does not resolve $ref; it normalises $defs in place and routes schemas with $ref/$defs to a larger model. 2) Fallback is to a second model (gpt-4.1-mini, same OpenAI provider) only on quota/rate-limit errors, not 'next provider on provider error'. 3) The 10,000-char figure is the max length of the question/query/prompt text, not the markdown input; question/highlights trim the page by tokens to the model context and summary uses trimToTokenLimit. 4) question/highlights run on a Firecrawl-hosted fine-tuned model (Fireworks) or Gemini through query.ts, not the json-extraction routine. 5) Prevalence: Apify Website Content Crawler offers an optional per-page AI summary (apify-platform-049, DOC), so 'summary' is at least 2 of 4; json/question/highlights as built-in scrape formats remain Firecrawl-only in this record set.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Firecrawl models are hard-coded to OpenAI families plus a private Fireworks fine-tune and Gemini; Verevon must route through Model Plane",
+   "question/highlights depend on a hosted fine-tuned model id; self-hosters may not have it (INF from model id string)",
+   "/extract is deprecated in Firecrawl (Deprecation headers), consistent with the item"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-024",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:14650-14800 (handoff handler: otpHandle guard https/frame origin/one required non-password field/no options/QR; Z = runtime.gaas?.getBrowserAuthBrokerChallenge, throws 'Browser auth broker is unavailable' when absent; email OTP elicitation text)",
+   "browser-service.pretty.js:30916-30940 (runtime.gaas set only when BROWSER_USE_SECURITY_MODE == 'gaas-browser-environment'; broker functions only when BROWSER_AUTH_BROKER_SOCKET_PATH is set)",
+   "browser-service.pretty.js:11134-11145, 15368, 25506 (browserAuth capability; ManualHandoff requires clientInfo.type === 'cdp' with browserAuth)",
+   "scratchpad/tmp/cxas/pretty/main.pretty.js:41138, 40918-40924 (desktop IAB client tab capabilities = [pageAssets] plus webmcp when flagged; browserAuth not advertised)",
+   "main.pretty.js:4222, 4235 (BROWSER_AUTH_BROKER_SOCKET_PATH forwarded to node_repl env only in the Dev build flavor)",
+   "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/docs/capabilities/tab/browserAuth.md:1-40,100-106,320-335 (references Cloud Browser; user_took_over = manual control of the cloud browser)",
+   "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:8227-8255 (Aside.create/fill/resolve/clearPasswordManagerGeneratedPasswordRef schemas)"
+  ],
+  "corrections": "1) Re-attribute: Codex browserAuth (secure sign-in handoff, isolated-world native delivery, credential observation gate, email OTP) is wired to the CDP client in the hosted 'gaas-browser-environment' (Codex Cloud Browser) via a broker socket; the shipped desktop in-app browser (iab client) does not advertise the browserAuth capability and the broker socket env is forwarded only in Dev builds. Say 'Codex Cloud Browser', not 'Codex in-app browser'. 2) Email OTP: the broker challenge reports email_otp_delivery and native delivery; 'the host fetches the code from the mail connector' is inferred from the elicitation text, not from observed connector code - mark INF. 3) Codex 'vault/saved-login picker' rests on UI strings (string-level evidence); the opaque-ref vault fill without a UI form is Aside's (SRC). 4) Prevalence '2 of 3, table-stakes' overstates: Aside (opaque password refs, SRC) and Codex (cloud-only) - call it 2 of 4 sources, differentiator, with Codex's variant cloud-only.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Codex browserAuth is cloud-browser (gaas) only and depends on an OpenAI-hosted broker; not available in the local desktop in-app browser per the shipped client capability list",
+   "Elicitation is not answerable by an automated guardian (codex_guardian_compatible:false) - SRC",
+   "Aside returns generated-password plaintext only to its trusted agent-manager extension (not the model) - SRC",
+   "browser_auth telemetry/gate names suggest server-side gating; exact flags not confirmed (INF)"
+  ],
+  "confidence": "medium"
+ },
+ {
+  "finalId": "F-t2-007",
+  "verdict": "partial",
+  "checked": [
+   "https://raw.githubusercontent.com/apify/crawlee/master/packages/browser-pool/src/browser-pool.ts (#pickBrowserWithFreeCapacity uses .find() = first browser below maxOpenPagesPerBrowser; retireBrowserAfterPageCount default 100; maxOpenPagesPerBrowser default 20; closeInactiveBrowserAfterSecs 300; hook order pre/postLaunch, pre/postPageCreate, pre/postPageClose)",
+   "C:/dev/firecrawl/apps/playwright-service-ts/api.ts:26-28,160,187-200,353-377 (single chromium.launch; Semaphore MAX_CONCURRENT_PAGES default 10; /health creates context+newPage then closes, no navigation, no explicit deadline)",
+   "scratchpad/tmp/aside/daemon_sea_blob.bin@3035200-3036900 (Page.enable, setDialogAutoAccept, DOM/Network/Inspector.enable, Page.setWebLifecycleState active, Emulation.setFocusEmulationEnabled, Target.setAutoAttach flatten, guarded by an internal flag); AI_TAB_STABLE_VIEWPORT={width:1440,...}",
+   "scratchpad/tmp/cxas/pretty/main.pretty.js:43527-43532 (xJ: setBackgroundThrottling off when visible, isBrowserUseActive or isBeingCaptured; showInactive)"
+  ],
+  "corrections": "1) Firecrawl does not run a browser process pool: the OSS playwright service launches ONE Chromium and bounds concurrent pages with a semaphore; no retirement, relaunch or placement. Pool lifecycle is 1 of 4 (Apify Crawlee BrowserPool); Firecrawl contributes only the page semaphore and health probe. 2) Crawlee assigns a new page to the FIRST active browser below maxOpenPagesPerBrowser (not the least-loaded); retired browsers close when they have no pages or via the inactivity sweeper (closeInactiveBrowserAfterSecs 300 s). 3) Firecrawl /health creates a fresh context and blank page and closes them; it does not navigate to about:blank and has no explicit deadline. 4) The Rust Vec<BrowserSlot>/Semaphore shape is a Verevon proposal (INF), not a reference mechanism.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Apify BrowserPool evidence is DOC plus public OSS source (not an installed artifact)",
+   "Aside page-hygiene CDP calls are SRC from the daemon SEA blob and conditional on an internal flag",
+   "Codex throttling exemption is for the Electron desktop shell (webContents.setBackgroundThrottling), not a headless pool"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t2-016",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/firecrawl/apps/api/native/src/crawler.rs:124-130, 294-456 (_filter_links: denial_reasons map with code constants; order parse, protocol, depth, file type, section, backward, exclude, include, robots, social, external)",
+   "C:/dev/firecrawl/apps/api/src/lib/crawl-regex.ts:1-25 (MAX_PATH_PATTERNS 1000, MAX_PATH_PATTERN_LENGTH 2000, total 1000 patterns / 100k chars across both fields)",
+   "C:/dev/firecrawl/apps/api/src/scraper/WebScraper/crawler.ts:41-60, 186-200, 230-290 (DenialReason remediation messages and per-URL messages built in TypeScript)",
+   "C:/dev/firecrawl/apps/api/src/lib/robots-txt.ts:10,41-76 (fetched via forced engine list, timeout 8000, maxAge 1 day)",
+   "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/shouldCheckRobots.ts (scrape checks robots only with safeMode.enforceRobots or team flag checkRobotsOnScrape; never in lockdown)",
+   "C:/dev/firecrawl/apps/api/src/lib/permissions.ts:80-100 (ignoreRobotsTxt / robotsUserAgent enterprise-gated; blocked under Safe Mode enforceRobots)",
+   "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:363-368 (robots fetched at crawl start; failure tolerated; Crawl-delay commented out)"
+  ],
+  "corrections": "1) The Rust filter_links returns only typed codes; the remediation sentences are built in TypeScript (WebCrawler.filterLinks / DenialReason enum), so split 'native Rust filter_links with remediation messages'. 2) Several remediation texts still name v1 options (maxDepth, allowBackwardCrawling) and the ROBOTS_TXT text tells callers to set ignoreRobotsTxt, which is enterprise-gated; no message names allowSubdomains (external-link denials name allowExternalLinks). 3) Check order differs slightly: depth and file type come before fragment/scope, and robots is checked before social media. 4) Pattern caps: 1000 patterns total across include+exclude (not per field) and 100k characters total.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Apify enqueueLinks/transformRequestFunction and respectRobotsTxtFile are DOC-only, and robots is opt-in in Crawlee (not on by default)",
+   "Firecrawl robots enforcement is on by default for crawl only; scrape is opt-in via team flag or Safe Mode; overrides are enterprise flags",
+   "Firecrawl fails open when the robots.txt fetch fails and deliberately ignores Crawl-delay"
+  ],
+  "confidence": "high"
+ }
+]

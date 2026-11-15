@@ -1,0 +1,671 @@
+{
+  "category": "Computer & environment control",
+  "items": [
+    {
+      "id": "R-t3-06-01",
+      "title": "Make agent browser runs reachable from chat and Do mode (real broker grants, browser_agent enabled, per-action state diffs, browser subagent profile)",
+      "summary": "Replace the fake 'session:{id}' grant with a real browser-broker grant minted by model-gateway for each run, then expose browser_agent to the model in web-enabled chat and Do mode as a subagent with its own model profile, step budget and recording reference. Add compact per-action state diffs (URL, title, focused element, changed nodes) to the Quarry observation so long browse runs stay cheap.",
+      "whyItMatters": "Browser use is the most-used 'computer' capability in every reference and the core of the Manus-style 'agent acts like a PC' vision. Verevon already built the hard half (Quarry observation protocol, risk-classified approvals, SSRF-safe egress, step receipts), but no agent run can reach it today, so users see none of that power. Unblocking it also lets the safety stack be exercised end to end for the first time.",
+      "referenceBestPractice": {
+        "bestSource": "Antigravity (widest browser vocabulary, DOM/pixel/hybrid modes, per-action state diffs, recorded browser subagent) plus Manus (hybrid accessibility+DOM snapshot, versioned 22-tool contract with snapshot/ref/revision binding)",
+        "others": [
+          "Cursor",
+          "Hermes (CDP supervisor for dialogs and cross-origin iframes)",
+          "T3 Code",
+          "Codex"
+        ],
+        "prevalence": "5 of 12 sources have a full agent browser toolset (common); the dedicated browser subagent with its own model is unique to Antigravity",
+        "mechanism": "A CDP session per tab; the snapshot merges the accessibility tree with the DOM and gives each interactable node a short opaque ref; actions take {ref} or pixel coordinates bound to a capture id; after each action the harness returns a diff of URL, title, focus and changed nodes instead of a full snapshot; dialogs and downloads are tracked from CDP events. The main agent calls browser_task{task, budget}, which spawns a subagent with only the browser toolset and returns {result, recording_ref, steps}."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235",
+          "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:138-170",
+          "apps/Model Plane/go/services/browser-broker/internal/server/server.go:42",
+          "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:823",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:639",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3055-3099",
+          "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:972",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1030",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:121-122",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:267"
+        ],
+        "gap": "Observed by reading code: the BFF sends grant_id 'session:{id}' (browser.rs:1235); model-gateway validates it through the broker (browser_run.rs:138 validate_grant), and the broker only knows ids it minted itself (server.go:42 AcquireGrant). AcquireGrant has no production caller anywhere, only a mock in a test at browser_run.rs:823, so every agent run fails closed. Separately, the chat-side browser_agent arm calls an external BROWSER_AGENT_URL service and is refused by inline_tool_allowed (tool_loop.rs:639), and model-initiated browsing in Do runs is deferred (plan E12). There is no pixel mode, no per-action state diff, and no per-subagent model choice."
+      },
+      "approach": "1) model-gateway (Model Plane) becomes the grant issuer: POST /v1/browser/runs (or a sibling route) calls AcquireGrant through the existing state.browser_client with session_key = hosted browser session, org from the verified bearer, and allowed_domains from broker policy; the BFF at browser.rs:1235 stops inventing an id and forwards the minted one (plan E1/E2). 2) Replace the legacy browser_agent arm in tool_loop.rs with a dispatch to the durable run path, and lift the inline_tool_allowed refusal only for web-enabled chat and Do mode with a run-bound grant (plan E12). Acceptance test: a login, checkout or cross-domain action produces a durable approval card in chat. 3) Quarry adds a state_diff field to BrowserObservation (observation.rs) consumed by the execution-core planner loop; add a golden contract test shared by both sides. 4) Expose a model profile and step budget on the tool call and return {summary, step_receipts, recording_ref} only, so the main context stays small. 5) Optional later: pixel-only mode for canvas-heavy pages. The Model proposes and Quarry stays the only executor.",
+      "effort": "M",
+      "dependencies": [
+        "browser-broker AcquireGrant call site (plan E2)",
+        "planner enabled and failing closed (plan E4)",
+        "Do-mode test-route ruling (plan E12 dependency)",
+        "chat approval cards (shared with the human takeover item)"
+      ],
+      "planeOwner": "Model Plane (model-gateway, execution-core) with a small Frontend Plane BFF change and a Quarry observation-contract change",
+      "risks": "Prompt injection from live pages (screen browser observations the way fetch_url results are already screened with assess_external_payload); runaway cost on long runs (max_steps, max_runtime_s and max_cost_usd already exist, keep them mandatory); must not let the subagent report unverified results, so require step receipts in the summary. Per the comparator's baseline, almost nothing here is live-proven yet, so verify on a real deployment before calling it done.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (E1 stop sending the fake session grant, E2 real grant issuer in model-gateway, E4 planner on, E9 chat bridge, E12 model-initiated browser_agent in Do runs, deferred to Wave 6). Code on 2026-10-10 still sends the fake grant, so the plan has not landed."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-023",
+        "C-t3-06-026"
+      ],
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 17,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-02",
+      "title": "Agent-requested human takeover and hand-back for logins, 2FA and CAPTCHAs",
+      "summary": "Add a request_human_takeover action to the browser agent that pauses the run, switches the hosted browser to human control with a takeover card in chat, and resumes on hand-back with the user's note and a forced fresh snapshot. Human-typed input never flows to the model or into replays.",
+      "whyItMatters": "Without it every browser agent stalls at the first login or CAPTCHA. With it the user, not the model, remains the only holder of credentials, which matches Verevon's authority model and removes the most common reason browsing agents fail.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (agent-suggested takeover cards, hand-back message) plus T3 Code (real human-vs-agent input arbitration by recording expected synthetic input and treating anything else as human)",
+        "others": [
+          "Codex",
+          "Hermes",
+          "web Manus"
+        ],
+        "prevalence": "5 of 12 sources (common)",
+        "mechanism": "The agent emits suggest_takeover{surface, reason}; the UI shows a card; control is leased to the human and agent actions are blocked; human input travels over the live transport; on hand-back the user can add a note and the agent re-snapshots before it continues."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:272-278",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:709",
+          "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:972",
+          "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:220",
+          "apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:420-448",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:187"
+        ],
+        "gap": "Manual takeover works in the hosted browser: controlMode human_takeover blocks model actions in the BFF. The Model Plane side is missing: the loop in browser_agent.rs only pauses for a user-initiated pause or a risk approval (wait_out_pause_or_cancel, WaitingApproval), so the agent cannot ask for takeover, there is no hand-back message into the run, and the secrets/2FA/CAPTCHA copy and flow exist only as a plan."
+      },
+      "approach": "execution-core: add a planner action request_human_takeover{reason, surface} that sets a new paused-for-takeover status by reusing the pause poll in wait_out_pause_or_cancel and emits an event on the orchestration backbone (like BrowserRunPaused). model-gateway: extend POST /v1/browser/runs/:run_id/control with handback{note}. BFF and chat panel: on the event, flip controlMode to human_takeover and show the takeover card in ChatLiveRunPanel (plan E10); on hand-back resume the run with the note appended to the planner context and a fresh Quarry snapshot (revision-bound refs already reject stale targets). Use broker-scoped grants (AcquireGrant supports parent_grant_id sensitive-approval scopes) so the human step cannot widen the run's domains. Mask keystrokes typed during takeover in replay events and step receipts.",
+      "effort": "M",
+      "dependencies": [
+        "Item 1 (reachable agent runs)",
+        "Chat live-view panel (plan E9/E10)"
+      ],
+      "planeOwner": "Model Plane (execution-core, model-gateway) with Frontend Plane and Quarry control-mode plumbing",
+      "risks": "Runs will time out while waiting for a human: the plan notes the delegated Quarry bearer lives 300 s with a 240 s clamp (plan line 479), so waiting needs a separate budget and token refresh. Typed secrets must not appear in replays or recordings.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (E10 live view and human takeover from the chat panel) and apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md section 2.2 (takeover for secrets/2FA/CAPTCHA); the agent-requested path and hand-back into the run are not in either document in detail."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-032"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 3,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-03",
+      "title": "Per-task sandbox computer behind a SandboxBackend seam, with visible lifecycle states",
+      "summary": "Give each task or Space run its own isolated machine (microVM or container-in-VM) with shell, files, network policy and later a browser and desktop. Build it in three steps: introduce the backend trait with bwrap as impl #1 plus one attested managed provider as impl #2; add lifecycle states, typed failure causes, heartbeat and idle reaping in sandbox-manager; then a first-party microVM backend with a guest agent over vsock.",
+      "whyItMatters": "This is the Manus 'the agent has a computer' foundation. Long-running code, package installs, building and testing, file-heavy research and any in-sandbox computer use all need it. Today execution is a shared container under bwrap with a roughly 30 s networkless code_interpreter, so the product cannot match what Manus, Perplexity and Claude cowork do. Several other items in this category (desktop computer use, environment images, persistent machines, in-sandbox previews) wait on it.",
+      "referenceBestPractice": {
+        "bestSource": "Perplexity SPACE and Manus (product lifecycle, DOC) plus Cursor (code-verified mechanism: Docker inside Firecracker with a shared tmux session the user can watch) and Claude (VM startup state machine with typed failure causes, 30 s heartbeat with five-strike restart)",
+        "others": [
+          "Hermes (seven backends behind one spawn contract)",
+          "DeepSeek (execution-world principle)",
+          "Codex",
+          "web Claude"
+        ],
+        "prevalence": "5 of 12 sources for a per-task computer (common); 3 of 12 for pluggable backends and 3 of 12 for explicit lifecycle states (differentiators)",
+        "mechanism": "A control plane allocates a microVM per task from a warm pool built from a prebuilt image; a guest agent exposes exec, PTY and file RPCs over vsock; all egress leaves through a node proxy with a domain allowlist; idle VMs are snapshotted and resumed on the next turn; a reaper deletes snapshots after a retention window. The state machine {not_created, creating, running, pausing, paused, resuming, resetting, reset_failed, deleting} emits an event with timing and a typed cause on every transition. Tools call only trait ExecutionHost { spawn, pty, read/write/stat/list, snapshot, capabilities }, and backends register capability flags."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:1-20",
+          "apps/Model Plane/docs/decisions/ledger.md:1358",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:270-279",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:336-372",
+          "apps/Model Plane/rust/services/execution-core/src/capability_client.rs:165",
+          "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-20",
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs"
+        ],
+        "gap": "sandbox-manager is lease and bookkeeping only (Postgres leases, CAS workspace, process registry). There is no per-session VM or container, no installed-tools persistence, no machine-level state or heartbeat, and no browser or desktop inside the sandbox. The ledger declined the SandboxBackend trait on 2026-08-22 because only one backend existed, with the explicit revisit trigger 'when a second real backend is being built'. That trigger would be met by this work. The seam is already half there: MpSandboxPolicy::External delegates to an attested external backend, and SandboxCapabilityProfile plus the Control-issued decision (capability_client.rs) already declare and pin persistence, processes, egress and credential_mode per backend."
+      },
+      "approach": "Phase 0 (M): add an ExecutionHost trait in execution-core with bwrap as impl #1 and, as impl #2, a managed microVM provider reached through the existing MpSandboxPolicy::External path to sandbox-manager; the provider backend publishes a stronger SandboxCapabilityProfile that Control pins by digest into the lease decision. Keep vendor use behind privacy tier and ZDR attestation. Phase 1 (M): sandbox-manager (Go) adds a lifecycle enum and typed failure cause to lease rows, a heartbeat loop and an idle reaper, and publishes transitions on NATS for the computer panel. Phase 2 (XL): a first-party Firecracker or Kata backend with a Rust guest agent (exec, pty, fs, snapshot over vsock), warm pool, Space CAS workspace hydrate and promote, bwrap kept as the in-guest second layer, guest egress through the existing fail-closed AllowDomains proxy, VM-minute metering in cost-core. ZDR orgs: no snapshots, wipe on lease release.",
+      "effort": "XL",
+      "dependencies": [
+        "Control Plane space:sandbox capability decisions",
+        "cost-core VM-minute metering",
+        "shipped fail-closed egress proxy (executor.rs)",
+        "ZDR rules for snapshots"
+      ],
+      "planeOwner": "Model Plane (execution-core + sandbox-manager)",
+      "risks": "Host isolation and noisy neighbours; idle-VM cost; nested-virtualisation availability on the chosen cloud; third-party vendors can break ZDR and residency unless attested; abuse such as mining or scraping needs quotas; snapshot retention conflicts with ZDR; state drift between sandbox-manager and the backend unless transitions are idempotent.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Not planned. apps/Model Plane/docs/decisions/ledger.md (2026-08-22 entry) declined the SandboxBackend trait for now and names a second real backend as the revisit trigger."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-001",
+        "C-t3-06-015",
+        "C-t3-06-003"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 15,
+        "DOC": 6,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-04",
+      "title": "Computer use inside the agent's own sandbox desktop (consent tiers only if user-desktop control is ever unparked)",
+      "summary": "Add a computer tool whose Model-proposed actions (screenshot plus accessibility tree, click, type, scroll) are executed by a guest agent on a desktop inside the item 3 sandbox VM, with receipts for every action. Adopt the 'typed connectors first, then browser, then screen' hierarchy now as policy; build Claude-style per-app consent tiers and an Endpoint Plane executor only if the owner later allows control of user machines.",
+      "whyItMatters": "'Controls a computer, acts like a PC' is part of the stated vision, and desktop computer use is a table-stakes feature in 8 of 12 sources. Doing it in the agent's own VM delivers the capability while respecting the owner's decision not to drive users' own desktops and the rule that the Model proposes and the executor acts.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (accessibility-first engine: UI Automation tree with short handles, element-targeted actions, synthesized input only as fallback, strict window-identity ladder) plus Claude (per-app consent tiers, deny list, machine lock, restoration at turn end)",
+        "others": [
+          "Hermes (any-model computer use via a cua-driver MCP with numbered elements)",
+          "Cursor",
+          "web ChatGPT",
+          "web Claude",
+          "web Perplexity"
+        ],
+        "prevalence": "8 of 12 sources (table-stakes); consent tiers are a differentiator (2 of 12)",
+        "mechanism": "get_app_state returns {a11y tree with handles, optional screenshot with capture id}; act{handle | coords+capture_id}; targets resolve through a window-identity ladder and ambiguous targets are refused; provider-native computer-use schemas map onto the same engine. Consent: request_access{app} gives a tier from the app category (view-only browsers, click-only terminals, full otherwise), enforced on every action against the frontmost app, with a deny list, a global lock and restoration of windows and clipboard at turn end."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Endpoint Plane/docs/architecture.md:1-30",
+          "apps/Endpoint Plane/src/consent.rs:1-6",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+        ],
+        "gap": "There is no computer-use tool anywhere in Model Plane. OS-level desktop control was parked by the owner (recorded in the chat parity audit). The Endpoint Plane is a native Rust remote-desktop host with screen capture, input injection and a consent prompt, but no agent tool targets it. Verevon's typed-actions-first policy already matches Claude's connectors-then-browser-then-screen hierarchy in spirit, but it is not written as a rule the model sees."
+      },
+      "approach": "Phase 1 (after item 3): an Xfce or Wayland desktop in the VM image; execution-core exposes a computer tool (screenshot, AT-SPI accessibility tree, xdotool or ydotool input); the guest agent executes and returns structured receipts reusing Quarry's receipt and tri-state verification model (step_receipts.rs); every action passes capability policy and the Model never executes. Write the tool-hierarchy rule into the system prompt and capability policy now. Phase 2, only if the owner unparks user-desktop control: the Endpoint Plane agent as executor with per-app consent tiers, deny list and machine lock.",
+      "effort": "XL",
+      "dependencies": [
+        "Item 3 (sandbox computer)",
+        "Item 6 (desktop viewer and takeover transport)",
+        "Quarry-style receipts and verification reused for desktop actions"
+      ],
+      "planeOwner": "Model Plane (execution-core computer tool, guest agent); Endpoint Plane only for phase 2",
+      "risks": "Pixel-agent reliability, prompt injection from on-screen content, vision-token cost, and the owner's parked decision on user-machine control; consent tiers add little value until phase 2.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Parked by the owner; the first phase has no plan. Related: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-034",
+        "C-t3-06-037"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 19,
+        "DOC": 7,
+        "INF": 1
+      }
+    },
+    {
+      "id": "R-t3-06-05",
+      "title": "Model-facing PTY exec sessions with yield/poll and output spilled to workspace files",
+      "summary": "Add a PTY mode to execution-core's process host and a Codex-style contract (exec_command with yield_ms and max_output_tokens, plus write_stdin on the same session id). Spill long output to a redacted log file in the Space CAS workspace and return a path plus head, tail and exit metadata so the model can grep or page it instead of seeing truncated text.",
+      "whyItMatters": "Dev servers, installs, REPLs and test runs need interactive terminals, and long agent runs lose context when large outputs are pasted in. It also serves the DeepSeek-style goal of full, inspectable logs for the user.",
+      "referenceBestPractice": {
+        "bestSource": "Codex (unified exec: exec_command with tty, yield_time_ms, max_output_tokens plus write_stdin polling) for the contract, and Cursor (each terminal is a file with header and footer metadata; big outputs offloaded to disk for grep) for output handling",
+        "others": [
+          "DeepSeek (tiered readiness detection for persistent shells)",
+          "Claude (redaction and size bounds)"
+        ],
+        "prevalence": "PTY sessions 3 of 12 (common); output offload 2 of 12 (differentiator)",
+        "mechanism": "exec_command{cmd, tty, yield_ms, max_output_tokens} spawns in a PTY, waits up to yield_ms, and returns the output or {session_id, partial_output}; write_stdin{session_id, chars, yield_ms} continues it. Output is token-capped with head and tail truncation. Each process also writes terminals/<id>.txt with {pid, running_for_ms, exit_code}; results over N tokens are spilled to a file and the model gets the path and a grep or read tool."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/process_tools.rs",
+          "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-20",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4089",
+          "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts:38"
+        ],
+        "gap": "process_start, read, stdin, signal and list exist under bwrap with a durable registry and redacted batched output, but only for Space-scoped leases with the Control space:processes permission, only in the agent (Do) loop, and only when EXECUTION_CORE_PROCESS_HOST=enabled. Stdio is pipes, so there is no PTY and no persistent interactive shell, children deliberately die with the worker (--die-with-parent), each process has a 1 hour TTL ceiling and is stopped after 64 MiB of output (process_host.rs MAX_TTL and MAX_TOTAL_OUTPUT_BYTES), and the registry keeps a redacted head-and-tail window rather than a full searchable file."
+      },
+      "approach": "execution-core process_host.rs: spawn through a PTY (portable-pty) under the same bwrap argv; add exec_command and write_stdin tools with the yield and token-cap contract next to the existing process tools. Write redacted output to logs/<process>.txt in the Space CAS workspace via workspace_cas.rs and return a path plus summary; make the workspace_promote step skip logs/ so they stay ephemeral, and never persist them under ZDR. Surface the same stream to the UI through item 6. Once item 3 lands, run the PTY in the guest agent so sessions survive worker restarts. If file edit tools are added here, return a version token from the CAS manifest with every read (see item 7).",
+      "effort": "M",
+      "dependencies": [
+        "Item 3 for sessions that survive worker restarts",
+        "Control space:processes lease permission (shipped)"
+      ],
+      "planeOwner": "Model Plane (execution-core, sandbox-manager)",
+      "risks": "Output floods, interactive prompts hanging a run (needs idle detection and hard timeouts), the current 1 hour process TTL ceiling for long-lived sessions, and log retention under ZDR.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": "The background-process registry shipped as S4.2 (apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md); PTY and output spill are not planned there."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-011",
+        "C-t3-06-013"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 10,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-06",
+      "title": "Live computer panel with typed viewers: browser, read-only terminal, files, and later the sandbox desktop",
+      "summary": "Turn ChatLiveRunPanel into a ComputerPanel that picks a viewer by tool kind from run events: browser frames (reusing BrowserChrome), a read-only terminal viewer fed by redacted process output with sequence numbers, file and diff and search viewers, timeline scrubbing, a picture-in-picture mini view and an 'agent controlling' badge. Add a sandbox-desktop viewer later using the Endpoint Plane remote-desktop stack.",
+      "whyItMatters": "It is the signature Manus and Claude cowork experience: users see exactly what the agent ran and can copy an error into chat, which is the transparency goal and what makes long agent runs trustworthy. Verevon already has the panel shell and the typed run timeline.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (computer panel with a viewer per tool kind and a picture-in-picture that follows the user; Rust LiveKit publisher with a strictly validated normalized input protocol for the desktop) plus T3 Code (canvas terminal with 'Add to chat', synthetic agent cursor, controller badge)",
+        "others": [
+          "Claude",
+          "Hermes",
+          "Codex (VNC tunnelled over a QUIC portal)",
+          "DeepSeek",
+          "Antigravity"
+        ],
+        "prevalence": "4 of 12 for the panel, 4 of 12 for terminal panes, 2 of 12 for desktop streaming transport",
+        "mechanism": "Run events carry tool_kind plus payload refs and the panel switches viewer by kind; scrubbing the timeline replays past states; terminal output streams with sequence numbers so a reconnect resumes; selecting terminal text creates a chat context chip. For the desktop: capture, encode (AV1, VP9 or H.264), publish as a WebRTC track, with input events using normalized coordinates, bounds-checked fields and sequence numbers."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:1-25",
+          "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts:38",
+          "apps/Endpoint Plane/docs/architecture.md:1-30",
+          "apps/Endpoint Plane/src/consent.rs:1-6",
+          "apps/Frontend Plane/verevonv3/src/features/support/components/RemoteSupportPage.tsx"
+        ],
+        "gap": "ChatLiveRunPanel mounts BrowserChrome for runs with frame evidence and shows per-step screenshots with honest ZDR states, and the Agent Run Console has a typed timeline. Shell and process tools render only as generic tool cards with a 'terminal' intent (no xterm or Ghostty dependency exists in the package.json files), and there is no file or editor viewer, no timeline scrubbing of computer state, no picture-in-picture and no agent cursor. The Endpoint Plane is a clean-room native RustDesk-protocol host with a web controller (packages/remote-core), but it is a human remote-support tool not connected to agents or sandboxes, and its 'live-verified' claim comes only from its own doc."
+      },
+      "approach": "Frontend Plane: a ComputerPanel with viewers keyed by tool kind, driven by existing session-core run events: browser frames, an xterm.js (or Ghostty-WASM) read-only terminal fed by the redacted process-output SSE with sequence numbers, a file diff viewer, and a search-results viewer; a floating PiP component; a controller badge reading the control mode; 'Add to chat' from terminal selection. Typing is enabled only in an explicitly taken-over sandbox. Desktop phase: run the Endpoint agent (or a headless variant) inside the item 3 desktop and point the remote-core viewer at it from the panel, keeping the clean-room AGPL boundary documented in the Endpoint Plane.",
+      "effort": "L",
+      "dependencies": [
+        "Item 5 (terminal stream)",
+        "Item 1 (browser frames in chat)",
+        "Items 3 and 4 for the desktop viewer"
+      ],
+      "planeOwner": "Frontend Plane (panel, viewers); Endpoint/Support Plane for the desktop transport",
+      "risks": "Rendering secrets (only redacted output may stream); event volume (fetch frames on demand); AGPL boundary must stay clean-room; relay cost for desktop streams. The desktop part rests on the Endpoint Plane's own documentation and should be verified before being relied on.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Chat panel work exists in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (E9, E10) for the browser view; terminal, file and desktop viewers are not planned."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-06-033",
+        "C-t3-06-014",
+        "C-t3-06-039"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 19,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-07",
+      "title": "Sandbox execution guardrails: per-call enforcement report, credential injection, shell-grammar approvals, versioned file writes",
+      "summary": "Phase A (small, ship now): consume the existing per-call 'sandboxed' result and capability profile in the Do-mode loop and tool cards, and add a policy rule that high-risk or ZDR runs require full enforcement. Phase B (with item 3): a host-side credential injection proxy so sandboxes see sentinels, never real secrets. Phase C (later): shell-grammar parsing for cap.shell approvals with reusable allow patterns, and version-token writes if agent file tools are added.",
+      "whyItMatters": "Transparency and safety for the execution surface Verevon is about to widen. Credential injection is a prerequisite for giving sandboxes network access without letting prompt-injected code exfiltrate secrets. The enforcement report is a nearly free trust signal that matches the DeepSeek-style 'show the user what protection applied' goal.",
+      "referenceBestPractice": {
+        "bestSource": "Claude (credential masking with sentinel values, per-host injection and SigV4 re-signing) plus DeepSeek (per-call enforcement report: full, partial or none) plus Antigravity (shell-grammar parsing with 'allow always' suggestions) plus Hermes and DeepSeek (version-token guarded file writes)",
+        "others": [
+          "Codex",
+          "Cursor"
+        ],
+        "prevalence": "1 of 12 each for enforcement report, credential masking and shell-grammar approvals (unique); 3 of 12 for guarded file writes (differentiator)",
+        "mechanism": "Enforcement: the launcher returns {enforcement, mechanisms[], denied, denial_detail} and the card shows a badge. Credentials: secret spec {source, mode, inject_hosts[]}; the sandbox env holds SENTINEL_<id>; the proxy terminates TLS only for inject hosts and swaps in the real value or re-signs, never returning it to the guest. Approvals: parse the command into an AST, match each simple command against allow, deny and ask lists plus a dangerous-binary list, and suggest a reusable pattern. Writes: read returns {content, version}; edit rejects if the version changed and writes atomically without following symlinks."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/executor.rs:132-170",
+          "apps/Model Plane/rust/services/execution-core/src/executor.rs:185-197",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:279-294",
+          "apps/Model Plane/rust/services/execution-core/src/http_health.rs:97",
+          "apps/Model Plane/rust/services/execution-core/src/scrub.rs:1-8",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:766-780",
+          "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-20",
+          "apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs:140-195"
+        ],
+        "gap": "Enforcement: ExecOutcome already carries sandboxed, and a measured capability profile is exposed and pinned by a Control decision, but nothing in the Do-mode loop or the UI reads it per call. Credentials: output is scrubbed and the BFF mints audience-bound delegated bearers, but there is no injection proxy, so a sandbox needing an API key would have to hold the real value. Approvals: shell is read-only host commands approved per call through capability policy, with no shell parser, reusable patterns or explicit bypass request. File writes: status unknown. No agent read_file or edit_file tool was found in execution-core; chat artifacts get server-assigned versions (artifacts.rs) so the model cannot stamp a wrong one, and the CAS is content-addressed (put and get by digest), but compare-and-swap writes for agent edits were not found."
+      },
+      "approach": "A (execution-core plus session-core): return the enforcement result as a typed field on the tool result, render a badge on the tool card, and add a capability_policy rule 'require full enforcement for cap.process.* when the org is ZDR or the call is high risk'. B (execution-core egress proxy): resolve secret refs from the Control Plane secret store at request time, terminate TLS only for declared inject_hosts, replace sentinels, audit each injection without logging the swapped body, and add 'credential_mode: injected' to the backend's SandboxCapabilityProfile. C: add a Rust bash-grammar parser to capability_policy for cap.shell with per-Space allow patterns (the OS sandbox stays the real boundary); if agent file tools are added, require a version token from the CAS manifest on every edit.",
+      "effort": "L",
+      "dependencies": [
+        "Item 3 for phases B and C",
+        "Control Plane secret store",
+        "Shipped fail-closed egress proxy"
+      ],
+      "planeOwner": "Model Plane (execution-core, session-core) with Control Plane secret references",
+      "risks": "TLS interception complexity and certificate pinning in client libraries; the swapped body must never be logged; shell-parser bypasses via obscure syntax, so never treat the parser as the boundary.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Not planned. The 2026-08-22 ledger entry already shipped one related fix: AllowDomains now fails closed when no egress proxy is configured (executor.rs)."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-06-007",
+        "C-t3-06-009",
+        "C-t3-06-010",
+        "C-t3-06-044"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-08",
+      "title": "Per-Space environment specs and prebuilt sandbox images",
+      "summary": "Let a Space or org define a sandbox environment declaratively (base image, setup script, env with secret refs, network policy, named actions) and prebuild it into a content-hashed image that is rebuilt on spec change or on a schedule, so agent sandboxes start fast on a healthy, reproducible base.",
+      "whyItMatters": "Enterprise customers and Spaces can preinstall their tools and connectors, so agent runs skip install time and behave reproducibly. Without it every run pays setup cost or works with a fixed package set.",
+      "referenceBestPractice": {
+        "bestSource": "Claude (cloud environments with setup script, env vars and network policy, vendor or self-hosted) plus Cursor (prebuilt images with recurring rebuilds, build logs and health tracking)",
+        "others": [
+          "Codex",
+          "DeepSeek"
+        ],
+        "prevalence": "4 of 12 sources (common)",
+        "mechanism": "A spec {base_image, setup_script, env (secret refs), network_policy, actions[]} is stored per org or Space; a builder runs it in a fresh VM and snapshots the result as an image with a content hash and logs; sandboxes boot from the latest healthy image; a rebuild runs on spec change or cron."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+          "apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go"
+        ],
+        "gap": "code_interpreter runs in a fixed image with a fixed package set. There is no per-org or per-Space environment definition, no setup script and no image build pipeline."
+      },
+      "approach": "Model Plane: sandbox-manager (Go) owns the environment spec per Space; image builds run as durable workflows in orchestrator-core (it already hosts Temporal activities); secrets are referenced by id and resolved by the item 7 injection proxy, never baked into images; build logs and health are shown in the Space settings UI.",
+      "effort": "L",
+      "dependencies": [
+        "Item 3 (VM backend)",
+        "Item 7 phase B (credential injection)"
+      ],
+      "planeOwner": "Model Plane (sandbox-manager, orchestrator-core)",
+      "risks": "Supply-chain risk in setup scripts, image storage cost, and secrets leaking into images.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-004"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-09",
+      "title": "Per-Space browser site policy (read vs act) and reviewable session recordings",
+      "summary": "Add a Control Plane per-Space site policy that separates reading from acting and is enforced by Quarry, with approval cards that name the sites and remember per-site choices. Add an optional per-run screencast stored as an artifact and played next to the step receipts.",
+      "whyItMatters": "Enterprises need to bound what a browsing agent may touch before they let it run, and users need a reviewable record of what it did. Both become urgent the moment item 1 makes agent browsing reachable.",
+      "referenceBestPractice": {
+        "bestSource": "Antigravity (separate read_url and execute_url permissions with a fail-closed server denylist; recording stored as an artifact and embedded in walkthroughs) plus Claude (approvals batched by site with an explicit allow-all switch)",
+        "others": [
+          "T3 Code (CDP screencast to MP4 or WebM)"
+        ],
+        "prevalence": "2 of 12 sources each (differentiators)",
+        "mechanism": "Navigation guard, then a denylist (fail closed), then an allowlist or prompt, then the action risk class, then an approval card listing sites and actions, then a remembered per-site choice. Recording: CDP Page.startScreencast frames encoded to a video artifact, or a provider replay URL."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:7-25",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1349",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:186-191",
+          "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:86",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:741",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:479"
+        ],
+        "gap": "Risk-classified durable approvals (login, checkout, form post, destructive, cross-domain, cookies) and Quarry allowed_domains with the SSRF guard exist, and the plan already gives the broker authority over a domain fence of at most 8 domains. They are not exercised end to end because agent runs fail closed. There is no user-managed per-site list with a read versus act distinction. BrowserChrome keeps up to 96 replay events (a timeline, not video) and Quarry passes through provider live_view_url and recording_id, but no recording artifact is attached to a chat answer or run."
+      },
+      "approach": "Control Plane: Space policy {site, read | act | deny} carried on the broker grant (allowed_domains exists; add read-only domains). Quarry: block act-class actions on read-only hosts and fail closed on the denylist. Chat: show approval cards that list sites and actions with a remembered choice per site. Recording: Quarry optional screencast to artifact per run, off under ZDR; Frontend plays it in the run panel beside step receipts.",
+      "effort": "M",
+      "dependencies": [
+        "Item 1 (reachable agent runs)",
+        "Control Plane policy storage"
+      ],
+      "planeOwner": "Ingestion Plane (Quarry) with Control Plane policy and Frontend Plane UI",
+      "risks": "Approval fatigue; recordings capture personal data and typed secrets, so they must respect ZDR and retention and mask takeover input.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md E2 covers a broker-owned domain policy (hard fence of the start host plus user-listed domains); the read versus act split and recordings are not planned."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-028",
+        "C-t3-06-027"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-10",
+      "title": "Sandbox computer extensions: persistent machine mode, execution-target picker, authenticated dev-server preview",
+      "summary": "Once the sandbox computer exists, add a persistent flag on a lease that keeps its disk (installed tools, services, databases), a device_ref on runs so a task can move between an ephemeral sandbox and a persistent machine, and an authenticated preview URL per listening port that opens in the Quarry hosted browser so the agent can verify what it built.",
+      "whyItMatters": "Teams that automate recurring work with installed software need a machine that survives between runs (and it is a revenue line), and agents that build small apps or dashboards need to preview and verify them. Value is moderate for an AI workspace and depends on item 3.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (always-on Ubuntu, Windows and macOS cloud computers with chosen compute and region; one active-device concept that tasks can move between) plus Claude (preview auto-verify, element selection, port discovery) plus Cursor (port forwarding from cloud VMs into shareable previews)",
+        "others": [
+          "Antigravity",
+          "T3 Code",
+          "web Manus"
+        ],
+        "prevalence": "2 of 12 for persistent computers, 2 of 12 for device switching, 4 of 12 for dev-server preview",
+        "mechanism": "A long-lived VM with a persistent disk and a guest agent, billed monthly, backed up as disk snapshots. Task.device_ref {kind: sandbox | cloud_computer, id} resolves the host through the backend trait; switching rehydrates the workspace and re-runs from the last checkpoint. Preview: detect listening ports, probe HTML, expose through an authenticated proxy shown in the hosted browser surface."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go",
+          "apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:205-247",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519"
+        ],
+        "gap": "Files persist per Space through the CAS workspace, which covers the most common persistence need without paying for idle machines, but there is no persistent machine, no user-visible target choice (one implicit execution-core target and a Space-scoped lease), and no way to preview a server the agent runs: HTML artifacts render in a sandboxed srcdoc iframe only."
+      },
+      "approach": "sandbox-manager: a persistent flag on the item 3 lease that retains the VM disk, billed through cost-core; session-core adds device_ref on runs and the composer gets a picker; sandbox-manager issues an authenticated preview URL per port that Quarry's hosted browser opens (the Model proposes, Quarry executes). Require auth on every preview and apply Space ACLs.",
+      "effort": "L",
+      "dependencies": [
+        "Item 3 (sandbox computer)",
+        "Item 1 (hosted browser access for verification)",
+        "cost-core billing"
+      ],
+      "planeOwner": "Model Plane (sandbox-manager, session-core)",
+      "risks": "Cost, abuse and data residency for persistent machines; public exposure of previews unless authenticated; partial-state confusion when moving a task mid-flight. Low confidence on demand for the picker.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "low",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-020",
+        "C-t3-06-021",
+        "C-t3-06-045"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 5,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-11",
+      "title": "Structured control surfaces beyond clicks: code-mode run_cell and WebMCP page tools",
+      "summary": "Add a run_cell tool that runs a short model-written script in a confined WASM runtime whose only bindings proxy to existing tools through the capability client, so every call keeps its own policy check and receipt. Separately, let Quarry detect WebMCP tools a page exposes and offer them as typed actions the Model proposes and Quarry executes.",
+      "whyItMatters": "Batching multi-step browser or computer work into one script cuts round trips and tokens, and typed page tools are safer than DOM clicks, which fits Verevon's typed-actions-first stance. Both are speculative or standards-immature, so they come after the core set.",
+      "referenceBestPractice": {
+        "bestSource": "Manus and DeepSeek for code mode (QuickJS-WASM with no fs or network; a host-child protocol with declared bindings, resource ceilings and an eight-way typed failure taxonomy); Antigravity for WebMCP",
+        "others": [
+          "Codex"
+        ],
+        "prevalence": "3 of 12 for code mode (differentiator); WebMCP 1 of 12 (unique)",
+        "mechanism": "run_cell{code} starts a fresh confined runtime; only host-declared bindings are callable and each binding call goes back through the normal policy and approval path; the result returns logs plus a typed failure. WebMCP: a page registers tools via navigator.modelContext and the CDP server enumerates and invokes them as MCP tools."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:14-16",
+          "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md:172-176",
+          "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md:221"
+        ],
+        "gap": "Code mode is recorded as greenfield (sections 23.4 and 23.5 of the Model Plane improvements doc): code_interpreter has no tool-RPC bridge and no network. WebMCP is absent; Quarry actions are DOM-level."
+      },
+      "approach": "execution-core: a run_cell tool using wasmtime plus QuickJS whose bindings call the existing tools through the capability client; each effectful binding call must surface as its own approval and receipt, never as one batched effect. Quarry: surface page-registered WebMCP tools in the observation and expose them as typed actions; treat page-supplied tool descriptions as untrusted input.",
+      "effort": "L",
+      "dependencies": [
+        "Item 1 (browser tools to bind)",
+        "Item 4 (computer tool to bind)"
+      ],
+      "planeOwner": "Model Plane (code mode); Ingestion Plane (WebMCP)",
+      "risks": "Approval semantics for batched effectful calls; the WebMCP standard is immature and its tool descriptions are an injection vector.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "low",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md sections 23.4 and 23.5 (MCP code mode, confirmed greenfield); WebMCP is not planned."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-035",
+        "C-t3-06-024"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-06-12",
+      "title": "Teach mode: turn recorded human takeover sessions into reusable skills",
+      "summary": "Record the steps a user performs during a hosted-browser takeover as Quarry step receipts, let Model Plane distil them into a parameterised routine in the existing skill registry, and replay it with per-step confirmation under the same evidence trail as any agent run.",
+      "whyItMatters": "It fits the Hermes-style goal of an agent that learns and tailors itself to its user: a workflow shown once becomes a reusable skill, and it reuses the takeover and receipt machinery rather than adding new infrastructure.",
+      "referenceBestPractice": {
+        "bestSource": "Claude (teach mode with a guided overlay plus watch-and-record with voiceover); ChatGPT's opt-in Computer History is a related activity memory (DOC)",
+        "others": [
+          "web ChatGPT"
+        ],
+        "prevalence": "2 of 12 sources (differentiator)",
+        "mechanism": "Record steps (events, frames, narration), have the model summarise them into a parameterised routine or skill, then replay it with confirmation."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:449",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:1-18"
+        ],
+        "gap": "Teach-by-demonstration browser routines are shortlisted (#3, effort L) in the cowork research but not built. The receipt machinery they would rely on already exists."
+      },
+      "approach": "Quarry records human-takeover input as step receipts (masking secrets); Model Plane distils receipts into a skill through the existing skill registry; replay goes through the normal browser run path with approvals. Off under ZDR.",
+      "effort": "L",
+      "dependencies": [
+        "Item 1",
+        "Item 2 (takeover)",
+        "Item 9 (recording and site policy)"
+      ],
+      "planeOwner": "Model Plane (skill distillation) with Ingestion Plane recording",
+      "risks": "Captures personal data and typed secrets; ZDR must disable it; replay fragility when pages change.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md section 2.3 (teach-by-demonstration, shortlist #3, L)"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-06-038"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 2,
+        "INF": 0
+      }
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t3-06-048",
+      "reason": "Distribution and integration surface (Office add-in bridge, global write-at-cursor overlay, mobile OS intents), not computer or environment control; write-at-cursor needs a native desktop client Verevon does not ship and local-device control is parked by the owner. A web-based Office add-in calling the existing BFF APIs belongs in an integrations or distribution audit."
+    }
+  ],
+  "strengthsToKeep": [
+    "OS command sandbox: bwrap plus Landlock plus seccomp with ReadOnly and WorkspaceWrite policies, probed at boot, and AllowDomains that fails closed when no egress proxy is configured (apps/Model Plane/rust/services/execution-core/src/sandbox.rs, executor.rs:132-170). Keep it as the in-guest second layer when VMs arrive.",
+    "A measured sandbox capability profile (persistence, processes, egress, credential_mode) pinned by a Control-issued decision with a profile digest is stronger than the ad hoc modes in the references and is the ready-made seam for a second backend (apps/Model Plane/rust/services/execution-core/src/sandbox.rs:279-372, capability_client.rs:165).",
+    "Quarry's DNS-pinned SSRF CONNECT proxy resolves once through the SSRF guard and connects to the vetted IP, which is stricter than the references (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs).",
+    "Revision-bound browser refs: refs are bound to snapshot and generation and effectful actions are never silently retargeted, at parity with the best reference's contract (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1030, target_repair.rs).",
+    "Risk-classified durable browser approvals (login, checkout, form post, destructive, cross-domain, cookies) are richer than most references (apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs), and broker grants support scoped sensitive-approval child grants (apps/Model Plane/go/services/browser-broker/internal/server/server.go:42-108).",
+    "Append-only step receipts with deterministic postcondition verifiers give an auditable trail equal to or better than the references (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs, postgres_step_receipts.rs).",
+    "Org-scoped browser profile store with cookies, storage and IndexedDB backed by Postgres, S3 and Redis is ahead of most references (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/cached_profile_store.rs).",
+    "Durable Space-scoped CAS workspace with lease, hydrate, snapshot, overlay-merge promote and promotion into Data Plane documents respects plane ownership and Space ACLs, which no reference does (apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs, workspace_promote.rs; apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go).",
+    "Process teardown is fail-safe: children run under --die-with-parent, get a grace period before kill, and are killed on lease release (apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-20).",
+    "Hosted, governed browser with live frames, tabs, DevTools, timeline, profiles and control-mode arbitration that blocks model actions during human takeover, reachable from any browser without a local relay (apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx, apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs).",
+    "Dangerous file-type admission and a renderable-type allowlist for agent-produced downloads (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:498).",
+    "A native Rust remote-desktop host with capture, AV1 encoding, input injection and consent exists in the Endpoint Plane, which few references own (apps/Endpoint Plane/docs/architecture.md); its live status rests on its own documentation and is not independently verified."
+  ]
+}

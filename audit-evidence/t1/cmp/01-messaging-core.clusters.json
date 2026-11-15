@@ -1,0 +1,2684 @@
+{
+ "category": "Messaging core",
+ "excluded": [],
+ "clusters": [
+  {
+   "id": "C-t1-01-001",
+   "name": "Shared rooms/channels with human-first posting (agents as ordinary members)",
+   "description": "Named open or private topic rooms where people post to each other in real time and agents are members, not the default responder. Benchmarks (Slack, Teams, buzz) all let a human post without any AI turn; QM deliberately offloads human chat to Slack.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams",
+     "qm"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-001",
+    "slack-product-surface-001",
+    "teams-product-surface-001",
+    "qm-architecture-087"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-001"
+    ],
+    "why": "Only source that ships a human-first channel with agents as plain members in source code (q4 SRC); Slack/Teams are equal in product but evidenced by DOC/REA, and QM explicitly does not own human chat."
+   },
+   "mechanism": "One channels table with channel_type (stream|forum|dm|workflow), visibility (open|private), topic_required, max_members; a message is an event (kind 9) tagged with the channel id. Posting is a plain append; agents receive it only via mention/subscription rules, never by default. Re-implement: Session Core entry append without an invocation, keyed by space_id, authorized by a Control space:post decision; agents subscribe by mention or engagement rule.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-001",
+     "v-space-backend-002",
+     "v-space-ui-002",
+     "v-space-ui-003",
+     "v-space-backend-003",
+     "v-space-backend-004"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-420",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:54-293",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-737",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:376-421",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:49-115",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-421",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.test.tsx:206",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1086-1264",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1268-1374",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2732",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:5340-5360"
+    ],
+    "gap": "Every room post is a Model Plane invocation (streamChat); there is no route that appends a human message without a model turn (v-space-backend-002/ui-003 absent, test asserts a plain room turn goes to a model). Docs claim a human-only flow exists: doc-vs-code discrepancy.",
+    "strengths": "Room post is a durable Session Core thread with origin=space/space_id CHECK, Control-minted thread:create decision, shared thread listing and audience-revision-filtered room transcript read. Keep this authority path; add a no-invoke append under it."
+   },
+   "benefit": "Without human-only posts a Space is a multi-user AI prompt box, not Teams/Slack. This is the single change that turns rooms into a place where people talk and agents join in; it also cuts model cost per message and avoids the default agent answering human small talk.",
+   "approach": "Model Plane: add AppendHumanEntry (no invocation) to Session Core, authorized by a digest-bound Control space:post decision minted by the Rust gateway; Frontend: composer 'send' vs '@agent'/'Ask' split; agent turns only on mention or engagement rule (see C043). Application Plane projects the timeline/unread.",
+   "effort": "M",
+   "dependencies": [
+    "Session Core non-invoking append",
+    "Control space:post decision type",
+    "C043 engagement rule"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Two write paths for one transcript can drift; ZDR orgs must not persist human text beyond the Session Core retention rule; existing tests assume every post is a turn.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Blocks the product vision (humans + agents cooperating like Teams/Slack); table stakes in every human-chat reference.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-002",
+   "name": "Direct messages and group DMs",
+   "description": "1:1 and small-group private conversations resolved idempotently from the participant set, hideable per viewer and resurfaced on new activity.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams",
+     "grokbot"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-architecture-029",
+    "buzz-product-005"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-005",
+     "buzz-architecture-029"
+    ],
+    "why": "DMs reuse the channel machinery with a unique participant_hash so the same set always resolves to one DM; hide is per-viewer projection, not leave. Slack (slack-product-surface-001) and Teams (teams-product-surface-001) also have DMs/group chats; GrokBot has DM/GROUP session kinds (grokbot-agent-product-057)."
+   },
+   "mechanism": "Open-DM event with participant list; server computes participant_hash = hash(sorted member ids) unique per org, returns existing channel if present; cap 9 participants; per-viewer hide row cleared when new activity arrives.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-018",
+     "v-space-ui-020"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:546-556",
+     "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27",
+     "apps/Application Plane/convex-core/convex/schema.ts:549-554"
+    ],
+    "gap": "Space kinds are personal|room|project|case and create accepts only personal and room; no DM kind, route or 1:1 flow. Personal Space cannot hold other members.",
+    "strengths": ""
+   },
+   "benefit": "Teams-style 1:1 and small-group chat is a core expectation; modelling DMs as small Spaces keeps one authority path (Space access never widens owner-plane ACL) and lets a person DM an agent or a colleague.",
+   "approach": "Control Plane: add kind=dm with participant_hash uniqueness and fixed roster (no role escalation); reuse room transcript/presence/read paths; Frontend sidebar DM section with per-viewer hide in Application Plane.",
+   "effort": "M",
+   "dependencies": [
+    "C001 human-first posting",
+    "Control Space kind registration"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "DM with an agent must bind to the caller's personal scope (see C046) or it leaks agent context; group-DM add-member needs a history-sharing rule (C041).",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Present in all human-chat references; absence is immediately noticed by Teams/Slack users.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-003",
+   "name": "Threads: reply-in-thread, shared multi-author threads, thread panel and broadcast",
+   "description": "Any message can start a thread; any member can reply; replies show in a side or focus panel with counts and can optionally also be posted to the main timeline; speaker labels per entry.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "slack",
+     "qm",
+     "teams"
+    ],
+    "n": 5,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-architecture-028",
+    "buzz-product-002",
+    "buzz-product-003",
+    "grokbot-agent-product-058",
+    "slack-product-surface-002",
+    "qm-product-009"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-002",
+     "buzz-architecture-028",
+     "buzz-product-003"
+    ],
+    "why": "Server-computed thread_metadata (root, parent, depth, reply_count, descendant_count, last_reply_at, broadcast) written atomically at ingest; clients never count replies; split vs focus panel preference. QM-product-009 is best for the multi-author semantics (any scope member continues, speaker label per entry)."
+   },
+   "mechanism": "Reply event carries root/parent ids; ingest rejects unknown parents, sets depth=parent+1 (cap 100), upserts thread_metadata counters in the same transaction; broadcast flag copies the reply into the channel timeline; read API returns thread summaries as overlays. Panel mode persisted per user.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-005",
+     "v-space-ui-004",
+     "v-space-backend-008"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:120-184",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:4397-4416",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:519-533",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:385",
+     "apps/Model Plane/rust/services/session-core/migrations/0035_message_author_attribution.sql",
+     "apps/Model Plane/rust/services/session-core/migrations/0030_message_agent_attribution.sql"
+    ],
+    "gap": "Gateway mints a thread:append decision but Session Core append_message still calls authorize_thread_owner(Mutate), so non-owner replies are refused while the UI offers Reply. No thread side panel, reply count, collapse or also-send-to-channel.",
+    "strengths": "Per-turn author attribution (author_subject_id from verified caller only) already provides speaker labels."
+   },
+   "benefit": "Multi-author threads are what let a human and several agents work one problem in context; today only the author can continue a post, which defeats cooperation.",
+   "approach": "Model Plane: Session Core accepts Space-authorized append from any member holding the thread:append decision (keep owner check for non-space threads); add thread_metadata counters. Frontend: thread side/focus panel, reply count, broadcast toggle.",
+   "effort": "M",
+   "dependencies": [
+    "Session Core shared append authorization",
+    "C001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Audience revision semantics must hold when a non-owner appends (reader may not see earlier rows); agent turns in a shared thread must use the invoker's grants, not the thread owner's.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Table stakes in all five sources; current refusal is a visible bug (UI offers Reply that fails).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-004",
+   "name": "Room lenses: forum/posts layout vs chat threads",
+   "description": "Per-room choice of a fast chat layout or a slower post-with-comments (forum or Teams 'Posts') layout, switchable with a system notice.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-004",
+    "teams-product-surface-003"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-003"
+    ],
+    "why": "Owners pick Threads or Posts per channel and can switch later with a system message (REA, q4); buzz forum is a separate channel type with votes (q3)."
+   },
+   "mechanism": "Room attribute layout=threads|posts; renderer switches; changing it emits a system message; optional reply-restriction (owner/moderator) for announcement rooms.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Verevon renders every post as a thread card (INF from v-space-ui-001), i.e. effectively a Posts layout; check SpaceRoomTimeline for any layout flag. project/case kinds are refused at create.",
+    "strengths": ""
+   },
+   "benefit": "Project/case Spaces suit a posts lens; announcement rooms need restricted replies.",
+   "approach": "Frontend Plane: room layout flag stored on the Space (Control/Application metadata), renderer switch; later.",
+   "effort": "S",
+   "dependencies": [
+    "C001",
+    "C003"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful once basic chat works; not blocking.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-005",
+   "name": "Quoted replies with tombstone and verification state",
+   "description": "Reply quoting a specific earlier message (author, time, jump), showing a tombstone if the original was deleted.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "teams-product-surface-159"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-159"
+    ],
+    "why": "Quote shows author/time, tombstone after deletion and an unverifiable marker (REA q4). GrokBot has 'In reply to' quote with jump (grokbot-agent-product-058)."
+   },
+   "mechanism": "Message carries quoted_message_id plus a server-resolved snapshot (author, ts, preview); on render, re-resolve and show tombstone if deleted or 'cannot verify' if the reader lacks access.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; Reply in Verevon targets a thread, not a quoted message. Check SpaceRoomComposer reply target.",
+    "strengths": ""
+   },
+   "benefit": "Gives humans an unambiguous target when approving or correcting a specific agent message in a flat thread.",
+   "approach": "Model Plane entry field quoted_entry_seq; Frontend quote chip; reader-side access check so a quote never reveals rows outside the reader's audience revision.",
+   "effort": "S",
+   "dependencies": [
+    "C003",
+    "C011"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Quote snapshot could leak content past audience filtering if stored denormalized.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Helpful but threads cover most needs.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-006",
+   "name": "Mentions bound to exact identities, with group and broadcast handles",
+   "description": "@mentions resolve to exact person/agent ids (not text), with ambiguity blocking the send, plus @channel/@here/@team and user-group/tag handles gated by role; one typeahead for people, agents, groups and skills.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams",
+     "grokbot"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-architecture-107",
+    "buzz-product-009",
+    "slack-product-surface-004",
+    "teams-product-surface-018",
+    "grokbot-agent-product-059"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-009",
+     "buzz-architecture-107"
+    ],
+    "why": "q5 SRC: label-to-key map in the composer, recipients sent as structured tags separate from body text, namesakes get qualified labels, pasted mentions verified with generation fences, send awaits bindings. Slack/Teams best for group handles and permission-gated @channel/@team."
+   },
+   "mechanism": "Composer keeps Map<label, subjectId>; send payload = text + mentions[] (subject ids); server validates each id against the room roster, rejects unresolved/ambiguous; stores mention records; broadcast handles checked against role policy; notifications fan out from mention records only.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-010",
+     "v-space-backend-011",
+     "v-space-ui-005"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4175-4216",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4399-4498",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:187",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:308",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:184-211",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:307-312"
+    ],
+    "gap": "@agent is shipped (browser sends only mentioned_agent_ref; gateway re-resolves roster and binding). @person is text insertion only: no mention record, no notification (notification-core allowlist blocks it), no highlight; no @room/@here or group handles.",
+    "strengths": "Agent mention already follows the exact-identity principle server-side; extend the same mentioned_*_ref pattern to people."
+   },
+   "benefit": "Mention records are the prerequisite for notifications, inbox slices, quotas and audit; without them humans cannot summon each other in a Space.",
+   "approach": "Model Plane: mentions[] on the entry (subject ids), validated by gateway against Control roster; Application Plane notification-core accepts mention events; Frontend: unified typeahead with chips. Add @room gated by role later.",
+   "effort": "M",
+   "dependencies": [
+    "C001",
+    "notification-core allowlist change"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Mention of a member who lacks thread_read_entitled must not leak content in the notification payload; ZDR orgs need content-free notifications.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Table stakes; @person is visibly broken today (inserts text that does nothing).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-007",
+   "name": "Invite an owned agent from the composer when mentioning it",
+   "description": "Mentioning an agent you own that is not in the room offers Invite-then-send or reference-only; authorization is rechecked at publish and failures keep the draft.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-architecture-108"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-architecture-108"
+    ],
+    "why": "Only source; ownership is not membership, discovery evidence never doubles as authority, re-check at publish (DOC, q4)."
+   },
+   "mechanism": "Typeahead lists owned-but-absent agents; choosing Invite runs add-member, then sends; any failure aborts send and restores draft; publish re-validates membership.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-010"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4175-4216",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4399-4498"
+    ],
+    "gap": "Server re-resolution at publish is shipped (roster intersect binding). No inline invite-from-mention flow was found in the baseline; binding an agent is done in the Space agent dialog (INF).",
+    "strengths": "Publish-time roster/binding re-resolution matches buzz's rule."
+   },
+   "benefit": "Smooth 'pull my agent in' moment while keeping Control as the authority.",
+   "approach": "Frontend: typeahead section 'Your agents (not in room)' that calls existing bind route then sends; gateway unchanged.",
+   "effort": "S",
+   "dependencies": [
+    "C006",
+    "C042 draft preservation"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Must not auto-bind with broader grants than the room policy.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Good UX polish on an existing secure path. Provenance DOC only.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-008",
+   "name": "Emoji reactions",
+   "description": "Per-user toggled emoji reactions on any message with a quick-reaction row and picker.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams",
+     "grokbot",
+     "qm"
+    ],
+    "n": 5,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-007",
+    "slack-product-surface-005",
+    "teams-product-surface-008"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-007"
+    ],
+    "why": "SRC q4: reactions table with removed_at and source event id, reaction channel derived from the target; Slack (q5 DOC) is the product reference with reactions as first-class events in the same real-time path."
+   },
+   "mechanism": "reactions(target_entry_id, subject_id, emoji, created_at, removed_at) unique on (target, subject, emoji); toggle is idempotent; aggregated counts returned with the timeline; real-time event on change.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-014",
+     "v-space-ui-008"
+    ],
+    "evidence": [],
+    "gap": "No reaction or emoji anywhere in session-core, gateway spaces.rs, Convex schema or Space UI.",
+    "strengths": ""
+   },
+   "benefit": "Cheapest social signal and a free human-to-agent feedback/approval channel (thumbs on an agent turn).",
+   "approach": "Application Plane (Convex) reactions table keyed by Session Core entry id with room ACL check via gateway; agent-visible reaction events forwarded to Model Plane only when targeted at an agent message (C009).",
+   "effort": "S",
+   "dependencies": [
+    "stable entry ids exposed to UI"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Reactions on content the reactor cannot read; reaction state is content metadata under ZDR (emoji only, no text, so low).",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Present in all five sources; small effort; enables C009.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-009",
+   "name": "Reactions as agent input and output",
+   "description": "Human reactions on agent messages reach the agent as typed events (can wake it); agents add acknowledgement or real reactions; thumbs up/down feedback votes.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "grokbot-agent-product-061",
+    "qm-product-006",
+    "qm-architecture-125",
+    "qm-architecture-126"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-006",
+     "qm-architecture-125"
+    ],
+    "why": "Reactions flow both ways with gating (shouldSurfaceReaction), max 5 per turn, cheap helper model picks an ack emoji with latency logged. GrokBot adds explicit feedback votes (UP/DOWN/SUBMIT/REVERT). QM's text directive parsing (qm-architecture-126) is the weaker mechanism; prefer a typed tool."
+   },
+   "mechanism": "Reaction event on an agent-authored entry -> policy gate -> ambient turn input {reaction, target_seq, by}; agent emits reactions through a typed tool (capped per turn); optional cheap-model ack emoji on addressed messages.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-014",
+     "v-space-ui-008"
+    ],
+    "evidence": [],
+    "gap": "No reactions at all; no feedback vote on Space turns found in baseline.",
+    "strengths": ""
+   },
+   "benefit": "Lightweight human-in-the-loop (approve/retry with a thumbs) without composing a message; agents can say 'seen' cheaply in busy rooms.",
+   "approach": "Model Plane: reaction-as-input event type and a react tool; Application Plane emits the event; gate by Space policy to avoid waking agents on every emoji.",
+   "effort": "M",
+   "dependencies": [
+    "C008"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Accidental wakeups and cost; reaction-as-approval must not replace Control approval for effects.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Real differentiator for human+agent rooms, after basic reactions.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-010",
+   "name": "Custom emoji, GIFs and emoji shortcode completion",
+   "description": "Org/member custom emoji, GIF search via server proxy, and :shortcode: completion with locale-aware emoji data.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "slack",
+     "teams"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-008",
+    "buzz-product-017",
+    "grokbot-agent-product-142"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-142"
+    ],
+    "why": "IME-safe ProseMirror shortcode plugin with locale-chunked emojibase data (SRC q4); buzz shows member-owned emoji union and a rate-limited GIF proxy with server-side key. Slack/Teams have custom emoji and GIFs (slack-product-surface-005, teams-product-surface-008)."
+   },
+   "mechanism": "Composer plugin matches trailing ':' token (1-50 chars) in a 60-char look-back, suggests from a lazy-loaded locale emoji map; GIF search via backend proxy with per-minute rate limit.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-008"
+    ],
+    "evidence": [],
+    "gap": "No emoji support in Space.",
+    "strengths": ""
+   },
+   "benefit": "Polish; shortcodes matter once reactions exist.",
+   "approach": "Frontend Plane only for shortcodes; skip GIF third-party proxy initially (ZDR/data egress).",
+   "effort": "S",
+   "dependencies": [
+    "C008"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Third-party GIF providers are data egress, conflicts with ZDR orgs.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Expected polish, low business value.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-011",
+   "name": "Edit and delete messages (with audit and tombstones)",
+   "description": "Authors edit or delete their messages under admin policy; owners of an agent can edit/delete its messages; deletes leave tombstones and edits may be retained for compliance.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams",
+     "qm"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-006",
+    "slack-product-surface-006",
+    "teams-product-surface-007"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-006"
+    ],
+    "why": "SRC q4 with the unique owner-of-agent authority (human can retract an agent's post) and soft-deleted events kept in the audit log; Teams/Slack add admin policy flags (AllowUserEditMessage/DeleteMessage) and retention-controlled edit logs."
+   },
+   "mechanism": "Edit = new revision event referencing the target; delete = tombstone event; permission = self-author OR viewer owns the authoring agent OR admin; originals kept in an append-only audit store subject to retention/ZDR; clients render latest revision plus 'edited'.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-013",
+     "v-space-ui-007"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:144-160",
+     "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:1-1028",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-736"
+    ],
+    "gap": "No EditMessage/UpdateMessage in Model Plane proto, no message delete route; only owner whole-thread delete via Chat.",
+    "strengths": ""
+   },
+   "benefit": "Users expect to fix typos and retract mistakes; owner-of-agent retract is a high-trust control over agent output in shared rooms.",
+   "approach": "Model Plane: Session Core revision entries (edited/deleted) never in-place overwrite; Control policy flags for edit/delete per org; Control audit receives the event; ZDR orgs keep no original beyond retention.",
+   "effort": "M",
+   "dependencies": [
+    "C001",
+    "C012 agent revision propagation"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Agent context divergence if revisions are not propagated (C012); compliance retention vs ZDR conflict must be explicit.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Table stakes; missing edit is noticed on first typo.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-012",
+   "name": "Human edits/deletes propagated to agent context as revision entries",
+   "description": "When a person edits or deletes a message the agent already saw, a revision entry is appended so the agent reasons over the corrected text.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-architecture-089",
+    "qm-product-005"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-005",
+     "qm-architecture-089"
+    ],
+    "why": "Only source; message_revision system entries appended outside a turn under a lease, rendered to the model as <message-edited>/<message-deleted>."
+   },
+   "mechanism": "On edit/delete of an entry with seq < last model-visible seq, append system entry {kind: message_revision, action, target_seq, text?} outside any turn using the session lease; the prompt builder renders it.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-013"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:144-160"
+    ],
+    "gap": "No edit/delete exists, so no propagation.",
+    "strengths": ""
+   },
+   "benefit": "Prevents agents acting on retracted text; keeps model context and audit aligned.",
+   "approach": "Model Plane Session Core: implement together with C011 as the same revision entry.",
+   "effort": "S",
+   "dependencies": [
+    "C011"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Deleted text must not be re-shown to the model under ZDR (send 'deleted' marker only).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap if done with C011; important for agent correctness.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-013",
+   "name": "Rich-text composer (formatting, code, lists, spell-check, Enter behaviour)",
+   "description": "WYSIWYG-plus-markdown composer with toolbar, code blocks, lists, link handling, configurable Enter, auto text direction and multi-language spell-check.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams",
+     "grokbot"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-010",
+    "slack-product-surface-003",
+    "teams-product-surface-014",
+    "grokbot-agent-product-141",
+    "slack-shell-and-native-113"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-141"
+    ],
+    "why": "Tiptap 3 chat-tuned editor with per-surface schema, RTL auto-direction, ARIA placeholder, caret scroll and paste linkify guard (SRC q4); buzz has the fuller markdown round-trip toolbar; Slack the mature shortcut set and 45-locale spell-check."
+   },
+   "mechanism": "ProseMirror/Tiptap editor with a restricted schema (paragraph, lists, code, link, mention chip), markdown serialisation on send, Shift+Enter newline with a user setting, dir=auto per paragraph, spellcheck languages per user.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-006",
+     "v-space-backend-012"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:329-336",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:537-539",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:3"
+    ],
+    "gap": "Composer is a plain textarea; human turns render as plain text; no toolbar or spell-check language choice.",
+    "strengths": "Assistant output already gets full ChatMarkdown (code, media, charts)."
+   },
+   "benefit": "Human-grade composition and rendering of human posts; Norwegian/English spell-check.",
+   "approach": "Frontend Plane: Solid-compatible ProseMirror (or Tiptap core) composer emitting markdown + mentions[]; render human turns through ChatMarkdown too.",
+   "effort": "M",
+   "dependencies": [
+    "C006 mention chips"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Editor bundle size; Solid integration of ProseMirror.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Table stakes; human posts rendered as plain text is noticeable.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-014",
+   "name": "Per-message action surfaces: hover toolbar, context menu, rich clipboard",
+   "description": "Hover/focus toolbar with reaction and more-menu (copy, download, open), native context menu for links/images, copy as text or image with clipboard restore. Class set to common (INF): only GrokBot and Slack have records, but every chat reference visibly has per-message menus; records for buzz/Teams were not captured in this category.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "slack"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "grokbot-agent-product-143",
+    "slack-shell-and-native-111",
+    "slack-shell-and-native-112"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-shell-and-native-111",
+     "slack-shell-and-native-112"
+    ],
+    "why": "Desktop shell provides multi-format set-and-paste with restore and a full localised context menu (SRC q4); GrokBot's toolbar shows keyboard modality but lacks edit/delete."
+   },
+   "mechanism": "role=toolbar per message with roving focus; more-menu actions dispatched by entry id; clipboard writes text/html + text/plain (+ image/png) in one ClipboardItem.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check SpaceRoomTimeline for per-turn actions (pin/retitle exist on the post per v-space-ui-011).",
+    "strengths": ""
+   },
+   "benefit": "Daily-use affordances; home for edit, delete, react, quote, forward, save.",
+   "approach": "Frontend Plane: one MessageActions component hosting C008/C011/C005/C028 actions.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Container for several priority actions; cheap.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-015",
+   "name": "Rich rendering: markdown, code, math, Mermaid, diffs",
+   "description": "Messages render sanitized markdown with tables, highlighted code, KaTeX, Mermaid, stable streaming, and structured diffs as a collapsible viewer.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm",
+     "buzz",
+     "grokbot"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "qm-product-007",
+    "buzz-product-011"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-007"
+    ],
+    "why": "Lazy hljs/KaTeX, Mermaid also in shared views, DOMPurify sanitisation and flicker-free streaming markdown (SRC q4). buzz adds a first-class diff message kind; GrokBot similar cards (grokbot-agent-product-063)."
+   },
+   "mechanism": "marked + DOMPurify, lazily loaded highlighters/math/mermaid, streaming parser that only re-renders the tail block; diff payloads rendered with a diff viewer.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-backend-012",
+     "v-space-ui-006"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:3",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:329-336",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:537-539"
+    ],
+    "gap": "Shipped for assistant turns only; human turns are plain text; no diff message type.",
+    "strengths": "ChatMarkdown already covers code, media and charts for agent output; keep it as the single renderer."
+   },
+   "benefit": "Already on par for agent output.",
+   "approach": "Frontend: render human posts with ChatMarkdown; add diff block later.",
+   "effort": "S",
+   "dependencies": [
+    "C013"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "None significant.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon equal for agent output; small delta for human text.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-016",
+   "name": "Typed message content model with forward-compatible cards",
+   "description": "Every message has a content type (text, rich, card, file, call event, system, signal...) driving rendering and typed sidebar previews; unknown or retired types render a neutral 'update/unsupported' card.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "teams-product-surface-002",
+    "grokbot-agent-product-063",
+    "grokbot-agent-product-146"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-146",
+     "grokbot-agent-product-063"
+    ],
+    "why": "oneof-typed previews plus explicit unknown/retired cards with once-per-type telemetry (SRC q4); Teams REA shows the broad content-type enum."
+   },
+   "mechanism": "Entry {content_type enum, payload oneof}; preview projection typed (text, attachments with counts, widget awaiting answer); client renders a fallback card for unknown types and logs once per type.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; room posts are model turns with markdown (INF from v-space-ui-001/006). Check Session Core message schema for a content_type field and whether approvals/tool-calls render as typed cards in the room.",
+    "strengths": ""
+   },
+   "benefit": "Space will carry approvals, receipts, tool calls, files and system events; typing them avoids parsing text and blank rows across client versions.",
+   "approach": "Model Plane proto: content_type + payload oneof on entries; Frontend card registry with unknown fallback.",
+   "effort": "M",
+   "dependencies": [
+    "C001",
+    "C038"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Schema migration of existing turns.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Foundation for agent cards and system messages.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-017",
+   "name": "Attachments and file upload pipeline",
+   "description": "Paste/drop/attach images, video, audio and files with previews, size/type policy and typed refusal reasons; large bytes go to object storage, not through the app server; malware scan.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "grokbot",
+     "teams",
+     "qm"
+    ],
+    "n": 5,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-012",
+    "slack-product-surface-008",
+    "grokbot-agent-runtime-093",
+    "grokbot-agent-product-140"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-012"
+    ],
+    "why": "Content-addressed media (sha256) with server thumbnails, blurhash and client metadata stripping (SRC q4); Slack's 3-step external upload URL + malware scan is the scale pattern; GrokBot best for typed size policy and refusal reasons."
+   },
+   "mechanism": "1) request upload slot (gateway checks room ACL, size/type policy) -> presigned URL + file_id; 2) client PUTs bytes; 3) complete: scan, hash, thumbnail, attach to entry; reads served by id with room ACL check; refusals typed (empty, too_large, count, type).",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-015",
+     "v-space-ui-009"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+    ],
+    "gap": "Room composer has no file input; Chat has /api/v1/chat/documents and artifacts but Space does not reuse them.",
+    "strengths": ""
+   },
+   "benefit": "Files are core to work rooms and to giving agents material; reusing Data Plane documents keeps one ACL path.",
+   "approach": "Data Plane documents with space_ref (Knowledge tab already reads documents.space_ref); gateway presigned upload; Frontend composer attach; attachments referenced from Session Core entries by id, never bytes.",
+   "effort": "L",
+   "dependencies": [
+    "Data Plane document upload with space_ref",
+    "malware scan",
+    "C021"
+   ],
+   "planeOwner": "Data Plane",
+   "risks": "ACL widening (room member reading owner-plane documents); ZDR retention of files; storage cost.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Present in all sources; a work room without files is not credible.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-018",
+   "name": "Speculative attachment pre-upload and pre-captioning",
+   "description": "Upload and caption staged attachments while the user is still typing so the agent turn starts immediately.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-139"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-139"
+    ],
+    "why": "Only source (SRC q5): pre-upload manager keyed by staged path scoped to agent+session, holds/releases, background image captioning."
+   },
+   "mechanism": "On stage: start upload, then request caption/extraction; keep a lease; on send, reference prepared ids; on discard, release and delete.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-015"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68"
+    ],
+    "gap": "No attachments in Space at all.",
+    "strengths": ""
+   },
+   "benefit": "Faster first token for attachment-heavy agent turns.",
+   "approach": "Add to C017 pipeline later (Data Plane extraction + Model Plane caption).",
+   "effort": "M",
+   "dependencies": [
+    "C017",
+    "C021"
+   ],
+   "planeOwner": "Data Plane",
+   "risks": "Processing unsent files raises consent/ZDR questions; must delete on discard.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Optimisation after the basic pipeline.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-019",
+   "name": "Safe local file sharing: recent-files shelf and share confirmation",
+   "description": "Desktop offers recent local files with thumbnails; sharing a file to others requires a native confirmation; the web page never sees file paths.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "slack-shell-and-native-114",
+    "slack-product-surface-016"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-shell-and-native-114"
+    ],
+    "why": "Only source (SRC q5): main-process capability-by-id upload with native confirm."
+   },
+   "mechanism": "Shell scans OS recent list, exposes opaque ids and thumbnails; upload by id happens in the main process after confirm.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-009"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+    ],
+    "gap": "Verevon v3 is web-first; no desktop shell or attachments in Space.",
+    "strengths": ""
+   },
+   "benefit": "Confirm-before-share pattern is useful for agent-produced artifacts posted to shared rooms.",
+   "approach": "Adopt only the share-confirmation idea in the web composer; skip the OS recent-files scan.",
+   "effort": "S",
+   "dependencies": [
+    "C017"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "OS file scanning is out of scope for a web product.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Desktop-shell specific; Verevon is web/Solid; keep only the confirm idea in C017.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-020",
+   "name": "Image markup before sending",
+   "description": "Draw on an image (pen, colours, undo) before attaching it.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-product-013"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-013"
+    ],
+    "why": "Only source (SRC q3)."
+   },
+   "mechanism": "Canvas strokes in natural-image coordinates, re-encode before upload.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-009"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+    ],
+    "gap": "No attachments.",
+    "strengths": ""
+   },
+   "benefit": "Screenshot feedback to agents.",
+   "approach": "Frontend canvas editor after C017.",
+   "effort": "S",
+   "dependencies": [
+    "C017"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 1,
+   "rationale": "Niche.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-021",
+   "name": "Attachments as model input, re-authorized every turn",
+   "description": "Documents reach the model natively where the provider supports it, else extracted text with explicit truncation/unreadable notices; each artifact is re-authorized per turn and labelled untrusted.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "qm-architecture-138",
+    "qm-product-008"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-138"
+    ],
+    "why": "SRC q4: newest-first up to 10 docs/8 MB, per-turn authorization, sha256 dedupe, worker extraction with heap/time caps, provider route table, tape stores references not bytes. GrokBot pre-captioning (grokbot-agent-product-139) is the adjacent pattern."
+   },
+   "mechanism": "At turn build: list attachments in scope newest-first, authorize each against current ACL, choose native-file vs extracted-text per provider, emit notices for skipped/truncated, wrap as untrusted data; persist only references.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-015"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68"
+    ],
+    "gap": "Room has no attachment path; Chat documents path not reused in Space.",
+    "strengths": ""
+   },
+   "benefit": "Fits Verevon rules exactly: reference-not-bytes supports ZDR, per-turn recheck ensures Space access never widens the owner-plane ACL.",
+   "approach": "Model Plane prompt builder pulls Data Plane document refs via retrieval API with per-turn authorization; no cross-plane DB reads.",
+   "effort": "M",
+   "dependencies": [
+    "C017",
+    "Data Plane extraction API"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Prompt injection via documents (label untrusted); cost of native file inputs.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Needed for agents to use room files safely.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-022",
+   "name": "Link previews / unfurling",
+   "description": "Pasted links render cards (title, site, description, image); either sender-side snapshots or server unfurl with a bounded per-account cache; apps can enrich unfurls.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "slack"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-product-016",
+    "grokbot-agent-product-144",
+    "slack-product-surface-007"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-016"
+    ],
+    "why": "Sender-side fetch under SSRF checks, size caps and per-host cooldown, sanitized image re-hosted, signed snapshot tags so recipients never contact third parties (SRC q4). Slack best for app-enriched unfurls (Work Objects)."
+   },
+   "mechanism": "On paste: backend fetch with SSRF guard (private-IP block, redirects capped), 256 KB page / 2 MB image caps, extract OG metadata, re-host image, store snapshot with the message; recipients render the snapshot only.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-015",
+     "v-space-ui-009"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+    ],
+    "gap": "No link previews in rooms.",
+    "strengths": ""
+   },
+   "benefit": "Expected in chat; snapshot-at-send fits ZDR and the Model-proposes/Quarry-executes rule if the fetch is done by Quarry.",
+   "approach": "Ingestion Plane: Quarry fetch-preview endpoint (SSRF-safe) invoked by the gateway on send; snapshot stored on the entry; integration-corev2 providers can supply rich unfurls for their records.",
+   "effort": "M",
+   "dependencies": [
+    "Quarry preview endpoint",
+    "C016 card type"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "SSRF; tracking-pixel leakage; ZDR orgs may disable previews.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common and visible; reuses Quarry.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-023",
+   "name": "Deep links and entity link chips",
+   "description": "Stable shareable links to rooms, messages, runs and external entities that render as chips; links unfurl safely when pasted into other chat apps.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-022",
+    "teams-shell-and-native-071"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-022"
+    ],
+    "why": "Allowlisted entity hosts rendered as chips, scheme handler, agents told to return a link field (SRC q4); Teams shows crawler-UA allowlist for safe external unfurls."
+   },
+   "mechanism": "URL scheme /spaces/{ref}/t/{thread}/e/{seq}; client router opens exact entry; chips for known hosts; external crawler UAs get minimal metadata.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "findings/t1/v-space-ui.baseline.md:120"
+    ],
+    "gap": "No baseline record in this category; v-space-ui baseline (search section) notes Activity rows link to ?thread_id=... but SpacePage never reads thread_id, so deep links land on the room only.",
+    "strengths": ""
+   },
+   "benefit": "Agents and notifications need precise links back into a room/message.",
+   "approach": "Frontend router reads thread/entry params; ZDR-aware minimal OG metadata endpoint in the gateway.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "External unfurl must not leak titles for private rooms.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap fix of an existing broken link path.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-024",
+   "name": "Voice notes and audio/video clips with transcripts",
+   "description": "Record short audio/video/screen clips into a conversation, play inline with speed control, and get transcripts (word-level jump).",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "slack",
+     "teams"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-014",
+    "grokbot-agent-product-060",
+    "slack-product-surface-009",
+    "teams-product-surface-013"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-060"
+    ],
+    "why": "Streaming STT, TTS for agent memos, word-level transcript jump and speed control (SRC q4); Slack adds screen+camera clips with captions (DOC)."
+   },
+   "mechanism": "Recorder -> attachment pipeline (C017) -> transcription job -> transcript stored as derived content linked to the clip; player maps word timestamps to seek.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-013",
+     "v-space-backend-019"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:45-55"
+    ],
+    "gap": "No voice clips in Space; a voice feature exists in src/features/voice but is not wired into rooms.",
+    "strengths": ""
+   },
+   "benefit": "Async voice suits mobile and pairs with agents summarising clips.",
+   "approach": "Reuse src/features/voice + C017; transcription in Model Plane inference; transcript inherits room ACL/ZDR.",
+   "effort": "M",
+   "dependencies": [
+    "C017"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Transcript retention under ZDR.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Common but not core to agent work; do after attachments.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-025",
+   "name": "Time-anchored video review comments",
+   "description": "Comments stamped with video playback time, shown in a side panel, replyable and reactable.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-product-015"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-015"
+    ],
+    "why": "Only source: zero-schema timecode prefix on thread replies (SRC q4)."
+   },
+   "mechanism": "Thread reply text begins with [mm:ss.mmm]; parser extracts it; player seeks on click.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No media in Space (no baseline record for this specific capability).",
+    "strengths": ""
+   },
+   "benefit": "Design/video review; same trick works for page or line anchors on documents.",
+   "approach": "Later, on top of C003 and C017.",
+   "effort": "S",
+   "dependencies": [
+    "C003",
+    "C017"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Outside Verevon's core work-room focus for now.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-026",
+   "name": "Persistent drafts",
+   "description": "Per-room and per-thread drafts survive restarts and failed sends, restored with exact mention recipients; Drafts view.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm",
+     "slack",
+     "teams"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-018",
+    "qm-product-014"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-018"
+    ],
+    "why": "Revisioned local draft store with authoritative-empty marker so late async completions cannot resurrect cleared drafts; restores mention bindings (SRC q4). Slack (slack-product-surface-010) and Teams (DRAFTS slice, teams-shell-and-native-072) also keep drafts."
+   },
+   "mechanism": "Draft keyed by (room, thread); {text, mentions[], attachments refs, revision}; clear writes an empty tombstone with higher revision; restore on failed send.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-010",
+     "v-space-backend-019"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:147",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:45-55"
+    ],
+    "gap": "Composer text is a component-local signal; lost on navigation or failed send.",
+    "strengths": ""
+   },
+   "benefit": "Prevents losing text when an agent invite/approval fails mid-send.",
+   "approach": "Frontend localStorage (per-viewer convenience, try/catch) first; optional sync later.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Drafts in browser storage under ZDR policy must be clearable on logout.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap, noticed when lost.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-027",
+   "name": "Scheduled send",
+   "description": "Schedule a message for later, edit/cancel from a Scheduled view; suggestions from recipient working hours; agent-relayed verbatim scheduled messages.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams",
+     "qm"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-product-024",
+    "slack-product-surface-010",
+    "teams-product-surface-006",
+    "teams-shell-and-native-137",
+    "qm-product-143"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-143"
+    ],
+    "why": "Reuses cron machinery for verbatim one-shot or recurring relays with attribution (SRC q3); Teams has the full human UX (REA q3). buzz-product-024 is a not-built record (kind reserved, no producer), so buzz is not counted."
+   },
+   "mechanism": "Scheduled message row {room, author, text, fire_at, status}; scheduler fires through the normal send path with the author's current authority rechecked at fire time.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-010",
+     "v-space-backend-019"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:147",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:45-55"
+    ],
+    "gap": "No human scheduled send; only agent cron schedules exist in Settings.",
+    "strengths": ""
+   },
+   "benefit": "Minor for humans; useful for agents delivering summaries at sensible times.",
+   "approach": "Reuse Control schedule/cron primitives; recheck authority at fire time.",
+   "effort": "M",
+   "dependencies": [
+    "C001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Authority drift between schedule and fire time.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Low priority in all references.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-028",
+   "name": "Pinned messages and room bookmarks",
+   "description": "Pin important messages for everyone in a room (pinned section, limit), bookmarks/links shelf in the header; agents can manage a capped pin set.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams",
+     "qm"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "slack-product-surface-012",
+    "teams-product-surface-010",
+    "qm-product-012",
+    "buzz-product-025"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-012"
+    ],
+    "why": "Surface-neutral pins API with hard cap usable by the agent (SRC q3); Slack/Teams have the richer human header shelf. buzz-product-025 is a not-built record (kinds reserved only)."
+   },
+   "mechanism": "room_pins(room, entry_seq|note, pinned_by, at) capped (409 pin_limit); permission = room editor+; shown in header/info pane.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-009",
+     "v-space-ui-011"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2183-2340",
+     "apps/Model Plane/proto/model_plane/v1/sessions.proto:1034-1056",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:231-258",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:396-409"
+    ],
+    "gap": "Only the post author can pin (owner-bound presentation); timeline re-sorts chronologically so pins are flagged not lifted; no pinned section or bookmarks shelf; agents cannot pin.",
+    "strengths": ""
+   },
+   "benefit": "Shared context anchor for humans and agents.",
+   "approach": "Application Plane room pins with Space-role authorization (not thread-owner); agent tool to pin with cap; Frontend pinned section.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "Pin must not reveal entries outside a viewer's audience.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Existing partial feature with a visible ordering bug.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-029",
+   "name": "Saved items, reminders and attention slices",
+   "description": "Per-user saved messages with due dates, /remind, and typed attention views (mentions, drafts, saved, reminders, VIP, requests).",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "slack-product-surface-011",
+    "teams-shell-and-native-072"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-072"
+    ],
+    "why": "Fixed slice taxonomy (HubSliceType) usable in hub and feeds (SRC q4); Slack Later + reminders is the best product UX (DOC). Teams saved messages also in teams-product-surface-010."
+   },
+   "mechanism": "saved_items(subject, entry ref, due_at, state); reminder scheduler; slices are server queries over mentions/drafts/saved/reminders.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-013",
+     "v-space-backend-019"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:45-55"
+    ],
+    "gap": "No saved items or reminders in Space.",
+    "strengths": ""
+   },
+   "benefit": "Personal 'later' list fits the personal Space.",
+   "approach": "Application Plane per-user saved items; reminders via Control schedule.",
+   "effort": "M",
+   "dependencies": [
+    "C006",
+    "C026"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Saved refs must re-check access on read.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Attention category overlap; after core messaging.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-030",
+   "name": "Polls / decision cards",
+   "description": "Poll posted as a message.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-019"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-019"
+    ],
+    "why": "Only evidence; REA low confidence and appears app-based (Forms). buzz lists polls as planned only."
+   },
+   "mechanism": "Card entry with options and per-user vote rows.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-013",
+     "v-space-backend-019"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:45-55"
+    ],
+    "gap": "No polls.",
+    "strengths": ""
+   },
+   "benefit": "An agent-created approve/reject decision card is the higher-value equivalent.",
+   "approach": "Build as a C016 card type with Control approval semantics where effects are involved.",
+   "effort": "S",
+   "dependencies": [
+    "C016"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Must not be confused with Control approvals.",
+   "tier": "nice-to-have",
+   "significance": 1,
+   "rationale": "Weak evidence (REA low) and low value.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-031",
+   "name": "Forward messages (incl. into an agent turn)",
+   "description": "Forward one or several messages with validations; forwarded content and files are unfolded into the agent's input.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "teams-product-surface-011",
+    "qm-product-013"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-011"
+    ],
+    "why": "Multi-select forward with explicit caps and a rule that bot messages cannot be forwarded (REA q3); QM unfolds forwarded content for the agent (SRC q3)."
+   },
+   "mechanism": "Forward creates a new entry with forwarded_from provenance chip and copied content snapshot; validation of size/count; access to source rechecked.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-013",
+     "v-space-backend-019"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:45-55"
+    ],
+    "gap": "No forwarding.",
+    "strengths": ""
+   },
+   "benefit": "Moving context between rooms and into agents.",
+   "approach": "Model Plane entry with provenance; must not carry source-room retrieval grants; Control decision per destination.",
+   "effort": "M",
+   "dependencies": [
+    "C016"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "ACL widening across Spaces.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful but risky for the authority model; after core.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-032",
+   "name": "Cross-post to several channels and move chat history into a channel",
+   "description": "Publish one post to many channels with bulk edit/delete; move last N days of a group chat into a channel.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-004",
+    "teams-product-surface-012"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-004",
+     "teams-product-surface-012"
+    ],
+    "why": "Only source (REA q3)."
+   },
+   "mechanism": "Cross-post: one logical post, N channel placements, replies stay with source. Move: copy then delete originals with system note.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; no cross-post or move found (INF).",
+    "strengths": ""
+   },
+   "benefit": "Promote a personal-Space brainstorm into a room.",
+   "approach": "Each destination minted as its own Control decision.",
+   "effort": "L",
+   "dependencies": [
+    "C031"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Authority widening; permanent deletes.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Teams-only, complex, conflicts with per-Space authority.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 2,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-033",
+   "name": "Fork a conversation from a message (visibility-preserving)",
+   "description": "Branch a conversation at a chosen message; the fork copies only what the forking viewer (or all current members) can see.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm",
+     "grokbot"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "qm-architecture-090",
+    "qm-product-011"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-011"
+    ],
+    "why": "Intersects visible seq sets of all members under a roster lock, records forkedFrom/forkBoundarySeq (SRC q4). GrokBot has is_fork on its send envelope (grokbot-agent-runtime-092)."
+   },
+   "mechanism": "fork(thread, upto_seq): read viewer-folded transcript (or intersection across members), append copies to a fresh thread under a new lease, record origin.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [],
+    "evidence": [
+     "findings/t1/v-space-ui.baseline.md:233"
+    ],
+    "gap": "Listed as S1.7 future work (visibility-preserving fork/share) in the QM adoption plan; no code.",
+    "strengths": ""
+   },
+   "benefit": "Lets a member branch off an agent thread without leaking rows others cannot see; reuses Verevon's audience-revision model.",
+   "approach": "Model Plane Session Core fork RPC using existing audience-revision filtering.",
+   "effort": "M",
+   "dependencies": [
+    "C003"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Copying content under ZDR; intersection correctness.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Already planned and aligned with Verevon's audience model.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-034",
+   "name": "Read-only conversation share snapshots",
+   "description": "Share button creates an immutable read-only copy of visible messages for 'anyone in org' or 'anyone with link'.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-010"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-010"
+    ],
+    "why": "Only source; allowlist projection plus creator recheck at read (DOC q3)."
+   },
+   "mechanism": "Snapshot = allowlisted projection (user messages, final replies, attachments copied to share storage); read recheck of creator access.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [],
+    "evidence": [
+     "findings/t1/v-space-ui.baseline.md:233"
+    ],
+    "gap": "S1.7 defers sharing until resource intersection is enforced.",
+    "strengths": ""
+   },
+   "benefit": "Handoff of agent results to non-members.",
+   "approach": "Later; org-internal only first; ZDR orgs disabled.",
+   "effort": "M",
+   "dependencies": [
+    "C033"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Bearer links conflict with ZDR and Space-never-widens-ACL rule.",
+   "tier": "skip",
+   "significance": 2,
+   "rationale": "Anyone-with-link conflicts with Verevon's authority rules; revisit org-internal variant later. DOC-only evidence.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-035",
+   "name": "Read state: per-thread unread, mark unread, read receipts",
+   "description": "Per-room and per-thread unread with divider and jump-to-first-unread, manual mark-unread, cross-device sync, optimistic throttled mark-read, optional read receipts degrading in large chats.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "grokbot",
+     "teams",
+     "slack"
+    ],
+    "n": 4,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-product-019",
+    "grokbot-agent-product-062",
+    "teams-shell-and-native-129",
+    "teams-product-surface-009"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-019"
+    ],
+    "why": "Moved from client-encrypted frontier blobs to a relay-side read-state API with manual-unread overrides (SRC q4); Teams best for optimistic 'client lie' + throttled network mark-read and receipt cut-off above 20 participants; GrokBot entry-anchored unread."
+   },
+   "mechanism": "read_frontier(subject, room, thread, last_read_seq) server-side; unread = entries with seq > frontier; manual unread sets frontier back; client marks optimistically and batches (max 3 calls / 8 s).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-017",
+     "v-space-ui-014"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1894-1916",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2063-2181",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:137-190",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts:23-43"
+    ],
+    "gap": "Room-level lastReadAt only; no per-thread unread, no jump-to-first-unread anchor, no mark-unread, no receipts.",
+    "strengths": "Durable server-side per-member marker already syncs across devices."
+   },
+   "benefit": "Expected in busy rooms with agent output.",
+   "approach": "Application Plane: extend spaceReadMarkers with thread frontier (seq-based); Frontend divider and jump.",
+   "effort": "M",
+   "dependencies": [
+    "C003"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Receipts reveal behaviour; make opt-in.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Partial today; per-thread needed once threads are shared.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-036",
+   "name": "Typing indicators (including agents)",
+   "description": "Transient 'is typing' signals not stored durably; agents broadcast typing while working.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-product-020",
+    "slack-product-surface-015"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-020"
+    ],
+    "why": "Ephemeral events via pub/sub with 5 s window and agents as typers (SRC q3); Slack keeps transient events out of the DB (DOC)."
+   },
+   "mechanism": "Ephemeral event -> pub/sub -> clients; ZSET per room with short window; agents emit typing while a run streams.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-backend-016",
+     "v-space-ui-015"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1918-2061",
+     "apps/Application Plane/convex-core/convex/spacePresence.ts:42",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:241-250",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:604-615"
+    ],
+    "gap": "Delivered by 6 s polling, not push; agents are not shown as typers (agent progress is via run stream).",
+    "strengths": "Throttled 3 s beat, 8 s decay, caller writes only own row, no content in rows: keep."
+   },
+   "benefit": "Mostly at parity.",
+   "approach": "Later: move transient signals to a push channel; show running agents as 'working'.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon at parity on basics.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-037",
+   "name": "Presence, status and availability",
+   "description": "Online/away/DND/BRB/OOO with auto-away from OS idle, custom status text/emoji with expiry, scheduled and automatic statuses, status shown when messaged.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "slack",
+     "teams"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "buzz-product-021",
+    "slack-product-surface-013",
+    "slack-product-surface-014",
+    "teams-product-surface-017",
+    "teams-shell-and-native-070"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-017",
+     "teams-shell-and-native-070"
+    ],
+    "why": "Richest availability model (calendar, OOO variants, status message shown on @mention) (REA/SRC q5); buzz shows the simplest TTL-lease implementation; Slack shows OS-idle-driven activity."
+   },
+   "mechanism": "Presence lease: heartbeat every 60 s sets key TTL 180 s; desktop OS idle > N s -> away; manual status {text, emoji, expires_at, availability}; DND suppresses notifications.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-016",
+     "v-space-ui-016"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1918-2061",
+     "apps/Application Plane/convex-core/convex/spacePresence.ts:42",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:196-253",
+     "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:233-256"
+    ],
+    "gap": "Room-scoped online/typing/offline only (30 s TTL, polled); no global status, away, DND, custom status or agent states (working, waiting for approval).",
+    "strengths": "Content-free presence rows with own-row-only writes."
+   },
+   "benefit": "Agents need to know if a human is available before interrupting; humans need to see agent state.",
+   "approach": "Application Plane global presence + status per subject; agent presence derived from Model Plane run state.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "Privacy of activity signals.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common; agent presence is a Verevon-specific win.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-038",
+   "name": "System messages in the timeline",
+   "description": "Membership, agent add/remove, renames, layout and sharing changes written into the conversation as typed, server-signed system entries.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-023",
+    "teams-product-surface-160"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-160"
+    ],
+    "why": "87+ typed system notifications including agent added/removed and history-sharing detail (REA q5); buzz signs notices with the relay key so clients cannot forge them (SRC q3)."
+   },
+   "mechanism": "System entry {type, actor, subject, details} emitted by the server from authority events, never client-authored; rendered as compact rows.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "findings/t1/v-space-ui.baseline.md:48"
+    ],
+    "gap": "No baseline record in this category. Verevon shows receipts and grants in a separate Activity tab (SpaceActivityPanel); check whether member/agent add/remove appear in the room timeline.",
+    "strengths": ""
+   },
+   "benefit": "Makes agent binding and membership changes visible where people work; audit-friendly.",
+   "approach": "Application Plane projects Control membership/binding events into typed system entries (C016) in the room timeline.",
+   "effort": "S",
+   "dependencies": [
+    "C016"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Event-to-timeline consistency.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap transparency for agent actions.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-039",
+   "name": "On-demand per-viewer translation",
+   "description": "Translate a received message (or channel) into the viewer's language, visible only to them, with admin policy.",
+   "prevalence": {
+    "sourcesWith": [
+     "slack",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "slack-product-surface-017",
+    "teams-product-surface-015",
+    "teams-shell-and-native-130"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-015",
+     "teams-shell-and-native-130"
+    ],
+    "why": "Per-message translate with language detection, admin policy AllowUserTranslation, channel translation and language hint headers (REA/SRC q4); Slack states translations are viewer-only (DOC)."
+   },
+   "mechanism": "Translate(entry_id, target_lang) -> inference with source/known-language hints; result shown only to viewer, not persisted (or cached under room ACL, never under ZDR).",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; likely absent (INF: no translate route listed in the Space route table). Check gateway spaces.rs and chat.rs.",
+    "strengths": ""
+   },
+   "benefit": "Norwegian/English mixed teams; translating agent output per viewer.",
+   "approach": "Model Plane inference call via gateway; no persistence under ZDR.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Retaining translated content; cost.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Cheap with Model Plane but not core.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-040",
+   "name": "Priority/urgent messages with repeat notification",
+   "description": "Mark a message Important or Urgent; Urgent re-notifies every N minutes for M minutes.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-005"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-005"
+    ],
+    "why": "Only source (REA q4)."
+   },
+   "mechanism": "priority flag on entry; scheduler re-notifies until read or window ends.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; check notification-core for priority.",
+    "strengths": ""
+   },
+   "benefit": "Agent waiting on human approval can escalate by interval.",
+   "approach": "Application Plane notification-core escalation policy for approval-wait entries.",
+   "effort": "M",
+   "dependencies": [
+    "C006"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Notification fatigue.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Specific value for agent approvals; belongs to attention category.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-041",
+   "name": "History-sharing choice when adding members",
+   "description": "When adding someone to a group chat, choose to share no history, last N days or all; system message narrates it.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-016"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-016"
+    ],
+    "why": "Only source (REA q4)."
+   },
+   "mechanism": "Member add carries history_from (none|ts|all); read path filters entries before history_from for that member.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-004"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2732",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:5340-5360"
+    ],
+    "gap": "Audience-revision filtering exists in the room transcript read, but no adder-chosen history window was found (INF, low confidence).",
+    "strengths": "Session Core drops rows stamped with a newer audience revision than the decision: the right primitive."
+   },
+   "benefit": "Explicit knob for what new members and agents may read; agent retrieval derives from history.",
+   "approach": "Control membership grant carries history window; Session Core read filter uses it.",
+   "effort": "M",
+   "dependencies": [
+    "C002"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Retrieval indexes must honour it too.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Matters once DMs/group chats exist.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-042",
+   "name": "Reliable send pipeline with honest delivery states and provenance",
+   "description": "Optimistic send with a persistent journal, client nonce, echo confirmation, cancel while pending, idempotent delivery (DUPLICATE), UNKNOWN_DURABILITY state, provenance of why a message was sent, and honest 'not delivered/unknown' for external channels.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-056",
+    "grokbot-agent-runtime-092",
+    "grokbot-agent-product-064"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-056"
+    ],
+    "why": "Only source (SRC q5): send-journal states queued/prepared/dispatching/accepted-awaiting-echo, typed delivery ACCEPTED|DUPLICATE|REFUSED and status UNKNOWN_DURABILITY."
+   },
+   "mechanism": "Client message_id nonce; journal persisted locally; server dedupes by message_id; bubble confirmed on transcript echo; GetSendStatus for uncertain cases; envelope carries initiator/send_source.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; Verevon append decisions are content-bound (digest), which makes retries hard (per grokbot record relevance note). Check whether streamChat carries an idempotency key.",
+    "strengths": "Stop distinguishes recorded vs local-only cancellation honestly (v-space-ui-017)."
+   },
+   "benefit": "Honest, retry-safe sends matter more when posts trigger costly agent runs.",
+   "approach": "Gateway idempotency key per post bound into the Control decision digest; Session Core dedupe; Frontend pending/failed states.",
+   "effort": "M",
+   "dependencies": [
+    "C001"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Digest-bound decisions must include the nonce to stay replay-safe.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Prevents duplicate agent runs on flaky networks.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-043",
+   "name": "Agent engagement rule in human threads (follow-up without re-mention)",
+   "description": "Once an agent has spoken or been mentioned in a thread, later human replies there reach it without another @mention; elsewhere top-level messages are only mirrored and judged in batches.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-002"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-002"
+    ],
+    "why": "Only source (SRC q4): botHasStakeInThread with LRU and 5 min negative TTL, ambient turn origin."
+   },
+   "mechanism": "On human post in a thread: if agent has stake (spoke or mentioned) -> dispatch ambient turn; else no turn. Top-level messages are stored and optionally batch-judged.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-001",
+     "v-space-backend-002"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-420",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:54-293",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-737"
+    ],
+    "gap": "Every post invokes the default model; there is no engagement rule because there is no human-only post.",
+    "strengths": ""
+   },
+   "benefit": "Explainable default for when agents listen in a human room; controls cost; required companion to C001.",
+   "approach": "Model Plane: per-thread agent stake record; gateway dispatches an ambient turn only when stake exists or agent is mentioned; Space policy can opt into ambient batch judging.",
+   "effort": "S",
+   "dependencies": [
+    "C001",
+    "C006"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Agents silently ignoring messages users expected them to see; surface 'agent is following this thread' state.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Without it, human-first posting either disables agents or reverts to every-post-is-a-turn.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-044",
+   "name": "Stop a running agent turn",
+   "description": "Stop button (or bare 'stop' text) aborts the in-flight run.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-003"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-003"
+    ],
+    "why": "Only reference record for turn stop (Verevon itself ships it); QM adds the natural-language 'stop' intercept before it becomes a new turn (SRC q3)."
+   },
+   "mechanism": "Typed run signal abort keyed by thread; text 'stop' matched by /^stop[.!]?$/ intercepted before dispatch.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-backend-007",
+     "v-space-ui-017"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:35-37",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:37-50",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:488-520",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:572-583"
+    ],
+    "gap": "No bare-'stop' text intercept (minor).",
+    "strengths": "Stop aborts SSE then records cancelled in Session Core, distinguishing recorded vs local-only stops: keep."
+   },
+   "benefit": "At parity.",
+   "approach": "Optional: intercept bare 'stop' in Space composer.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon equal or ahead (honest recorded/local distinction).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-045",
+   "name": "Queue for later and steer a running turn",
+   "description": "While a turn runs, queue editable follow-up chips (with attachments) or promote one to steer the running task; multi-author attribution.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-004"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-004"
+    ],
+    "why": "Only source with editable queue chips and steer promotion with durable RunSignal (SRC q4)."
+   },
+   "mechanism": "queuedRuns map per thread; steer = durable RunSignal{kind:steer,text,runId}; harness capability check.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-006",
+     "v-space-ui-018"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:41-43",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:165-205",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:746",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2184-2219"
+    ],
+    "gap": "Backend queue/steer shipped (re-mints append decision per queued message) but Space composer disables the textarea while submitting; only /chat uses queueInvocationInput.",
+    "strengths": "Backend already supports it."
+   },
+   "benefit": "In a shared room others keep talking while an agent works.",
+   "approach": "Frontend: wire queueInvocationInput into SpaceRoomComposer; show queue chips with author.",
+   "effort": "S",
+   "dependencies": [
+    "C003"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Steer by non-owner needs the shared-append authority (C003).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap: backend exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-046",
+   "name": "Conversation kind decides scope and session (one agent, many conversations)",
+   "description": "DM, channel and group conversations map to different scopes (personal, channel, group) that own memory/files/sandbox; each thread is its own session inside a shared scope; one agent identity has many sessions keyed by kind.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "grokbot-agent-product-057",
+    "qm-product-001",
+    "qm-product-142"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-001",
+     "qm-product-142"
+    ],
+    "why": "conversationScope() maps dm->personal(actor), group->group:<ref>, else channel:<ref>; threads are sessions sharing the scope's resources (SRC q5). GrokBot's session-kind enum separates agent identity from conversation."
+   },
+   "mechanism": "ScopeId 'kind:ref'; Session{scopeId, threadRef}; resources (memory, files, sandbox, crons) attach to scope; context attaches to session.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-001",
+     "v-space-backend-018"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-420",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:54-293",
+     "apps/Application Plane/convex-core/convex/schema.ts:546-556",
+     "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27"
+    ],
+    "gap": "Space kinds personal/room exist (project/case refused); a personal Space cannot hold an agent; no DM kind, so 'DM with my agent = my personal scope' is not expressible.",
+    "strengths": "Space already owns instructions and knowledge binding shared by its threads."
+   },
+   "benefit": "Clear rule for which resources an agent may use in which conversation; prevents personal agent context leaking into rooms.",
+   "approach": "Control Plane: scope derived from Space kind; allow agent in personal Space; Model Plane sessions per thread with scope ref.",
+   "effort": "M",
+   "dependencies": [
+    "C002"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Migration of existing personal Spaces.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Key architectural rule for agent-in-chat; partly a membership topic.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-01-047",
+   "name": "Bridged external chat surfaces with honest limits",
+   "description": "Mirror external platform messages (Slack, SMS) into a neutral store with live fallback, state when context may be incomplete or rate-limited, and tag bridged chats whose features are limited.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm",
+     "teams"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "qm-architecture-088",
+    "qm-product-137",
+    "teams-product-surface-161"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-088",
+     "qm-product-137"
+    ],
+    "why": "Surface-neutral cache (channel_messages/state/files) with ingest normalization, mirror-first reads, live fallback and in-band limit notices (SRC q3-q4); Teams tags SMS chats with feature limits (REA)."
+   },
+   "mechanism": "IngestEvent normalizer -> channel_messages; readMessages tries mirror then live API; context notes when partial; adapter-level capability flags shown in UI.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Channel Plane is docs-only/future per architecture rules; no baseline record.",
+    "strengths": ""
+   },
+   "benefit": "Future Channel Plane design input.",
+   "approach": "Defer to Channel Plane; keep the honest-limits rule.",
+   "effort": "XL",
+   "dependencies": [
+    "Channel Plane"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Data residency/ZDR of mirrored external content.",
+   "tier": "skip",
+   "significance": 2,
+   "rationale": "Channel Plane is future by architecture decision; not part of Space messaging core now.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

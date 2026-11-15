@@ -1,0 +1,1775 @@
+[
+ {
+  "finalId": "F-t3-069",
+  "title": "Rewind with undo preview, read-only side chat and spin-off tasks, built on the message tree",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 1,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Once the server message tree exists, add three tree operations. Rewind moves the active leaf to before an earlier message and restores the artifact version pointer, with a preview and an undo of the rewind. Side chat is an ephemeral child thread seeded with a read-only snapshot of the parent's context, with inline read-only tools only, usable while the run continues. Spin-off lets the assistant propose a draft thread chip with a seeded prompt th…",
+  "whyItMatters": "Rewind is a differentiator for safe experimentation in Do mode, side chat (6 of 12 sources) lets users ask 'why did it do X?' mid-run without redirecting the run, which serves the transparency goal, and spin-off keeps threads focused. All three are cheap once forks exist.",
+  "reference": {
+   "bestSource": "Claude desktop (SRC) for rewind and spin-off; Claude desktop plus Codex (SRC) for side chat, with Codex's ephemeral read-only fork as the safest model",
+   "others": [
+    "Antigravity (SRC, rewind preview)",
+    "Cursor",
+    "Perplexity (DOC)",
+    "DeepSeek harness (DOC proposal)",
+    "claude.ai (DOC)"
+   ],
+   "prevalence": "6 of 12 (side chat, common), 2 of 12 each (rewind, spin-off; differentiators)",
+   "mechanism": "Rewind: a checkpoint per user turn (conversation cursor plus artifact version ids); rewinding moves the cursor, restores versions and keeps the rewound tail recoverable until a new message is sent; a preview lists the per-artifact diffs that would be undone and warns about external effects. Side chat: an ephemeral child session seeded with a read-only snapshot of parent context, no effectful tools and no user prompt…"
+  },
+  "verevon": {
+   "status": "planned",
+   "exactGap": "No rewind, side chat or spin-off exists in code: messages are a linear table with a sequence identity and no parent pointer (session-core 0001_init.sql:14-24), InvokeRequest.parent_message_id (gateway.proto:250) has no handler, checkpoints are run step watermarks (compaction.rs:1-12, save_checkpoint) with no restore RPC, and regenerate and edit versions are client-only (chat-versions.ts:1-12). Rewind is already planned as I10 then I11 in CHAT_GA…",
+   "evidence": [
+    "apps/Model Plane/rust/services/session-core/migrations/0001_init.sql:14-24",
+    "apps/Model Plane/rust/services/session-core/migrations/0034_thread_origin.sql:36-40",
+    "apps/Model Plane/proto/model_plane/v1/gateway.proto:250"
+   ],
+   "reuse": [
+    "CHAT_GAP_CLOSURE_PLAN I10 and I11 plus the OD19 rewind ruling (reference them, do not re-specify)",
+    "session-core GetContextAssembly for the parent's context, noting it re-assembles memory and retrieval rather than snapshotting the exact prompt that was sent",
+    "model-gateway builtin_tool_defs as the catalogue for an explicit read-only allowlist"
+   ],
+   "constraints": "ZDR: a side chat under a ZDR parent must not persist; threads.origin allows only chat, space, agent_run, support and system, so a persisted 'side' thread needs a migration, while an unpersisted ephemeral invocation avoids both problems. Space authority: a sid…",
+   "approachAdjustment": "Remove rewind from this item and reference I10 and I11 (planned, M, dependent on the server message tree). Keep side chat as the new recommendation, implemented in model-gateway as an ephemeral invocation with an explicit read-only tool allowlist (for example web_search, fetch_url, knowledge_search…",
+   "verdict": "reword",
+   "verdictReason": "All three are absent in code, but rewind is already planned and should be referenced rather than re-recommended; side chat is a genuine gap but its approach reuses an inline tool gate that is not read-only.",
+   "effort": "M"
+  },
+  "approachOriginal": "Rewind: move the active leaf of the R-t3-01-02 tree plus an artifact version pointer; scope per OD19 is conversation and artifact versions only, and effectful turns are marked non-rewindable with an explicit preview. Side chat: a model-gateway ephemeral invocation using the parent thread's assembled context snapshot (GetContextAssembly exists), the inline_tool_allowed read-only tool gate, no persistence under ZDR an…",
+  "planeOwner": "Model Plane (tree operations, ephemeral invocation), Frontend Plane (side pane, rewind preview)",
+  "dependencies": [
+   "F-t3-012",
+   "F-t3-031"
+  ],
+  "risks": "Users may assume rewind reverts external effects (emails, tickets), so the preview must be explicit. A second context costs tokens and must carry the parent's ACL and ZDR posture. Spin-off must never auto-start effectful work.",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 7,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Partly: plan I11 checkpoint and rewind with non-rewindable marking (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:252, owner decision OD19); side chat and spin-off are not in the plan"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-070",
+  "title": "Tool efficiency at scale: a deferred tool index, typed tool outputs, code mode through a gated sandbox bridge, background jobs and WebMCP page tools",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 2,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Extend the mcp_catalog/mcp_call staged-disclosure pattern into one deferred tool index over built-ins, provider actions and MCP tools; add optional typed output schemas; then let sandboxed code call Verevon tools as async functions where every call re-enters capability-core EvaluatePolicy, with per-cell limits; add background jobs with await and notify, and later WebMCP site tools proposed by the Model and executed by Quarry.",
+  "whyItMatters": "Codex, Hermes, Manus and DeepSeek use code mode or tool search to cut round trips and context; Verevon's built-in catalogue is unbounded (about 16k characters). Valuable, but it should follow MCP enablement and the sandbox computer.",
+  "reference": {
+   "bestSource": "Hermes (tool_search / tool_describe / tool_call bridge with core tools never deferred, BM25 gated on the query's rarest token and a coverage floor; SRC) for the index; Codex (JavaScript in a V8 isolate with injected async tools and bounded output; SRC) with DeepSeek PTC (every sub-call re-enters the full guarded pipeline; SRC) for code mode; DeepSeek (validated, frozen tool outputs rendered purely) for the output contract ; Codex (model-written JS in a fresh V8 isolate with tools as async functions) and Manus (per-cell budgets and resumable state) for code mode; Cursor (background commands with output-pattern notifications; tee on the model stream dispatching completed tool calls) for jobs and early dispatch ; Manus and DeepSeek for code mode (QuickJS-WASM with no fs or network; a host-child protocol with declared bindings, resource ceilings and an eight-way typed failure taxonomy); Antigravity for WebMCP",
+   "others": [
+    "Cursor (MCP descriptors as files; spills results over 40 KB to files)",
+    "claude.ai",
+    "Codex",
+    "Hermes (programmatic tool calling)",
+    "DeepSeek (jobs scoped to the starting agent with a wake budget; PTC routes sub-calls through the policy pipeline)",
+    "Antigravity"
+   ],
+   "prevalence": "R-t3-05-11: Tool search 4 of 12, common; code mode 2 of 12, differentiator; tool-result contract 3 of 12, differentiator | R-t3-04-11: code mode 3 of 12 (differentiator); background jobs 4 of 12 (common); streaming dispatch 1 of 12 (unique to Cursor) | R-t3-06-11: 3 of 12 for code mode (differentiator); WebMCP 1 of 12 (unique)",
+   "mechanism": "Classify tools as visible (core, direct-only) or deferrable; exec(source) runs in an isolate with no filesystem or network; run_cell{code} starts a fresh confined runtime;"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "The MCP baseline is overstated: stage_mcp_tool_defs builds the mcp_catalog/mcp_call definitions (threshold 40, ceiling 200), but tool_loop.rs returns an error for both names and every mcp__ call, execution-core has no mcp_call handler, and trusted_capability_id returns None for dynamic MCP names so the signed gate fails closed, so registered MCP tools cannot run. Present: tool-result handles with result_query (inline loop), argument validation i…",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:538-640",
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:815-850",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:625-645"
+   ],
+   "reuse": [
+    "stage_mcp_tool_defs and the 60-second MCP catalogue cache as the staging mechanism once MCP execution is unblocked",
+    "tool_result_handles and result_query as the bounded-output and large-result contract (extend to execution-core)",
+    "mp_contracts tool_arguments validation as the input half of a typed tool contract"
+   ],
+   "constraints": "Both loops refuse MCP execution by design until capability-core provides a durable per-tool binding (F-t3-003), so a deferred index over MCP tools cannot ship first. The decision ledger records that offered_tool_defs() is the purpose-lock allowlist: hiding a …",
+   "approachAdjustment": "Reorder: (1) MCP enablement via F-t3-003 is the prerequisite, not \"shipped\"; (2) deferred index only after decoupling the purpose-lock allowlist, starting with description and schema budgeting with degrade-before-drop as the ledger advises; (3) typed outputs as an optional output schema on ToolDefi…",
+   "verdict": "reword",
+   "verdictReason": "The item is correctly partial and correctly sequenced late, but its premise that MCP staged disclosure is shipped is wrong (definitions only, execution blocked), the purpose-lock constraint is missing, and process_* plu…",
+   "effort": "XL"
+  },
+  "approachOriginal": "Deferred index first (resolve the purpose-lock collision recorded in the ledger), code mode (BKL #11) second with DeepSeek's rule that each sub-call passes the full guarded pipeline.",
+  "planeOwner": "Model Plane (model-gateway catalogue, execution-core, sandbox-manager)",
+  "dependencies": [
+   "F-t3-003",
+   "F-t3-009"
+  ],
+  "risks": "Code mode can bypass per-call approvals if the bridge is not routed through the gate; deferred tools can hide needed tools from the model.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 31,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-05-11: Partly: code mode is scheduled and not built (BKL #11, MODEL_PLANE_IMPROVEMENTS_2026.md section 23.4); the unbounded tool-catalogue budget is a recognised gap that collides with the purpose-lock (decision ledger, Needle entry). | R-t3-04-11: BKL #11 in CHAT_PARITY_AUDIT_2026-10-01.md:43 (code mode), per the cluster evidence | R-t3-06-11: apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md sections 23.4 and 23.5 (MCP code mode, confirmed greenfield); WebMCP is not planned."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-071",
+  "title": "Coordinator-mode orchestration on Temporal with typed child results, a fleet panel and gated fan-out",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 3,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Replace the in-memory coordinator and team-worker stub with a coordinator workflow in orchestrator-core (Temporal WideResearch and DeepTask workflows already exist but chat and Do do not use them). The coordinator run has no effect tools, writes a plan, spawns workers through the existing subagent.task (bounded concurrency, shared atomic budget), collects typed results ({status, summary, evidence, next_steps, blocker} through an optional output_…",
+  "whyItMatters": "Research-heavy and wide tasks are where Manus Wide Research and Perplexity Computer beat single-agent chat, and Verevon already has the hard parts (durable subagent lineage, atomic budgets, Temporal workflows). Without typed child results and a visible, stoppable fleet, parallel work is both invisible and unusable by code that must branch on outco…",
+  "reference": {
+   "bestSource": "Cursor (Project mode: non-editing orchestrator with phase gates and a single-writer progress record); Manus (deterministic Workflow Composer with confirmation above about 20 agent calls); T3 Code (task rows, fleet banner with Stop) for the UI",
+   "others": [
+    "Antigravity (pipelines, swarms, Battle Mode best-of-N)",
+    "Perplexity Computer (closest web benchmark)",
+    "Claude Desktop (task backlog)",
+    "DeepSeek (structured_output child tool with a guard)",
+    "Hermes"
+   ],
+   "prevalence": "orchestration patterns 6 of 12 (common); fleet panel 4 of 12; model-authored workflows 3 of 12; best-of-N 3 of 12; structured child results 2 of 12",
+   "mechanism": "A coordinator run with no effect tools writes a plan, spawns a worker per item with bounded concurrency, collects structured results, runs a verifier pass and synthesises; progress lives in one single-writer record and a fresh successor coordinator per milestone avoids context rot. Child tasks may declare output_schema; the child concludes by calling structured_output. The UI maps run, child-run and process events t…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "The coordinator-mode TeamCreate, TeamDelete and TeamList RPCs are an in-memory DashMap tracker with no caller (coordinator.rs:1-25, 401; gateway.proto:83), but parallel delegation already ships in-loop: subagent.task and subagent.research_fan_out (research_fan_out.rs) give a shared atomic round pool, a per-run child ceiling, bounded concurrency, per-item ok/failed/refused status with extracted sources, a merged digest, durable lineage with a bat…",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:1-25",
+    "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:396-401",
+    "apps/Model Plane/proto/model_plane/v1/gateway.proto:76-91"
+   ],
+   "reuse": [
+    "subagent.research_fan_out and LoopSubagentDispatch as the worker primitive instead of a new Temporal coordinator",
+    "GET /v1/orchestration/threads/:thread_id/lineage and the SubagentAttached/Stopped events for the fleet panel",
+    "ChatWideResearchPanel and the ChatLiveRunPanel wideResearch slot as the fleet UI base"
+   ],
+   "constraints": "ZDR must propagate: DeepTaskWorkflow and WideResearchWorkflow are not marked DeniesZDR (workflowreg.go:120-131) and the WideResearch input stamps only org and user ids (workflowreg.go:369-385), so a ZDR caller could start it and Temporal history would persist…",
+   "approachAdjustment": "Do not rebuild the coordinator as a Temporal workflow first. Extend the shipped fan-out: add a validated output contract per item (provider-enforced structured_output_schema or a deeper validator, since mp-contracts tool_arguments ignores nested schema constructs), a confirmation card through the e…",
+   "verdict": "reword",
+   "verdictReason": "Status is partial rather than stub: in-loop fan-out, lineage and a chat fan-out card grid already ship, and the proposed /v1/fleets route confuses Quarry fleets with Model Plane subagents. Reword to extend the shipped f…",
+   "effort": "M"
+  },
+  "approachOriginal": "Model Plane (orchestrator-core, execution-core subagent, model-gateway) plus Frontend. Build the coordinator as a Temporal workflow reusing subagent.task for workers; add output_schema validated with the existing mp-contracts tool_arguments machinery; expose it as a Do-mode option behind a fan-out and cost confirmation; add the /v1/fleets gateway route and a Work-panel fleet section fed by child-run events. Treat be…",
+  "planeOwner": "Model Plane (orchestrator-core) with Frontend Plane for the fleet panel",
+  "dependencies": [
+   "F-t3-002",
+   "F-t3-019"
+  ],
+  "risks": "Cost blow-up (confirmation above a call-count threshold, shared budget); non-determinism if workflow scripts are model-authored; delegated authority must never widen across children; coordinator effect tools must stay empty.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 23,
+   "DOC": 6,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "The typed subagent handoff report is deferred by decision until code must branch on outcomes (cluster C-t3-04-036 baseline, status planned); the model-authored workflow question is an open owner decision."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-072",
+  "title": "Resilient routing: failure vocabulary, credential pools, benching, usage-limit and refusal fallbacks, provider health",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 4,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Extend the shipped fallback chain in inference-core with a closed failure code set (auth, quota, rate limit, context too long, server, timeout, refusal, empty response) carrying retry_after, per-route retry policy, pooled deployments or credentials with model-scoped cooldowns, and benching of a failed primary until its declared reset. Add declared fallback models for usage-limit exhaustion with a switch-back at reset_at (opt-in when it crosses f…",
+  "whyItMatters": "Fewer failed answers and stalled agent runs during provider incidents or quota exhaustion, which matters most for unattended scheduled agents and Azure deployment quotas. The subscription route currently stops at its limit with a typed message but no alternative.",
+  "reference": {
+   "bestSource": "hermes (hermes-architecture-and-surfaces-095, 094 failover and credential pools); codexagent (036 usage-limit fallback and switch-back); claude (112 reversible refusal fallback); t3code (002, 050 provider health snapshot)",
+   "others": [
+    "deepseek (126, 095 closed failure vocabulary and per-route retry modes)",
+    "web-chatgpt",
+    "web-claudeai"
+   ],
+   "prevalence": "2 to 3 of 12 per facet; differentiator",
+   "mechanism": "try_activate_fallback() rebuilds the client in place; cooldowns follow the provider-declared reset (exponential 60 s to 4 h when absent); credential pools rotate on plan-limit 429s before switching provider; limit errors carry reset_at, blocked model and fallback models, and the client announces switches and switch-backs; a model_refusal_fallback message switches the model and remembers the original. [SRC]"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Exists: FallbackChain (fallback.rs) walks providers with per-provider max_retries, ThrottleState (retry-after, TooLong), typed ProviderError::SubscriptionRefused with resets_at, and ZDR/privacy/residency gates before every hop. Missing: a closed failure enum (auth, quota, timeout, server, empty and refusal collapse into Http/Unavailable), any cooldown, benching or credential-pool state, any refusal-driven reroute, and any health or availability …",
+   "evidence": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:920-1010",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:75-110",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:316-410"
+   ],
+   "reuse": [
+    "FallbackChain::infer_one_model gate loop (ZDR, privacy tier, residency checks already run before each hop; a bench check slots in at the top of that loop)",
+    "ThrottleState and ProviderError::RateLimited/TooLong/SubscriptionRefused as the seed of the failure enum",
+    "ModelInfo proto and the /v1/models handler in http_routes.rs (add an availability field there)"
+   ],
+   "constraints": "Inference-core (Rust) owns the chain; the Go failover package in capability-core is an inert contract and the wrong plane for runtime state. Master ownership matrix rule 17 says enforcers honour a ZDR waiver only for the exact connection named and \"never re-r…",
+   "approachAdjustment": "Keep only: a closed failure enum, per-(provider, model) cooldown and benching with reset_at in fallback.rs for API providers, and a health/availability field on ModelInfo surfaced in /v1/models and the picker. Remove the automatic usage-limit fallback and switch-back from the subscription route; if…",
+   "verdict": "reword",
+   "verdictReason": "The base chain, typed throttling and typed subscription refusals exist, and the rest is absent, so the item stands. But the subscription fallback and switch-back clash with rule 17 and the by-design no-failover decision…",
+   "effort": "M"
+  },
+  "approachOriginal": "inference-core fallback.rs: add the failure enum and per-route retry policy, a cooldown map keyed by (credential, model), benching with reset_at, and reroute events written into the RoutingDecision (R-t3-09-07). Every hop is filtered through the privacy floor, entitlements and cost gates. subscription route: declared fallback models plus a user consent setting for platform billing. Provider health map feeds the mode…",
+  "planeOwner": "Model Plane",
+  "dependencies": [
+   "F-t3-042",
+   "F-t3-073"
+  ],
+  "risks": "Failover can silently cross privacy or cost lines (gate and display every hop); falling back from a user subscription to platform billing must be opt-in; stale health data can hide a working route (short-lived cheap probes); safety rerouting must al…",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 10,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "BKL #25 multi-provider auth-profile failover (docs/verevon_CHAT_PARITY_BACKLOG.md, v-modelplane baseline line 349)"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-073",
+  "title": "Per-step routing decision and model continuity: resolver, lifecycle successors and a reasoning replay envelope",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 5,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Implement the planned step-level RoutingDecision {requested, resolved model, provider, effort, reason, complexity, budget posture} in inference-core, persist it on every run step in Session Core, and surface model and reason in the served-by line with an optional routing-feedback control. Build one resolve_model() with fixed precedence (explicit, thread last step, Space default, user last used, org default, intent default) that chat, Do, schedul…",
+  "whyItMatters": "Serves the DeepSeek-style transparency goal, gives the router-policy page real data to tune Budget/Balance/Genius, and protects saved threads, agents and scheduled runs from provider model retirements. Replay is required for correct multi-turn tool use with thinking models and is a blocker for Gemini.",
+  "reference": {
+   "bestSource": "hermes (097 reasoning replay, 093 single resolver); cursor (073, 108 routed model); codexagent (035 lifecycle and upgrade target); deepseek (094, 134 mid-thread notice)",
+   "others": [
+    "t3code (057, 003, 097)",
+    "antigravity",
+    "web-claudeai (085)"
+   ],
+   "prevalence": "replay 4 of 12 (common); routed-model stream 2 of 12, lifecycle 3 of 12, switching semantics 2 of 12, layered defaults 2 of 12 (differentiators)",
+   "mechanism": "reasoning_carriers stores opaque reasoning as typed private records lifted back only for the matching route, with fingerprints of signature-rejected blocks excluded on retry; the agent stream emits routed_model with a display name; the catalogue declares upgrade {model, migration note, retirement_at} and a thread switches automatically after retirement; a durable notice tells the new model earlier turns came from an…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Request-level routing already exists: inference-core intent.rs resolve() returns a Decision{model,mode,complexity,posture} per request, but fallback.rs only logs it; the resolved model reaches the client as model_used on the done frame (shown as the Modell row in the Details popover) and in cost-core's USAGE_ENVELOPE, while ServedBy carries provider/residency/tier only (no reason) and nothing writes the model to Session Core message or run metad…",
+   "evidence": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/intent.rs:74 (Complexity), :178 (BudgetPosture), :201 (choose), :223 (Decision), :236 (resolve)",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:1011-1045 (resolve_intent rewrites model; Decision only info!-logged at :1036)",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:1247 (attempt_models: ladder empty unless intent resolved, pinned never substituted)"
+   ],
+   "reuse": [
+    "inference-core intent::Decision + RoutingPolicy table + BudgetClient posture (extend Decision with reason codes rather than a new type)",
+    "model-gateway USAGE_ENVELOPE (already carries model, provider_used, residency; cost-core ledger already has a model column) as the durable per-call record that router-policy can read",
+    "session_flow::turn_evidence_metadata / with_*_summary metadata chain on the assistant message (JSONB, no migration; with_head_summary shows the zdr-aware pattern)"
+   ],
+   "constraints": "ZDR: a RoutingDecision is ids and enums only (content-free like turn_timing and the proof bundle) so it may be recorded on ZDR runs; a ReplayEnvelope holds provider-signed reasoning content and must never be persisted on ZDR turns (with_head_summary returns e…",
+   "approachAdjustment": "Split into three. (1) Stamp: extend intent::Decision with reason codes and carry it on USAGE_ENVELOPE, the usage SSE/ServedBy frame and the assistant-message metadata chain; render model and reason in the existing Details popover (the served-by line is the privacy line, not the model line). (2) Res…",
+   "verdict": "reword",
+   "verdictReason": "Request-level routing, model_used on the done frame, the Details popover model row and the cost-ledger model all exist, so the item must be stated as extending them. Two parts are misdescribed: replay is not required fo…",
+   "effort": "L"
+  },
+  "approachOriginal": "inference-core: RoutingDecision per call plus a resolve_model(ctx) used by every surface; lifecycle {state, retire_at, successor_id} in the model record (R-t3-09-05). Session Core: extend the step schema with the route and an optional ReplayEnvelope {adapter, model, blocks}; skip persisting envelopes on ZDR turns. model-gateway: routed_model / model_switched SSE events, a small router-feedback endpoint, an org setti…",
+  "planeOwner": "Model Plane (with Session Core)",
+  "dependencies": [
+   "F-t3-042"
+  ],
+  "risks": "Reasoning content retention must follow ZDR; automatic successor mapping can change cost or behaviour (record it per run and show it); notices consume tokens and can break caches (insert only on family change); exposing model names may conflict with…",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 15,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Step-level RoutingDecision is planned in docs/MODEL_PLANE_IMPROVEMENTS_2026.md section 9 (v-modelplane baseline line 245)"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-074",
+  "title": "Editable permission rules, CEL policy and an MCP tool gate with consent receipts",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 6,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Add a rule store in capability-core (org, Space, user and thread scopes) over typed targets such as read_url(domain), send_mail(recipient) and command(prefix), resolved strictest-wins (deny > ask > ask-session > allow, with a wildcard allow surviving a merge only if both layers state it), so 'don't ask again' shows and edits the exact rule with its scope and org-scope rules are audited admin-gated changes. Optionally accept admin CEL expressions…",
+  "whyItMatters": "Editable 'don't ask again' rules are an acknowledged open item and the deterministic way to cut approval fatigue without an LLM in the permission path. Verevon already has the central decision point (capability-core EvaluatePolicy with signed Allow evidence and fail-closed unknown tools) that Claude is only now adding externally, and MCP is how us…",
+  "reference": {
+   "bestSource": "Antigravity (action(target) grant store with deny > ask > allow and per-conversation grants) with Claude (strictness lattice and strictest-wildcard folding, CEL rules and an external decision endpoint that fails closed, MCP gate with single-use consent receipts)",
+   "others": [
+    "claude",
+    "antigravity"
+   ],
+   "prevalence": "declarative rules 2 of 12 (differentiator); CEL policy and MCP gate 1 of 12 each (unique)",
+   "mechanism": "Rule = {action, target-pattern, effect deny|ask|ask_session|allow, scope, source}; exact match first, else fold the strictest over matching wildcards; deny from any scope wins; grants recorded per conversation. CEL rules {id, condition over (tool, args, session, user), action, reason}, any deny wins. MCP: wrap the transport, reject malformed frames and unlisted tools, mint a short-lived receipt (session, tool, sha25…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "capability-core EvaluateCapability (engine.go) decides per capability id from a risk heuristic plus the org scope-grant table, EvaluatePolicyRequest carries no target or arguments, and execution-core permission::evaluate_call checks arguments only against fixed keyword lists; hook rules are tool-name globs, first-match-wins, fail-open and held in an in-memory HookRegistry. So there is no durable user or admin rule set over typed targets, no ask-…",
+   "evidence": [
+    "apps/Model Plane/go/services/capability-core/internal/policy/engine.go:23-60",
+    "apps/Model Plane/go/services/capability-core/internal/policy/engine.go:97-227",
+    "apps/Model Plane/proto/model_plane/v1/capabilities.proto:123-153"
+   ],
+   "reuse": [
+    "capability-core policy Engine and its signed Allow evidence (execution-core already verifies it and fails closed for unbound tools)",
+    "The execution-core hook matcher and the HookRegistry to hook_context_json wire, as the pattern for delivering rules to a run",
+    "permission::evaluate_call, which already receives tool_input, as the place to derive a server-side target"
+   ],
+   "constraints": "capability-core IsSupportedScope accepts only org and global; agent, run, thread, workspace and user scopes are rejected until trusted identity bindings exist, so thread, user and Space rules cannot be evaluated in EvaluatePolicy yet. Owner-plane effects and …",
+   "approachAdjustment": "First cut: add a server-derived typed target to EvaluatePolicyRequest (proto change in Go and Rust) and a durable rule table in capability-core (not the in-memory hook registry), org scope only, admin-authored and audited, resolved strictest-wins. Thread, user and Space \"don't ask again\" rules wait…",
+   "verdict": "reword",
+   "verdictReason": "Editable rules are genuinely absent (the Space approval panel and the chat design doc both record that no standing answer exists), but the proposed Space, user and thread scopes are not evaluable by capability-core toda…",
+   "effort": "L"
+  },
+  "approachOriginal": "capability-core: rules table keyed by capability id plus target pattern with strictest-wins resolution in Go; execution-core passes the target (domain, recipient, path) in EvaluatePolicy and surfaces the matched rule and reason on denials and cards; SPA Rules settings page (reusing R-t3-11-02 scoped grants as the producer of rules). Optional cel-go rules per org inside EvaluatePolicy. MCP gate after capability-core …",
+  "planeOwner": "Model Plane",
+  "dependencies": [
+   "F-t3-006",
+   "F-t3-032"
+  ],
+  "risks": "Wildcard allows can silently widen authority: strictest-wins, audit every rule change and always show scope. Rule errors can lock users out, so validate and dry-run. Under master-ownership-matrix rule 12 an 'allow' rule for a provider write still ne…",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 14,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "claude-hermes-deepseek.md section 13.3 records editable don't-ask-again rules as an open item; no scheduled task found"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-075",
+  "title": "Privacy by construction and a closed telemetry contract: user-content newtypes, allow-list scrubbing of telemetry, then org analytics and customer-owned telemetry export",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 7,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Introduce a UserContent (Redacted) newtype in mp-contracts so prompts, messages, tool results and memory cannot be logged or serialised except through an explicit privacy context carrying ZDR posture, add allow-list sanitising of telemetry names and labels, define a content-free telemetry contract (allowed event names, closed enums, buckets), and only then extend Insights with agent-run outcome analytics and customer export.",
+  "whyItMatters": "Verevon's ZDR resolver and hash-only security events are strong; type-level wrappers (Cursor) and allow-list scrubbing (Claude) would make leaks a compile error instead of a review finding. Org analytics is common (5 of 12) but lower urgency.",
+  "reference": {
+   "bestSource": "Cursor (privacy-typed fields); Claude desktop app (allow-list telemetry scrubbing) ; claude",
+   "others": [
+    "Antigravity",
+    "web-claudeai (wca-089 export and analytics)",
+    "manus (mau-086 metadata-only streams with optional full-payload tiers)",
+    "cursor (cloud agent run lists and analytics)",
+    "web-chatgpt (conversational personal analytics, workspace exports)",
+    "hermes (hel-081 closed enums and count buckets, opt-in, recorder never raises)",
+    "codexagent",
+    "deepseek"
+   ],
+   "prevalence": "R-t3-13-09: C-017: 1 of 12 (unique). C-018: 3 of 12 (differentiator) | R-t3-10-09: Customer telemetry export 5 of 12 (common); workspace analytics 5 of 12 (common); closed-vocabulary telemetry 1 of 12 (unique)",
+   "mechanism": "Cursor marks user content in proto field options and wraps it in a RedactedString that refuses to serialize into logs unless privacy mode allows, with content-addressed AES-GCM blobs behind it. Claude's org policy holds the endpoint, protocol, headers (or a headers-helper script), resource attributes, trace toggle and content-capture categories (user prompts, assistant responses, tool details, tool content, raw API …"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "No UserContent or Redacted newtype exists (the only analogue is RedactedArgv, a plain struct with public fields at sandbox_manager_client.rs:98), mp-telemetry has no field or label allow-list (a JSON fmt layer plus an OTLP trace exporter read from env), and scrub.rs is a regex deny-list applied at the persistence boundary rather than at log or metric boundaries. gateway_metrics.rs labels every request counter and histogram with the raw URI path …",
+   "evidence": [
+    "apps/Model Plane/rust/crates/mp-telemetry/src/lib.rs:1-75",
+    "apps/Model Plane/rust/services/execution-core/src/scrub.rs:1-60",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_manager_client.rs:93-101"
+   ],
+   "reuse": [
+    "mp-telemetry::init as the single place to add a tracing field allow-list layer for every Rust service",
+    "mp_contracts::retention resolve_turn and its golden matrix as the privacy-context source",
+    "security_events.rs hash-only envelope as the content-free event precedent"
+   ],
+   "constraints": "ZDR must propagate: any telemetry export or run analytics must be content-free and carry the ZDR posture, and a customer export is a new egress path that needs a Control Plane-owned org setting with explicit consent and audit rather than a Model Plane env var…",
+   "approachAdjustment": "Reorder: (1) change gateway_metrics.rs to label by matched route instead of the raw path and add a tracing field allow-list layer in mp-telemetry::init (S to M, immediate protection across all Rust services); (2) write the content-free telemetry contract as data (allowed event names, closed enums, …",
+   "verdict": "reword",
+   "verdictReason": "Partial stands. The real, cheap gap is the missing allow-list in mp-telemetry and the raw-path metric label, and usage analytics with CSV export already exist; a single-line grep of tracing macros for prompt, content, q…",
+   "effort": "L"
+  },
+  "approachOriginal": "Newtype and sanitizer first (M), contract next, analytics last (XL).",
+  "planeOwner": "Model Plane (mp-contracts, mp-telemetry) with Control Plane (analytics, export)",
+  "dependencies": [
+   "F-t3-067",
+   "F-t3-004"
+  ],
+  "risks": "Refactoring cost across crates; export creates a new egress path.",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 22,
+   "DOC": 5,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-076",
+  "title": "Changed-files card per turn and a review gate before workspace promotion (accept or reject by file or hunk, with feedback to the agent)",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 8,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "At the end of each agent turn, diff the leased workspace against its baseline and show a compact changed-files card with line stats; hold the overlay as pending and let the owner accept or reject per file (later per hunk) with a written reason sent back to the run as steering, before PromoteWorkspace runs.",
+  "whyItMatters": "Review before promotion is table-stakes among coding tools (5 of 9) and useful for document workspaces too, but Verevon is not an IDE and agents barely edit workspace files until F-t3-030 lands, so this follows demand.",
+  "reference": {
+   "bestSource": "T3 Code (changed-files section with auto-expand thresholds, single-child directory chain collapse, aggregated stats, per-turn persisted expansion) ; Antigravity (accept/reject with FILE|HUNK|ALL scope, written_feedback returned to the trajectory, STALE and CLEARED states)",
+   "others": [
+    "DeepSeek harness (turn-start vs turn-end snapshots; edit replay)",
+    "T3 Code (panel scope turn | branch | working tree, persisted per thread, stacked or split)",
+    "Cursor",
+    "Claude desktop",
+    "ChatGPT web"
+   ],
+   "prevalence": "R-t3-07-03: 2 of 9 sources; differentiator | R-t3-07-04: 5 of 9 sources; table-stakes",
+   "mechanism": "Snapshot content hashes per path at turn start; Agent edits land in a pending layer instead of the durable copy."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "workspace_hydrate::diff_and_upload (workspace_hydrate.rs:102) returns ChangedFile with base_hash but runs once at lease release (sandbox_lease.rs:495-540) and feeds SnapshotSandbox, which upserts a per-run overlay (server.go:204-250); nothing surfaces it to the user, and no caller invokes PromoteWorkspace, so overlays are never merged into the Space today. sandbox-manager's workspace store exposes only GetManifest, UpsertOverlay and a whole-over…",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:35-66",
+    "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:102-125",
+    "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:176-198"
+   ],
+   "reuse": [
+    "diff_and_upload and ChangedFile{base_hash} as the per-turn diff producer",
+    "the overlay versus Space-row split and the CAS compare-and-swap Promote (conflicting_paths) as the pending layer and merge",
+    "SnapshotSandbox changed_files for recording the overlay"
+   ],
+   "constraints": "The overlay and Space rows are sandbox-manager data, so the gateway must reach them through a model-gateway or sandbox-manager route under a Space decision, never by direct DB access, and accept or reject authority must come from the Space member decision, no…",
+   "approachAdjustment": "Reorder: step 0 is deciding who calls PromoteWorkspace (today nobody does); a review gate is a variant of that call, not an add-on. Add sandbox-manager RPCs to list a lease's overlay, discard paths and promote selected paths, keep the overlay as the pending layer (it already is one), exclude the pr…",
+   "verdict": "reword",
+   "verdictReason": "Partial is right and the primitives are real, but the item omits that the promote step is unwired and that per-file accept or reject needs new sandbox-manager APIs; reword around wiring promote first and raise effort to…",
+   "effort": "L"
+  },
+  "approachOriginal": "Reuse workspace_hydrate::diff_and_upload per turn; Antigravity's FILE/HUNK/ALL scope.",
+  "planeOwner": "Model Plane (sandbox-manager, workspace) with Frontend Plane (card, review UI)",
+  "dependencies": [
+   "F-t3-030",
+   "F-t3-031"
+  ],
+  "risks": "Promote/reject semantics with concurrent runs; stale reviews.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 13,
+   "DOC": 2,
+   "INF": 3
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-077",
+  "title": "One action-registry-driven command surface: palette, slash commands, shortcut sheet and safe double-Escape stop",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 9,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Build a Solid command palette (Ctrl/Cmd+K) over the existing typed action registry, executing only low-risk reversible actions directly and opening the normal confirm dialog for the rest, with typed pickers for threads, projects and files and a content mode once server-side chat search lands. Move the fixed chat shortcuts into a declarative {command, key, when} table that renders a searchable Ctrl+/ sheet, add a double-Escape stop validated agai…",
+  "whyItMatters": "Power users and enterprise admins move faster, and the registry already carries zod I/O, owner plane, risk and reversibility, so palette actions are authority-checked for free. A safe keyboard stop for an agent run is also a trust feature.",
+  "reference": {
+   "bestSource": "T3 Code (one palette reducer for commands, threads with content snippets, files and content search, with mutually exclusive modes; VS Code-style when-clauses, a key recorder and conflict flags) plus DeepSeek (searchable Mod+/ reference and a double-Escape stop bound to the live turn)",
+   "others": [
+    "Claude desktop (recent-item switcher, usage ranking)",
+    "Antigravity",
+    "Codex agent",
+    "ChatGPT web"
+   ],
+   "prevalence": "Palette: 4 of 12; keyboard-first and shortcuts: 6 of 12; slash commands: 3 of 12 (common to differentiator).",
+   "mechanism": "A palette state machine reduceCommandPaletteUiState(mode: command|files|content) where re-pressing the shortcut toggles closed and modes never stack; items {kind: action|submenu, searchTerms, threadContentMatch}. A declarative keybinding table {command, key, when} with per-OS overrides and a context-key evaluator. Stop requires two Escapes within a short window, each validated against {sessionId, turn, generation, f…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "No palette exists (Ctrl/Cmd+K and bare '/' open global search, and Escape only closes shell overlays), chat has four fixed shortcuts in matchChatShortcut with no table, sheet, rebinding or double-Escape stop, and the stop path (cancelRun in use-chat-controller) has no keyboard binding in either file. A typed slash catalog does exist and the chat page does render the same DashboardComposer (ComposerCommand with aliases, argument hints, built-ins …",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:118-133",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:8-34",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:80-114"
+   ],
+   "reuse": [
+    "action-registry.ts descriptors (ownerPlane, risk, requiresApproval, reversible, zod schemas) and the gateway /api/v1/actions/catalog route",
+    "ActionCommand.tsx preview-then-execute flow (previewAction/executeAction, approval-gated vs direct-run badge) as the palette's confirm step",
+    "use-chat-shortcuts.ts matchChatShortcut as the seed for a declarative shortcut table"
+   ],
+   "constraints": "Frontend Plane only, but the palette must never bypass approval gates: run through previewAction and executeAction and honour requiresApproval and risk. Escape is already consumed by CoreNavbar closeShellOverlays, ChatPage panel close and menu-local handlers,…",
+   "approachAdjustment": "Replace 'verify the chat-page composer shares the slash catalog' with the confirmed fact that it does (ChatPage renders DashboardComposer). Start the palette with navigation plus a curated allowlist of parameterless, low-risk, reversible registry actions, because most registry actions need typed in…",
+   "verdict": "reword",
+   "verdictReason": "Partial is correct; the open question about the chat composer is resolved and the plan-ownership conflict on DashboardComposer commands must be added.",
+   "effort": "M"
+  },
+  "approachOriginal": "Frontend Plane: (1) extract a declarative shortcut table from use-chat-shortcuts.ts and render the Ctrl+/ sheet from it (task I1), testing nb-NO layouts for AltGr collisions; (2) add the double-Escape stop wired to the run id and stream generation; (3) build the palette as a Solid overlay over action-registry.ts, filtering by risk metadata so only low-risk reversible actions run directly; (4) lift the DashboardCompo…",
+  "planeOwner": "Frontend Plane",
+  "dependencies": [
+   "F-t3-012",
+   "F-t3-025"
+  ],
+  "risks": "The palette must not become a back door around approval gates, so reuse registry risk and reversibility metadata. Bare \"/\" already opens search outside the composer, so pick one meaning per context. Needs verification that the chat-page composer sha…",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 14,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Shortcut sheet is task I1 (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:215), full-text chat search is I12 (:222) and user slash command templates are I13 (:223). The palette itself and the double-Escape stop were not found in the plan."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-078",
+  "title": "Feedback surfaces and limit notices: shell toasts, composer banners, connection pill and role-aware limit messages",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 10,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Add a shell-level toast manager that outlives the panel that triggered it, a prioritised notice stack docked above the composer, and a connection pill driven by the chat stream state with hysteresis so healthy operation stays silent. Map the typed refusal codes and gateway 429s to inline notices that state the limit, the current value, the reset time and a role-aware action (member: ask your admin; owner: change plan or quota).",
+  "whyItMatters": "Verevon spans many planes that fail independently, so calm, specific failure and limit feedback is a trust signal for an enterprise product. The typed refusal catalogue already exists, so the missing piece is the presentation layer.",
+  "reference": {
+   "bestSource": "T3 Code (thread-scoped stacked toasts with expandable detail and copy-for-errors, composer banner stack) plus DeepSeek (toast vs in-place notice rule; connection pill with minimum-visible and recovered hold times) for feedback; Manus and Claude.ai (inline limit messages with reset, wait, upgrade or credits) for limits",
+   "others": [
+    "Claude desktop",
+    "ChatGPT web",
+    "Perplexity web"
+   ],
+   "prevalence": "Feedback surfaces: 4 of 12; limit presentation: 4 of 12 (both common).",
+   "mechanism": "One toast manager {threadRef, severity, detail, actions, copyable}; a composer banner stack with priority ordering; a connection indicator fed by the SSE/fetch layer that shows Reconnecting only after a short delay and holds Connected for about 2 s before hiding (DeepSeek, DOC); failed operations keep user data in place. Limits arrive as typed errors {limitKind, current, max, resetAt, actions[]} and map to inline no…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Chat already maps typed stream failures (subscription usage limit with reset time, rate_limited, reauth, ZDR refusal codes) to inline notices with a retry, wait or reconnect action in chat-normalizers streamFailurePresentation and ChatMessages, and chat-client resumes dropped streams with Last-Event-ID. Missing: any shell toast primitive (src/shared/ui has none; only a search-panel toast style exists), any connection pill (the only stream-level …",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts:255-300",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts:395-470",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts:562-574"
+   ],
+   "reuse": [
+    "streamFailurePresentation and StreamFailureAction (chat-normalizers.ts, chat-types.ts) as the typed refusal-to-notice mapper",
+    "ChatMessages verevon-chat-error-notice for inline notices",
+    "shared/i18n/errors.ts code-to-message table (includes budget_exceeded and budget_unavailable)"
+   ],
+   "constraints": "Frontend Plane presentation only; Model Plane and Control Plane already own the refusal codes and quotas. The budget_exceeded 402 body carries current_cost_usd and current_tokens (org-level spend), so a member-facing notice must show only the message and an a…",
+   "approachAdjustment": "Narrow the item: drop 'map refusal codes to notices', which exists for chat, and keep (1) a shell toast manager and notice primitive in src/shared/ui, (2) a ConnectionPill fed from the stream and resume state in use-chat-controller, (3) role-aware wording for budget_exceeded and 429 in chat using t…",
+   "verdict": "reword",
+   "verdictReason": "The feedback and limit-presentation gaps are real but smaller than stated; the item undersells the existing typed notices and misses the member-versus-admin spend exposure in the 402 body.",
+   "effort": "S"
+  },
+  "approachOriginal": "Frontend Plane: add a toast manager and notice primitive in src/shared/ui, a ComposerNoticeStack in the chat composer, and a ConnectionPill fed by the chat-client stream state with an 800 ms minimum-visible and 2 s recovered hold. Map refusal codes (mp-contracts, model-gateway subscription_failure) and 429 responses to localised notices with role-aware actions. Model Plane cost-core exposes a per-run and per-month s…",
+  "planeOwner": "Frontend Plane",
+  "dependencies": [
+   "F-t3-066"
+  ],
+  "risks": "Do not expose org spend to non-admin members. Avoid over-notifying: healthy stays silent. Needs verification of how non-chat pages surface gateway errors today and whether a toast primitive already exists under src/shared/ui.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 7,
+   "DOC": 7,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-079",
+  "title": "Typed feature-flag and settings registry served by Control Plane, with kill switches and an agent-access class",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 11,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Replace the sprawl of per-crate environment flags with one typed registry (name, stage, default, owner, kill switch, agentAccess excluded|read|write) whose values are evaluated per org by Control Plane, cached in each service with a TTL and served to the SPA in the BFF boot payload. Fold the fragmented composer, org and profile settings into the same schema so one source feeds the settings UI and any future agent settings tool.",
+  "whyItMatters": "Verevon has many built-but-dark features (Do on subscription, hooks, MCP dispatch, fine-tuning); today turning one on or off needs a redeploy and there is no per-org staging or record of what is live. An agent-access class is required before the agent can be given a settings tool.",
+  "reference": {
+   "bestSource": "Claude desktop app",
+   "others": [
+    "Codex (about 170 staged features)",
+    "Antigravity",
+    "Cursor",
+    "DeepSeek harness (validate, persist, hot-apply)"
+   ],
+   "prevalence": "C-019: 4 of 12 (common). C-020: 5 of 12 (common)",
+   "mechanism": "Flags: layered sources (static map, remote refresh, disk cache, fallback), exposure events, and staleness windows that disable security-sensitive features when flags are stale. Settings: a zod schema where each key carries scope, default and agent access (excluded, read, write); security-relevant keys are excluded from the agent's own settings tool, main-only keys cannot be set from the renderer, and grant maps can …"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Per-org entitlements already exist in Control Plane (org-core org_entitlements table seeded with default feature.* keys, GET /organizations/:id/entitlements, proxied by the gateway and read by the SPA for the ZDR entitlement check) and billing-core keeps per-account feature_flags and entitlements that its feature check evaluates, but there is no typed registry (stage, owner, kill switch, agentAccess), no operator or admin write route for entitle…",
+   "evidence": [
+    "apps/Control Plane/org-core/internal/org/types.go:262-280",
+    "apps/Control Plane/org-core/migrations/001_init.up.sql:15-20",
+    "apps/Control Plane/org-core/internal/http/server.go:95"
+   ],
+   "reuse": [
+    "org-core org_entitlements (per-org key and enabled), its GET route, the gateway /api/v1/orgs/{id}/entitlements proxy and the SPA organization-client",
+    "billing-core Account.Entitlements / FeatureFlags and the plan-driven refresh as the entitlement seed",
+    "org_quota.rs (service-token derivation per org, call pattern into org-core) as the template for a Model Plane flag client; its fail-open outage behaviour must not be copied for security gates"
+   ],
+   "constraints": "Control Plane owns entitlements, quotas and billing, so extend org-core's entitlement store (billing-core stays the plan-driven seed) rather than create a second Control registry; registry definitions may live in mp-contracts but evaluation is per org through…",
+   "approachAdjustment": "Start from org-core entitlements: add an operator/admin write route and stage/owner metadata, then add a small Model Plane client modelled on org_quota.rs with a TTL cache, and migrate only flags with a real per-org use (hooks, MCP dispatch, Do-on-subscription staging, fine-tuning). Leave deploymen…",
+   "verdict": "reword",
+   "verdictReason": "The claim of no per-org evaluation and no Control-side flag store is wrong for Control Plane and the SPA (org entitlements and plan feature flags exist) and right for Model Plane; reword as extending org-core entitlemen…",
+   "effort": "M"
+  },
+  "approachOriginal": "Define a flag and settings schema crate in mp-contracts (name, stage dev|beta|stable|deprecated, default, owner, scope, agentAccess); Control Plane org-core serves per-org values (billing-core plan feature_flags can seed entitlement-driven flags); each service caches with TTL and fails closed for security gates when stale; the BFF boot payload exposes the SPA-visible subset; link flag state to the capability promoti…",
+  "planeOwner": "Control Plane (registry), consumed by all planes",
+  "dependencies": [
+   "F-t3-039"
+  ],
+  "risks": "Flag debt; a flag path that widens ZDR or authority would defeat the posture model; migration of existing settings rows.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 16,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-080",
+  "title": "Library of generated and uploaded files across chats, with org publishing built on Data Plane documents",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 12,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Register generated files and promoted artifacts (non-ZDR) as Data Plane v2 documents with origin_thread metadata, and build the library as a filtered document view with search, type grouping and favourites instead of a new store. 'Publish' is then 'save the artifact as a document and share it through the existing resource_grants and Application Plane collaboration', not a parallel publishing platform.",
+  "whyItMatters": "Users want to find 'that report Verevon made last week' without hunting threads, and agentic products that produce deliverables converge on a library. Reusing Data Plane documents avoids duplicate storage and keeps sharing under existing grants.",
+  "reference": {
+   "bestSource": "Manus (SRC) for the library; Claude desktop (SRC) for private-by-default published artifacts with roles",
+   "others": [
+    "ChatGPT (DOC)",
+    "Manus web (DOC)",
+    "Perplexity (DOC)"
+   ],
+   "prevalence": "3 of 12 for the library (differentiator) and 3 of 12 for publishing (differentiator)",
+   "mechanism": "A server file index keyed by owner with type, stage (process versus product), origin session, versions and share state; a library page with filters and batch download; storage quotas and recently-deleted restore (ChatGPT, DOC). Publishing: an artifact store with versions and an ACL (org, people, groups, email, public link; view, comment, edit), comments anchored to spots and @assistant comments routed to a watching …"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "No cross-chat library exists: the Reports and Findings pages read the local transcript cache and a title regex (ChatUtilityPage), the artifact panel only exports Word, Excel, PowerPoint and PDF, and artifacts persist as per-thread message metadata in session-core. The document-backed pieces exist but are unwired: POST /api/v1/chat/documents and /api/v1/knowledge/documents create Data Plane documents (private by default for end users), the Knowle…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatUtilityPage.tsx:49-70",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:250-258",
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-46"
+   ],
+   "reuse": [
+    "gateway POST /api/v1/knowledge/documents and /api/v1/chat/documents (proxy to documents-api /v1/documents)",
+    "Knowledge page document list plus ShareDialog and shares.rs over user-core resource_grants",
+    "documents-api-go visibility default (private for end users) and the type filter on GET /v1/documents"
+   ],
+   "constraints": "Data Plane v2 owns documents and Control Plane owns grants, so 'publish' must stay 'save as document then share through resource_grants', never a parallel store or public link by default. The current chat-document upload route hard-codes zdr_classification 'i…",
+   "approachAdjustment": "Implement 'Save as document' in the gateway on the existing knowledge document create (not workspace_promote.rs, which is sandbox-only and has no caller), with a dedicated type value such as chat_artifact plus source and metadata carrying thread id, artifact id and version, so the existing type fil…",
+   "verdict": "reword",
+   "verdictReason": "Status is partial rather than absent (document create, listing and sharing exist); the approach holds but must add the text-only limit, the ZDR gate on the save route and the type-based filter.",
+   "effort": "M"
+  },
+  "approachOriginal": "After R-t3-01-04, add a 'Save as document' action that creates a Data Plane v2 document with origin_thread metadata and reuses shares.rs and Control Plane grants for visibility. The library page is a filtered document view in the SPA. Comments and @assistant routing, if wanted, go through Application Plane collaboration rather than a new runtime. No durable library under ZDR.",
+  "planeOwner": "Data Plane v2 (documents), Frontend Plane (library view), Control Plane (grants)",
+  "dependencies": [
+   "F-t3-031"
+  ],
+  "risks": "Duplicated storage between session artifacts and documents; retention policy; public links conflict with ZDR and org data policies, so do not offer them by default.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-081",
+  "title": "Teach mode: record a user's hosted-browser workflow and distil it into a reviewed, replayable skill",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 13,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Record the steps a user performs in a Quarry-hosted browser session (including takeover sessions) as step receipts, have a Model Plane run draft a parameterised routine, send it through the skill proposal path for review, and replay it with per-step confirmation under the same evidence trail. Desktop recording stays out of scope.",
+  "whyItMatters": "Learning by demonstration (Claude teach mode, Manus) is a differentiator (3 of 12) that fits Verevon's receipt machinery, but it depends on the browser, takeover and learning-governance work first.",
+  "reference": {
+   "bestSource": "Claude (teach mode with a guided overlay plus watch-and-record with voiceover); ChatGPT's opt-in Computer History is a related activity memory (DOC) ; manus",
+   "others": [
+    "web ChatGPT",
+    "claude",
+    "cursor"
+   ],
+   "prevalence": "R-t3-06-12: 2 of 12 sources (differentiator) | R-t3-08-11: 3 of 12 sources (differentiator).",
+   "mechanism": "Record steps (events, frames, narration), have the model summarise them into a parameterised routine or skill, then replay it with confirmation. Manus ships a recorder addon sharing an MCP server with computer use: it captures action events, periodic screenshots and an optional voice transcript, uploads a recording bundle, a task summarises it into steps and frames and drafts the skill file, and the user reviews it …"
+  },
+  "verevon": {
+   "status": "planned",
+   "exactGap": "No demonstration recorder or recording-to-skill path exists in Quarry or Model Plane code, but substrate does: human takeover actions arrive over the live-view websocket and run through the same execute_ws_action path as agent actions, which appends step receipts with actor id (skipped under ZDR), and a RUN_COMPLETED learning loop writes transcript-derived skills into session-core. That loop persists skills with enabled=true and origin backgroun…",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:1-22",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:85-92",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1095-1104"
+   ],
+   "reuse": [
+    "Quarry step receipts and ReceiptBuilder (append-only, actor-tagged) as the recording substrate",
+    "the live-view websocket action path (execute_ws_action) and BrowserControlMode::HumanTakeover state",
+    "Quarry plan section 42 procedure compiler and rollout states for replay"
+   ],
+   "constraints": "Quarry owns recording, procedure compilation and execution; the Model proposes browser actions and Quarry executes or rejects them, so a taught skill should reference a Quarry procedure id and parameters and replay through Quarry with per-step confirmation, n…",
+   "approachAdjustment": "Re-anchor the item on Quarry's planned section 42 (recorded browser procedure and compiler) rather than a new Model Plane recorder: Quarry records and compiles a candidate procedure from takeover receipts, Model Plane drafts the parameterised description and routes it through the F-t3-007 proposal …",
+   "verdict": "reword",
+   "verdictReason": "Planned, not partial: the feature itself is docs-only but the substrate and an existing Quarry plan change where it should be built, and two safety preconditions (ZDR, typed-text redaction) are missing from the item.",
+   "effort": "XL"
+  },
+  "approachOriginal": "Shortlisted as #3 in the cowork research; build after F-t3-008, F-t3-026 and F-t3-007.",
+  "planeOwner": "Ingestion Plane (Quarry traces) with Model Plane (distillation, skills)",
+  "dependencies": [
+   "F-t3-008",
+   "F-t3-026",
+   "F-t3-007"
+  ],
+  "risks": "Recorded sessions contain personal data and credentials typed by the human; the trace must exclude them.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 2,
+   "INF": 2
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-06-12: apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md section 2.3 (teach-by-demonstration, shortlist #3, L)"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-082",
+  "title": "Upgrade voice input: streaming dictation with a cleanup pass first, local speech-to-text for ZDR later, realtime delegation only if un-parked",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 14,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Phase 1: add a streaming speech endpoint in model-gateway (a proxied WebSocket, so provider keys never reach the browser and cost stays metered), capture with an AudioWorklet at 16 kHz PCM in about 40 ms frames, and one dictation state machine (idle, starting, listening, finishing, with a length cap) shared by the composer and voice mode, with an optional cleanup pass through the governed loop. Phase 2 (optional): local WASM speech-to-text in a …",
+  "whyItMatters": "Dictation is table-stakes (6 of 11 sources) and exists, but one governed call per utterance feels slow and has no live text, and users on ZDR or in temporary chat have no voice input at all. A delegation-only realtime front end answers the governance concern behind the owner's park decision.",
+  "reference": {
+   "bestSource": "Claude desktop (SRC) and Antigravity (SRC) for streaming dictation; DeepSeek harness (SRC) for local speech-to-text; Codex (SRC) for governed realtime delegation",
+   "others": [
+    "Cursor (SRC)",
+    "Manus (SRC)",
+    "ChatGPT web (DOC, Live voice UX bar)"
+   ],
+   "prevalence": "Dictation: 6 of 11 (5 distinct vendors), table-stakes. Realtime delegation: 2 of 11, differentiator. On-device speech-to-text: 1 of 11, unique",
+   "mechanism": "Dictation: an AudioWorklet downsamples to 16 kHz PCM and posts about 40 ms frames; the page asks the backend for a short-lived speech credential or uses a backend WebSocket proxy; partial and final events return; a finishing state flushes; an optional cheap-model cleanup rewrites the final transcript using conversation context; a hard cap bounds session length. Local: lazy-download a quantised model (about 240 MB IN…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "The cleanup pass is already shipped: /api/v1/ai/dictate runs speech-to-text then a fail-soft LLM cleanup in model-gateway ai_dictate (http_routes.rs:3960), and the composer and voice dialog both use it, so the item's \"no cleanup pass\" is wrong. Missing: streaming or partial transcripts (capture is MediaRecorder per utterance and STT providers are REST-only), AudioWorklet capture, local speech-to-text, and any browser realtime client (the realtim…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts:34-100",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs:30-110",
+    "apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts:1-120"
+   ],
+   "reuse": [
+    "ai_dictate cleanup stage and DICTATE_SYSTEM_PROMPT (keep it as the finishing step after streamed partials)",
+    "VoicePhase state machine and voice-recorder level meter and silence auto-stop",
+    "inference-core reject_unattested_zdr_modality, which already refuses speech under ZDR"
+   ],
+   "constraints": "The browser-speech ESLint guard forbids SpeechRecognition and any vendor recogniser so audio always goes through Verevon provider and audit controls. A new streaming route must stay proxied through the Rust gateway and model-gateway so cost is metered and ZDR…",
+   "approachAdjustment": "Drop \"cleanup pass first\" from the item and rename it as streaming partials plus a final cleanup. Phase 1 needs a new streaming STT capability in inference-core (providers are REST only today) before the proxy and AudioWorklet work can matter. Keep local WASM speech-to-text as the only route to ZDR…",
+   "verdict": "reword",
+   "verdictReason": "Dictation and its cleanup pass already exist, and the item's gap text says otherwise; the remaining value is streaming partials, ZDR-capable local speech-to-text and (if un-parked) realtime delegation.",
+   "effort": "L"
+  },
+  "approachOriginal": "Model Plane: a streaming speech route in model-gateway that proxies the provider WebSocket (cost and audit metered, ZDR refusal unchanged) or mints a short-lived scoped token; cleanup through the normal governed loop. Frontend Plane: AudioWorklet capture and the shared state machine in the composer and voice dialog; for phase 2 a worker running whisper.cpp or sherpa-onnx WASM with model files served from Verevon's C…",
+  "planeOwner": "Model Plane (model-gateway streaming proxy, realtime broker) with Frontend Plane (capture, state machine, local speech-to-text)",
+  "dependencies": [],
+  "risks": "Direct browser-to-provider streaming would bypass gateway metering unless proxied; ZDR must keep refusing server audio; Norwegian accuracy of small local models is unproven; realtime adds per-minute cost, EU-region latency and accidental spoken cons…",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 8,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-083",
+  "title": "Run admission controls: credit-aware pause and resume, an org-level agent pause switch and clamped per-turn overrides",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 15,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Add a Control-plane org flag (\"agents paused\") checked at run, schedule and trigger admission and again at each continuation, as an incident-response kill switch (drain.rs only handles redeploys today). Add a paused_for_credit run status when the cost reservation fails mid-run (persist state, resume on a billing event, and show queue position or a cheaper tier at admission). Add a typed per-turn override envelope (model, effort, approval posture…",
+  "whyItMatters": "Long agent runs, goals and schedules make admission control matter: enterprise admins need a fast stop, and a run should pause rather than die at a credit boundary. Per-turn overrides let users move a hard step to a stronger model without losing context. All three are cheap once runs are resumable.",
+  "reference": {
+   "bestSource": "Hermes (install-wide pause through a fail-safe sentinel) for the kill switch; Perplexity (pauses rather than cancels on credit exhaustion) for credit pause; Codex (typed 27-field TurnStartParams) for overrides",
+   "others": [
+    "Manus (per-tier wait estimates, idleness reporting and maintenance fence)",
+    "Claude Desktop",
+    "web Manus"
+   ],
+   "prevalence": "emergency stop 2 of 12; credit-aware admission 2 of 12 (differentiator); per-turn overrides 4 of 12 (common)",
+   "mechanism": "A global or org pause flag is checked at admission for runs, schedules and triggers. Before each round check the cost reservation; on shortfall set paused_for_credit and persist state, and a billing event resumes the run. A typed TurnStart{model, effort, approval_policy, ...} is validated server-side and clamped per surface and plan."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "What exists: drain.rs (graceful shutdown on redeploy only), a user pause (PauseRun/ResumeRun, an in-memory RunStatus::Paused honoured only by the browser-agent loop), a durable HITL pause (agent.rs pause_for_approval creates a session-core approval with a continuation descriptor and sets AwaitingApproval) whose cold resume through approval_delivery_worker.rs covers only three idempotent action kinds, admission-time budget checks (org_quota.rs re…",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-30",
+    "apps/Model Plane/rust/services/model-gateway/src/budget.rs:41-48",
+    "apps/Model Plane/rust/services/model-gateway/src/budget.rs:82-160"
+   ],
+   "reuse": [
+    "durable HITL pause: agent.rs pause_for_approval (session-core CreateApproval with continuation descriptor, AwaitingApproval), ResumeRun with validate_granted_approval, and approval_delivery_worker.rs as the pattern for a credit-wait pause that a billing event can grant",
+    "execution-core RunStatus::Paused, StateStore pause/resume_paused and the PauseRun/ResumeRun RPCs (user pause resumes without an approval id)",
+    "budget.rs plus org_quota.rs admission path in sse.rs, which already runs once per turn before inference"
+   ],
+   "constraints": "Control Plane owns entitlements and org policy, so the pause flag must be a Control-side org setting with Model Plane only reading it at admission and at each continuation; the Control-decision path for effectful and scheduled steps is the natural fail-closed…",
+   "approachAdjustment": "Split into three pieces. (1) The org pause switch first: a Control org setting enforced in the gateway admission path next to org_quota, in Control's per-step decision issuance for effects and scheduled steps, and as a gate in the agent loop (only browser_agent polls Paused today). (2) A typed per-…",
+   "verdict": "reword",
+   "verdictReason": "The three asks are genuinely missing, but the item understates what exists (PauseRun/Paused, the durable approval pause, the admission budget check, clamped effort and posture) and misjudges the cost of paused_for_credi…",
+   "effort": "L"
+  },
+  "approachOriginal": "Control Plane org setting plus Model Plane admission. Gateway and capability-core read the org flag at run, schedule and trigger admission; cost-core reservation failure transitions the run to paused_for_credit via the continuation machinery; extend the invoke contract with typed per-turn overrides clamped by Control-plane entitlements.",
+  "planeOwner": "Control Plane (flag, entitlements) with Model Plane (admission)",
+  "dependencies": [
+   "F-t3-002",
+   "F-t3-028"
+  ],
+  "risks": "Billing correctness around pause and resume; entitlement bypass if overrides are not clamped server-side; the policy for an unreadable pause flag (fail open or fail closed) must be an explicit, documented choice.",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 3,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-084",
+  "title": "Per-Space environment specs and prebuilt sandbox images",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 16,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Let a Space or org define a sandbox environment declaratively (base image, setup script, env with secret refs, network policy, named actions) and prebuild it into a content-hashed image that is rebuilt on spec change or on a schedule, so agent sandboxes start fast on a healthy, reproducible base.",
+  "whyItMatters": "Enterprise customers and Spaces can preinstall their tools and connectors, so agent runs skip install time and behave reproducibly. Without it every run pays setup cost or works with a fixed package set.",
+  "reference": {
+   "bestSource": "Claude (cloud environments with setup script, env vars and network policy, vendor or self-hosted) plus Cursor (prebuilt images with recurring rebuilds, build logs and health tracking)",
+   "others": [
+    "Codex",
+    "DeepSeek"
+   ],
+   "prevalence": "4 of 12 sources (common)",
+   "mechanism": "A spec {base_image, setup_script, env (secret refs), network_policy, actions[]} is stored per org or Space; a builder runs it in a fresh VM and snapshots the result as an image with a content hash and logs; sandboxes boot from the latest healthy image; a rebuild runs on spec change or cron."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "There is no per-org or per-Space environment definition, setup script, image build pipeline or health tracking. code_interpreter runs under bubblewrap inside the execution-core container with network hard-set to Disabled (code_interpreter.rs:581) and its package set (numpy, pandas, matplotlib, openpyxl, docx, reportlab, pypdf, pillow, lxml, python-pptx) baked into the execution-core image (execution-core/Dockerfile:41-97). sandbox-manager (Go) i…",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:94-110",
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:570-585",
+    "apps/Model Plane/rust/services/execution-core/Dockerfile:41-97"
+   ],
+   "reuse": [
+    "the execution-core Dockerfile package layer as the seed for curated named runtime profiles",
+    "sandbox-manager workspace store and the CAS client for per-Space files",
+    "capability-core registry and policy for org-level selection of a profile"
+   ],
+   "constraints": "The sandbox has no network and AllowDomains fails closed without an egress proxy (executor.rs:113-180), so a setup script that installs packages or a spec with a network policy cannot run today; secrets by reference need the injection proxy of F-t3-043, which…",
+   "approachAdjustment": "Blocked on the computer or VM substrate (F-t3-009) and the injection proxy (F-t3-043). Until then, offer curated, vendor-built runtime profiles (extra package sets in the execution-core image, selected per org through capability-core), which needs no builder, no customer scripts and no secrets. Kee…",
+   "verdict": "demote",
+   "verdictReason": "Absent and hard-blocked by two prerequisites that do not exist, with no demand evidence and a supply-chain risk; curated runtime profiles deliver most of the value sooner.",
+   "effort": "L"
+  },
+  "approachOriginal": "Model Plane: sandbox-manager (Go) owns the environment spec per Space; image builds run as durable workflows in orchestrator-core (it already hosts Temporal activities); secrets are referenced by id and resolved by the item 7 injection proxy, never baked into images; build logs and health are shown in the Space settings UI.",
+  "planeOwner": "Model Plane (sandbox-manager, orchestrator-core)",
+  "dependencies": [
+   "F-t3-009",
+   "F-t3-043"
+  ],
+  "risks": "Supply-chain risk in setup scripts, image storage cost, and secrets leaking into images.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-085",
+  "title": "Sandbox computer extensions: persistent machine mode, execution-target picker, authenticated dev-server preview",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 17,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Once the sandbox computer exists, add a persistent flag on a lease that keeps its disk (installed tools, services, databases), a device_ref on runs so a task can move between an ephemeral sandbox and a persistent machine, and an authenticated preview URL per listening port that opens in the Quarry hosted browser so the agent can verify what it built.",
+  "whyItMatters": "Teams that automate recurring work with installed software need a machine that survives between runs (and it is a revenue line), and agents that build small apps or dashboards need to preview and verify them. Value is moderate for an AI workspace and depends on item 3.",
+  "reference": {
+   "bestSource": "Manus (always-on Ubuntu, Windows and macOS cloud computers with chosen compute and region; one active-device concept that tasks can move between) plus Claude (preview auto-verify, element selection, port discovery) plus Cursor (port forwarding from cloud VMs into shareable previews)",
+   "others": [
+    "Antigravity",
+    "T3 Code",
+    "web Manus"
+   ],
+   "prevalence": "2 of 12 for persistent computers, 2 of 12 for device switching, 4 of 12 for dev-server preview",
+   "mechanism": "A long-lived VM with a persistent disk and a guest agent, billed monthly, backed up as disk snapshots. Task.device_ref {kind: sandbox | cloud_computer, id} resolves the host through the backend trait; switching rehydrates the workspace and re-runs from the last checkpoint. Preview: detect listening ports, probe HTML, expose through an authenticated proxy shown in the hosted browser surface."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "None of the three proposed pieces exists: there is no persistent machine (leases are per run with a one-hour TTL, and background processes die with their parent and are capped at one hour), no execution-target concept on runs or in the composer, and no dev-server preview (HTML artifacts render only in a sandboxed srcdoc iframe, and the sandbox network namespace is down). The item's premise that files already persist per Space is only partly true…",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:50",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:106-160",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:436-540"
+   ],
+   "reuse": [
+    "S4.2 background processes: process_* tools, ProcessHost, registry rows and the Work-tab processes section (spaces.rs:2517-2580)",
+    "Space-scoped lease plus capability decision (sandbox_lease.rs:106-160)",
+    "CAS workspace hydrate, overlay and Promote (workspace_hydrate.rs, workspace/store.go)"
+   ],
+   "constraints": "Quarry's navigation guard blocks loopback and private targets (navigation.rs:86-140), so agent-side verification through Quarry's hosted browser needs a public, authenticated preview origin admitted by an explicit browser grant, never a relaxed guard; the Mod…",
+   "approachAdjustment": "First wire PromoteWorkspace (owner-gated or review-gated per F-t3-076) so Space files really persist across runs, which covers the common persistence need. Treat the persistent machine and the picker as dependent on F-t3-009 and a billing decision. For preview, start with a human-facing authenticat…",
+   "verdict": "demote",
+   "verdictReason": "All three proposed pieces are absent and gated on F-t3-009, the item itself flags low demand confidence, and its file-persistence premise is overstated; the promote wiring should be pulled forward as a separate item.",
+   "effort": "L"
+  },
+  "approachOriginal": "sandbox-manager: a persistent flag on the item 3 lease that retains the VM disk, billed through cost-core; session-core adds device_ref on runs and the composer gets a picker; sandbox-manager issues an authenticated preview URL per port that Quarry's hosted browser opens (the Model proposes, Quarry executes). Require auth on every preview and apply Space ACLs.",
+  "planeOwner": "Model Plane (sandbox-manager, session-core)",
+  "dependencies": [
+   "F-t3-009",
+   "F-t3-008"
+  ],
+  "risks": "Cost, abuse and data residency for persistent machines; public exposure of previews unless authenticated; partial-state confusion when moving a task mid-flight. Low confidence on demand for the picker.",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 12,
+   "DOC": 5,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-086",
+  "title": "Review as a run: read-only reviewer subagent with strict P0-P3 findings, merged with the deterministic source checks",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 18,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Add a 'review this' run for an artifact revision, a workspace turn diff or attached files. A read-only reviewer subagent returns findings in a validated schema (title, body, priority P0-P3, confidence, location, plus overall correctness) and may report nothing. Deterministic findings from source_validation.rs are merged into the same schema and card, and 'apply fix' sends a finding back as a scoped edit turn.",
+  "whyItMatters": "A trustworthy, located second pass is useful for code, reports and contracts alike, and four of nine references ship a review run. Verevon already has a rare strength here (deterministic checks of numbers, dates, word counts and revision preservation against sources); putting both reviewers behind one findings card makes that strength visible and …",
+  "reference": {
+   "bestSource": "Codex (review/start with four targets, inline or detached delivery, steering disabled during review, strict findings JSON and a 'report only what the author would fix' standard)",
+   "others": [
+    "Claude desktop (best findings-card UX: walkthrough, apply fix, rerun)",
+    "Cursor",
+    "Antigravity"
+   ],
+   "prevalence": "4 of 9 sources; common",
+   "mechanism": "review/start {target, delivery, threadId} spawns a read-only sandboxed reviewer with a target-specific prompt (uncommitted changes, merge-base diff, a commit, or custom instructions). Output is held to a schema {findings[{title, body, confidence_score, priority, code_location}], overall_correctness, overall_confidence_score}; an explicit-only review skill enforces 'no invented findings'. The UI renders a findings ca…"
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No user-invokable review run, located P0-P3 findings schema or findings card exists; the only reviewer is source_validation.rs, an automatic model reviewer (forced review_tool call returning per-segment supported/no_assertions/unsupported verdicts with source-line evidence and receipts) that gates artifact drafting inside model-gateway, with an opt-in proposal rule that is off and unvalidated. The subagent spawn path already passes a SubagentRol…",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:1-3",
+    "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:24",
+    "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:1394-1410"
+   ],
+   "reuse": [
+    "source_validation.rs review_tool schema, receipts and batching (structured forced-tool review with line-cited evidence) as the model for a findings call",
+    "SubagentRole::Reviewer lineage tag (mp-orchestration subagent.rs:19-33; session-core already maps 'reviewer') and run_delegated_child's role parameter",
+    "InvokeRequest.structured_output_schema (gateway.proto:218) for the inline chat path"
+   ],
+   "constraints": "The existing review is labelled fallible semantic evidence, not a factual guarantee or business authority (source_validation.rs:1-3), so the findings UI must keep source-check results and model findings visibly distinct and never present either as authority. …",
+   "approachAdjustment": "Build the first slice on the inline chat path in model-gateway (artifact revision and attachments as targets) with structured_output_schema plus server-side validation, not as an agent-loop subagent: the agent loop does not forward a schema and tool_arguments::validate_arguments ignores nested sche…",
+   "verdict": "reword",
+   "verdictReason": "Absent is correct and nothing substantial exists to drop, but the item mis-describes the existing reviewer as deterministic and assumes fs.* tools and a subagent profile that do not exist; the realistic first slice is a…",
+   "effort": "M"
+  },
+  "approachOriginal": "Model Plane: a review subagent profile with a read-only capability set (fs.read, fs.grep, read_artifact; no edit or process tools) and a findings JSON schema enforced through the structured-output path; drop findings without a location or below a confidence threshold. Targets: artifact revision diff, Space workspace turn diff (R-t3-07-03), attached code or documents. Map deterministic source_validation findings into…",
+  "planeOwner": "Model Plane (model-gateway, execution-core) with Frontend Plane for the card",
+  "dependencies": [
+   "F-t3-030"
+  ],
+  "risks": "False positives erode trust: enforce the 'only what the author would fix' standard, a confidence floor and a reviewer that cannot write. Reviewer cost doubles the work on big diffs, so make it explicit-only and budgeted. Keep deterministic and model…",
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 8,
+   "DOC": 0,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-087",
+  "title": "Multi-file app build and preview: static web bundles first, built output next, screenshots through Quarry",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 19,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Let agents ship a small multi-file web app or dashboard safely. Phase 0: a multi-file static bundle artifact (HTML plus CSS/JS files, no build) rendered in the existing sandboxed iframe. Phase 1: build inside the Space sandbox with a pinned, pre-baked toolchain and serve the dist output from a per-run isolated origin through the Frontend gateway. Phase 2: dev-server ports and authenticated previews, which belong to R-t3-06-10. UI screenshots of …",
+  "whyItMatters": "'Build me a small app or dashboard' is a headline use case for claude.ai, ChatGPT and Manus, and Verevon's agents can only produce single-file HTML. A safe preview extends an existing strength (sandboxed HTML artifacts) to multi-file outputs and closes a visible gap against the references.",
+  "reference": {
+   "bestSource": "Claude desktop (dev-server candidate detection, explanations for cold starts and port conflicts, request throttling, ask-Claude fallback)",
+   "others": [
+    "Manus (checkpoint previews and webdev LSP presets)",
+    "ChatGPT web (preview of built apps, DOC)",
+    "Claude.ai web (artifacts shared between code and chat, DOC)"
+   ],
+   "prevalence": "4 of 9 sources; common",
+   "mechanism": "The workspace declares a start command and port, or the agent detects them, and the sandbox runs it. A reverse proxy exposes the port to a sandboxed iframe on a per-run origin. Checkpoints snapshot the workspace and serve a static build for comparison, and a screenshot tool captures the preview for the model."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Single-file HTML artifacts render in a sandbox=allow-scripts iframe (no same-origin, no-network CSP); ArtifactKind has only code, document, html, spreadsheet, file and image with one text content string capped at 200,000 characters, so there is no multi-file bundle kind. The Space sandbox (process_start, code_interpreter) has no network, runs python or sh only and exposes no port, so there is no build step, no per-run preview origin and no scree…",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:20-70",
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:88-94",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:490-525"
+   ],
+   "reuse": [
+    "ArtifactHtmlPreview iframe and the sandbox-html.ts CSP wrapper",
+    "The artifact version stepper and kind registry in artifacts.rs (add a bundle kind there)",
+    "process_* tools and the space:processes lease for any build run"
+   ],
+   "constraints": "The preview CSP allows only inline script and style plus data: and blob: images and media, so blob: script URLs, external scripts and ES module imports would be blocked: a bundle must be inlined into one srcdoc or the CSP and origin model changed deliberately…",
+   "approachAdjustment": "Phase 0 should inline all bundle files into one srcdoc at render time (still no same-origin and the same CSP) rather than use blob URLs, and should reject module imports between files. Keep phases 1 and 2 behind F-t3-009 and F-t3-045; do not promise a build until a pre-baked toolchain image exists.",
+   "verdict": "keep",
+   "verdictReason": "The multi-file, build and preview parts are absent and the single-file foundation is exactly as described; only the Phase 0 mechanism needs the CSP correction.",
+   "effort": "L"
+  },
+  "approachOriginal": "Phase 0 (INF, no new infrastructure): a bundle artifact kind carrying a files map, composed into one srcdoc (or blob URLs) for the existing sandboxed iframe, with the no-same-origin rule unchanged. Phase 1: execution-core builds the leased workspace with a pinned toolchain from a pre-baked image (R-t3-06-08), since the sandbox cannot install dependencies, then publishes the dist folder to a per-run isolated origin s…",
+  "planeOwner": "Model Plane (execution-core, sandbox-manager) with Frontend Plane gateway for the preview origin",
+  "dependencies": [
+   "F-t3-030",
+   "F-t3-009",
+   "F-t3-045"
+  ],
+  "risks": "Serving untrusted code needs strict per-run origins, a CSP and no cookies; keep allow-same-origin out. ZDR runs must not persist builds beyond the lease. A networkless build only works for projects whose dependencies are vendored or pre-baked, which…",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 4,
+   "DOC": 2,
+   "INF": 2
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-088",
+  "title": "Code edit quality on demand: post-write diagnostics (decision H11) and an optional apply_patch format where a provider benefits",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 20,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "After a code artifact or workspace file is written, run cheap syntax and lint checks in the hermetic sandbox and report only newly introduced errors with one bounded auto-repair; if an edit-success evaluation shows avoidable failures on the Codex route, accept a Codex-style patch as a second fs.edit argument form parsed by the same Rust crate.",
+  "whyItMatters": "Cursor's shadow lints and Codex's grammar-constrained patches matter for coding products; for Verevon (not an IDE) they are conditional optimisations once file tools exist.",
+  "reference": {
+   "bestSource": "Cursor (shadow workspace computing lints for a change without touching the user's files, plus an explicit ReadLints tool with a 10 s timeout) ; Codex (Lark-grammar-constrained freeform apply_patch tool, shell-heredoc interception, line-ending preservation, streaming patch events)",
+   "others": [
+    "Antigravity (auto-fix without a prompt and a verification mode that runs tests and builds)",
+    "Cursor (switches edit tools by model vendor in production: apply_patch for GPT-5 family, Write plus StrReplace for others)"
+   ],
+   "prevalence": "R-t3-07-08: 2 of 9 sources; differentiator | R-t3-07-09: 2 of 9 sources; differentiator",
+   "mechanism": "After each successful edit run the language toolchain on the changed files in the sandbox within a time budget (tsc, eslint, ruff, cargo check or go vet by extension). The tool catalogue builder switches on model family: gpt-5 and codex models register apply_patch as a freeform grammar-constrained tool, other families get write plus str_replace."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No file edit tool, no apply_patch and no post-write code diagnostics exist; the nearest code is lsp.rs (a typed pass-through RPC to an external bridge, disabled when LSP_BRIDGE_URL is unset and not offered to the model as a tool) and post_mutation.rs (which verifies provider writes, not code). create_artifact runs only in the inline model-gateway loop, which has no sandbox, while code_interpreter runs in execution-core, so a diagnostics hook has…",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1-45",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:1428-1438",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs:730-737"
+   ],
+   "reuse": [
+    "code_interpreter hermetic sandbox (no network, read-only rootfs, timeout) for lint or syntax runs on code_interpreter output",
+    "The post_mutation append-one-line-to-tool-output pattern as the way to feed diagnostics back",
+    "lsp.rs request and response contract if a bridge is ever deployed"
+   ],
+   "constraints": "The ChatGPT subscription route does not execute native Codex tools: inference-core encodes tools as a constrained JSON proposal envelope, so a freeform grammar-constrained apply_patch tool cannot be carried by it, and platform OpenAI and Azure calls use Chat …",
+   "approachAdjustment": "Drop the apply_patch half (no edit tool exists and the subscription route cannot carry it). Reduce H11 to an optional syntax or lint line appended to code_interpreter output in execution-core, and only on a concrete user need; do not deploy an LSP bridge.",
+   "verdict": "demote",
+   "verdictReason": "Nothing exists to build on, the plan defers H11 pending a real user need, the product is not an IDE, and the apply_patch half has no carrying route on the subscription provider.",
+   "effort": "S"
+  },
+  "approachOriginal": "Execute H11 instead of an LSP bridge; gate apply_patch on measured need.",
+  "planeOwner": "Model Plane (execution-core)",
+  "dependencies": [
+   "F-t3-030"
+  ],
+  "risks": "Toolchain images grow; second edit format doubles test surface.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 11,
+   "DOC": 2,
+   "INF": 4
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-07-08: Task H11 in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (lines 270, 276, 504): deferred to Wave 6, revisit only on a concrete user need; OD18 default is to skip. Downgraded from the comparator's recommended tier for this reason"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-089",
+  "title": "Use Verevon from other agents and work tools: outward MCP endpoint and channel adapters",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 21,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Host an MCP server over the typed action registry (Streamable HTTP with OAuth) so users can reach Verevon from Claude, ChatGPT or Cursor, and let Quarry consume WebMCP site tools as proposals that the Model Plane may select and Quarry executes. Separately, build Slack, Teams and email entry points as channel adapters in the future Channel Plane, with identity binding, per-channel routing, progress mirrored back and a consent card stating who pos…",
+  "whyItMatters": "It grows usage by meeting users where they already work (channel entry points 5 of 12 sources; outward MCP or WebMCP 3 of 12). It is a later phase because it depends on the action registry being open to agents (item 05) and on a Channel Plane ADR.",
+  "reference": {
+   "bestSource": "Hermes (mcp serve exposes conversations as MCP tools; SRC) plus ChatGPT web (consumes WebMCP site tools whose instructions cannot authorise sensitive actions; DOC) for outward interop; Cursor (Slack, Linear, GitHub and Teams start cloud agents with routing rules and mirrored progress; SRC) with Claude desktop (a session bound to a Slack thread through a disclosure-bearing consent card; SRC) for channels",
+   "others": [
+    "Manus and Manus web (email and IM channels)",
+    "Perplexity web",
+    "ChatGPT web"
+   ],
+   "prevalence": "Channels 5 of 12, common; outward MCP and WebMCP 3 of 12, differentiator",
+   "mechanism": "Outward: an MCP server endpoint (Streamable HTTP, OAuth) exposing selected typed actions and search over the user's workspace; WebMCP: the browser surface lists tools a page registers and offers them to the model under the same policy. Channels: adapters (webhook or events API) -> identity binding (channel user to platform user) -> routing rule -> run creation with the channel as origin -> progress and result posted…"
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "Verevon exposes no outward MCP server: model-gateway and the gateway mcp.rs only manage a registry of consumed servers and an OAuth client for connecting to them (mcp_oauth.rs), the mcp-bridge is consumer-side, and Control Plane has no OAuth authorization server for external agents. No WebMCP code exists, bridge-core's ingress adapters are CLI, VS Code, web and API with a webhook delivery adapter on an in-memory outbox (not Slack, Teams or email…",
+   "evidence": [
+    "Verevon-ai-first-plan.md:44",
+    "Verevon-ai-first-plan.md:114-123",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:322-343"
+   ],
+   "reuse": [
+    "action-registry.ts and the gateway /api/v1/actions/catalog route as the tool source for an MCP server",
+    "agent-tools.ts model-executable metadata (allowedActorTypes, risk, requiresApproval) for gating external callers",
+    "settings.create_api_key (Control Plane user API keys) as an interim credential"
+   ],
+   "constraints": "Frontend Plane gateway is a session-cookie BFF and Control Plane owns identity, so the OAuth authorization server (and PAT or API-key auth for MCP clients) is a Control Plane prerequisite that does not exist. External callers must pass through the same approv…",
+   "approachAdjustment": "Fix the WebMCP direction: the plan's WebMCP bridge is Verevon publishing its own registry to in-browser agents (outward), whereas the item's 'Quarry consumes WebMCP site tools' is a different, unplanned idea with documentation-only evidence, so demote it to a note. Add the missing Control Plane OAu…",
+   "verdict": "reword",
+   "verdictReason": "Absent and already planned as M4, but the WebMCP direction is conflated, the plan path is wrong, and the OAuth authorization-server prerequisite is not stated.",
+   "effort": "XL"
+  },
+  "approachOriginal": "Frontend Plane gateway hosts the MCP endpoint over the typed action registry (item 05), inheriting the same risk metadata, approval gates and witness stream; ZDR must propagate to outward calls. WebMCP discovery lives in Quarry (the Model proposes browser actions; Quarry executes or rejects). Channel adapters wait for the Channel Plane ADR and live in that plane, not in Model Plane; identity binding is Control-owned…",
+  "planeOwner": "Frontend Plane (MCP endpoint) with Ingestion Plane/Quarry (WebMCP) and the future Channel Plane (adapters)",
+  "dependencies": [
+   "F-t3-025",
+   "F-t3-064",
+   "Channel Plane ADR"
+  ],
+  "risks": "External agents acting with user tokens; identity-binding errors post private data to shared channels; ZDR must propagate to outward calls; the WebMCP evidence is DOC and low confidence.",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 5,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Partly: outward MCP server and WebMCP bridge are Phase 4 / M4 of Verevon-ai-first-plan.md (lines 44 and 114-123, after M2); channel adapters are blocked on a Channel Plane ADR (architecture rule 7)."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-090",
+  "title": "Time-based media on demand: transcribe recordings into documents, pull meeting minutes, and expose video generation and understanding",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 22,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Four optional capabilities on one pipeline, to schedule on demand. (1) Audio and video uploads become transcript documents: chunk by silence, transcribe with the existing governed speech-to-text, store a Data Plane document with a back-reference to the media. (2) Meeting minutes from Teams or Zoom transcripts pulled through integration-corev2 with no recording, summarised in the Model Plane, with action items written through governed actions. (3…",
+  "whyItMatters": "Meeting recordings, voice notes and training clips would become searchable knowledge and tasks, and marketing teams ask for video. All four are off the critical chat and agent path, need new providers or connectors, and rest mostly on documentation, so they follow the priority and recommended set.",
+  "reference": {
+   "bestSource": "Perplexity web (DOC) for transcribed audio and video with speakers; ChatGPT Meetings (DOC) for the privacy design (no bot, private by default, audio deleted after notes); Manus (SRC) for video modes and a cost confirmation; Antigravity (SRC) for the typed media part",
+   "others": [
+    "ChatGPT web (DOC)",
+    "Cursor (SRC, Gemini video subagent)",
+    "Manus web (DOC)"
+   ],
+   "prevalence": "Meetings 3 of 11 and video generation 3 of 11 (each 2 distinct vendors), common; audio and video uploads 2 of 11 (DOC only), video understanding 2 of 11, differentiator",
+   "mechanism": "Uploads: object storage, transcode to 16 kHz mono, chunk by silence under the speech-to-text limit, transcribe with diarisation, stitch with timestamps, store the transcript as a document linked to the media and index it. Meetings: native recorder or platform connector, then transcript, summary with action items, then a page with linked tasks; raw audio deleted after processing. Video generation: async job tool vide…"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Voice input already reaches model-gateway /v1/ai/speech and /v1/ai/dictate (Whisper-based provider, 8 MiB body cap, no chunking or diarisation), and Data Plane's embedding-engine already has a durable consumer for audio and video segment events (dataplane.audio_segments.created and video_segments.created, CLAP and X-CLIP embeddings, optional transcript stored for display only), but a search of apps/ found no producer of those events, so there is…",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:405-458",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:4980-5018",
+    "apps/Model Plane/rust/services/inference-core/src/provider/speech.rs:1-20"
+   ],
+   "reuse": [
+    "model-gateway /v1/ai/speech and zdr_posture::decide_content_route for governed transcription",
+    "Data Plane embedding-engine media_consumer subjects and the media-embedder service (consumer side is built; emit the existing segment events with transcript filled)",
+    "documents-api-go create (type, source, idempotency_key) for the transcript document"
+   ],
+   "constraints": "Data Plane owns transcript documents and segment events while Model Plane owns inference, so the Data Plane job must call Model Plane speech with the delegated bearer rather than embed a provider. Media embedding is local-only (no egress, ZDR-safe by construc…",
+   "approachAdjustment": "Replace 'first check imports-core' with the finding: imports-core has no media path, and Data Plane's consumer already exists without a producer. Build the producer (ffmpeg segmentation, silence chunking under the speech limit, per-chunk transcription) as a Data Plane orchestrator job, create the t…",
+   "verdict": "reword",
+   "verdictReason": "Not unknown: the code shows what exists (speech API, media-embedding consumer, Sora routes) and what is missing (producer, connectors, tool, metering, Gemini); the item's claim of Sora cost metering and its imports-core…",
+   "effort": "XL"
+  },
+  "approachOriginal": "First check imports-core and the doc_indexed_consumer for audio MIME handling and transcript documents. Then Data Plane ingestion calls Model Plane speech-to-text per chunk (Data Plane owns orchestration and storage, Model Plane owns inference), with ZDR orgs refused persistence. Meetings: integration-corev2 transcript connectors for Teams and Zoom, summarisation in the Model Plane, tasks through governed actions. V…",
+  "planeOwner": "Data Plane (transcript documents) with Model Plane (speech, video tools), Ingestion Plane (meeting connectors) and Frontend Plane (video artifact)",
+  "dependencies": [
+   "F-t3-017",
+   "F-t3-041"
+  ],
+  "risks": "Cost of long audio and of video generation; personal data in recordings (consent, retention, recording law); video-provider availability and residency in the EU; speaker identification is unreliable (ChatGPT documents this).",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 4,
+   "DOC": 7,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-091",
+  "title": "Data-connected dashboards with visible queries, and sensitivity-label-aware document policy",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 23,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Two governance-flavoured options. (1) A dashboard artifact made of {chart spec, query, connector, refreshed_at} entries where every chart shows its query and last refresh and re-runs with the viewer's own connector credentials; first check whether Data Plane retrieval tools or the Reports page can already bind charts to stored queries. (2) Adopt Microsoft sensitivity-label checks in Data Plane document access through integration-corev2 Graph met…",
+  "whyItMatters": "Showing the query beside each chart extends Verevon's habit of showing its sources to operational data. Label-aware policy mirrors the governance layer Claude desktop ships for add-ins and matters to Microsoft-centric customers, independent of whether add-ins ever ship.",
+  "reference": {
+   "bestSource": "claude.ai (DOC) for per-chart query transparency; Claude desktop (SRC) for label-aware add-in policy",
+   "others": [
+    "ChatGPT web (DOC, broader add-in coverage including Google Sheets)"
+   ],
+   "prevalence": "Dashboards: 1 of 11, unique (DOC only). Add-ins and label policy: 2 of 11, differentiator",
+   "mechanism": "Dashboard artifact = list of {chart spec, query, connector, refreshed_at}; refresh re-runs queries with the viewer's connector credentials and the query is displayed with each chart. Label policy: a policy engine evaluates the document's sensitivity label (equals, starts with, any, none) before each action, with separate rules for opened and uploaded files; an Office add-in sidebar authenticates to the assistant and…"
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "Chart specs are static (ChartSpec holds categories and series values only), the Insights page has fixed tabs over Insight Core overview contracts, and result_query handles are conversation-scoped and expire, so nothing can store a re-runnable {chart, query, connector, refreshed_at}. No Microsoft sensitivity-label (MIP) reading exists in finspo-core or integration-corev2; the only related seams are finspo-core's fail-closed ClassifyVisibility (Sh…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-chart/spec.ts:20-60",
+    "apps/Frontend Plane/verevonv3/src/features/insights/components/InsightsPage.tsx:55-90",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/insights.rs:1-30"
+   ],
+   "reuse": [
+    "finspo-core ClassifyVisibility (extend it into a label-aware downgrade rule that fails closed)",
+    "documents-api-go visibility (private|org|shared), VisibilityFromSource and resource_grants via gateway shares.rs",
+    "typed integration-corev2 provider read actions as the unit of a chart 'query' (Graph workbook and Sheets reads are planned as G4/G5)"
+   ],
+   "constraints": "Data Plane stores and enforces visibility but does not read Microsoft labels; the label read belongs in the Ingestion Plane SharePoint ingest (finspo-core), which already owns ACL-to-visibility mapping. The rule may only narrow (org to private, or hold back f…",
+   "approachAdjustment": "Split into two items. (1) Label-aware ingest policy: extend finspo-core ClassifyVisibility to read the SharePoint/OneDrive sensitivity label through Graph and demote labelled items to private (missing label data fails closed), and record the label as document metadata; do not describe it as 'Data P…",
+   "verdict": "reword",
+   "verdictReason": "Status is absent (not unknown) and the approach misplaces label evaluation and connector query execution in Data Plane; reword and split, treating the dashboard half as the weaker option.",
+   "effort": "L"
+  },
+  "approachOriginal": "Dashboards: Data Plane owns query execution and connectors, Model Plane writes the query, Frontend Plane renders a dashboard artifact with visible queries and a refresh that uses the viewer's own permissions. Label policy: read the label through integration-corev2 Graph metadata and evaluate allow or deny in Data Plane document access before any action; revisit an Office add-in only after owner decision OD14.",
+  "planeOwner": "Data Plane (query execution, label policy) with Model Plane (query authoring), Frontend Plane (dashboard artifact) and Ingestion Plane (integration-corev2)",
+  "dependencies": [
+   "F-t3-017"
+  ],
+  "risks": "Query cost and permissions; stale data shown as current (always show refreshed_at); add-in marketplace review and support burden; label policy must never widen an owner-plane ACL.",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 1,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Office add-ins and in-place editing are planned behind OD14 (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:63). Dashboards are not planned (INF, not found)."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-092",
+  "title": "Model Council: parallel multi-model answers with a disagreement synthesis",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 24,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Add a council mode in which the gateway fans the same question out to N catalogue models through inference-core, then runs a synthesiser call that lists agreement, disagreement and unique contributions, shown side by side. Show the expected cost first, reusing the estimate card from R-t3-03-03.",
+  "whyItMatters": "Multi-model use is a stated Verevon goal (the T3 Code reference) and disagreement surfacing supports the transparency and confidence story. It is distinctive but N-fold in cost, so it comes after the core research gaps.",
+  "reference": {
+   "bestSource": "Perplexity Model Council (web-perplexity-web-product-038, DOC)",
+   "others": [],
+   "prevalence": "1 of 11 sources; unique (DOC only)",
+   "mechanism": "Fan out the same prompt to N models concurrently (3 on the web, 2 to 8 in Computer, per-model thinking toggles), collect answers, run a separate synthesiser model that compares claims as agree, disagree or unique, and render columns plus a synthesis."
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No code path fans one question out to several catalogue models and synthesises a comparison; the only fan-out is execution-core subagent.research_fan_out (research_fan_out.rs), which runs N items on one model into a merged digest. The Agents page ChatbotPlayground.tsx has a disabled \"Compare AI models\" button whose comment says there is no backend, and MODEL_PLANE_IMPROVEMENTS_2026.md lists selective multi-model ensembles as future work.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotPlayground.tsx:90-125",
+    "apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs:1-40",
+    "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md:625-640"
+   ],
+   "reuse": [
+    "inference-core Infer with provider_hint and model per member, called in parallel from model-gateway",
+    "shared/chat-nodes keyed node registry for a council turn node",
+    "The F-t3-028 pre-run cost estimate card"
+   ],
+   "constraints": "Every member must pass the same ZDR, privacy-tier and residency gates; under ZDR only attested routes may join. A subscription-route member spends the single org or user seat and is final on refusal (no substitute), so it must be opt-in and count against the …",
+   "approachAdjustment": "Place the fan-out in model-gateway as a non-agentic, tool-free council run (bounded concurrency, hard member cap) rather than in execution-core. Persist the result as one structured assistant node with per-member panels and a synthesis, and let the user pick the answer that continues the thread.",
+   "verdict": "keep",
+   "verdictReason": "Confirmed absent by my own search of Model Plane, the SPA and the gateway; it is a unique, cost-multiplying feature and the nice-to-have tier fits.",
+   "effort": "M"
+  },
+  "approachOriginal": "Model Plane model-gateway: a council run type that calls inference-core for N models in parallel (bounded concurrency), then a synthesis inference; stream per-model answers into per-model panels. Cost estimate first. Frontend: side-by-side view in the chat turn. Under ZDR only models on ZDR-attested routes may join the council.",
+  "planeOwner": "Model Plane",
+  "dependencies": [
+   "F-t3-028"
+  ],
+  "risks": "N-fold cost; ZDR must hold for every council member; subscription-route rate limits (a single seat is shared across the org) make wide fan-out risky.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 0,
+   "DOC": 1,
+   "INF": 2
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-093",
+  "title": "Grow the corpus from research: arm promote-on-use safely and add a data-source catalogue with use_when and cost hints",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 25,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "(a) promote_on_use.rs counts grounded fetches per (org, user, url) and promotes pages the agent keeps relying on into Data Plane v2, but it is off by default, dry-run first, keeps an in-memory counter, and is called only from the execution-core agent loop. Before arming it: mint a per-user token so promoted documents are owned by the user, make the counter durable, count citations rather than fetches, keep ZDR off, keep untrusted provenance, and…",
+  "whyItMatters": "Research done once becomes reusable organisation knowledge, which feeds the Data Plane moat. A catalogue helps the model choose the right data tool and is the schema needed before any licensed premium source can be added.",
+  "reference": {
+   "bestSource": "Antigravity knowledge items (antigravity-agent-ux-and-gemini-023, SRC) for distillation limits; Manus data-source catalogue (manus-product-ux-044, SRC) for the use_when and billing_hint schema",
+   "others": [
+    "Perplexity finance vertical and premium sources (web-perplexity-web-product-039 and -042, DOC)"
+   ],
+   "prevalence": "1 of 11 for knowledge items (unique); 3 of 11 for vertical data sources (differentiator)",
+   "mechanism": "A background step every K turns writes bounded knowledge items with references and a retrieval step inserts the top items into later prompts. A catalogue of data APIs carries description, use_when and billing hint; calls go through a proxy that holds partner keys, results are cited like web sources and charged per call."
+  },
+  "verevon": {
+   "status": "stub",
+   "exactGap": "(a) promote_on_use.rs (maybe_promote, called from runtime_loop/mod.rs:786 only for web_fetch and Quarry web-read results in the execution-core agent loop, never from the chat-loop fetch_url) is a complete no-op unless PROMOTE_ON_USE_ENABLED, dry-run unless PROMOTE_ON_USE_EXECUTE, keeps a process-local counter, counts successful fetches rather than citations, and promotes through Quarry /v1/scrape with a service token so the document would be own…",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs:1-140",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:760-810",
+    "apps/Model Plane/rust/services/execution-core/src/auth.rs:545-612"
+   ],
+   "reuse": [
+    "Quarry /v1/scrape ingest primitive (owner from signed claims, ZDR from the body flag, durable crawl and batch jobs refused under ZDR) and execution-core quarry_auth TokenSource",
+    "user-delegated, audience-bound bearer pattern in execution-core auth.rs (inference, browser-broker, data-plane, sandbox-manager) which already carries the zdr posture",
+    "execution-core provenance labelling of web tool output so promoted text keeps an untrusted source label"
+   ],
+   "constraints": "Model proposes, Quarry executes: promotion must remain a Quarry ingest that execution-core only triggers, and the document must land owner=user with private visibility in Data Plane, which owns the document and its ACL. ZDR must be a hard gate in maybe_promot…",
+   "approachAdjustment": "Add the missing precondition first: a ZDR gate in maybe_promote, then a user-delegated ingest credential (only inference, browser-broker, data-plane and sandbox-manager delegated bearers exist; a Quarry-ingest audience or routing through the delegated Data Plane bearer would be new). Wire the chat-…",
+   "verdict": "reword",
+   "verdictReason": "Stub confirmed and risks are real, but the item omits the ZDR blocker and the missing delegated credential, and (a) and (b) have very different size; keep (a) as a low-priority arming checklist and (b) as a small quick …",
+   "effort": "L"
+  },
+  "approachOriginal": "Model Plane execution-core: implement the two refinements named in promote_on_use.rs (per-user token minted through data-plane or Quarry so owner=user and visibility=private; durable per-org counter; citation-based signal) and wire the call site in the chat loop only after that. Data Plane: mark promoted documents with web provenance and untrusted trust class. Frontend: a 'promoted from web' badge and an undo on the…",
+  "planeOwner": "Data Plane",
+  "dependencies": [
+   "F-t3-054"
+  ],
+  "risks": "Promoting web content imports injected text or stale facts, so keep untrusted provenance on promoted documents. Must be off under ZDR. Licence terms may restrict caching.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 5,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "promote-on-use is 'Phase 8' in apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs module doc, with two refinements listed as required before arming (not scheduled in the gap closure plan)."
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-094",
+  "title": "Self-maintained team knowledge wiki generated from activity",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 26,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "A scheduled Data Plane job reads new activity through a contract with session-core (no cross-plane DB access), extracts entities and decisions, and upserts source-linked wiki pages that the Model Plane proposes and users approve, with stale marking when sources change. Space ACLs govern visibility and personal memory never enters a shared wiki without opt-in.",
+  "whyItMatters": "Perplexity's Brain shows demand for a knowledge base that maintains itself, and Verevon already ships an org knowledge base and a Data Plane that owns wiki and graph tools. It is a strong team feature but large, overlaps the Data Plane roadmap and rests on a single documentation-only reference.",
+  "reference": {
+   "bestSource": "web-perplexity",
+   "others": [],
+   "prevalence": "1 of 12 sources (unique, documentation only, research preview).",
+   "mechanism": "An overnight refresh reads new activity, upserts markdown pages with source links into versioned storage, marks pages stale when sources change, and shows Concepts, Entities and Workstreams views; a shared project Brain has owner-controlled auto or manual updates and a personal-memory opt-in."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Data Plane already has most of the approval half: wiki-store-go stores pages and versions, accepts agent proposals with source_refs (SubmitProposal, ReviewProposal), takes maintenance sweeps for stale, orphan and contradiction items, runs an operating-map proposal flow with human review in the Knowledge page, and data-orchestrator has a scheduled JobWikiRefresh; Model Plane exposes wiki_propose_edit and wiki_lint tools and POST /v1/wiki/proposal…",
+   "evidence": [
+    "apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go:340-350",
+    "apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go:385-456",
+    "apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go:458-520"
+   ],
+   "reuse": [
+    "wiki-store-go proposals (page_id, proposed_content, source_refs, status) with ReviewProposal publishing a new version and emitting the wiki-published event",
+    "operating-map proposal, review route and KnowledgePage review UI as the human-approval surface to generalise",
+    "wiki_agent.rs propose_edit and lint tools and the model-gateway /v1/wiki/proposals routes"
+   ],
+   "constraints": "Data Plane owns wiki storage and the page ACL (pages are scoped by org and workspace_id today), the Model Plane may only propose through the proposal route and humans accept, and session-core activity must reach Data Plane through a contract (the existing out…",
+   "approachAdjustment": "Reuse the existing proposal-and-review path instead of designing a new approval path: add a create-page proposal kind (proposals can only edit an existing page today) and a generic wiki-proposal review view (only the operating map has one). Drive the generator from RUN_COMPLETED-style session-core …",
+   "verdict": "reword",
+   "verdictReason": "The recommendation reads as greenfield but Data Plane already owns pages, versions, proposals, review and sweeps, and the Model Plane already proposes; reword to name the real delta (activity-to-page generator, new-page…",
+   "effort": "XL"
+  },
+  "approachOriginal": "Data Plane owns the generator and storage; session-core publishes activity through a contract; the Model Plane proposes page edits through the R-t3-08-04 style approval path; Space ACLs decide who sees what. Treat as a roadmap bet after the learning loop and profile are in place.",
+  "planeOwner": "Data Plane",
+  "dependencies": [
+   "F-t3-007"
+  ],
+  "risks": "Cost, privacy of personal memory in shared wikis, and overlap with the Data Plane roadmap. Single documentation-only reference.",
+  "confidence": "low",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 0,
+   "DOC": 3,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "apps/GRAPHITI_ADOPTION_ADR_2026-09-07.md (validity intervals only; Graphiti not adopted); no activity-to-wiki generator is planned"
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-095",
+  "title": "Second-order latency and cache levers: speed tier, prewarm, cache-preserving in-band changes, Responses continuation",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 27,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "After the cache and effort basics are measured, add optional levers in this order: a user-facing speed tier (Standard or Fast) declared in the model record and mapped to provider priority processing with a cost multiplier in cost-core; a prewarm call on composer focus (connection warm-up first, cache priming only if measured to pay) with deadline-based optional context sources and a context-status block; append-only in-band updates for changed p…",
+  "whyItMatters": "Lower time to first token and cost on long sessions and connector-heavy threads. Plumbing already exists for the priority tier on the Codex route, and turn_timing gives a baseline to prove any gain.",
+  "reference": {
+   "bestSource": "codexagent (034 service tiers, 038 Responses WebSocket); cursor (134, 110 prewarm and progressive hydration); deepseek (037, 038 in-history updates)",
+   "others": [
+    "hermes (103 time-bounded fast windows, 058 cache-parity review forks)",
+    "web-chatgpt"
+   ],
+   "prevalence": "speed tier 3 of 12, in-band changes 3 of 12 (differentiators); prewarm 1 of 12, Responses WebSocket 1 of 12 (unique)",
+   "mechanism": "Per-model service_tiers with multipliers and a default tier; a request-header tool diff that emits one developer message instead of rewriting the tool list; prewarm_request mirroring a run request without an action; previous_response_id continuation with HTTPS fallback. [SRC]"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "More exists than the item states: the composer has a Quick/Standard/Deep effort selector (DashboardComposer.tsx) whose Quick value becomes a 1024-token budget in thinking.rs, and inference-core codex_service_tier maps that to the priority tier on the ChatGPT subscription route (prefer_priority_service_tier is also set internally for source review and project drafting). Missing: a tier declared per model record, any priority tier on platform Open…",
+   "evidence": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:140-170",
+    "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:130-200",
+    "apps/Model Plane/rust/services/model-gateway/src/thinking.rs:1-60"
+   ],
+   "reuse": [
+    "The Quick/Standard/Deep selector and the thinking.rs profile contract as the UI and wire home for a speed control",
+    "codex_service_tier and prefer_priority_service_tier on InferRequest, extended to a declared per-model tier",
+    "latency_levers.rs kill-switch pattern for each new lever"
+   ],
+   "constraints": "The subscription route goes through the Integration Core broker (BrokerRequest carries only model, messages, output_schema, reasoning_effort and service_tier), so Responses continuation can apply only to platform OpenAI or Azure routes (INF). previous_respons…",
+   "approachAdjustment": "Reword the baseline: a user-facing speed control already exists as the Quick response mode, but it conflates reasoning effort with the priority tier and works only on the subscription route. Split the speed tier from effort (declared tier per model record, cost multiplier in cost-core, platform-rou…",
+   "verdict": "reword",
+   "verdictReason": "The item is not absent: part of the speed-tier mechanism is live behind the Quick mode, so its gap statement (no user-facing speed control) is wrong. The rest is real and unbuilt.",
+   "effort": "L"
+  },
+  "approachOriginal": "Follow the latency_levers.rs kill-switch pattern for each lever. Speed tier: model-record service_tiers plus composer toggle, price in cost-core. Prewarm: model-gateway endpoint plus deadline-bounded context sources, using turn_timing to prove a gain. In-band changes: header diffing (system_hash, tools_hash, effort) in prompt_context, enabled per model only where tested. Responses mode: optional adapter flag, rebuil…",
+  "planeOwner": "Model Plane",
+  "dependencies": [
+   "F-t3-022",
+   "F-t3-042"
+  ],
+  "risks": "Cost surprises from the fast tier (show the multiplier); prewarm cache-priming spends tokens; provider-held state (previous_response_id) conflicts with ZDR and durable Session Core history, so restrict to non-ZDR turns; provider-specific in-band sem…",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 10,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-096",
+  "title": "Operability long tail: per-thread run export, report-a-problem and per-run support bundles, SPA long-task telemetry, a product-guide skill and a public event API",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 28,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "Small independent additions on the existing event model: a per-thread export job (events, artifacts, receipts, manifest), a 'Report a problem' dialog and Run Console support bundle with run and trace ids and scrubbed client errors (no content on ZDR runs), a PerformanceObserver long-task reporter, a verevon-guide skill answering how-to questions, a versioned public SSE event API, rule-driven detection over the audit stream and a customer policy …",
+  "whyItMatters": "Useful for support and enterprise integration (support bundles are common, 6 of 12, mostly desktop tools), but none blocks the vision.",
+  "reference": {
+   "bestSource": "claude ; Antigravity (debug bundle, guide skill); Claude desktop app (stall profiler)",
+   "others": [
+    "deepseek (raw session tree ZIP; session.event JSON-RPC notifications and Python SDK)",
+    "codexagent (feedback id; data can stay local)",
+    "hermes (doctor registry with fail-closed redaction)",
+    "web-claudeai (customer-hosted inference policy hooks, allow/deny only, beta)",
+    "Hermes Agent",
+    "Perplexity (Numbat, documentation-level evidence only)",
+    "DeepSeek harness"
+   ],
+   "prevalence": "R-t3-10-12: Export 3 of 12 (differentiator); support bundles 6 of 12 (common, desktop-centric); raw event stream 1 of 12 (unique); customer policy hook 1 of 12 (unique, DOC only) | R-t3-13-13: C-029: 2 of 12 (differentiator). C-030: 1 of 12 (unique). C-048: 2 of 12 (differentiator). C-054: 1 of 12 (unique, DOC-only)",
+   "mechanism": "Claude's diagnostic bundle is a registry of collectors {id, label, description, defaultChecked, collect} listed with per-section consent and source-side log scrubbing, uploaded with a correlation id shown to the user; Antigravity keeps the last 50 RPCs in a ring buffer and exposes CreateDebugBundle, pprof and flight-recorder RPCs, and embeds an antigravity-guide skill with offline-then-sitemap retrieval."
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "Exists: a free-text 'Give feedback' dialog from the chat actions menu that files an Inbox conversation with the page URL (FeedbackWidget.tsx, inbox-client.ts submitFeedback), per-answer export to docx/xlsx/pptx/pdf with a client zip writer, a read-only content-free Run proof bundle in Run Console and Trace (no download, no trace id), run-event SSE plus replay with an OpenAPI spec and generated SDKs, server-side turn_timing and a skill registry (…",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:209-211 (Give feedback menu item opens the feedback widget)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/FeedbackWidget.tsx:83 (pageUrl only; no run, trace or error context; feedback mirrored into the team's monitored org per its header comment)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/inbox-client.ts:672 (submitFeedback posts to /api/v1/inbox/feedback)"
+   ],
+   "reuse": [
+    "getChatThreadTranscript plus the thread-events client and gateway history.rs/json_handlers.rs routes for per-thread export; chat-export zip.ts + download.ts for a client-side bundle (no new backend job needed to start)",
+    "FeedbackWidget and the Inbox feedback path, extended with run/request id and a scrubbed client-error ring buffer",
+    "GetRunProofBundle gateway route and ProofBundlePanel for a JSON download; add a correlation/trace id to RunProvenance"
+   ],
+   "constraints": "ZDR: every bundle or report must be content-free on ZDR and temporary runs (the proof bundle already excludes final_output and error; turn_timing is ids and counts), and a ZDR thread has nothing retained to export. Plane ownership: thread export must read thr…",
+   "approachAdjustment": "Reword as four small additions on existing pieces: (a) per-thread export built client-side from the transcript and thread-events APIs and the existing zip writer; (b) turn the existing 'Give feedback' dialog into 'Report a problem' by attaching run and request id and scrubbed client errors (the gat…",
+   "verdict": "reword",
+   "verdictReason": "Roughly half of the bundle exists in some form (feedback dialog, proof bundle view, run-event SSE with OpenAPI and SDKs, per-answer export, skill registry), so the item should extend those rather than describe them as n…",
+   "effort": "M"
+  },
+  "approachOriginal": "Ship independently as demand appears; reuse the sanitizer of F-t3-075 and the audit delivery of F-t3-004.",
+  "planeOwner": "Model Plane with Frontend Plane and Control Plane (API keys)",
+  "dependencies": [
+   "F-t3-004",
+   "F-t3-075"
+  ],
+  "risks": "Each export is an egress path; keep ZDR runs content-free.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 14,
+   "DOC": 5,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-097",
+  "title": "Tighten-only runtime monitors: asynchronous action reviewer and information-flow control",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 29,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "If the owners revisit the standing 'no LLM on the permission path' ruling for a restricted role, add an asynchronous reviewer between capability policy and the human card that can only deny or escalate and never grant, fed user turns plus the proposed tool call and never tool outputs, using a versioned rule set (must-name intent-clearing rules, agent-authored argument provenance, deterministic forced-card checks) and failing closed to a human ca…",
+  "whyItMatters": "A trajectory monitor is a second line of defence against injection-driven actions in Do-mode, and classification-aware flow control stops confidential Data Plane content leaking to Slack or email through agents. Neither is needed to make approvals usable: that is delivered deterministically by R-t3-11-02, -03 and -04. The comparator rated the revi…",
+  "reference": {
+   "bestSource": "Codex Guardian v2 (asynchronous trajectory scoring with thresholds, gating later actions, fail closed) plus Claude (classifier policy discipline: must-name rules, tool-result blindness, forceAsk escalations) for the reviewer; Manus (admin classification levels, per-connector input and output levels, approval on downward flow) for flow control",
+   "others": [
+    "antigravity (vet_data_flow, denied-action equivalence)",
+    "cursor",
+    "deepseek",
+    "hermes (consecutive-denial circuit breaker)",
+    "web-chatgpt",
+    "claude"
+   ],
+   "prevalence": "auto-review 7 of 12 (table-stakes elsewhere); classifier policy text 1 of 12 (unique); flow control 3 of 12 (differentiator)",
+   "mechanism": "Reviewer gets user messages plus proposed tool name and arguments (not tool outputs) and a policy prompt, returns {decision, reason, risk 0..1}; allow below a threshold, escalate above it, deny on clear violation; N consecutive denials pause the run; reviewer failure fails closed to a human card; every verdict is logged. Flow control: ordered levels, a session level that rises when it reads higher-classified data, c…"
+  },
+  "verevon": {
+   "status": "absent",
+   "exactGap": "No action reviewer exists: permission evaluation is posture mode plus a keyword risk list (permission/mod.rs:43-70, 229-290), and capability policy is asked with tool name, run id and org id only (capability_policy.rs:55-70, 135-145), never the call arguments or user turns. Flow control is absent: there is no admin-defined data classification, no session taint and no per-connector input or output level; precursors are TrustClass tool-result prov…",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:43-70",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:100-116",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:160-181"
+   ],
+   "reuse": [
+    "hook engine (execution-core hook/mod.rs): PreToolUse Allow/Deny/Ask where Allow only defers to the permission engine, so it is already a tighten-only lattice and the natural host for a reviewer verdict",
+    "autonomy rung ladder (permission/mod.rs rung_required_for, mp_contracts::autonomy)",
+    "semantic_screening.rs shadow-pass pattern (sampled, detached, audit event, never changes behaviour) and security_events.rs hash-only events"
+   ],
+   "constraints": "A standing decision rules out an LLM on the permission hot path (harness-adoption-execution-plan.md:914-916; claude-hermes-deepseek.md anti-pattern near 1278), and ownership matrix rule 12 (master-ownership-matrix.md:168) says Model Plane never invents approv…",
+   "approachAdjustment": "Split the item. (a) Reviewer: ship it first as a shadow-only evaluator on the semantic_screening pattern (sampled, detached, verdicts to the audit outbox, no enforcement), feeding it user turns plus proposed call arguments and never tool outputs, then promote it to tighten-only through the hook eng…",
+   "verdict": "reword",
+   "verdictReason": "Absent status and the conflict with the standing no-LLM-on-the-permission-path decision are confirmed. Reword to begin with a shadow-mode reviewer on the existing INJ-3 precedent via the hook engine and to split flow co…",
+   "effort": "XL"
+  },
+  "approachOriginal": "execution-core: Reviewer step after EvaluatePolicy using a cheap inference-core route; the verdict can only lower Allow to Ask or Deny, consecutive denials pause the run, verdicts go to the run trace and audit outbox, ZDR runs use a ZDR-attested reviewer or force a human, and NeverAuto and hard floors stay outside the classifier. Policy text is versioned data in capability-core with red-team fixtures. Flow control: …",
+  "planeOwner": "Model Plane (reviewer, taint checks); Data Plane (document labels); Control Plane (classification levels)",
+  "dependencies": [
+   "F-t3-003",
+   "F-t3-033",
+   "ADR: LLM on the permission path (HAP WS-3, rule 12)"
+  ],
+  "risks": "Conflicts with the standing decision if it ever grants; keep it tighten-only and asynchronous. Classifier false negatives under injection and policy drift from tool semantics. Taint over-propagation makes threads unusable, so provide a reviewed down…",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 19,
+   "DOC": 8,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ },
+ {
+  "finalId": "F-t3-098",
+  "title": "Reader and appearance polish: conversation TOC and chapters, font size and dyslexia-friendly font, org accent and environment identity, calm tips, reasoning translation",
+  "originalTier": "nice-to-have",
+  "finalTier": "nice-to-have",
+  "rank": 30,
+  "wave": "W5",
+  "quickWin": false,
+  "summary": "A floating table of contents from user messages and headings; user font, density and dyslexia-font preferences; an organisation accent generated for safe contrast and an admin banner; an environment pill; a calm tip registry; and opt-in, cost-isolated translation of model reasoning that is never fed back to the model.",
+  "whyItMatters": "Theming is widespread (7 of 12) and accessibility preferences matter, but these are polish items with modest benefit; Verevon's accessibility baseline (live regions, accessible charts, focus rings) is already strong.",
+  "reference": {
+   "bestSource": "Claude desktop (SRC) for chapters, TOC and appearance settings; T3 Code (SRC) for collapsing long prompts; DeepSeek harness (SRC) for reasoning translation ; T3 Code (about 56 colour roles, an OKLCH generator that solves contrast, independent font families and sizes, build-stage artwork) plus Claude desktop (admin org banner and deployment identity, tip registry with shown, clicked and dismissed tracking, What's New modal)",
+   "others": [
+    "ChatGPT web (DOC, TOC from headings)",
+    "Manus web (DOC, output locale)",
+    "Antigravity (server-driven NUX tips)",
+    "DeepSeek (synchronous first-paint theme bootstrap)",
+    "Manus",
+    "ChatGPT web",
+    "Claude.ai web",
+    "Hermes Agent"
+   ],
+   "prevalence": "R-t3-01-15: 2 of 12 sources each; differentiators | R-t3-12-12: Theming: 7 of 12 (table-stakes, Verevon has the basic form); environment identity: 2 of 12; tips and What's New: 1 of 12.",
+   "mechanism": "A mark_chapter tool inserts a titled divider and the UI builds a floating TOC from chapters (or from headings once a conversation exceeds roughly five responses). Semantic colour roles as CSS custom properties with separate light and dark themes;"
+  },
+  "verevon": {
+   "status": "partial",
+   "exactGap": "The SPA has a light, dark and system toggle in CoreNavbar plus a per-user colorScheme that only drives the sidebar accent variable, and Control Plane user-core already persists fontSize (small, medium, large) and compactMode in the appearance settings, but the gateway navbar payload drops them and no SPA code reads or sets them. No conversation TOC or chapters, mark_chapter tool, dyslexia-friendly font, environment pill, tip registry, What's New…",
+   "evidence": [
+    "apps/Control Plane/user-core/internal/http/handlers.go:836",
+    "apps/Control Plane/user-core/internal/http/handlers.go:973-979",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs:84-104"
+   ],
+   "reuse": [
+    "Control Plane user-core appearance settings (fontSize, compactMode already stored)",
+    "gateway navbar.rs appearance_payload and save_theme plus navbar-client saveNavbarTheme",
+    "global.css colour tokens and focus-ring token as the CSS-variable base"
+   ],
+   "constraints": "Frontend Plane with Control Plane user-core owning personal appearance state; the gateway must pass fontSize and compactMode through without choosing tenants. An organisation accent or admin banner would be Control Plane org branding that does not exist today…",
+   "approachAdjustment": "Start from what is stored: pass fontSize and compactMode through gateway navbar.rs, apply them as CSS variables, and add a dyslexia-friendly font toggle (S). Add a headings-based TOC after F-t3-021. Demote the org accent generator, environment pill, tip registry and reasoning translation to optiona…",
+   "verdict": "reword",
+   "verdictReason": "Partial is right, but the stored fontSize and compactMode fields and the gateway pass-through gap make the cheap part concrete, while the rest is a low-significance bundle better demoted.",
+   "effort": "M"
+  },
+  "approachOriginal": "CSS-variable preferences first; TOC after render performance work.",
+  "planeOwner": "Frontend Plane with optional Control Plane branding",
+  "dependencies": [
+   "F-t3-021",
+   "F-t3-066"
+  ],
+  "risks": "Low. Translation must not touch ZDR turns through a retained path.",
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 16,
+   "DOC": 5,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "referenceCheck": null
+ }
+]

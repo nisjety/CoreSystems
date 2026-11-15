@@ -1,0 +1,905 @@
+[
+ {
+  "finalId": "F-t1-002",
+  "title": "Addressed agent wake-up: several agents per message, per-binding respond_to/subscribe trigger policy, offer-to-add, then optional ambient participation",
+  "searches": [
+   "rg respond_to|respondTo|subscribe_mode|subscribeMode|respond_policy in verevonv3/src, verevonv3/apps/gateway/src, apps/Application Plane (no hits)",
+   "rg trigger_mode|triggerMode|apply_mention_binding_policy|mention_binding across C:/dev/CoresSystem",
+   "rg mentioned_agent|mentionedAgent|addressed_agent|addressed agent across C:/dev/CoresSystem",
+   "rg ambient_judge|ambient judge|overheard|standing_order|judge_model across C:/dev/CoresSystem",
+   "rg human-only|human_post|turn_origin|offer-to-add|offer_to_add|invite_and_send across C:/dev/CoresSystem (no Space hits)",
+   "rg stay silent|room_tool|no_reply|NO_REPLY|ChannelPolicy across C:/dev/CoresSystem (no Space hits)",
+   "rg ambient in verevonv3/src/features/spaces (no hits)",
+   "read spaces.rs router lines 649-735 and rg post_message|/messages in spaces.rs (no human message POST)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 149,
+    "why": "SRC: single mentionedAgentRef signal, so one addressed agent per message.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 402,
+    "why": "SRC: every composer send calls streamChat with spaceRef; no human-only post path.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 188,
+    "why": "SRC: comment: offering to bind an unbound agent is deferred, not built here.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 210,
+    "why": "SRC: mention candidates are prefix-matched and sliced to six; no recency ranking.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 4500,
+    "why": "SRC: apply_mention_binding_policy checks trigger_modes, approval_mode, allowed_tools; no respond_to or subscribe.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 4504,
+    "why": "SRC: mention refused unless trigger_modes contains 'mention' (agent_mention_not_enabled).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 4535,
+    "why": "SRC: non-auto approval strips agentic and forces plan_mode off on mention turns.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 4449,
+    "why": "SRC: unbound mentioned agent is rejected (mentioned_agent_not_bound), not offered for add.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 649,
+    "why": "SRC: Space router has no human message POST; routes cover membership, agents, reads, presence.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 701,
+    "why": "SRC: agents/bind route exists; an offer-to-add flow would reuse this bind step.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts",
+    "line": 723,
+    "why": "SRC: client binding type exposes trigger_modes ('mention'|'group') only; no respond_to.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+    "line": 945,
+    "why": "SRC: trigger_modes shown as read-only chips; no binding policy editor found.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+    "line": 628,
+    "why": "SRC: binding triggerModes union is mention|group; no respond_to, subscribe or rule fields.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 9106,
+    "why": "SRC test: asserts unbound mentioned agent returns mentioned_agent_not_bound error.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.test.tsx",
+    "line": 1115,
+    "why": "SRC test: a person mention never sets mentionedAgentRef, so the person path is text-only.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go",
+    "line": 398,
+    "why": "SRC: judge_model field belongs to a generic evaluator workflow, not room ambient judging.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+    "line": 163,
+    "why": "DOC: intent: a mention invokes but never grants; offer-to-add is a governed action.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+    "line": 210,
+    "why": "DOC: trigger_modes stored and enforced as of 2026-08-16; absent list means legacy mention.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+    "line": 238,
+    "why": "DOC: audit says unbound agent is simply absent; docs ask for offer-to-add.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+    "line": 250,
+    "why": "DOC: audit notes no ambient policy and calls mention-only model correct.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+    "line": 2245,
+    "why": "DOC: S5.2 standing orders planned as opt-in with version history; no code found.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-007",
+  "title": "Identity-bound @mentions for people and agents with mention records, role-gated group handles, invite-from-mention and ranked @/# pickers",
+  "searches": [
+   "rg mentioned_person|mentionedPerson|mention_refs|mention_record|mentioned_subject|person_mention in verevonv3/src and verevonv3/apps/gateway/src (no hits)",
+   "rg space.mention|mention_signal|comment.mentioned|mention.received across C:/dev/CoresSystem/apps (notification-core only)",
+   "rg @room|@here|@channel|broadcast_handle|group_handle|user_group|mention_group in verevonv3/src (no hits)",
+   "rg mentionRanking|recent interaction|Typeahead|MentionPicker|referenceProvider|hashtag in verevonv3/src/features (picker is prefix-only, no ranking)",
+   "read notification-core handlers.go isNotificationTypeAuthorized allowlist (lines 199-218)",
+   "rg mention in Application Plane and Model Plane session-core (no mention records found)",
+   "read SpaceRoomComposer.tsx candidates memo lines 180-211"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 185,
+    "why": "SRC: candidate list includes roster users as person candidates by display name.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 200,
+    "why": "SRC: agents are listed before people; ordering is static, with no recency ranking.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 210,
+    "why": "SRC: prefix match only, then slice(0, 6); no scroll past six results.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 742,
+    "why": "SRC: composer hint says '@ mentions someone, / picks a skill'; no '#' reference provider.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 274,
+    "why": "SRC: skill '/' query is parsed separately, the only non-agent picker in the composer.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 4175,
+    "why": "SRC: MENTIONED_AGENT_FIELDS accepts only an agent ref; no person ref field exists.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 4399,
+    "why": "SRC: inject_mentioned_space_agent_persona re-resolves the agent subject against the roster.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 701,
+    "why": "SRC: agents/bind route exists, the bind step an invite-from-mention would reuse.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/http/handlers.go",
+    "line": 199,
+    "why": "SRC: per-service notification type allowlist; verevon-gateway may send only notification.created.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/migrations/005_create_channel_configs.up.sql",
+    "line": 60,
+    "why": "SRC: mention.received default in-app preference row exists; no producer found in repo.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/service_preferences_test.go",
+    "line": 33,
+    "why": "SRC test: comment.mentioned appears only as a test fixture; no producer found.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.test.tsx",
+    "line": 1098,
+    "why": "SRC test: agent mention sends its Control subject id as mentionedAgentRef.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_DESIGN.md",
+    "line": 94,
+    "why": "DOC: global chat '@' inserts styled text from people-search; never sets a mention ref.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+    "line": 1571,
+    "why": "DOC: mention picker made keyboard-accessible via aria-activedescendant.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+    "line": 163,
+    "why": "DOC: mention invokes, never grants; adding an unbound agent is a governed action.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-013",
+  "title": "Room attachments and file library: paste, drop and attach through presigned Data Plane documents with Space provenance, scan and typed refusals, plus a Files view",
+  "searches": [
+   "rg type=file|accept=|dataTransfer|onDrop|onPaste|FileList in verevonv3/src/features/spaces (no hits)",
+   "rg presign|presigned|upload_slot|attachment_id|complete_upload in verevonv3/apps/gateway/src (chat attachments only)",
+   "rg PutObject|minio|S3Client|object_store|blob across apps/Data Plane v2 and apps/Ingestion Plane",
+   "rg clamav|clamd|malware|antivirus|virus across C:/dev/CoresSystem/apps (no upload scan code)",
+   "rg thumbnail|blurhash in imports-core and documents-api-go (no hits)",
+   "rg FormData|multipart|imports/upload|jobs/upload in verevonv3/src/shared and verevonv3/apps/gateway/src",
+   "rg MAX_FILE_SIZE|ALLOWED_FILE_TYPES|too_large|unsupported_type in imports-core/app",
+   "rg X-Space-Import-Decision|space_import_intent|space_ref in documents-api-go and imports-core"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/app/main.py",
+    "line": 215,
+    "why": "SRC: POST /import/jobs/upload accepts multipart files with an extension allowlist and size cap.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/app/main.py",
+    "line": 221,
+    "why": "SRC: uploads refused when zdr is set (409 zdr_persistence_forbidden).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/app/main.py",
+    "line": 271,
+    "why": "SRC: Space import ingress decision header exists only on /import/jobs/source (connector path).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/app/config.py",
+    "line": 85,
+    "why": "SRC: MAX_UPLOAD_FILES=100, MAX_FILE_SIZE_MB=50, ALLOWED_FILE_TYPES list (pdf, docx, txt, md, csv, json, html, htm).",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/app/main.py",
+    "line": 239,
+    "why": "SRC: unsupported type and oversize files return 400 detail strings, not typed codes.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/app/parsers.py",
+    "line": 30,
+    "why": "SRC: _sha256 helper hashes uploaded bytes; no thumbnail or malware scan step.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/app/chat_extract.py",
+    "line": 12,
+    "why": "SRC: ephemeral chat-extract helper with 60,000-char cap; returns text, no Space binding.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core/app/models.py",
+    "line": 35,
+    "why": "SRC: ImportJob model stores space_import_intent as JSONB.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/imports.rs",
+    "line": 39,
+    "why": "SRC: gateway forwards multipart upload to imports-core, org-scoped; no space_ref.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs",
+    "line": 149,
+    "why": "SRC: route for knowledge multipart upload, the Knowledge page's upload path.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/knowledge/components/KnowledgePage.tsx",
+    "line": 2114,
+    "why": "SRC: Knowledge page sends multipart files to imports upload via requestForm.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/knowledge-client.ts",
+    "line": 350,
+    "why": "SRC: FormData helper for knowledge imports upload; no Space variant found.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "line": 632,
+    "why": "SRC: knowledge.upload_files refused as a JSON action; multipart route required.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 1342,
+    "why": "SRC: knowledge.upload_files registry entry with its own input schema.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/documents-api-go/internal/handler/documents.go",
+    "line": 266,
+    "why": "SRC: documents API verifies a Control-signed Space import decision for connector writes.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/documents-api-go/internal/handler/space_import.go",
+    "line": 15,
+    "why": "SRC: X-Space-Import-Decision header constant; signed token format v2 checked.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/documents-api-go/internal/model/document.go",
+    "line": 41,
+    "why": "SRC: documents model carries optional space_ref field.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/documents-api-go/internal/model/source_object.go",
+    "line": 20,
+    "why": "SRC: connector source-object metadata with mime, size and content hash; no room binding.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/embedding-engine-rs/src/cas_store.rs",
+    "line": 4,
+    "why": "SRC: delete-only MinIO CAS client for page images; key layout copied from Quarry.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/cas_store.rs",
+    "line": 69,
+    "why": "SRC: put_page_png writes page images to the MinIO CAS bucket (put path).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs",
+    "line": 1,
+    "why": "SRC: sha256-keyed MinIO object-store client, first in Model Plane, for S3.3 workspace.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 128,
+    "why": "SRC: global chat request carries ChatAttachment[]; a separate attachment path, not Space.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+    "line": 389,
+    "why": "SRC: chat stream forwards attachments array unchanged; no Space scope in this path.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs",
+    "line": 119,
+    "why": "SRC: mail ingest allow-lists attachments with size limits; a separate ingest path.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/infra/postgres/migrations/20260907120000_document_space_ref.sql",
+    "line": 1,
+    "why": "INF: migration filename indicates documents.space_ref; contents not read.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+    "line": 1660,
+    "why": "DOC: S1.5 Data and Ingestion Space binding section; planned Data-side document binding.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/endpoint-map.md",
+    "line": 349,
+    "why": "DOC: imports-core upload endpoint listed in endpoint map (internal key, X-Org-Id).",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-014",
+  "title": "Bring agent-produced artifacts and the shared viewer registry into the Space room",
+  "searches": [
+   "rg ChatArtifactPanel|chat-artifacts|ArtifactViewer|ChatAttachmentCanvas in verevonv3/src (chat feature only)",
+   "rg artifact in verevonv3/src/features/spaces and verevonv3/apps/gateway/src/domains/spaces.rs (no hits; composer has zero artifact references)",
+   "rg create_artifact|update_artifact|read_artifact|create_or_update_artifact across apps/Model Plane/rust",
+   "rg mammoth|sheetjs|xlsx|docx-preview|pdfjs|mermaid in verevonv3/package.json (mermaid only)",
+   "rg ViewerRegistry|registerViewer|viewerFor in verevonv3/src (no registry; ArtifactViewer is local to chat)",
+   "rg DEFAULT_FEATURES and 'artifacts' in gateway ag_ui.rs and src/shared/api/chat-client.ts"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "line": 164,
+    "why": "SRC: ArtifactViewer is a per-kind viewer component inside the chat artifact panel.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.test.tsx",
+    "line": 48,
+    "why": "SRC test: ArtifactsPanel suite covers the chat artifact panel only.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx",
+    "line": 43,
+    "why": "SRC: SpaceTabId has six tabs and no artifacts or canvas tab.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 402,
+    "why": "SRC: composer's streamChat call passes no features list, so client defaults apply.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 1319,
+    "why": "SRC: artifact SSE events dispatched only if onArtifact handler is supplied; composer supplies none.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 898,
+    "why": "SRC: client DEFAULT_FEATURES includes 'artifacts', so Space turns request artifacts too.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+    "line": 30,
+    "why": "SRC: gateway DEFAULT_FEATURES also includes 'artifacts' for chat-stream requests.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "line": 1,
+    "why": "SRC: chat artifact versioning module; gateway assigns versions, model supplies ids only.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "line": 19,
+    "why": "SRC: versions rehydrated from artifact metadata in the authorized durable thread.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "line": 33,
+    "why": "SRC: ArtifactKind enum: Code, Document, Html, and generated binaries (xlsx, docx, pdf).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "line": 455,
+    "why": "SRC: prompt lists existing artifact handles; tools create/update/read_artifact.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 5101,
+    "why": "SRC: update_artifact calls counted as model document writes for turn timing.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "line": 2526,
+    "why": "SRC: comment says turn evidence including artifacts is persisted with the turn.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "line": 7577,
+    "why": "SRC test: asserts artifact SSE frames in the chat invoke chain.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/package.json",
+    "line": 35,
+    "why": "SRC: only mermaid renderer dependency; no DOCX, XLSX or PDF viewer libraries.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+    "line": 1975,
+    "why": "DOC: S3.3 says promote selected output through Data artifact APIs (planned).",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-015",
+  "title": "Room canvas: a shared, revisioned Space document that humans and agents co-author",
+  "searches": [
+   "rg canvas|Canvas in verevonv3/src/features/spaces (layout CSS class only)",
+   "rg expected_version|expected_head|head_revision|current_head|If-Match in apps/Data Plane v2/services/wiki-store-go (no hits)",
+   "rg CreateVersion|proposed_by_agent|proposed_by_user|restore|space_ref in wiki-store-go (versions and proposals; no restore)",
+   "rg spacePresence|plannerDocuments|saveState|presence in apps/Application Plane/convex-core/convex",
+   "rg wiki_write|doc_write|document_write|write_document|read_document in apps/Model Plane/rust (no Space document tool)",
+   "read studio.rs header; rg RwLock|ephemeral|restart in studio.rs"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go",
+    "line": 359,
+    "why": "SRC: CreateVersion inserts an append-only version with no expected-head precondition.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go",
+    "line": 378,
+    "why": "SRC: INSERT into wiki_page_versions records proposed_by_user and version_status.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/repo/wiki_repo.go",
+    "line": 412,
+    "why": "SRC: agent proposals stored in wiki_proposals with proposed_by_agent for review.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/wiki-store-go/internal/model/wiki.go",
+    "line": 33,
+    "why": "SRC: version and proposal models carry ProposedByAgent and ProposedByUser attribution.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs",
+    "line": 1,
+    "why": "SRC: Studio canvas persistence is gateway-local and ephemeral, lost on restart.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/plannerDocuments.ts",
+    "line": 240,
+    "why": "SRC: update mutation patches title, parent, favorite and space only; no revision check.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spacePresence.ts",
+    "line": 42,
+    "why": "SRC: Space presence heartbeat with 30-second TTL already exists in Convex.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx",
+    "line": 43,
+    "why": "SRC: cockpit tabs are chat, work, knowledge, activity, agent, members; no Canvas tab.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+    "line": 357,
+    "why": "SRC: 'verevon-space-canvas' is only a layout CSS class, not a document canvas.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 5101,
+    "why": "SRC: counts model document-write tool calls (update_artifact); no Space-bound write tool found.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs",
+    "line": 1,
+    "why": "SRC: sha256-keyed CAS for S3.3 durable workspace; blobs, not versioned documents.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+    "line": 1948,
+    "why": "DOC: S3.1 slice 2 plans Data-owned revisioned Space knowledge docs with CAS and restore.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md",
+    "line": 268,
+    "why": "DOC: section 3.5 wiring of the durable Space workspace; sandbox disk, not a room document.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-019",
+  "title": "Let room agents call Space actions themselves (agent self-API with run-bound grants)",
+  "searches": [
+   "rg MODEL_EXECUTABLE_ACTION_IDS|isModelExecutableAction in verevonv3/src",
+   "rg id: 'spaces.<name>' in action-registry.ts (14 hits)",
+   "rg x-agent-capability|agent_capability|capability_token|run_bound|run_grant across C:/dev/CoresSystem/apps (no x-agent-capability header)",
+   "rg model.cron.create|model.cron.fire in Control Plane user-core",
+   "rg mcp_catalog|disclos|/v1/apis|tool_catalog in Model Plane (no staged tool-disclosure catalog)",
+   "rg create_thread|schedule_follow|pin_thread|follow_up in verevonv3/src/shared (no create_thread or schedule action)",
+   "rg agent-action-grants|create_agent_ticket_action_grant in gateway spaces.rs"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts",
+    "line": 126,
+    "why": "SRC: MODEL_EXECUTABLE_ACTION_IDS has 8 entries (tickets, inbox, chat, org); no spaces.* actions.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 1991,
+    "why": "SRC: 14 spaces.* registry actions, including set_agent_state; no create_thread or schedule.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 668,
+    "why": "SRC: owner-issued agent-action-grants route per conversation, POST for tickets.create.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 743,
+    "why": "SRC: create and revoke ticket grant handlers forward owner mutations to conversation grant API.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 426,
+    "why": "SRC: inject_personal_schedule_create_context attaches the Control schedule-create decision.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/schedule_create_decision.go",
+    "line": 13,
+    "why": "SRC: model.cron.create decision; payload digest over evidence and request.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/schedule_fire_decision.go",
+    "line": 13,
+    "why": "SRC: model.cron.fire decision uses the same digest pattern for scheduled fires.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "line": 1,
+    "why": "SRC: agent_actions is a skills and capabilities catalog proxy, not an agent self-API.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 4535,
+    "why": "SRC: mention turns lose agentic and plan_mode unless approval_mode is auto.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx",
+    "line": 46,
+    "why": "SRC: SpaceApprovalPanel component exists, the in-room approval card analogue.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/approvals.rs",
+    "line": 12,
+    "why": "SRC: approvals rehydrated from durable session-core on boot; approval continuation exists in model-gateway.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+    "line": 55,
+    "why": "SRC: CapabilityPolicy trait gives per-tool-call authority, the check spaces.rs:4496 cites.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs",
+    "line": 1,
+    "why": "SRC: Verevon READ actions reachable from the inline chat tool loop; read-only lane.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+    "line": 2003,
+    "why": "DOC: S3.6 says agents may request use but never change future authority (planned).",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+    "line": 1744,
+    "why": "DOC: S2.1 catalog-manifest derives actor eligibility with a human-only default; provisional.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-020",
+  "title": "Room-scoped agent browser: space_ref on browser runs, a live preview card that expands to an interactive view, hand-off and take-over with a control indicator",
+  "searches": [
+   "read model-gateway browser_run.rs BrowserRunStartRequest (line 87) and space_id lines (435-441)",
+   "rg takeover|take_control|handoff|hand_off|Take control across C:/dev/CoresSystem/apps (browser.rs, browser-session.ts, BrowserChrome.tsx)",
+   "rg bot_wall|bot_check|captcha|challenge_page|botWall across Ingestion Plane Quarry-v2 crates",
+   "rg noVNC|vnc|live_view|screen switcher|control_owner in verevonv3/src (test label only)",
+   "rg BrowserChrome in verevonv3/src (dashboard and chat; none in features/spaces)",
+   "rg teach|recording|demonstration in apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+   "rg browser in verevonv3/src/features/spaces (generic prose only; no browser-run code)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+    "line": 87,
+    "why": "SRC: BrowserRunStartRequest has no Space field, so browser runs carry no space_ref.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+    "line": 441,
+    "why": "SRC: space_id hardcoded to empty string for browser runs; code_interpreter wired instead.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "line": 272,
+    "why": "SRC: BrowserControlMode enum: agent_control and human_takeover modes exist.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "line": 421,
+    "why": "SRC: live frame routes /frames/stream and /frames/ws proxy to upstream agent runs.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "line": 709,
+    "why": "SRC: browser_human_takeover_active error returned while a human takeover holds the session.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+    "line": 497,
+    "why": "SRC: humanTakeoverActive gates browser model actions; takeover UI sits in the dashboard.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts",
+    "line": 146,
+    "why": "SRC: browser session controlMode defaults to agent_control; takeover modeled per session.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs",
+    "line": 170,
+    "why": "SRC: challenge classifier maps captcha markers to ChallengeKind::Captcha.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+    "line": 140,
+    "why": "SRC: comment: bot-walled origins (403/429) burn request budget; no hand-off logic here.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+    "line": 9,
+    "why": "SRC: chat live-run rail shows browser screenshots as expandable thumbnails (preview analogue).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.test.tsx",
+    "line": 40,
+    "why": "SRC test: expects 'live view:' labels in the fleet run console.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md",
+    "line": 841,
+    "why": "DOC: section 3.5.A DONE: space_id plumbed to browser_run call site; value still empty in code.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+    "line": 240,
+    "why": "DOC: 'Teach a task' records a demonstration; program-by-demonstration intent for agents.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-024",
+  "title": "Client resilience: root and per-region error boundaries, lazy-chunk recovery, a boot watchdog, and a build id with stale-tab reload and contract guard",
+  "searches": [
+   "rg ErrorBoundary|Suspense|Errored in verevonv3/src (comments only; no component usage)",
+   "rg vite:preloadError|unhandledrejection|ChunkLoadError|dynamically imported module in verevonv3 (demo bridge only)",
+   "rg buildId|__APP_VERSION__|version.json|BUILD_ID in verevonv3 (no hits outside node_modules, dist, public)",
+   "rg X-Verevon-Client|CLIENT_UPDATE_REQUIRED|min_version|client-config|update_required in verevonv3 (no hits)",
+   "rg watchdog|bootStage|safe mode|location.reload in verevonv3/src (demo only)",
+   "read nginx.conf locations 102-133 (immutable assets, try_files, SPA fallback)",
+   "rg Last-Event-ID in verevonv3/src/shared/api/sse.ts",
+   "rg version.json|build id|error boundary in verevonv3/docs (no hits)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts",
+    "line": 5,
+    "why": "SRC: comment states the app has zero Suspense or ErrorBoundary usage.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/demo/fixtures/fjordform-home.ts",
+    "line": 8,
+    "why": "SRC: fixture comment notes there is no root ErrorBoundary for the SPA.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/sse.ts",
+    "line": 46,
+    "why": "SRC: SSE reader sends Last-Event-ID on resume; a partial hook for reconnect checks.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/nginx.conf",
+    "line": 105,
+    "why": "SRC: hashed js/css/fonts get Cache-Control immutable; no recovery path for missing chunks.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/nginx.conf",
+    "line": 114,
+    "why": "SRC: try_files $uri =404 means a stale hashed chunk after deploy returns 404.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/nginx.conf",
+    "line": 132,
+    "why": "SRC: SPA fallback serves index.html for all other paths; no version.json location.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/demo/product-demo/bridge.ts",
+    "line": 83,
+    "why": "SRC: unhandledrejection listener exists only in the demo bridge, not production boot.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+    "line": 458,
+    "why": "SRC: per-feature typed error state example: onError handling for budget_exceeded.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.test.tsx",
+    "line": 690,
+    "why": "SRC test: budget_exceeded surfaces as a typed per-feature error in the composer.",
+    "kind": "test"
+   }
+  ],
+  "impression": "absent"
+ }
+]

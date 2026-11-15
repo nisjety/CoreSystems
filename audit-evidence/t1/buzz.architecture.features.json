@@ -1,0 +1,2227 @@
+[
+  {
+    "id": "buzz-architecture-001",
+    "category": "Realtime & sync architecture",
+    "name": "Single authoritative signed-event log with kind as the only dispatch switch",
+    "what": "Every message, reaction, workflow step, canvas update, huddle event and agent action is one signed event in one relay-owned log. New features arrive as new kind numbers, so older clients keep working and simply ignore what they do not know.",
+    "how": "Nostr NIP-01 events (sha256 id, secp256k1 Schnorr sig, u32 kind, tags, content). crates/buzz-core/src/kind.rs holds 133 pub const KIND_ definitions at HEAD 799cfd705 (ARCHITECTURE.md quotes 80 and 127 in different places) and range helpers: replaceable 10000-19999, ephemeral 20000-29999 (never stored, audited or searched), parameterized replaceable 30000-39999, Buzz custom 40000-49999. The relay is the single source of truth: no peer-to-peer exchange, gossip or replication between independent relays. Derived read models are served as relay-signed events (sidecar kinds 40901 channel summary, 40902 presence snapshot, 39005-39007 window overlays).",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:5-7",
+      "C:/dev/buzz/ARCHITECTURE.md:152-193",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:9-640",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:500-506",
+      "C:/dev/buzz/VISION.md:60-77"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon could keep room content in Session Core but expose one small typed, append-only event envelope per Space (message, approval, tool card, presence) with a kind registry so new surfaces are additive and consumers ignore unknown kinds.",
+    "notes": "Quality 4: coherent and exercised by 100+ kinds. Cost of the model: pure-event purity forced accessory APIs (/buzz/v1 unread, thread windows) and client-signed timestamps (see ordering record). ARCHITECTURE.md counts kinds inconsistently (80 vs 127); kind.rs is ground truth. Federation: the repo explicitly has none."
+  },
+  {
+    "id": "buzz-architecture-002",
+    "category": "Realtime & sync architecture",
+    "name": "Two doors, one room: transport-neutral ingest pipeline",
+    "what": "Browser/desktop WebSocket clients and HTTP-only writers (CLI, app-hosted agents, workflow webhooks) are validated by the same admission pipeline, so authority checks are not duplicated per transport.",
+    "how": "handlers/ingest.rs ingest_event is shared by WebSocket EVENT and HTTP POST /events (plus POST /query and /count, NIP-98 signed per request). Order: auth + scope, pubkey==auth pubkey, reject AUTH kind, ephemeral sub-pipeline, spawn_blocking signature verify, channel membership, idempotent DB insert, Redis publish, local fan-out, then async audit append and workflow trigger (loop-guarded for workflow kinds 46001-46012). Side effects run in handlers/side_effects.rs.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/ingest.rs:1-5",
+      "C:/dev/buzz/ARCHITECTURE.md:272-295",
+      "C:/dev/buzz/crates/buzz-relay/src/router.rs:326-328",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/side_effects.rs"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "One admission function behind both the SPA/BFF and agent writers keeps Verevon from drifting into a human path and an agent path with different authority rules.",
+    "notes": "Fire-and-forget audit and workflow steps mean a failed audit append does not fail the write (ARCHITECTURE.md:290); that is a deliberate availability-over-completeness trade."
+  },
+  {
+    "id": "buzz-architecture-003",
+    "category": "Realtime & sync architecture",
+    "name": "Idempotent content-addressed writes make retries safe",
+    "what": "A message the client retries after a timeout cannot appear twice; the sender distinguishes pending, accepted and failed.",
+    "how": "Event id is the hash of the signed canonical form; insert uses ON CONFLICT (community_id, created_at, id) DO NOTHING and returns was_inserted. Relay answers OK only after the full pipeline. Mobile spec: sent means relay-accepted, uncertain acceptance stays pending, retry must not duplicate. Desktop uses a local optimistic key replaced on ack.",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/events.sql:1-41",
+      "C:/dev/buzz/ARCHITECTURE.md:479-481",
+      "C:/dev/buzz/VISION_MOBILE.md:50-52",
+      "C:/dev/buzz/desktop/src/features/messages/hooks.ts:107-125"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon room posts are model turns; a client-generated idempotency key per post would stop poll/stream retries from creating duplicate billable turns.",
+    "notes": "Slack (client_msg_id) and Teams have the same idea; Buzz gets it free from signed ids."
+  },
+  {
+    "id": "buzz-architecture-004",
+    "category": "Realtime & sync architecture",
+    "name": "Three-tier subscription index plus a single delivery-time access chokepoint",
+    "what": "Live events reach only connections whose filter matches and whose current membership still allows the read; revocation bites at the next delivery even when the subscription outlived it or lives on another pod.",
+    "how": "SubscriptionRegistry keeps DashMap indexes: (channel,kind), channel wildcard, and a linear scan for global subs; global subs never receive channel-scoped events. filter_fanout_by_access is the one send chokepoint shared by local ingest and Redis cross-node paths: tenant-label equality per connection, author-only kinds, shared-gated kinds, owner-only kinds (30622, 44200), private-channel membership via a 10 s cache, fail closed on any lookup error.",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:327-362",
+      "C:/dev/buzz/crates/buzz-relay/src/subscription.rs:86",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/event.rs:96-250",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:129-215"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "When Verevon replaces 6 s polling with push, re-authorize every delivery against the current Control audience (decisions live 2 minutes) and fail closed; do not trust the subscription-time check.",
+    "notes": "Membership cache TTL (10 s) plus cross-pod invalidation bounds staleness; stale-negative repair exists in req.rs:625."
+  },
+  {
+    "id": "buzz-architecture-005",
+    "category": "Realtime & sync architecture",
+    "name": "REQ checks access before registering; live-before-history client contract",
+    "what": "A non-member never sees a private channel event in the gap between subscribing and being checked, and a rebuilding client never silently misses events.",
+    "how": "req.rs loads accessible channels, applies the scoped-token upper bound, repairs a cache-negative against the DB, and only then registers the subscription. ARCHITECTURE documents the client invariant: open the live subscription before or overlapping the finite history REQ, dedupe by id, and release client-side fences when the relay sends a terminal CLOSED (post-mortems PR #3995, #6996).",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:363-388",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/req.rs:575-660"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The subscribe-first, backfill-second, dedupe-by-id rule is the cheapest way to close the gap window when Verevon moves from polling to a push transport.",
+    "notes": "These invariants were learned from production bugs, which raises confidence that they hold."
+  },
+  {
+    "id": "buzz-architecture-006",
+    "category": "Realtime & sync architecture",
+    "name": "Community-scoped Redis topics with refcounted dynamic SUBSCRIBE",
+    "what": "Each relay pod ingests only the channel and community topics it has local subscribers for, which keeps cross-pod fan-out flat as tenants grow.",
+    "how": "Topics buzz:{community}:channel:{id} and buzz:{community}:global; retain_topic/release_topic drive SUBSCRIBE on a dedicated PubSub connection with a 500 ms unsubscribe debounce; a 4096-slot broadcast channel feeds local receivers; local-echo dedup via a moka cache; backoff 1 s to 30 s. perf/relay_bus_scaling.py measured a 64x ingress reduction at 64 communities with only Redis in the loop (no DB, websocket or client costs).",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-pubsub/src/topic.rs:43",
+      "C:/dev/buzz/crates/buzz-pubsub/src/lib.rs:13",
+      "C:/dev/buzz/crates/buzz-pubsub/src/lib.rs:86",
+      "C:/dev/buzz/perf/RELAY_BUS_SCALING.md:1-30",
+      "C:/dev/buzz/ARCHITECTURE.md:531-545"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A future Verevon realtime plane should subscribe per Space (not per org firehose) and refcount subscriptions so pods only carry rooms they serve.",
+    "notes": "ARCHITECTURE.md still describes the old PSUBSCRIBE buzz:channel:* design; code and perf doc are ground truth. The 64x figure is a bus-only microbenchmark, not an end-to-end number."
+  },
+  {
+    "id": "buzz-architecture-007",
+    "category": "Realtime & sync architecture",
+    "name": "Cross-pod side channels split hints from commands",
+    "what": "A membership change or ban takes effect on every pod quickly, and a banned user (and their agents) loses live sockets cluster-wide.",
+    "how": "Two separate Redis pub/sub channels: buzz:*:cache-invalidate carries pure idempotent cache-key drops (next read re-fetches from DB, so loss is harmless), and buzz:*:conn-control carries imperative disconnect-pubkey commands (the DB ban row is the durable backstop if the message is lost). ConnectionManager.disconnect_pubkey also closes sockets admitted through the banned principal as owner. A third global channel carries NIP-FI deny disconnects.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-pubsub/src/cache_invalidation.rs:1-27",
+      "C:/dev/buzz/crates/buzz-pubsub/src/conn_control.rs:1-31",
+      "C:/dev/buzz/crates/buzz-relay/src/state.rs:855-905"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon propagates membership revocation over plain NATS tolerating loss; adding a re-check at next authorize (durable backstop) and keeping hint vs command semantics separate would make that safe by construction.",
+    "notes": "The explicit rationale comment (do not fold imperative commands into the idempotent hint channel) is worth copying as a design rule."
+  },
+  {
+    "id": "buzz-architecture-008",
+    "category": "Realtime & sync architecture",
+    "name": "Presence as a renewable lease, ephemeral kinds never stored, snapshot/live inclusion contract",
+    "what": "Online/away dots and typing indicators update in real time for humans and agents and expire on their own when a client dies; a dead agent shows offline within about three minutes.",
+    "how": "Kind 20001 presence sets buzz:{community}:presence:{pubkey} with EX 180 (3x the 60 s heartbeat); kind 20002 typing uses a ZSET with a 5 s window and 60 s key TTL; ephemeral kinds skip DB, audit and search. If the Redis mutation fails the relay refuses both the ACK and the fan-out so a later bulk snapshot (relay-signed kind 40902, synthesized in api/bridge.rs from Redis) can never contradict a delta a client already saw. Presence now rides the shared global ephemeral path to other nodes.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-pubsub/src/presence.rs:1-16",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/event.rs:929-1000",
+      "C:/dev/buzz/crates/buzz-relay/src/api/bridge.rs:2600",
+      "C:/dev/buzz/ARCHITECTURE.md:545-553",
+      "C:/dev/buzz/docs/agent-availability.md:1-12"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Model agent availability as a lease the agent renews (online/away/offline plus unknown), not a stored flag; Verevon already polls presence in Convex and could adopt the inclusion contract when it adds push.",
+    "notes": "ARCHITECTURE.md:306 still says presence fan-out is local-only; event.rs:990 shows it now reaches other nodes (doc drift)."
+  },
+  {
+    "id": "buzz-architecture-009",
+    "category": "Realtime & sync architecture",
+    "name": "Connection lifecycle hardening, slow-client policy and graceful restart",
+    "what": "Slow or dead clients are shed without hurting others, and a rolling restart hands clients an explicit close frame instead of a cut socket.",
+    "how": "Connection semaphore, a 1024-slot handler semaphore, 5 s AUTH timeout, ping every 30 s with three missed pongs, bounded per-connection send queue with a grace counter (3 consecutive full), separate control and terminal-control channels that are drained before cancel so ban and NIP-FI denial frames always arrive, 5 s restart-close ack under the process drain deadline. Limits: 64 KiB frame, 1024 subs per connection, 10 filters per REQ, 500 rows per historical filter, 4 concurrent filter queries. Early startup phases emit fixed-schema JSON lifecycle events to stderr before telemetry exists.",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:230-269",
+      "C:/dev/buzz/crates/buzz-relay/src/connection.rs:30",
+      "C:/dev/buzz/crates/buzz-relay/src/state.rs:290-330",
+      "C:/dev/buzz/crates/buzz-relay/src/protocol.rs:9-12",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/req.rs:26-49",
+      "C:/dev/buzz/crates/buzz-relay/src/lifecycle.rs:1-12"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "A checklist for any Verevon socket layer: bounded queues, explicit slow-client policy, priority control frames, drain-with-ack on deploy.",
+    "notes": "No evidence of load tests at the stated 10K human / 50K agent targets; those are targets in VISION.md:198-208."
+  },
+  {
+    "id": "buzz-architecture-010",
+    "category": "Realtime & sync architecture",
+    "name": "Redis fixed-window rate limiting with tenant scopes and a machine-readable retry hint",
+    "what": "Per-pubkey and per-IP limits protect the relay, and clients receive a \"retry in Ns\" hint that drives one shared back-off gate for WebSocket and HTTP.",
+    "how": "Lua INCR+EXPIRE script (atomic, self-repairing TTL); LimitType Messages, ApiCalls, GifSearches, WsEvents, IpConnections; check_principal fails closed to Unavailable; WS budget uses a 5 s burst window; keys carry the community. Desktop RelayRateLimitGate parses \"retry in Ns\" from CLOSED frames and 429 bodies, extends one shared expiry (max 300 s) and resets on community switch; reconnect replay paces REQs to stay under the budget.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-pubsub/src/rate_limiter.rs:1-50",
+      "C:/dev/buzz/crates/buzz-relay/src/admission.rs:9-60",
+      "C:/dev/buzz/crates/buzz-auth/src/rate_limit.rs:49-80",
+      "C:/dev/buzz/desktop/src/shared/api/relayRateLimitGate.ts:1-30"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Cheap to copy: a canonical retry hint string plus one client-side gate. Add per-owner aggregation so one human cannot multiply quota by minting many agents (NIP-AA recommends this).",
+    "notes": "Code comments admit fixed windows allow 2x burst. ARCHITECTURE.md:949 says no limiter is enforced; that is stale (resolves the scout conflict). Owner-scoped aggregation across virtual agent members is recommended by NIP-AA:135 but I did not confirm it is implemented."
+  },
+  {
+    "id": "buzz-architecture-011",
+    "category": "Realtime & sync architecture",
+    "name": "Time-partitioned Postgres event store with tenant-leading keys and generated search column",
+    "what": "One durable log serves history, search, mentions and projections with predictable query plans per community.",
+    "how": "events table PARTITION BY RANGE(created_at) monthly via an advisory-locked partition manager with allowlisted DDL names; PK (community_id, created_at, id); every hot index starts with community_id; GIN on tags jsonb_path_ops for e-tag containment; generated tsvector for FTS; four logical pool roles (writer, reader, audit, search) with per-role gauges; 60 backward-compatible migrations plus a desired-state schema/ tree applied with pgschema. Disposable projections (mentions, thread metadata, reactions, search) are rebuildable from the log.",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/events.sql:1-70",
+      "C:/dev/buzz/ARCHITECTURE.md:462-470",
+      "C:/dev/buzz/ARCHITECTURE.md:700-711",
+      "C:/dev/buzz/docs/multi-tenant-relay.md:69-90",
+      "C:/dev/buzz/bin/pgschema"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Time-partitioning plus tenant-leading keys is directly reusable for Space transcripts if Verevon adds a human-message store; the \"projections are disposable\" rule keeps ownership clear across planes.",
+    "notes": "Throughput targets (600K events/day) are design targets only."
+  },
+  {
+    "id": "buzz-architecture-012",
+    "category": "Realtime & sync architecture",
+    "name": "Bounded client clock skew converts signed timestamps into replica-safe keyset ordering",
+    "what": "Timeline pages stay exact (no holes, no duplicates) even when served from read replicas, despite client-signed created_at values.",
+    "how": "Ingest accepts only a bounded future skew (900 s) and a deferred commit-time trigger events_created_at_floor_guard rejects channel events older than a floor (960 s) before commit, armed per session by GUC. replica_fence.rs proves replica completeness with an ordered heartbeat: exclusive advisory lock, sample S, scan pg_stat_activity for the oldest open xact, and commit the heartbeat token last; a replica session seeing the token has replayed every earlier commit. Windows then use a composite (created_at,id) cursor.",
+    "evidence": [
+      "C:/dev/buzz/schema/functions/events_created_at_floor_guard.sql:1-23",
+      "C:/dev/buzz/crates/buzz-db/src/runtime/replica_fence.rs:1-40",
+      "C:/dev/buzz/desktop/src/shared/api/relayReconnectReplay.ts:18-30"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "If Verevon ever reads transcripts from replicas or caches, the commit-ordered heartbeat token is a reusable correctness recipe; if it keeps server-assigned sequence numbers it avoids the skew problem entirely.",
+    "notes": "The need for this machinery is itself a cost of Nostr: no server-assigned monotonic sequence, so clients carry a ~31 minute lookback on resume."
+  },
+  {
+    "id": "buzz-architecture-013",
+    "category": "Realtime & sync architecture",
+    "name": "Replica read routing with writer-pinned write-influencing reads",
+    "what": "Scroll pages and counts use replicas; any read that gates a write (canvas save head, post-write verification) is forced to the writer.",
+    "how": "Db::query_events (writer) vs query_events_routed (replica when BUZZ_REPLICA_READ_MAX_AGE_MS is set, subject to a RoutePredicate soundness check); clients signal intent with a consistency:\"strong\" filter extension that can only force the writer (no inverse); a caller classification table in PLANS/ must be updated when a call site is added; fail closed to writer except on statement_timeout (57014).",
+    "evidence": [
+      "C:/dev/buzz/PLANS/REPLICA_FULL_READ_ROUTING_DESIGN.md:8-76",
+      "C:/dev/buzz/crates/buzz-relay/src/api/bridge.rs:438"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Adopt the rule \"a read that influences a write or a permission decision reads the authoritative store\" before Verevon adds caches or projections over Control/Convex data.",
+    "notes": "Design status is \"active\"; the routing is a no-op until the max-age env is set."
+  },
+  {
+    "id": "buzz-architecture-014",
+    "category": "Realtime & sync architecture",
+    "name": "NIP-CW channel and thread windows with relay-signed overlays",
+    "what": "Clients page top-level messages and thread replies with exact cursors, reply summaries and a trustworthy has_more, without downloading raw reply volume.",
+    "how": "Extended NIP-01 filter on the NIP-98 HTTP /query bridge: top_level, include_summaries, include_aux, until+before_id (both or neither). Relay probes limit+1 for exhaustion, signs overlay events with its own key (39005 thread summary, 39006 channel bounds with next_cursor, 39007 thread bounds) and appends a two-hop aux closure (reactions, deletions, edits). Inaccessible equals nonexistent. NIP-10 marked reply tags define depth (cap 100) and an author opt-in broadcast flag.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-CW.md:1-125",
+      "C:/dev/buzz/crates/buzz-core/src/thread_window.rs",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:435-441"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon thread listing could return server-computed has_more, next cursor and per-thread reply counts in one response instead of separate polls.",
+    "notes": "Needed because NIP-01 filters cannot express \"not a reply\". I read the NIP and the kind constants, not the full relay implementation."
+  },
+  {
+    "id": "buzz-architecture-015",
+    "category": "Realtime & sync architecture",
+    "name": "Client reconnect and resume machinery without a server-side cursor",
+    "what": "After sleep, network loss or relay restart the desktop client re-establishes subscriptions and fills the gap without hammering the relay.",
+    "how": "Per-subscription lastSeenCreatedAt; replay since = cursor minus a 1,870 s lookback (900 s relay future tolerance + 960 s storage floor + 5 s margin); paged backfill (500 rows, 4 pages concurrent); live REQs replayed in batches of 8 with 50 ms spacing; page retries capped at 3 then degrade to live-only while pinning the missed window; a passive stall watchdog that never writes to the socket (plugin mutex hazard on half-open TCP); event-driven resume triggers (online, focus, visibility; min 5 s) because WKWebView throttles timers; a terminal latch after an AUTH denial; a 256-frame inbound buffer while connecting.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src/shared/api/relayReconnectReplay.ts:14-60",
+      "C:/dev/buzz/desktop/src/shared/api/relayStallWatchdog.ts:1-10",
+      "C:/dev/buzz/desktop/src/shared/api/relayResumeTriggerPolicy.ts:1-30",
+      "C:/dev/buzz/desktop/src/shared/api/relayReconnectPolicy.ts:1-30",
+      "C:/dev/buzz/desktop/src/shared/api/relayInboundBuffer.ts:1-10",
+      "C:/dev/buzz/desktop/src/shared/api/channelReconnectRepair.ts:1-27"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Prefer a server-assigned monotonic per-room sequence for resume (cheaper than Buzz time lookback) but copy the trigger policy, paced replay, passive stall detection and terminal-state latch.",
+    "notes": "Very edge-case aware (many files, many tests) but clock-based resume is inherently overlap-heavy; dedupe by event id is mandatory."
+  },
+  {
+    "id": "buzz-architecture-016",
+    "category": "Realtime & sync architecture",
+    "name": "Native-owned relay socket with batched IPC into the webview",
+    "what": "The desktop UI stays responsive during catch-up storms and multiple backend features share one authenticated socket.",
+    "how": "Tauri Rust owns the WebSocket (tokio-tungstenite, 64-slot send queue, 10 s timeouts). Inbound text frames are coalesced in 8 ms windows under a 7,680-byte serialized cap to stay below Tauri 8,192-byte direct-eval threshold (otherwise IPC round-trips). A shared native relay session multiplexes archive sync, persona catalog and batched unread catch-up on one socket per (relay, pubkey) with an immutable per-subscription filter contract.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/src/native_websocket_batch.rs:1-30",
+      "C:/dev/buzz/desktop/src-tauri/src/native_websocket.rs:1-25",
+      "C:/dev/buzz/desktop/src-tauri/src/native_relay_client.rs:1-30",
+      "C:/dev/buzz/desktop/src-tauri/src/unread_catch_up.rs:1-12"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Relevant only if Verevon ships a desktop shell; the transferable lesson is to keep high-rate sockets out of the UI thread and batch UI updates to a fixed time window.",
+    "notes": "Slack and Teams desktop clients are JS/Electron-style; this Rust-socket design is unusual among the references."
+  },
+  {
+    "id": "buzz-architecture-017",
+    "category": "Realtime & sync architecture",
+    "name": "Disposable derived stores and paint-accelerator caches",
+    "what": "Recently opened channels paint instantly from a local cache that is always replaced by authoritative relay data; the mobile spec treats the whole local store as rebuildable.",
+    "how": "Desktop channel_head_cache.rs: per (pubkey, relay) SQLite scope, at most 32 channels and 1 MiB per row, schema v1, never authoritative. VISION_MOBILE: verify events on receipt and fold into a persistent store that the UI subscribes to (never to raw events); avoid migrations by discarding and rebuilding the store; keep drafts and pending actions in a separate minimally scoped store.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/src/channel_head_cache.rs:1-30",
+      "C:/dev/buzz/VISION_MOBILE.md:10-30",
+      "C:/dev/buzz/desktop/src-tauri/src/archive/mod.rs:1-25"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has no offline cache; a never-authoritative, scoped, clearable paint cache is a low-risk first step and can be disabled for ZDR orgs.",
+    "notes": "Mobile behaviour is a written intent (doc says not all intents are realized); desktop archive is a user-driven local save, not the live cache."
+  },
+  {
+    "id": "buzz-architecture-018",
+    "category": "Realtime & sync architecture",
+    "name": "Optimistic send with local keys replaced on ack",
+    "what": "Sent messages appear instantly and are replaced in place by the relay-confirmed event without remounting.",
+    "how": "TanStack Query mutation: onMutate inserts an optimistic message with a stable local key (optimistic-<uuid>), onSuccess swaps it for the signed event while preserving the render key, onError removes it; edits wait for the relay edit event rather than faking one.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src/features/messages/hooks.ts:85-125",
+      "C:/dev/buzz/desktop/src/features/messages/hooks.ts:667-765",
+      "C:/dev/buzz/desktop/src/features/messages/types.ts:16"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Standard pattern Verevon needs once human-only posts exist; the stable render key avoids list flicker on ack.",
+    "notes": "I read the mutation code, not the full timeline reconciler."
+  },
+  {
+    "id": "buzz-architecture-019",
+    "category": "Realtime & sync architecture",
+    "name": "Read state evolved from client-synced encrypted frontiers to a server-derived accessory API",
+    "what": "Unread dots, mention counts and mark-read stay consistent across devices, and a thread keeps its own read position independent of its channel.",
+    "how": "NIP-RS: kind 30078 per-installation blobs (d=read-state:<32-hex slot>, NIP-44 to self, frontier timestamps, manual-unread override layer with durable tombstone floors). Then the opt-in /buzz/v1 accessory API (advertised in NIP-11 as buzz_v1): GET /me/sidebar returns per-channel and per-thread rows {unread, mentions, read_through_id, latest_id}, POST mark_through anchors, cursor paging, private no-store caching, NIP-98 per request; absence means \"unavailable\", never \"zero\". Tables personal_read_accounts and personal_read_frontiers. The two systems do not synchronize.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-RS.md:1-60",
+      "C:/dev/buzz/docs/buzz-v1-read-state.md:1-90",
+      "C:/dev/buzz/docs/buzz-v1-extension-design.md:1-21",
+      "C:/dev/buzz/VISION.md:77",
+      "C:/dev/buzz/schema/tables/public/personal_read_frontiers.sql"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has no cross-room unread aggregate; model a read frontier per (user, scope) with mark_through anchors computed by the owning plane (Application) and a \"never show zero when unavailable\" rule.",
+    "notes": "Stated rule: conversation stays Nostr-authoritative; derived state (unread) lives in accessories. The pivot away from pure NIP-RS shows pure-protocol read state did not scale to counts."
+  },
+  {
+    "id": "buzz-architecture-020",
+    "category": "Realtime & sync architecture",
+    "name": "Encryption posture: server-managed content, client-side NIP-44 for owner-private side data",
+    "what": "Channels and DMs are readable by the relay (so admins, search and eDiscovery work); data that should stay owner-private is encrypted client-side.",
+    "how": "TLS in transit, at-rest delegated to storage, no E2EE for channels or DMs (VISION calls it a future consideration for DMs). NIP-44 v2 protects read state, agent engrams, agent turn metrics, observer frames, push leases and reminders; NIP-17 gift wraps (kind 1059) are accepted but not indexed (tsvector NULL). Cleartext routing tags remain visible to the operator (explicit in NIP-AO).",
+    "evidence": [
+      "C:/dev/buzz/VISION.md:100-102",
+      "C:/dev/buzz/NOSTR.md:71",
+      "C:/dev/buzz/schema/tables/public/events.sql:28-33",
+      "C:/dev/buzz/docs/nips/NIP-AO.md:176-200"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The two-layer posture (server-readable room content, owner-encrypted agent side data) fits Verevon better than claiming E2EE; ZDR is about retention, which Buzz does not address at all.",
+    "notes": "Teams and Slack are also server-readable; Grok-style personal agents are the closest to client-held secrets."
+  },
+  {
+    "id": "buzz-architecture-021",
+    "category": "Realtime & sync architecture",
+    "name": "Device pairing with short-authentication-string confirmation over an ephemeral sidecar relay",
+    "what": "Move an identity to a new phone or desktop by scanning a QR and confirming a short code; nothing is stored on the relay.",
+    "how": "NIP-AB: HKDF-SHA256 for session id, SAS and transcript hash, ECDH + NIP-44 v2 payloads, QR payload, abort on SAS mismatch; kind 24134 over buzz-pair-relay, a loopback-bound sidecar (128 conns, 4 KiB frames, 120 s TTL, 8 events per connection, +/-120 s freshness, 300 s dedup, no persistence) behind a reverse proxy. A Tamarin model ships next to the spec. Key backups use NIP-49 ncryptsec and HPKE-wrapped files; an egress guard blocks ncryptsec material at 13 relay-bound boundaries with an inventory test.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-core/src/pairing/mod.rs:1-20",
+      "C:/dev/buzz/crates/buzz-core/src/pairing/NIP-AB.md",
+      "C:/dev/buzz/crates/buzz-core/src/pairing/NIP-AB.spthy",
+      "C:/dev/buzz/crates/buzz-pair-relay/src/lib.rs:1-25",
+      "C:/dev/buzz/desktop/src-tauri/src/egress_guard.rs:1-25"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon uses central auth so key pairing is out of scope, but SAS-confirmed linking is a good pattern for attaching a local agent runner or browser to a personal agent.",
+    "notes": "Corrects the scout note that no NIP-AB spec exists: it lives at crates/buzz-core/src/pairing/NIP-AB.md."
+  },
+  {
+    "id": "buzz-architecture-022",
+    "category": "Realtime & sync architecture",
+    "name": "Transactional push match queue and wake outbox with claim leases",
+    "what": "Push work survives crashes and never blocks chat writes; duplicate wakes are harmless.",
+    "how": "Event writes enqueue into push_match_queue (trigger for legacy writers, best-effort post-commit for updated writers; overload may drop push work because messages stay authoritative). Workers claim batches of 64 with a 30 s lease, MAX_ATTEMPTS 8, idle poll backoff 250 ms to 2 s, a poison-job reaper every 30 s; matches become rows in push_wake_outbox with UNIQUE (community, endpoint_hash, event_id) for idempotency. A shared advisory lock on enqueue pairs with an exclusive lock on lease activation to close the lost-wake race.",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/push_match_queue.sql:1-20",
+      "C:/dev/buzz/schema/tables/public/push_wake_outbox.sql:1-26",
+      "C:/dev/buzz/schema/functions/enqueue_push_match_job.sql:1-30",
+      "C:/dev/buzz/crates/buzz-relay/src/push_runtime.rs:30-48"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon Application Plane already has lease/retry outboxes; confirm an idempotent unique key per (endpoint, event), a poison reaper and the \"drop notifications under overload, never messages\" rule.",
+    "notes": "Deployed only for APNs; see push gateway record."
+  },
+  {
+    "id": "buzz-architecture-023",
+    "category": "Realtime & sync architecture",
+    "name": "Inter-pod QUIC mesh with Redis-fenced session ownership",
+    "what": "Participants of one huddle connected to different relay pods still hear each other; a stale pod cannot keep acting as owner.",
+    "how": "buzz-relay-mesh: one iroh endpoint per relay runtime (boot-unique key attested by the relay signing key), scuttlebutt gossip with phi-accrual failure detection, warm full mesh. Law: mesh membership is only a hint; a Redis lease with an INCR generation counter (Lua acquire, renew, release; 30 s TTL) is the arbiter, and every session frame carries FencedHeader {session_id, generation, owner_runtime_id}; stale generations are dropped (equivalent to packet loss for audio). BUZZ_MESH=off yields single-instance behaviour.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-relay-mesh/src/lib.rs:1-25",
+      "C:/dev/buzz/crates/buzz-relay/src/tunnel/directory.rs:1-60",
+      "C:/dev/buzz/crates/buzz-relay/src/audio/mesh.rs:1-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Fenced-generation leases are the standard recipe for one owner per live room session (voice, streaming agent run) once Verevon runs multiple realtime replicas.",
+    "notes": "Not federation: this mesh joins pods of one deployment. \"Mesh\" in the vision docs for LLM compute is a different thing (see agents record)."
+  },
+  {
+    "id": "buzz-architecture-024",
+    "category": "Realtime & sync architecture",
+    "name": "Stateless relay pods, HPA on active-websocket gauge, operator listener split",
+    "what": "The relay scales horizontally on connection count and exposes ops endpoints on a separate listener.",
+    "how": "Relay holds no tenant state (Postgres + Redis + S3/MinIO); replicaCount>1 requires Redis; git state is object-store CAS so no RWX volume. Helm HPA: min 5, max 15, CPU 65% plus custom metric buzz_ws_connections_active target 5000 per pod, scale-up 100%/60 s, scale-down stabilization 600 s one pod per 120 s. Separate operator listener serves /_liveness, /_readiness, /_status (build identity), /_mesh; storage accounting runs as an external snapshot worker; Prometheus metrics use closed label sets.",
+    "evidence": [
+      "C:/dev/buzz/deploy/charts/buzz/values.yaml:1-60",
+      "C:/dev/buzz/crates/buzz-relay/src/router.rs:566-569",
+      "C:/dev/buzz/docs/storage-accounting.md:1-30",
+      "C:/dev/buzz/docs/deployment-identity.md:39-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Concrete autoscaling signal (active-connection gauge per pod) and the pattern of moving expensive accounting out of the hot service into a snapshot worker.",
+    "notes": "Chart defaults ship single-replica; HA examples were flagged non-conforming in the multi-tenant doc for the replay seen-set until it moved to Redis."
+  },
+  {
+    "id": "buzz-architecture-025",
+    "category": "Realtime & sync architecture",
+    "name": "Durable data backfills and backward-compatible migration discipline",
+    "what": "Data repairs run while the relay serves traffic and resume exactly after a crash.",
+    "how": "Each backfill is one Postgres row with a stable id and captured upper bound; a worker takes an exclusive claim; every transaction mutates target rows and advances the checkpoint together; validation precedes completed; timers and queues only wake workers (Postgres is authority). Migrations must stay backward compatible; fence probes verify guard catalog and behaviour at startup; schema/ holds the desired state.",
+    "evidence": [
+      "C:/dev/buzz/docs/data-backfills.md:1-40",
+      "C:/dev/buzz/ARCHITECTURE.md:519-521",
+      "C:/dev/buzz/migrations/0060_push_single_application.sql"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon spans several planes with their own migrations; the \"backfill is a durable row with checkpoint and validation\" contract is portable.",
+    "notes": "Spec is draft; implementation breadth not audited."
+  },
+  {
+    "id": "buzz-architecture-026",
+    "category": "Realtime & sync architecture",
+    "name": "Capability discovery through NIP-11 with absence-means-unsupported",
+    "what": "Clients learn which optional features a community supports before using them, and degrade cleanly.",
+    "how": "NIP-11 document advertises buzz_v1 (read-state API, limits, eligible kinds), buzz-push-v1 (push), supported_extensions (nip-pl), federated_identity, workspace icon (NIP-WP) and a credential-free GIF descriptor. Unknown host or disabled feature omits the capability; clients treat absence as \"unavailable, do not show zero\".",
+    "evidence": [
+      "C:/dev/buzz/docs/buzz-v1-read-state.md:11-30",
+      "C:/dev/buzz/docs/buzz-push.md:1-10",
+      "C:/dev/buzz/docs/nips/NIP-WP.md:1-40",
+      "C:/dev/buzz/docs/multi-tenant-conformance.md:50"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "A single capability document per Space (what is enabled by org policy) would remove guesswork from Verevon clients facing deny-by-default effect policies.",
+    "notes": "Fits Verevon deny-by-default effect policies: advertise the allowed set instead of letting the UI discover denials by 403."
+  },
+  {
+    "id": "buzz-architecture-027",
+    "category": "Realtime & sync architecture",
+    "name": "Addressable-event watermarks and explicit write-conflict semantics",
+    "what": "Last-writer-wins records (settings, read state, definitions) cannot be resurrected by stale or backdated events, and CLI callers get a distinct write-conflict exit code.",
+    "how": "parameterized_event_watermarks table keyed (community, kind, pubkey, d_tag) tracks the winning (created_at, event_id); NIP-PL additionally requires both NIP-01 ordering and a strictly higher generation counter; NIP-PMA defines a CAS generation + prev chain; buzz CLI returns exit code 5 for write conflicts.",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/parameterized_event_watermarks.sql:1-8",
+      "C:/dev/buzz/docs/nips/NIP-PL.md:92",
+      "C:/dev/buzz/docs/nips/NIP-PMA.md:1-30",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:8-21"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Any Verevon aggregate edited from several devices or agents (instructions, bindings) should carry a generation/CAS token rather than last-write-wins timestamps.",
+    "notes": "Medium confidence: I verified the table and doc rules, not every write path that consults the watermark."
+  },
+  {
+    "id": "buzz-architecture-028",
+    "category": "Messaging core",
+    "name": "Threading as protocol: NIP-10 marked replies, depth cap and author-chosen broadcast",
+    "what": "Replies form threads with real thread metadata; a reply can optionally also appear on the channel timeline.",
+    "how": "A reply is an event with an e tag marked reply; thread_metadata is written atomically at ingest and unknown parents are rejected; depth is parent depth + 1 (Buzz rejects beyond 100); [\"broadcast\",\"1\"] surfaces a depth-1 reply on the timeline; top-level classification is defined purely from wire tags so any implementation reproduces the same windows. Forum channels use post/comment/vote kinds (45001-45003).",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-CW.md:86-110",
+      "C:/dev/buzz/NOSTR.md:70",
+      "C:/dev/buzz/schema/tables/public/thread_metadata.sql",
+      "C:/dev/buzz/crates/buzz-core/src/nip10.rs"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon should decide thread identity early (non-owner replies are refused today in Session Core); defining top-level vs reply from explicit fields keeps timelines reproducible.",
+    "notes": "Slack/Teams threading is similar in effect; the notable part is the wire-level, relay-independent definition."
+  },
+  {
+    "id": "buzz-architecture-029",
+    "category": "Messaging core",
+    "name": "Direct messages as hidden private channels with per-viewer hide projection",
+    "what": "DMs (1:1 and group up to 9) reuse the channel machinery; hiding a DM is per-viewer presentation state, not leaving it.",
+    "how": "channels.participant_hash (unique per community) identifies a DM; kinds 41010 open, 41011 add member, 41012 hide, 41001 created; the relay publishes a relay-signed per-viewer snapshot kind 30622 (NIP-DV) so thin clients can filter hidden DMs; NIP-17 gift wraps are also accepted community-wide. 30622 is owner-only at fan-out and excluded from search.",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/channels.sql:41-45",
+      "C:/dev/buzz/docs/nips/NIP-DV.md:1-45",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:509-515",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/event.rs:177-200"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Reusing the room abstraction for DMs avoids a second authority path; Verevon could model DMs as two-member Spaces rather than a new aggregate.",
+    "notes": "DM visibility had a user-visible bug (hidden DM reappeared) that motivated the snapshot kind."
+  },
+  {
+    "id": "buzz-architecture-030",
+    "category": "Search & discovery",
+    "name": "Postgres full-text search with post-filter authorization and privacy-null columns",
+    "what": "Messages are searchable per community with channel scoping and no separate search service to keep in sync.",
+    "how": "events.search_tsv is a STORED generated tsvector (simple config) with a GIN index; sensitive kinds (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200) yield NULL so they can never match; every query carries community_id; the relay fetches candidates in full pages of 100 and re-authorizes each hit (channel membership, #p, owner gates), so results may be shorter than the limit; NIP-50 one-shot REQ. No vector or semantic retrieval exists.",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/events.sql:19-33",
+      "C:/dev/buzz/ARCHITECTURE.md:559-585",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/req.rs:580-600",
+      "C:/dev/buzz/NOSTR.md:69"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Candidates-then-authorize is the safe pattern when search runs in a different plane from authority; Verevon must also honour ZDR for any index it adds.",
+    "notes": "No semantic/AI search: weaker than Slack/Teams on this axis; agents compensate by reading history through the CLI."
+  },
+  {
+    "id": "buzz-architecture-031",
+    "category": "Notifications & attention",
+    "name": "Blind push gateway with encrypted, expiring, self-scoped leases and a constant wake payload",
+    "what": "Mobile apps get woken through APNs without Apple or the gateway ever seeing message content, and a lease cannot be abused as a surveillance or firehose primitive.",
+    "how": "NIP-PL: kind 30350 addressable lease (random per-origin installation id, mandatory expiration <= 30 days, everything else NIP-44 encrypted to the executor key). Filters must be narrowed (#p self-only, #h, or authors), exact values, bounded kinds, no since/until/limit/search; classes silent < default < time_sensitive < urgent (urgent reserved for approval kinds). Wake payload is a fixed reconnect instruction authored by the gateway. buzz-push-gateway is a separate service with App Attest verification (pinned Apple root), encrypted token custody (two independent AEAD keyrings), replay/quota admission transactions in its own Postgres, six tables, reaper, bounded-cardinality metrics. Python bounded-exhaustive models plus mutation tests cover acceptance, delivery and fixed-payload invariants.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-PL.md:20-45",
+      "C:/dev/buzz/docs/nips/NIP-PL.md:128-165",
+      "C:/dev/buzz/docs/push-gateway-deployment.md:1-60",
+      "C:/dev/buzz/crates/buzz-push-gateway/src/app_attest.rs:1-20",
+      "C:/dev/buzz/docs/formal/nip-pl/NOTE.md:1-38",
+      "C:/dev/buzz/docs/buzz-push.md:1-21"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "If Verevon ever sends Space notifications it must keep ZDR: a constant wake signal with fetch-on-open keeps content out of Novu/APNs and matches the existing deny-by-default posture.",
+    "notes": "Experimental: relays advertise buzz-push-v1, not nip-pl; only APNs delivery code exists (fcm/unifiedpush are named in the draft only); gateway never deployed outside personal dev per its doc. Teams/Slack push content goes through vendor clouds, so this is a real differentiator."
+  },
+  {
+    "id": "buzz-architecture-032",
+    "category": "Notifications & attention",
+    "name": "Zero-notification defaults per surface and priority classes",
+    "what": "Chat and forum are silent by default; DMs notify only when urgent; workflows notify for approvals only; users opt in to noise.",
+    "how": "Surface table in VISION (Stream zero, Forum zero, DMs URGENT, Workflows approvals); push subscriptions are explicit leases (nothing registers as a side effect of joining a channel); per-subscription hellthread gate suppress.p_tags_max and ignore filters. Home feed is fan-out-on-read assembled from event_mentions joins with a hard cap of 100 rows.",
+    "evidence": [
+      "C:/dev/buzz/VISION.md:13-31",
+      "C:/dev/buzz/VISION.md:131-137",
+      "C:/dev/buzz/docs/nips/NIP-PL.md:143-165",
+      "C:/dev/buzz/ARCHITECTURE.md:462-485"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon has no Space notifications at all; zero-default plus explicit opt-in classes fits an agent-heavy room where noise would otherwise explode.",
+    "notes": "Defaults are documented intent; I did not verify each default in the desktop settings code."
+  },
+  {
+    "id": "buzz-architecture-033",
+    "category": "Notifications & attention",
+    "name": "Desktop-active mobile push suppression (draft specification only)",
+    "what": "Specified behaviour: while the user is active on a desktop connected to the community, mobile pushes for messages are withheld, with a 10-minute inactivity threshold.",
+    "how": "Spec only (status: draft, not ready for implementation): the relay enforces, the gateway stays agnostic; desktop sends renewals every 10 s; eligibility expires 30 s after the last confirmation; recheck before sending a queued push; separate from visible presence; relay keeps only short-lived state; favour sending a redundant push when uncertain. Domain language in CONTEXT.md.",
+    "evidence": [
+      "C:/dev/buzz/docs/mobile-push-suppression.md:1-60",
+      "C:/dev/buzz/CONTEXT.md:1-53"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Useful rule set if Verevon adds mobile: relay-side enforcement, renewal leases instead of activity timestamps, and failing toward notifying.",
+    "notes": "No suppression logic found in push_runtime.rs, push_lease.rs (only per-subscription p_tags_max) or ingest; do not count as shipped."
+  },
+  {
+    "id": "buzz-architecture-034",
+    "category": "Notifications & attention",
+    "name": "Operator-listener mention delivery with durable outbox",
+    "what": "A hosting operator can receive mention notifications for registered pubkeys across all communities on a deployment and deliver them through its own channel.",
+    "how": "operator_listener.rs runs a deployment-global worker: claim 30 s, batch 10, idle poll 250 ms to 2 s, outbox reaper every 5 minutes and registration reaper daily; payload carries pubkey, community host, event id/kind/created_at (no content); delivery uses NIP-98 signed requests; tables operator_listener_outbox and operator_listener_pubkeys.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-relay/src/operator_listener.rs:1-40",
+      "C:/dev/buzz/schema/tables/public/operator_listener_outbox.sql",
+      "C:/dev/buzz/schema/tables/public/operator_listener_pubkeys.sql"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Shows a content-free mention webhook design that a hosting platform can bridge to email or other channels; relevant to the docs-only Channel Plane.",
+    "notes": "Purpose inferred from module header and table names; no consumer was read."
+  },
+  {
+    "id": "buzz-architecture-035",
+    "category": "Agents in the room",
+    "name": "Agents are ordinary signed principals: own keypair, own membership, same pipeline",
+    "what": "An agent joins a channel the way a person does, posts under its own name, shows presence and typing, and is subject to the same audit and rate limits; there is no separate bot gateway.",
+    "how": "Each agent has a secp256k1 keypair and a users row in the same community with agent_type, capabilities JSONB, agent_owner_pubkey (FK inside the community) and channel_add_policy (owner_only, nobody, anyone) that lets the agent restrict who may add it to channels; channel role bot; kind 10100 agent profile; the kind 0 profile carries the NIP-OA auth tag so discovery can prove ownership. Agents publish presence (20001) and typing (20002) like humans; HTTP typing path exists for app-hosted agents.",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/users.sql:5-22",
+      "C:/dev/buzz/VISION.md:87-96",
+      "C:/dev/buzz/docs/owned-agent-discovery.md:1-12",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/event.rs:1075",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:84-87"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already models agent membership in Control (space_memberships subject_type=service); Buzz adds an owner link and an agent-side add-policy so agents decide who may pull them into rooms.",
+    "notes": "Marketing line \"agents are members, not bots\" is accurate at the data-model level. Ownership is not membership: an owned agent can be discovered without being a member (owned-agent-discovery)."
+  },
+  {
+    "id": "buzz-architecture-036",
+    "category": "Agents in the room",
+    "name": "NIP-OA owner attestation: offline-verifiable agent-to-owner provenance",
+    "what": "Anyone can verify that a person authorized an agent key, and the credential can be reused across events without making the owner the author.",
+    "how": "Tag [\"auth\", owner_pubkey, conditions, sig]; sig is BIP-340 over SHA256(\"nostr:agent-auth:\" || agent_pubkey || \":\" || conditions); conditions are kind=N, created_at<t, created_at>t joined by & and must be used verbatim (no canonicalization); self-attestation and duplicate tags are rejected; relays need not verify it. The relay and harness use it for membership fallback (NIP-AA), sibling checks, owned-agent discovery, ban cascade and agent drafts. Test vectors accompany the spec.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-OA.md:1-80",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/auth.rs:296-330",
+      "C:/dev/buzz/docs/owned-agent-discovery.md:1-14",
+      "C:/dev/buzz/crates/buzz-acp/src/lib.rs:360-440"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon proves delegation through Control-issued signed decisions; an owner-signed, offline-verifiable delegation receipt would give auditors lineage that survives replay without calling Control.",
+    "notes": "Credential is a reusable capability: a leaked agent key plus its tag stays valid until conditions expire or the owner is removed (spec admits this). created_at conditions are agent-controlled unless the relay enforces AUTH freshness."
+  },
+  {
+    "id": "buzz-architecture-037",
+    "category": "Agents in the room",
+    "name": "NIP-AA virtual membership: agents admitted by their owner membership, revoked with the owner",
+    "what": "A person who is a community member can run agents without the operator enrolling each one; removing or banning the person cuts the agents off, including live sockets.",
+    "how": "At NIP-42 AUTH the relay verifies the auth tag, checks that the owner is an active member, and grants per-pubkey virtual membership with no persistent row; channel, role and quota checks still use the agent key and never inherit owner roles or admin rights; owner pubkey stays in session state for enumeration, termination and quota aggregation. The implementation goes beyond the spec: it materializes the owner link before admission (DB agent_owner_pubkey), cascades community bans owner-to-agents (an agent ban stays agent-only) and ConnectionManager closes sockets admitted under a revoked owner, cluster-wide via Redis.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-AA.md:25-60",
+      "C:/dev/buzz/docs/nips/NIP-AA.md:135-150",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/auth.rs:55-120",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/auth.rs:514-680",
+      "C:/dev/buzz/crates/buzz-relay/src/state.rs:319",
+      "C:/dev/buzz/crates/buzz-relay/src/state.rs:855-905"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Directly addresses a Verevon gap (personal Spaces cannot hold agents): derive an agent access from its owner membership and revoke it with the owner, never granting owner roles to the agent.",
+    "notes": "Spec says active sessions are not force-terminated; code does terminate them (state.rs admitted_owner). Doc/code drift in the safe direction."
+  },
+  {
+    "id": "buzz-architecture-038",
+    "category": "Agents in the room",
+    "name": "buzz-acp: relay-to-agent harness speaking ACP over stdio",
+    "what": "Any ACP-speaking runtime (goose, Claude Code via adapter, Codex, buzz-agent, presets, custom JSON harnesses) can sit in channels and answer mentions.",
+    "how": "A standalone binary authenticates to the relay as the agent (NIP-42, optional auth tag), discovers channels over REST (member=true) and auto-subscribes to new memberships via kind 44100, queues events per session scope (500 pending per scope and per channel), allows one prompt in flight per scope, batches queued events into one session/prompt, and runs a pool of 1 to 32 agent subprocesses with crash respawn and a circuit breaker (3 crashes per 60 s). Replays unprocessed mentions on startup. About 61K lines including tests.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/README.md:1-60",
+      "C:/dev/buzz/crates/buzz-acp/README.md:298-312",
+      "C:/dev/buzz/ARCHITECTURE.md:759-790",
+      "C:/dev/buzz/crates/buzz-acp/src/queue.rs:1-40",
+      "C:/dev/buzz/crates/buzz-acp/src/lib.rs:2181-2200"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The missing piece for Verevon shared rooms: a per-scope queue with one in-flight turn and batched event framing, so several authors can address an agent without racing.",
+    "notes": "ARCHITECTURE.md describes only goose/codex/claude; BYO tiers extend that. The harness is the trust boundary for author gating (see author-gate record)."
+  },
+  {
+    "id": "buzz-architecture-039",
+    "category": "Agents in the room",
+    "name": "Session scoping policy: channel, thread, DM and task scopes with a rollback switch",
+    "what": "Operators choose whether an agent keeps one context per channel or per thread; DMs stay one conversation; task runs are fresh.",
+    "how": "SessionScope is derived once at event admission from SessionPolicy (Channel default, Thread), whether the channel is a DM and the NIP-10 thread tags, then used as the single key for provider sessions, queue partitions, in-flight tracking and !cancel/!rotate resolution. The agent is told its session model in the base prompt (sessions share core memory, workspace and relay access but not conversation context). Ships dark so it can be canaried and rolled back without code changes.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/src/scope.rs:1-70",
+      "C:/dev/buzz/crates/buzz-acp/src/session_model_channel.md:1-5",
+      "C:/dev/buzz/crates/buzz-acp/src/session_model_thread.md:1-5",
+      "C:/dev/buzz/crates/buzz-acp/src/queue.rs:20-70"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon needs the same decision (room-level vs thread-level context) before it adds agent-to-agent delegation; make scope an explicit key carried through authorization.",
+    "notes": "The IFC proposal states plainly that these sessions are not security boundaries: same credentials, workspace and caches."
+  },
+  {
+    "id": "buzz-architecture-040",
+    "category": "Agents in the room",
+    "name": "Mid-turn message handling: queue, steer, interrupt, owner-interrupt",
+    "what": "When someone writes to an agent that is already working, the harness can queue the message, steer the running task, supersede it, or let only the owner interrupt.",
+    "how": "MultipleEventHandling enum: Queue (deliver after the turn), Steer (default: cancel the in-flight turn and re-dispatch a merged prompt framed as a steering message for any author the gate admits), Interrupt (supersede for any mention), OwnerInterrupt (only the owner cancels). Merged prompts use explicit sections new-message-arrived-while-you-were-working and new-request-supersedes-previous. Requires dedup mode Queue; dedup Drop discards events while a prompt is in flight.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/src/config.rs:62-90",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:1-8"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon has a queue route for mid-stream input; add Buzz variants (steer vs supersede, owner-only interrupt) and the explicit prompt framing so the model knows how to weave the new message.",
+    "notes": "Steer is implemented by cancel plus merged re-dispatch, not by injecting into the live turn."
+  },
+  {
+    "id": "buzz-architecture-041",
+    "category": "Agents in the room",
+    "name": "Inbound author gate: owner-only by default, allowlist, anyone, nobody; siblings and workflow provenance",
+    "what": "An agent answers only people it is meant to answer; same-owner sibling agents are admitted by cryptographic proof; scheduled workflow messages can carry the scheduling owner authority only with authenticated provenance.",
+    "how": "RespondTo enum (owner-only default, allowlist, anyone, nobody with heartbeat-only). is_owner_or_sibling fetches the author kind 0 and verifies a NIP-OA tag naming the same owner: verdict Sibling, NotSibling or Indeterminate (fails closed, bounded retry, never caches an outage as a verdict). Workflow attribution is accepted only for kind 9 events signed by the relay NIP-11 self key with exactly one canonical workflow marker and an explicit agent mention; nobody remains absolute.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/README.md:137-175",
+      "C:/dev/buzz/crates/buzz-acp/src/lib.rs:360-440",
+      "C:/dev/buzz/crates/buzz-acp/src/lib.rs:560-600",
+      "C:/dev/buzz/crates/buzz-acp/src/config.rs:99-112"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon bindings control trigger modes and approval, but not who may address an agent; add a per-binding author class (owner, listed members, any member, nobody) and fail-closed lookups.",
+    "notes": "Default owner-only means a shared agent answers nobody else until configured, which is safe but surprising in a room setting."
+  },
+  {
+    "id": "buzz-architecture-042",
+    "category": "Agents in the room",
+    "name": "In-band owner control commands: !cancel, !rotate, !shutdown",
+    "what": "The owner can stop a turn, reset an agent session or shut a harness down by writing a message in the room.",
+    "how": "Owner kind 9 messages whose trimmed body is exactly the command and which carry a separate p-tag mention of the agent are consumed by the harness before the author gate; scope-aware under the thread policy (reply in the thread to affect only that thread); !cancel is a no-op when idle; !shutdown is also how remote pods are stopped.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/README.md:160-182",
+      "C:/dev/buzz/docs/remote-agents.md:243-262"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A room-native override path that works from any client; Verevon has cancel APIs but no chat-level stop that other members can see.",
+    "notes": "Control is best-effort over chat delivery; remote shutdown is a request, not confirmed termination (agent-availability doc)."
+  },
+  {
+    "id": "buzz-architecture-043",
+    "category": "Agents in the room",
+    "name": "Heartbeat, lazy pool and scheduled agent work",
+    "what": "Agents can act without being mentioned (periodic check of mentions and pending actions) and idle agents do not consume an LLM subprocess until work arrives.",
+    "how": "BUZZ_ACP_HEARTBEAT_INTERVAL (0 disabled, else >= 10 s) fires a prompt at lower priority than queued events, skipped when all agents are busy, at most one in flight, default prompt reads feed actions and mentions; --respond-to nobody plus heartbeat gives a broadcast-only agent; --lazy-pool connects and queues first, starting ACP/LLM only on the first accepted event with bounded backoff. Workflows add cron triggers with an at-most-once claim row.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/README.md:127-140",
+      "C:/dev/buzz/crates/buzz-acp/README.md:255-263",
+      "C:/dev/buzz/schema/tables/public/scheduled_workflow_fires.sql:1-22",
+      "C:/dev/buzz/docs/remote-agents.md:925-960"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon already has schedules; the notable detail is the unique (community, workflow, scheduled_for) claim that makes multi-pod cron at-most-once.",
+    "notes": "The lazy pool plus inactivity reaper interaction caused a deadlock risk that the remote-agent spec documents (reaper must not ride the pool maintenance tick)."
+  },
+  {
+    "id": "buzz-architecture-044",
+    "category": "Agents in the room",
+    "name": "Runaway agent-to-agent reply loops: fixed by prompt wording, no hop limit exists",
+    "what": "Three Codex agents once exchanged 21+ acknowledgements in a row; the fix narrowed the prompt rules, but there is still no code-level breaker for agent-to-agent chatter.",
+    "how": "Root cause: base prompt rule \"every turn MUST publish a reply\" composed with \"callback-mention the delegator\". Fix: publish only when the turn has something new; humans always get a reply; no bare acknowledgements; mentions are for action, not narrative. Missing: reply-depth counter, hop limit, cooldown or agent-to-agent budget. ignore_self blocks only self-replies, sibling admission lets peers in by design, max_turns_per_session defaults to 0, queue caps bound backlog not ping-pong. The doc sketches a consecutive agent-reply budget (N about 6-10, reset by a human message).",
+    "evidence": [
+      "C:/dev/buzz/docs/welcome-kickoff-silent-failures.md:152-255",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:68-82",
+      "C:/dev/buzz/crates/buzz-acp/src/lib.rs:3563",
+      "C:/dev/buzz/crates/buzz-acp/src/lib.rs:2181-2200"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Before enabling agent-to-agent delegation in Spaces (UI-2c is absent), build a per-thread agent-hop budget and cooldown in the orchestration layer; do not rely on prompts.",
+    "notes": "My grep found no reply-budget code at HEAD 799cfd705 (only the process-crash circuit breaker). Important negative result for any multi-agent room."
+  },
+  {
+    "id": "buzz-architecture-045",
+    "category": "Agents in the room",
+    "name": "Permissions: ACP permission requests are auto-approved and the default mode bypasses them",
+    "what": "Agents run tools without per-call human approval by default; the permission broker in buzz-agent exists but the harness answers on the human behalf.",
+    "how": "buzz-acp handle_permission_request selects the allow_once option (falls back to reject_once) for every session/request_permission; CLI/env BUZZ_ACP_PERMISSION_MODE defaults to bypass-permissions. buzz-agent PermissionBroker asks the client before every MCP tool call with a global admission semaphore, claim-before-wake at-most-once resolution, abort-safe leases, a single absolute deadline and fail-closed denial. No per-tool-call approval card was found in the desktop UI.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/src/acp.rs:1265",
+      "C:/dev/buzz/crates/buzz-acp/src/acp.rs:2005-2070",
+      "C:/dev/buzz/crates/buzz-acp/src/config.rs:464-476",
+      "C:/dev/buzz/crates/buzz-agent/src/permission.rs:1-100"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Keep Verevon approval gating (approval_mode, require_confirmation) as a differentiator; copy the broker invariants (at-most-once, fail closed, one absolute deadline) when wiring the paused-run resume path.",
+    "notes": "Strongest evidence that Buzz optimizes for autonomy over supervision. The IFC proposal admits agents act with owner ambient authority. The only per-action human gate found is the owner-reviewed draft path (agent management requests) and the planned workflow approval gate; there is no generic approval card for tool calls."
+  },
+  {
+    "id": "buzz-architecture-046",
+    "category": "Agents in the room",
+    "name": "Owner-reviewed drafts: agents propose agents and project channels, humans approve",
+    "what": "An agent cannot create another agent or attach a channel to a project by itself; it opens a draft or request that the owner saves or approves in the app.",
+    "how": "buzz agents draft-create/draft-update require BUZZ_AUTH_TAG and publish an owner-addressed ephemeral request over WSS; the base prompt forbids claiming the agent exists until the owner saves it; buzz projects add-channel opens an owner-reviewed request. Human approval is therefore expressed as a proposal record plus owner UI, not as agent-held authority.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:22-40",
+      "C:/dev/buzz/crates/buzz-cli/src/lib.rs:34-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Matches the Verevon rule that decisions authorizing agent behaviour come from outside the agent (agents cannot bind agents or change roles); implement as proposals plus a human decision.",
+    "notes": "Medium: I read the prompt and CLI comment, not the desktop approval UI end to end."
+  },
+  {
+    "id": "buzz-architecture-047",
+    "category": "Agents in the room",
+    "name": "NIP-AO observer frames: encrypted ephemeral agent telemetry to the owner with a cancel control frame",
+    "what": "The owner sees what the agent is doing live (turn started, protocol frames) and can cancel a turn, while the relay stores nothing.",
+    "how": "Kind 24200 ephemeral, NIP-44 v2 between agent and owner; exactly one p, agent and frame tag; telemetry payload {seq, timestamp, kind (acp_read, acp_write, turn_started, session_resolved), agentIndex, channelId, sessionId, turnId, payload}; relay authorizes publish and subscribe through is_agent_owner (tags alone are insufficient), fans out in memory only, rate-limits to 100 events/s per agent (scoped by community); harness keeps a 1,000-event ring buffer; control frame cancel_turn is best-effort. Desktop validates frames and can archive them locally.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-AO.md:1-300",
+      "C:/dev/buzz/crates/buzz-acp/src/observer.rs:1-60",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/event.rs:1140-1290",
+      "C:/dev/buzz/desktop/src-tauri/src/archive/mod.rs:1-25",
+      "C:/dev/buzz/desktop/src/shared/api/observerRelay.ts:1-30"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon lacks tool-call event visibility for non-owners; this stream is owner-only by design, so a Space needs a second room-visible semantic activity stream; borrow seq gap detection and the cancel control frame.",
+    "notes": "Metadata (who streams to whom, rate) stays visible to the operator; no forward secrecy; frames are advisory and can drop on reconnect."
+  },
+  {
+    "id": "buzz-architecture-048",
+    "category": "Agents in the room",
+    "name": "Agent activity feed designed as verb, object, outcome render classes",
+    "what": "Supervision happens by skimming semantic cards (sent a message, edited a file +12/-3, ran tests: 1248 passed) with raw frames one toggle away.",
+    "how": "VISION_ACTIVITY defines twelve render classes (message, relay op, file edit, shell, tool status and turn lifecycle; thought, plan, permission, error; generic tool, raw rail, suppressed noise), mutate-in-place rows, never-go-dark rendering of idle and timeout, reference resolution (names not hashes), stream coalescing and honesty over guessing. Desktop implements AgentSessionTranscriptList, AgentSessionToolItem, file-edit diffs and AgentActivityCard.",
+    "evidence": [
+      "C:/dev/buzz/VISION_ACTIVITY.md:1-65",
+      "C:/dev/buzz/desktop/src/features/agents/ui/AgentSessionToolItem.tsx",
+      "C:/dev/buzz/desktop/src/features/agents/ui/AgentSessionTranscriptList.tsx",
+      "C:/dev/buzz/desktop/src/features/pulse/ui/AgentActivityCard.tsx"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A ready taxonomy for Verevon tool-call cards in rooms: semantics over transport, outcome-first, failures rise and reads recede.",
+    "notes": "Design is strong; implementation depth not audited. Owner-only telemetry feeds it, so non-owners see less."
+  },
+  {
+    "id": "buzz-architecture-049",
+    "category": "Agents in the room",
+    "name": "NIP-AM turn metrics: durable usage records encrypted to the owner, with delta reliability and pricing identity",
+    "what": "Owners can account for tokens and estimated cost per agent and harness over time without the relay learning what the agent did.",
+    "how": "One regular kind 44200 event per completed turn, NIP-44 to the owner, only p and agent tags (the channel stays inside the encrypted payload to hide per-channel rates); payload has turn and cumulative usage, null for unknown (never summed as zero), deltaReliable flag, sessionId/turnSeq ordering, and an optional pricingIdentity (authority + model) omitted unless provable. Owner-only at fan-out; excluded from search; harness computes deltas from cumulative counters.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-AM.md:1-140",
+      "C:/dev/buzz/crates/buzz-acp/src/usage.rs:1-60",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/event.rs:150-185"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon cost-core has no Space awareness; a per-turn record carrying the room reference inside a protected payload, with unknown-not-zero semantics, is a clean model.",
+    "notes": "No spend cap, budget or per-room allowance exists anywhere in the repo (grep); limits are turns, rounds, tokens and time only."
+  },
+  {
+    "id": "buzz-architecture-050",
+    "category": "Agents in the room",
+    "name": "NIP-AE engrams: owner-readable, HMAC-blinded agent memory with fail-safe reads",
+    "what": "An agent keeps a small always-loaded core profile plus on-demand cold memories that survive session restarts and relay changes; the owner can always read and curate them.",
+    "how": "Kind 30174 addressable events signed by the agent, content NIP-44 encrypted with the agent-owner conversation key, d tag = HMAC-SHA256(K_c, \"agent-memory/v1/d-tag\" || 0x00 || slug) so slugs are hidden, slugs core or mem/..., tombstones as null value, strict head selection with duplicate-key rejection, 65,535-byte limit. The harness fetches core at session creation and injects it every turn; on a transport error it injects nothing (never mistakes an outage for empty memory and invites an overwrite). buzz mem ls/get/set/patch/rm manage cold memory; removals need owner approval by prompt rule.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-AE.md:1-120",
+      "C:/dev/buzz/crates/buzz-acp/src/engram_fetch.rs:1-50",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:103-114",
+      "C:/dev/buzz/crates/buzz-core/src/engram.rs"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon has no Space memory scope; design one with an audience label from day one. Do not copy the owner-wide scope: memory is per (agent, owner), not per room, which the IFC document identifies as a leak path.",
+    "notes": "Memory is scoped to (agent, owner) pair; the same core is injected in every channel the agent serves."
+  },
+  {
+    "id": "buzz-architecture-051",
+    "category": "Agents in the room",
+    "name": "Personas, teams and managed-agent definitions as signed owner projections (NIP-AP) with share-gated visibility",
+    "what": "Reusable agent blueprints (prompt, model, runtime, name pool), teams and shareable catalog entries sync across devices and can be shared deliberately.",
+    "how": "Kinds 30175 persona, 30176 team, 30177 managed agent (opt-in allowlist projection that must never carry nsec, auth tag, env vars or runtime fields), 30178 team catalog (embeds member projections), 44300 instructions version history; SHARED_GATED_KINDS are author-only unless the event carries [\"shared\",\"true\"]; agent snapshots and .agent.png cards export/import with round-trip verification; NIP-PMA reserves an owner-private encrypted aggregate (kind 30179) with CAS generations that the relay rejects until its gates ship.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-AP.md:1-60",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:270-325",
+      "C:/dev/buzz/docs/nips/NIP-PMA.md:1-30",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:215"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Copy the allowlist-projection rule (public definitions never carry secrets) and \"private unless shared:true\" gating for Verevon agent definitions and bindings.",
+    "notes": "NIP-PMA includes the agent private key inside an owner-encrypted aggregate; that is a design only, rejected at the relay today."
+  },
+  {
+    "id": "buzz-architecture-052",
+    "category": "Agents in the room",
+    "name": "Agent availability is conversational presence with an explicit unknown state",
+    "what": "The UI never shows a green dot for a process that merely exists, and a failed read shows unknown, not offline.",
+    "how": "Availability comes only from the agent own kind 20001 presence (snapshot via relay); an identity missing from a queried snapshot is Offline only if it was requested; failed, pending or disconnected reads are unknown even if the cache held Online; shutdown is a request not a confirmation; absence of presence is not permission to deploy a duplicate body. One shared reader per surface, no per-row polling, no substrate poller.",
+    "evidence": [
+      "C:/dev/buzz/docs/agent-availability.md:1-60",
+      "C:/dev/buzz/docs/remote-agents.md:200-228"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon binding states (active, paused, revoked) are configuration; add a liveness tri-state (online, offline, unknown) in the Space roster so UIs stop implying availability.",
+    "notes": "Presence lag is bounded (180 s) and explicitly documented as a bounded wrong dot."
+  },
+  {
+    "id": "buzz-architecture-053",
+    "category": "Agents in the room",
+    "name": "Remote agents: provider protocol with no control channel after deploy, self-bounded lifetime",
+    "what": "An agent can be deployed onto a remote substrate (Kubernetes first); afterwards the only tether is the relay, and the agent shuts itself down when idle.",
+    "how": "Provider is an executable buzz-backend-<id> discovered by name; one process per operation with JSON on stdin and stdout and an exit code carrying one bit; output treated as hostile (capped, redacted). Invariants I1 identity fail-closed, I2 no secrets in config (key-name lint), I3 presence is status, I4 at most one live instance (deterministic pod name buzz-agent-<12 hex> plus annotation compare; per-attempt immutable Secrets), I5 intentional termination is final. --exit-after-inactivity runs on its own timer independent of pool readiness and fires the same shutdown path as !shutdown; bare Pod with restartPolicy following lifetime policy; annotation-verified GC. Spec lists open defects (deploy payload bypasses the launch resolver, reaper not yet landed at the pinned commit).",
+    "evidence": [
+      "C:/dev/buzz/docs/remote-agents.md:151-305",
+      "C:/dev/buzz/docs/remote-agents.md:925-990",
+      "C:/dev/buzz/docs/remote-agents.md:1119-1300",
+      "C:/dev/buzz/docs/remote-agents.md:1580-1640",
+      "C:/dev/buzz/VISION_REMOTE_AGENTS.md:1-73",
+      "C:/dev/buzz/crates/buzz-backend-kubernetes/src/env.rs",
+      "C:/dev/buzz/crates/buzz-acp/src/config.rs:512",
+      "C:/dev/buzz/crates/buzz-backend-kubernetes/src/pod.rs:131-168",
+      "C:/dev/buzz/desktop/src-tauri/src/commands/agents_deploy.rs:44-49"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon agent sandboxes can adopt the self-reaping inactivity timer, deterministic-name single-instance rule and secrets-only-in-launch-payload discipline; the relay-as-only-tether idea maps to Verevon Model Plane being the only channel to a sandbox.",
+    "notes": "Quality 3 because the spec is draft and its own Known Defects section lists unlanded prerequisites; the design is rigorous (5) but delivery is partial. Windows is not a supported provider platform. Second-pass check at HEAD 799cfd705: the inactivity reaper now exists (BUZZ_ACP_EXIT_AFTER_INACTIVITY in buzz-acp config.rs:512, mapped by the Kubernetes backend in env.rs:282 and reserved in desktop reserved_env_keys.rs:62), the Kubernetes pod is hardened (non-root, all capabilities dropped, seccomp profile, no service-account token, restartPolicy Never, 60 s grace; pod.rs:131-168) and the desktop now builds a launch block from the same resolver as local spawn (agents_deploy.rs:44-49). So the Known Defects list is dated (pinned at 28ae6cd21); I did not re-verify the pre-secret protocol_version gate or the shutdown-tail budget."
+  },
+  {
+    "id": "buzz-architecture-054",
+    "category": "Agents in the room",
+    "name": "Agent isolation is process-level, not a sandbox, and agents have no browser or desktop control",
+    "what": "Agents run shell and file tools on the host (or in a pod) with the owner ambient authority; Buzz bounds processes and outputs but does not contain what an agent can reach.",
+    "how": "buzz-dev-mcp shell: ephemeral process per call, process-group kill on every exit path, 8 KB tail to the model with first 10 MB saved as artifact, timeouts to 20 min; paths resolve against workdir for file tools; BUZZ_ACP_LAUNCH_PREFIX lets a trusted host wrap workers (Unix only, no direct fallback, absolute path, stripped from child env); buzz-acp run --task states session isolation is not a security sandbox; the IFC doc Appendix C says ACP sessions are not security boundaries. Browser use exists only for OAuth login in buzz-agent; no playwright or computer-use code in agent crates.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-dev-mcp/src/lib.rs:36-60",
+      "C:/dev/buzz/crates/buzz-acp/README.md:196-230",
+      "C:/dev/buzz/crates/buzz-acp/TASKS.md:70-82",
+      "C:/dev/buzz/docs/practical-information-flow-for-buzz-agents.md:332-360",
+      "C:/dev/buzz/crates/buzz-agent/src/auth.rs:13-20"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon sandbox-manager (credential-free leases, no network) and Quarry-mediated browser are stronger; do not copy host-level shell as the agent PC. A Grok-style agent browser would have to go through Quarry grants.",
+    "notes": "The scout inventory called isolated_execution.rs an \"agent execution sandbox\"; it is a bounded one-shot task session (spawn, run, cancel, reap), not isolation."
+  },
+  {
+    "id": "buzz-architecture-055",
+    "category": "Agents in the room",
+    "name": "Information-flow broker proposal: keyless, audience-bound agent instances with labeled memory",
+    "what": "Proposal that an agent invoked in a restricted channel can never publish that knowledge to a wider audience without an exact one-time human approval.",
+    "how": "Design (draft, Aug 27 2026): a trusted broker holds the agent key and Buzz reads; each agent instance is bound to one audience and never switches; managed memory entries keep audience and membership epoch; closed action set (messages.read/reply/post, memory.search/write, declassification.request) with deliberately no sign(bytes) or publish(event); five enforcement points (event admission, instance and session selection, reads and memory, output, signing and revocation); membership-change epochs revoke old sessions; declassification is exact content to exact destination, short-lived or single-use. A generic ifc-core crate (reader-set labels) exists but has no dependents.",
+    "evidence": [
+      "C:/dev/buzz/docs/practical-information-flow-for-buzz-agents.md:9-115",
+      "C:/dev/buzz/docs/practical-information-flow-for-buzz-agents.md:372-445",
+      "C:/dev/buzz/docs/practical-information-flow-for-buzz-agents.md:513-518",
+      "C:/dev/buzz/crates/ifc-core/src/lib.rs"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Highest-value idea for Verevon: it matches \"Space access never widens an owner-plane ACL\"; Verevon already has recipient-audience snapshots with revisions, so audience-bound agent invocation plus a human declassification grant is the natural extension.",
+    "notes": "Proposal, not shipped; the doc concedes it does not stop laundering through files, tools or network. \"No dependents\" for ifc-core is my grep, confidence medium."
+  },
+  {
+    "id": "buzz-architecture-056",
+    "category": "Agents in the room",
+    "name": "Lifecycle hooks and CLI-as-tool: agents drive the platform through a JSON CLI inside a shell",
+    "what": "Agents post, search, manage memory and open PRs by running the buzz CLI; hidden underscore-prefixed MCP tools act as advisory lifecycle hooks (stop objection, post-compaction reinjection).",
+    "how": "buzz-dev-mcp exposes shell, read_file, view_image, str_replace and todo and puts rg, tree and buzz on PATH; buzz-cli is JSON-only with exit codes 0 ok, 1 user, 2 network, 3 auth, 4 other, 5 write conflict. Tools whose bare name starts with _ are hooks: filtered from the LLM tool list, rejected if the model calls them, 2.5 s timeout treated as no objection, 3 rejections per prompt. Hook output is JSON-encoded for prompt-injection safety.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-dev-mcp/src/lib.rs:36-60",
+      "C:/dev/buzz/docs/MCP_DRIVEN_HOOKS.md:1-60",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:8-21",
+      "C:/dev/buzz/crates/buzz-cli/src/lib.rs:1-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A stable machine-readable CLI is a cheap second surface for agents and CI against Verevon APIs; the underscore-hook convention gives invisible, advisory control points with no protocol change.",
+    "notes": "CLI-through-shell means platform actions are not typed tool calls, so they lack structured approval hooks; the activity feed parses CLI output back into semantic cards."
+  },
+  {
+    "id": "buzz-architecture-057",
+    "category": "Agents in the room",
+    "name": "buzz-agent: minimal ACP agent with context-handoff ladder and bounded loops",
+    "what": "A small in-house agent runs the LLM/tool loop, summarizes and continues when context fills, and works with any ACP client.",
+    "how": "Up to 8 concurrent sessions each with its own MCP servers; handoff summarizer with a token cap, a reactive context-recovery ladder and per-run budget; max rounds, tool-call, prompt and result byte bounds; reflection suffix after tool errors; truncation recovery message; providers Anthropic, OpenAI-compatible, Databricks (OAuth PKCE), OpenRouter; prompt caching and thinking-effort knobs; pricing identity proven from the actual endpoint.",
+    "evidence": [
+      "C:/dev/buzz/VISION_AGENT.md:1-70",
+      "C:/dev/buzz/crates/buzz-agent/src/handoff.rs:1-60",
+      "C:/dev/buzz/crates/buzz-agent/src/agent.rs:1-45",
+      "C:/dev/buzz/crates/buzz-agent/src/config.rs"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Handoff-on-full-context with a bounded recovery ladder is a reusable pattern for long-running room agents in Verevon Model Plane.",
+    "notes": "Vision says \"read both in an afternoon\"; buzz-agent is about 42K lines including tests (second-pass wc) plus the MCP server, so treat that as aspiration."
+  },
+  {
+    "id": "buzz-architecture-058",
+    "category": "Agents in the room",
+    "name": "Bring-your-own-harness tiers: compiled-in, preset catalog, user JSON",
+    "what": "Users can pick Goose, Claude Code, Codex or buzz-agent out of the box, choose from a catalog of other ACP tools, or register their own binary without a code change.",
+    "how": "Tier 1 ids goose, claude, codex, buzz-agent with installers and auth probes; tier 2 presets (Cursor, Oh My Pi, Pi, Grok Build, OpenCode, Kimi Code, Amp, Hermes Agent, OpenClaw) PATH-probed and non-editable; tier 3 JSON files in custom_harnesses/ with id, command, args, env floor; reserved ids; BUZZ_* identity keys stripped from definition env; no install shell commands and no user icon URLs.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/README.md:315-372",
+      "C:/dev/buzz/desktop/src-tauri/src/managed_agents/custom_harnesses.rs"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A strategic option for Verevon: let ACP-speaking external runtimes sit in Spaces as service members under Control roster and effect policies instead of only the in-house model path.",
+    "notes": "The preset list includes products that are also reference apps in this audit."
+  },
+  {
+    "id": "buzz-architecture-059",
+    "category": "Agents in the room",
+    "name": "Multi-agent coordination is conversational (mentions and callbacks), job kinds are reserved",
+    "what": "Teams of agents coordinate in the open in channels and threads, so humans can read and steer; orchestrator/worker rosters can be benchmarked.",
+    "how": "Base prompt defines delegation by mention, a completion callback mention to the delegator, no mention in narrative, no bare acknowledgements, deeper nesting allowed for agent-only subthreads; BUZZ_ACP_TEAM_INSTRUCTIONS injects team context; kinds 43001-43006 (job request, accepted, progress, result, cancel, error) exist but only the feed query references them (no harness dispatch found); Harbor orchestra manifests define roster, endpoints, byte-pinned prompts and budgets.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:41-67",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:518-530",
+      "C:/dev/buzz/crates/buzz-db/src/store/feed.rs:40",
+      "C:/dev/buzz/benchmarks/harbor-buzz-orchestra/README.md:1-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Chat-as-coordination-bus is observable and simple but loop-prone (see loop record); Verevon should coordinate through typed delegation with budgets and mirror summaries into the room.",
+    "notes": "Medium: job kinds may be used by external clients; I only found feed queries in this repo."
+  },
+  {
+    "id": "buzz-architecture-060",
+    "category": "Agents in the room",
+    "name": "Agent behaviour benchmarks double as product regression tests",
+    "what": "Releases are checked against how agents behave inside the product: where the reply lands, who is notified, what is read, whether memory is used.",
+    "how": "benchmarks/buzz-dataset: ten Harbor tasks (reply-to-thread, user-mention, read-named-path-outside-workspace, create-channel-invite-users, multiline-message, narrative-agent-names, interleaved-agent-reports, cross-thread-requests, ambiguous-user-mention, memory-retrieval) in regression (k=1) and workflow (k=3) layers; the harbor-buzz-orchestra adapter runs the real buzz-acp, buzz-agent and buzz-dev-mcp process tree inside the task container with fresh keys and a private channel per trial and exports the relay snapshot to graders; some graded behaviour is deliberately absent from the instruction so it must come from the production base prompt.",
+    "evidence": [
+      "C:/dev/buzz/benchmarks/buzz-dataset/README.md:1-45",
+      "C:/dev/buzz/benchmarks/harbor-buzz-orchestra/README.md:1-60",
+      "C:/dev/buzz/.github/workflows/benchmark-harbor.yml"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon needs room-behaviour evals (thread reply placement, mention hygiene, exact membership, cross-thread isolation) as release gates alongside R-1..R-5; the relay-snapshot grading approach maps to exporting a Space transcript for graders.",
+    "notes": "Report regression results per behaviour, not averaged (their rule); useful discipline."
+  },
+  {
+    "id": "buzz-architecture-061",
+    "category": "Agents in the room",
+    "name": "Headless one-shot task runner with a versioned task contract",
+    "what": "Scripts can run one prepared agent task with a hard deadline and get one JSON result line and a precise exit code.",
+    "how": "buzz-acp run --task <path|-> takes a v1 JSON document (<= 1 MiB; taskId, agentPubkey, prompt, maxDurationMs) with unknown/duplicate fields rejected; spawns one fresh agent process and session, loads normal base prompt, persona, team and core memory, does not publish final text automatically, kills the process group on SIGINT/SIGTERM or deadline (5 s cooperative cancel, 5 s reap); exit codes 0, 1, 2, 124, 130, 143; terminal stdout line has status completed, failed, invalid, timed_out or cancelled plus a sanitized error code.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/TASKS.md:1-150",
+      "C:/dev/buzz/crates/buzz-acp/src/isolated_execution.rs:1-95",
+      "C:/dev/buzz/crates/buzz-acp/src/run_task.rs"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A crisp contract for Verevon scheduled or watch-triggered agent runs: versioned input, deadline cap, no implicit publish, sanitized terminal record.",
+    "notes": "Explicitly not a sandbox and not an idempotency key: launching the same task twice can execute twice."
+  },
+  {
+    "id": "buzz-architecture-062",
+    "category": "Agents in the room",
+    "name": "Local-first agent hosting: the desktop supervises agent sidecars and local runtimes",
+    "what": "Personal and team agents run as child processes on the owner machine (or remote), started, restarted and monitored by the desktop app.",
+    "how": "Desktop bundles buzz-acp, buzz-agent, buzz-dev-mcp, buzz-backend-kubernetes, git-credential-nostr and buzz CLI as external binaries; managed_agents modules handle spawn, auto-restart, start-on-launch, readiness, snapshots, retention, reserved env keys and six-layer env resolution; agent nsec lives in the OS keyring and is injected into the child; tray shows running agents; macOS sleep prevention while agents run; a Nest workspace (~/.buzz) holds AGENTS.md, RESEARCH, PLANS, WORK_LOGS, REPOS.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/tauri.conf.json:49-58",
+      "C:/dev/buzz/desktop/src-tauri/src/managed_agents/process_lifecycle.rs",
+      "C:/dev/buzz/desktop/src-tauri/src/secret_store.rs:1-30",
+      "C:/dev/buzz/desktop/src-tauri/src/prevent_sleep.rs",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:83-102"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The Grok Bot style personal agent PC can be owner-hosted (Buzz) or platform-hosted (Verevon sandbox-manager); Buzz shows the owner-hosted costs: agents die when the laptop sleeps, hence the remote-agent work.",
+    "notes": "Voice agents also depend on the owner desktop (see huddle record)."
+  },
+  {
+    "id": "buzz-architecture-063",
+    "category": "Agents in the room",
+    "name": "Relay-gated shared compute (Buzz Mesh) for agent inference",
+    "what": "Community members can opt in to share GPUs; agents point at a local OpenAI-compatible endpoint and the request routes to a member machine, gated by relay membership.",
+    "how": "External mesh-llm project (tag v0.76.2, cargo feature mesh-llm) embedded in the desktop; relay membership is the admission filter (mesh status events from members, relay-derived allowlist); the provider relay-mesh maps to OPENAI_COMPAT_BASE_URL http://127.0.0.1:9337/v1 and a virtual model mesh that forms a mixture-of-agents committee when two or more workers are reachable and degrades to one model otherwise; CI mesh-lifecycle workflow runs three real nodes including a stranger-denied check.",
+    "evidence": [
+      "C:/dev/buzz/VISION_MESH.md:1-53",
+      "C:/dev/buzz/desktop/src-tauri/src/managed_agents/relay_mesh.rs:1-45",
+      "C:/dev/buzz/desktop/src-tauri/src/mesh_llm/mod.rs:1-30",
+      "C:/dev/buzz/.github/workflows/mesh-lifecycle.yml:1-20",
+      "C:/dev/buzz/desktop/src-tauri/Cargo.toml:26-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Low priority for Verevon (cloud model plane), but the pattern of presenting any model source as a local OpenAI-compatible provider so the agent runtime stays unchanged is a good abstraction.",
+    "notes": "Feature-flagged and developed on a mesh-enabled branch; \"your prompts go to people, not a vendor\" is the honest cost they document."
+  },
+  {
+    "id": "buzz-architecture-064",
+    "category": "Agents in the room",
+    "name": "Run bounds and cost visibility without budgets",
+    "what": "Agent runs are bounded in time, turns and tokens and their usage is visible to the owner, but nothing stops spending.",
+    "how": "Idle timeout 620 s (resets on agent stdout), absolute turn cap 7,200 s, optional max turns per session (0 disabled), BUZZ_AGENT_MAX_ROUNDS/TOOL_TIMEOUT/LLM_TIMEOUT, handoff caps, remote inactivity bound; usage flows through NIP-AM; desktop shows usage series; no spend caps or per-room allowances anywhere.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/README.md:119-120",
+      "C:/dev/buzz/crates/buzz-acp/src/usage.rs:1-30",
+      "C:/dev/buzz/desktop/src-tauri/src/archive/mod.rs:817"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon cost-core has an org budget hard stop but no Space awareness; add per-Space and per-agent allowances, which Buzz does not offer.",
+    "notes": "Absence claim based on a grep for budget/cap terms in crates and desktop; confidence medium."
+  },
+  {
+    "id": "buzz-architecture-065",
+    "category": "Governance, security & compliance",
+    "name": "Row-zero host binding: the tenant is resolved by the server before any handler runs",
+    "what": "Which community a request belongs to is decided only by the connection host; client-supplied hints can narrow authority but never choose or override a tenant.",
+    "how": "tenant.rs bind_community normalizes the Host (lowercase, trailing dot and default port stripped), resolves it through a HostResolver trait backed by the communities table (UNIQUE lower(host)), and fails closed with a generic rejection for unmapped hosts, empty hosts and lookup errors (no default tenant, no probing oracle). TenantContext has no Default, no Deserialize and no parse-from-client path; the h tag, token stamps and NIP-98 URL host are all checked against the resolved community. Per-community relay signing key (communities.signing_key) signs system events.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-relay/src/tenant.rs:1-90",
+      "C:/dev/buzz/crates/buzz-core/src/tenant.rs:1-60",
+      "C:/dev/buzz/schema/tables/public/communities.sql:15-30",
+      "C:/dev/buzz/docs/multi-tenant-conformance.md:1-35",
+      "C:/dev/buzz/docs/multi-tenant-relay.md:69-141"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon already resolves authorized_org_id from the verified session and strips forged authority fields; Buzz confirms the pattern and adds the typed no-parse-from-client context object as a compile-time reminder.",
+    "notes": "The code is honest that the fence is lint-and-review, not a compiler guarantee (tenant.rs:18) because the constructors are pub."
+  },
+  {
+    "id": "buzz-architecture-066",
+    "category": "Governance, security & compliance",
+    "name": "Tenant isolation specified in TLA+ and Tamarin, mutation-gated, with runtime trace replay",
+    "what": "Cross-tenant isolation is stated as non-interference and machine-checked, and the running relay emits traces that an independent checker validates against the model.",
+    "how": "docs/spec holds MultiTenantRelay.tla and MultiTenantAuth.spthy (Dolev-Yao), plus GitOnObjectStore.tla; every invariant is mutation-tested so proofs are non-vacuous; buzz-conformance defines a trace schema and an independent replay checker that re-implements the spec transition relation (no shared helpers with the emitter, coverage breach fails the run) and runs in the unit CI lane. NIP-PL and read-state also have bounded exhaustive Python models with mutation tests.",
+    "evidence": [
+      "C:/dev/buzz/docs/multi-tenant-relay.md:1-60",
+      "C:/dev/buzz/docs/multi-tenant-relay.md:736-760",
+      "C:/dev/buzz/docs/spec/MultiTenantRelay.tla",
+      "C:/dev/buzz/crates/buzz-conformance/src/lib.rs:1-45",
+      "C:/dev/buzz/Justfile:453-457",
+      "C:/dev/buzz/docs/formal/nip-pl/NOTE.md:1-38"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "A good template for Verevon release gates R-1..R-5: state invariants (no cross-Space reads, no widened ACL), model them, and replay production traces against the model rather than only unit-testing.",
+    "notes": "Proof is relative to stated axioms. The doc axiom A-RLS (Postgres row-level security as fail-closed backstop) is NOT present in the SQL: no ENABLE ROW LEVEL SECURITY in schema/ or migrations/ (grep). See the next record."
+  },
+  {
+    "id": "buzz-architecture-067",
+    "category": "Governance, security & compliance",
+    "name": "Spec-versus-implementation gap: row-level security is an axiom in the proof, not in the schema",
+    "what": "The isolation proof assumes a database backstop that the checked-in schema does not install; tenant isolation actually rests on community-leading keys, application TenantContext, write fences and typed admission.",
+    "how": "docs/multi-tenant-relay.md lists A-RLS-1..5 (restrictive policy on every tenant table, NOBYPASSRLS role, SET LOCAL app.community_id). A repo-wide grep finds ENABLE ROW LEVEL SECURITY only in markdown. Implemented instead: every table PK/FK/unique includes community_id, community write-fence triggers, deletion locks, replica floor guard and the AdmittedTx type; conformance gates are described as admission checks per deployment.",
+    "evidence": [
+      "C:/dev/buzz/docs/multi-tenant-relay.md:350-376",
+      "C:/dev/buzz/schema/functions/enforce_community_write_fence.sql",
+      "C:/dev/buzz/schema/tables/public/events.sql:43-60",
+      "C:/dev/buzz/docs/multi-tenant-conformance.md:60-70"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Lesson for Verevon: when a proof leans on a database backstop, make the backstop executable (policy files plus a startup assertion) or state it as unimplemented; Verevon cannot count on row-level security in Convex either.",
+    "notes": "Inference from grep absence over .sql/.rs/.md in this checkout (HEAD 799cfd705); a private deployment could add RLS out of tree. Confidence medium."
+  },
+  {
+    "id": "buzz-architecture-068",
+    "category": "Governance, security & compliance",
+    "name": "Typed admission for tenant writes plus database write fences (dual enforcement)",
+    "what": "Code that writes events cannot compile unless it holds a transaction that already passed community admission, and the database independently refuses writes to fenced or deleted communities.",
+    "how": "buzz-db AdmittedTx wraps a transaction whose only constructors take the shared community admission lock (or validate a serving write lease); event-write helpers accept &mut AdmittedTx and read the community from it; compile_fail doctests prove a raw sqlx transaction or a different community is rejected and the connection cannot be swapped. Commit-time triggers and functions (enforce_community_write_fence, assert_community_write_allowed, tombstone checks) remain authoritative during the transition to application-owned protocols; operator backfills must use the same locks or hold routing fences closed.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-db/src/runtime/admitted_tx.rs:1-80",
+      "C:/dev/buzz/ARCHITECTURE.md:489-521",
+      "C:/dev/buzz/schema/functions/assert_community_write_allowed.sql",
+      "C:/dev/buzz/schema/functions/enforce_community_write_fence.sql",
+      "C:/dev/buzz/Justfile:440-446"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "A strong typestate idiom: make \"has been authorized by Control for this Space\" a value that write functions require, so a missed authorization check fails to compile in the Rust BFF.",
+    "notes": "Inside the crate the type cannot stop a raw COMMIT, so the DB fences stay as backstop (their own comment)."
+  },
+  {
+    "id": "buzz-architecture-069",
+    "category": "Governance, security & compliance",
+    "name": "Per-community hash-chain audit log",
+    "what": "Each community has a tamper-evident append-only log of security-relevant actions whose chain can be verified independently.",
+    "how": "audit_log rows keyed (community_id, seq); entry hash covers seq, timestamp, event id and kind, actor, action, channel id, canonical metadata (BTreeMap) and prev_hash, with community_id folded in so rows cannot be lifted into another chain; per-community pg_advisory_lock serializes writers across pods (released on panic via catch_unwind); verify_chain recomputes. Ten actions: event created/deleted, channel created/updated/deleted, member added/removed, auth success/failure, rate limit exceeded. AUTH and ephemeral events are never logged.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-audit/src/lib.rs:1-30",
+      "C:/dev/buzz/ARCHITECTURE.md:588-600",
+      "C:/dev/buzz/schema/tables/public/audit_log.sql"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has no Space-scoped audit view; a per-Space chain keyed by Space id gives tamper evidence and a natural export unit.",
+    "notes": "Narrow scope: agent tool calls and ephemeral telemetry are outside the chain; no external anchoring of the head. Slack/Teams offer richer admin audit exports but not hash chains."
+  },
+  {
+    "id": "buzz-architecture-070",
+    "category": "Governance, security & compliance",
+    "name": "Durable whole-community deletion with fences, leases and a bounded abort window",
+    "what": "An operator can destroy a tenant completely and recoverably until destruction begins; the process survives pod crashes and cannot race with ownership changes.",
+    "how": "Admission records an operator-attested owner request (idempotent by request UUID) at stage submitted and returns 202; unarchive and ownership transfer conflict while it exists; a one-shot buzz-admin deletions drain claims work under a durable generation lease, inventories with lease-loss cancellation and atomically freezes the inventory plus a digest-bound approval; stages submitted, inventoried, approved, fenced stay abortable (privileged abort), closing from drained when destruction may have begun; Kubernetes runs it with Forbid concurrency and no job retries because durable rows own retry. Owner consent is asserted by the operator, not proven by an owner signature.",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:17-66",
+      "C:/dev/buzz/ARCHITECTURE.md:809-818",
+      "C:/dev/buzz/crates/buzz-deletion/src/lib.rs",
+      "C:/dev/buzz/docs/operator-community-deletion.md:1-60",
+      "C:/dev/buzz/schema/tables/public/community_deletion_requests.sql"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon personal Space deletion saga has per-plane receipts; adopt the explicit abort window that closes when irreversible work may have started and the digest-bound inventory approval.",
+    "notes": "Docs state the weakness plainly: no owner-signed attestation and no owner-facing cancellation."
+  },
+  {
+    "id": "buzz-architecture-071",
+    "category": "Governance, security & compliance",
+    "name": "Moderation as workflow: private reports, signed commands, enforcement at the identity seam",
+    "what": "Members report content privately, owners and admins decide, bans bite at authentication, and everyone affected hears the outcome.",
+    "how": "Reports (NIP-56 kind 1984) go to a tenant-scoped moderation_reports queue and are never stored as events or fanned out; moderation actions (ban 9040, unban 9041, timeout 9042, untimeout 9043, resolve 9044) are signed commands validated against role (admins cannot act on owners or admins) and never stored as content; a ban is enforced when the key authenticates (and cascades owner-to-agents), a timeout is a write block with expiry; removals leave honest tombstones; restricted users and reporters get best-effort notices; durable audit rows record decisions separately from enforcement. Two layers: community moderation vs platform safety escalation (hook only today).",
+    "evidence": [
+      "C:/dev/buzz/VISION_MODERATION.md:1-71",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:327-370",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/moderation_authz.rs",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/report_resolution.rs",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/auth.rs:55-120"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon rooms will need reporting for human content; copy \"reports are signals not triggers\", reporter identity visible only to moderators, and enforcement at authorization rather than scattered filters.",
+    "notes": "No automod, no volunteer-moderator tier, escalation pipeline not built (their own honest-edges list)."
+  },
+  {
+    "id": "buzz-architecture-072",
+    "category": "Governance, security & compliance",
+    "name": "Kind-level reader authorization: author-only, shared-gated, owner-only and p-gated kinds",
+    "what": "Some records (reminders, push leases, agent metrics, DM visibility, persona definitions) are readable only by their author or named owner, enforced on pull, push and search.",
+    "how": "AUTHOR_ONLY_KINDS (reminders, push leases, private managed-agent aggregate) never reveal existence, count, tags, content or search matches to others; SHARED_GATED_KINDS (persona, team catalog) are author-only unless the event carries shared=true; owner-only kinds (30622, 44200) reach only the p-tagged pubkey; p-gated kinds (44100, 44101, 1059) require a #p filter equal to the authenticated pubkey or the REQ is rejected. The same reader_authorized_for_event predicate is used by pull paths and the delivery chokepoint.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:99-135",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:205-220",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/event.rs:115-215",
+      "C:/dev/buzz/NOSTR.md:141-150"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Per-kind read policy declared next to the kind registry and enforced in one predicate is a neat way to keep Verevon event types from leaking across audiences as the Space event vocabulary grows.",
+    "notes": "Linear lists today; the code comment suggests moving to a bitset past about 4 kinds."
+  },
+  {
+    "id": "buzz-architecture-073",
+    "category": "Governance, security & compliance",
+    "name": "Federated enterprise identity: IdP assertion bound to a Nostr key plus proof of possession (NIP-FI / NIP-FA)",
+    "what": "An enterprise relay can require that every connecting key is bound to an identity from an approved issuer, with offline verification and instant disconnects.",
+    "how": "Assertion is a compact JWS (typ nip-fi+jwt or at+jwt) with iss, sub, nostr_pubkey, aud equal to the community canonical host, iat, exp bounded by a configured maximum age; verified offline against per-issuer JWKS snapshots; authorization requires assertion and a fresh NIP-42 proof of possession of the named key; modes off, shadow, enforce, deny_protected rolled out per deployment; issuer-to-relay disconnect API (/api/nip-fi/disconnect) with replay guard and a shared Redis deny channel; desktop discovery via NIP-11 federated_identity allowlisted by build config; NIP-FA adapter contract is planned on the desktop side. No SAML and no SCIM.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-FI.md:15-70",
+      "C:/dev/buzz/crates/buzz-relay/src/nip_fi_config.rs:1-40",
+      "C:/dev/buzz/crates/buzz-relay/src/router.rs:389",
+      "C:/dev/buzz/docs/federated-identity-adapter.md:1-62",
+      "C:/dev/buzz/crates/buzz-pubsub/src/conn_control.rs:38-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon better-auth SSO has no SCIM; copy audience-equals-tenant binding and the shadow-then-enforce rollout, and the issuer-driven disconnect for fast deprovisioning.",
+    "notes": "Corrects the scout note that SSO was not found: federated enterprise identity exists (OIDC-assertion based), only SAML/SCIM are absent. users table keeps a legacy okta_user_id column."
+  },
+  {
+    "id": "buzz-architecture-074",
+    "category": "Governance, security & compliance",
+    "name": "Boundary hardening: SSRF deny policy, constant-time webhook secrets, Redis replay guard",
+    "what": "Outbound fetches cannot reach internal networks, inbound webhooks and signed HTTP requests cannot be replayed across pods.",
+    "how": "is_not_global_unicast is an enumerated-deny policy over IPv4/IPv6 special-use ranges (including embedded IPv4 forms) applied to workflow call_webhook (redirects off, 1 MiB cap), JWKS fetches and desktop link previews; workflow webhook secrets are UUIDs compared in constant time and stored inside the hashed definition; workflow approval tokens are stored as SHA-256 and single-use; NIP-98 requests carry url, method, payload hash and nonce and are marked seen with Redis SET NX EX scoped by community.",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:866-890",
+      "C:/dev/buzz/crates/buzz-core/src/network.rs",
+      "C:/dev/buzz/crates/buzz-pubsub/src/nip98_replay.rs:1-40",
+      "C:/dev/buzz/crates/buzz-relay/src/webhook_secret.rs:1-25",
+      "C:/dev/buzz/docs/multi-tenant-relay.md:651-690"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Standard checklist for Verevon webhooks, link previews and any agent-triggered fetch; note that enumerated-deny is weaker than allow-listing.",
+    "notes": "docs/multi-tenant-relay.md says the NIP-98 seen-set is per-pod; code uses Redis (doc drift in the safe direction). Enumerated deny accepts unlisted ranges by design."
+  },
+  {
+    "id": "buzz-architecture-075",
+    "category": "Governance, security & compliance",
+    "name": "Key and secret custody: OS keyring blob, egress guard, agent keys handed to providers",
+    "what": "Private keys stay in the OS keyring and backups cannot accidentally be sent to a relay; remote providers receive an agent key only inside the one-way deploy payload.",
+    "how": "secret_store.rs keeps all secrets in one keyring entry (one OS prompt per process); BUZZ_PRIVATE_KEY for harnessed agents is injected into the child env; sprig dev-MCP strips the key from its own env and re-materializes it as a 0600 keyfile for git helpers; egress_guard rejects ncryptsec1 material at 13 relay-bound boundaries with an inventory test that fails the build when a new /events URL site lacks the guard; provider_config rejects key names containing secret, password, token, key or credential; provider output is redacted; RESERVED_ENV_KEYS blocks user env from disabling safety knobs; K8s Secrets are per-attempt immutable and any principal with secret-read in the namespace can read the nsec (stated).",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/src/secret_store.rs:1-30",
+      "C:/dev/buzz/desktop/src-tauri/src/egress_guard.rs:1-30",
+      "C:/dev/buzz/docs/remote-agents.md:173-200",
+      "C:/dev/buzz/docs/remote-agents.md:1247-1292",
+      "C:/dev/buzz/crates/buzz-acp/README.md:392-412"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The inventory-completeness test that fails when a new egress path skips the guard is a transferable way to enforce a data-handling rule across a large codebase.",
+    "notes": "Raw nsec intentionally transits the encrypted pairing session; raw-key DLP is marked as separate future work."
+  },
+  {
+    "id": "buzz-architecture-076",
+    "category": "Governance, security & compliance",
+    "name": "Supply-chain and deployment-identity controls",
+    "what": "Relay images carry signed provenance and a deployment-eligibility attestation, toolchains are pinned, and dependency policy is enforced in CI.",
+    "how": "Canonical images from ghcr.io/block/buzz have SLSA build provenance and a custom predicate recording the same-SHA CI run and Helm chart version; tags are created only after CI succeeds on the full SHA; /_status exposes build identity; Hermit pins rust, node, flutter, just, pgschema and others; cargo-deny (deny.toml), lefthook, security CI workflows and a codex security-review workflow; protected-branch release PRs with immutable candidates.",
+    "evidence": [
+      "C:/dev/buzz/docs/deployment-identity.md:1-60",
+      "C:/dev/buzz/deny.toml",
+      "C:/dev/buzz/lefthook.yml",
+      "C:/dev/buzz/.github/workflows/_ci-security.yml",
+      "C:/dev/buzz/.github/workflows/codex-security-review.yml",
+      "C:/dev/buzz/bin/hermit.hcl"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Gate promotion on attestations that bind an image digest to green CI for the same commit; Verevon release gates R-1..R-5 could be recorded as an attestation predicate.",
+    "notes": "Slack and Teams cannot be compared here (closed source)."
+  },
+  {
+    "id": "buzz-architecture-077",
+    "category": "Governance, security & compliance",
+    "name": "Operational telemetry with closed label sets and privacy-aware tracing",
+    "what": "Metrics stay bounded in cardinality and never carry tokens, device ids or per-community series unless explicitly enabled.",
+    "how": "Prometheus label values come from closed enums (APNs outcome classes, admission results, readiness causes); per-community usage metrics default off; leader-only DB gauges with availability gauges (absence is never zero); stale data keeps original age; buzz-datastore-tracing provides policy-enforcing macros for logical datastore spans; early startup emits fixed-schema JSON lifecycle events; DB pools export idle/active/max gauges per role; OTLP traces optional.",
+    "evidence": [
+      "C:/dev/buzz/docs/push-gateway-deployment.md:88-110",
+      "C:/dev/buzz/docs/usage-metrics.md:1-40",
+      "C:/dev/buzz/crates/buzz-datastore-tracing/src/lib.rs:1-30",
+      "C:/dev/buzz/crates/buzz-relay/src/lifecycle.rs:1-30",
+      "C:/dev/buzz/ARCHITECTURE.md:700-711"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Adopt the rule \"pair every aggregate gauge with an availability gauge so absence is not read as zero\" and closed label vocabularies for Space metrics under ZDR.",
+    "notes": "Purpose of the datastore tracing macros inferred from the crate header; medium confidence on exact policy."
+  },
+  {
+    "id": "buzz-architecture-078",
+    "category": "Governance, security & compliance",
+    "name": "Media authorization gap and what is absent: DLP, residency, SCIM, eDiscovery export",
+    "what": "Blob reads need an authenticated host-scoped Blossom grant, but a read is not tied to the channel ACL of the message it was attached to; several enterprise compliance features are not present.",
+    "how": "Per the conformance table, GET/HEAD /media/{sha256.ext} requires a Blossom t=get auth event scoped to the host or blob hash and binds to the header-resolved tenant, so relay membership plus a known hash is sufficient (gap deferred). No DLP, data-residency controls, SCIM or compliance export were found (grep and doc review); retention exists as event TTL refresh for ephemeral channels, observer ephemerality and local archive retention; VISION claims eDiscovery works because content is server-managed.",
+    "evidence": [
+      "C:/dev/buzz/docs/multi-tenant-conformance.md:52",
+      "C:/dev/buzz/VISION.md:100-102",
+      "C:/dev/buzz/crates/buzz-media/src/lib.rs:1-30"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon deny-by-default effect policies with retention_class and residency fields are ahead here; do not copy blob access that bypasses room ACL.",
+    "notes": "Absence claims are inference from greps over crates and docs; confidence medium. Slack and Teams offer DLP/eDiscovery/SCIM; Buzz does not."
+  },
+  {
+    "id": "buzz-architecture-079",
+    "category": "Org & membership",
+    "name": "Community as tenant selected by URL, with operator-provisioned lifecycle",
+    "what": "A workspace is a URL; one relay can host one community or thousands; an operator can provision, archive, unarchive, transfer and delete communities.",
+    "how": "communities table (host, signing key, icon, deletion state and fence generation) is the operator-global registry; requests bind to a community by Host; operator endpoints /operator/communities (provision, archive, unarchive, delete, transfer, availability) are NIP-98 signed by operator keys; archived or deleting communities disconnect live sockets; hosted community limit raised to fifty per user in v0.5.28; workspace icon via NIP-WP kind 9033 served through NIP-11.",
+    "evidence": [
+      "C:/dev/buzz/VISION.md:50-58",
+      "C:/dev/buzz/schema/tables/public/communities.sql:15-30",
+      "C:/dev/buzz/crates/buzz-relay/src/api/operator.rs",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/community_provisioning.rs",
+      "C:/dev/buzz/docs/nips/NIP-WP.md:1-40",
+      "C:/dev/buzz/crates/buzz-relay/src/state.rs:367-376"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon orgs and Spaces map to communities and channels; the explicit operator lifecycle (archive before delete, transfer) is a useful reference for Space lifecycle states.",
+    "notes": "Shared channels across communities do not exist; identity is portable but each community stores its own profile and DMs."
+  },
+  {
+    "id": "buzz-architecture-080",
+    "category": "Org & membership",
+    "name": "Portable key identity with per-community profile and per-host NIP-05",
+    "what": "One keypair works in every community, but profile, DMs and presence live per community, so joining a second community leaks nothing about the first.",
+    "how": "users PK is (community_id, pubkey); NIP-05 handles must canonicalize to the connected host and are unique per community; kind 0 is reposted per community; DMs, presence and memberships do not bleed across hosts; agents keep the same rule (VISION_AGENT).",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/users.sql:5-30",
+      "C:/dev/buzz/NOSTR.md:9-25",
+      "C:/dev/buzz/VISION_AGENT.md:25-30",
+      "C:/dev/buzz/docs/multi-tenant-conformance.md:50-56"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon identity is Control-issued, but the per-tenant profile rule is worth keeping for agents that serve several orgs.",
+    "notes": "Key loss is unrecoverable by design; the vision docs list this as an honest cost."
+  },
+  {
+    "id": "buzz-architecture-081",
+    "category": "Org & membership",
+    "name": "Membership, roles and add-policy model: open and private channels, guests, bots, signed roster",
+    "what": "Channels are open or private; roles are owner, admin, member, guest, bot; people and agents can limit who may add them; relay-level membership is a signed roster.",
+    "how": "channel_members with soft delete (removed_at) and transactional role enforcement (TOCTOU-safe), NIP-29 commands 9000-9022, users.channel_add_policy, relay_members plus pubkey_allowlist, NIP-43 admin kinds 9030-9033 and relay-signed roster kind 13534 (published by buzz-admin), stateless invite codes minted and claimed over NIP-98 with terms acceptance, identity archival (NIP-IA) that hides retired keys from active surfaces without deleting history.",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:474-486",
+      "C:/dev/buzz/NOSTR.md:20-60",
+      "C:/dev/buzz/NOSTR.md:238-290",
+      "C:/dev/buzz/docs/nips/NIP-IA.md:1-40",
+      "C:/dev/buzz/crates/buzz-relay/src/api/invites.rs"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon room roles are fixed to editor today; the guest role, soft-deleted membership and archival-without-deletion semantics are worth adopting.",
+    "notes": "Guest is a role, not a separate external-sharing model; there are no shared channels between communities."
+  },
+  {
+    "id": "buzz-architecture-082",
+    "category": "Org & membership",
+    "name": "Ephemeral channels with a sliding TTL deadline",
+    "what": "A channel can auto-archive after a period of inactivity, which suits short-lived rooms such as huddles and agent task rooms.",
+    "how": "channels.ttl_seconds and ttl_deadline; a deferred trigger refresh_channel_ttl_after_event_insert pushes the deadline forward on every durable event (shared advisory lock so permanent-channel commits do not serialize; TTL transitions take it exclusively); kind 9002 ttl tag sets or clears (empty clears) and is validated; a reaper archives expired channels; huddle backing channels use ttl 3600.",
+    "evidence": [
+      "C:/dev/buzz/schema/tables/public/channels.sql:33-48",
+      "C:/dev/buzz/schema/functions/refresh_channel_ttl_after_event_insert.sql:1-40",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/side_effects.rs:578-665",
+      "C:/dev/buzz/mobile/HUDDLES.md:1-20"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon case or task Spaces could expire automatically after inactivity, with deletion receipts handled by the existing saga.",
+    "notes": "Best-effort refresh (a failure to refresh never rejects the event)."
+  },
+  {
+    "id": "buzz-architecture-083",
+    "category": "Calls & meetings",
+    "name": "Huddles: WebSocket Opus relay with no SFU, peer-index epochs and owner-pod routing",
+    "what": "Channel members join voice rooms hosted by the relay; participants on different pods still hear each other.",
+    "how": "WS /huddle/{ephemeral_channel_id}/audio with NIP-42 auth and membership check; protocol v2 frames: 8-byte header (seq u16, 48 kHz timestamp u32, level dBov i8, flags u8) plus opaque Opus; relay prefixes a peer index (v3 adds an epoch byte); rooms cap at 25 peers (N x (N-1) copies per 20 ms tick) with a 255-value index pool rotated to avoid reuse; bounded drop-on-full audio channels and a never-dropping control channel; cross-pod rooms use the owner pod via the fenced mesh; recording and per-track publishing are reserved but not built; no video and no screen share.",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:664-675",
+      "C:/dev/buzz/crates/buzz-relay/src/audio/room.rs:60-75",
+      "C:/dev/buzz/crates/buzz-relay/src/audio/mesh.rs:1-60",
+      "C:/dev/buzz/mobile/HUDDLES.md:20-70",
+      "C:/dev/buzz/VISION.md:106-113",
+      "C:/dev/buzz/crates/buzz-relay/src/audio/handler.rs:196-198"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has no calls; a relay-forwarded Opus room is cheap but quadratic and has no video; weigh buying an SFU instead.",
+    "notes": "The scale ceiling (25 peers) is explicit. Slack and Teams offer video, screen share and recording; Buzz does not. Code check: CURRENT_PROTOCOL_VERSION is 3 and the relay accepts any version from 1 to 3; the mesh wire comment says client frames are NIP-44 encrypted between endpoints, but no encryption code exists in audio/ or the desktop huddle module (grep), so treat huddle media as relay-readable Opus."
+  },
+  {
+    "id": "buzz-architecture-084",
+    "category": "Calls & meetings",
+    "name": "Huddle as an ephemeral private channel with lifecycle events and persistent record",
+    "what": "Voice sessions carry their own chat, reactions and transcript in a private auto-expiring channel linked from the parent channel by start and end events.",
+    "how": "Creator-signed kinds 48100 started and 48103 ended in the parent channel reference a private stream backing channel created with kind 9007 and ttl=3600; the relay validates that the signer created an active private ephemeral stream with the expected TTL; participant joined/left (48101/48102) are relay-emitted; reactions are ephemeral kind 24810 scoped to the backing channel; the last human leaving ends the huddle and archives the backing channel atomically; mobile reconstructs the visible card from parent-channel history.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/ingest.rs:55-110",
+      "C:/dev/buzz/mobile/HUDDLES.md:1-20",
+      "C:/dev/buzz/ARCHITECTURE.md:672-673",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:595-606"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Model a meeting as an ephemeral child Space with TTL and start/end markers in the parent; transcript, chat and agent notes then inherit room authorization and expiry.",
+    "notes": "No AI recap or recording exists yet; transcripts are published as messages by participants desktops."
+  },
+  {
+    "id": "buzz-architecture-085",
+    "category": "Calls & meetings",
+    "name": "Agent voice participation runs on the owner desktop (local STT and TTS)",
+    "what": "Agents can be added to a huddle and speak with locally synthesized voices; humans are transcribed locally.",
+    "how": "Desktop huddle module: Opus with NetEq-style jitter buffer, VAD (earshot) with a 300 ms silence flush, sherpa-onnx STT and Pocket TTS models downloaded on demand; agent TTS publishers authenticate as the agent using its managed key and push audio into the same relay room; transcription publishes text events; push-to-talk global shortcut. Because synthesis and capture run in the owner desktop pipeline, agent voice depends on that machine being online (inference from the publisher design).",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/src/huddle/agent_tts_publisher.rs:1-40",
+      "C:/dev/buzz/desktop/src-tauri/src/huddle/stt.rs",
+      "C:/dev/buzz/desktop/src-tauri/src/huddle/pipeline.rs:1-40",
+      "C:/dev/buzz/crates/buzz-voice/src/pocket.rs"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "A path to Grok-style voice without server GPUs, but it ties agent speech to a user device; Verevon would more likely use cloud realtime voice already present for AI voice.",
+    "notes": "Dependence on the owner desktop is my inference from agent_tts_publisher loading the managed agent key locally."
+  },
+  {
+    "id": "buzz-architecture-086",
+    "category": "Apps & extensibility",
+    "name": "Agent-first CLI and Rust SDK crates as the extensibility surface",
+    "what": "Everything a human can do in the app is scriptable by JSON-in/JSON-out CLI, and Rust crates expose typed event builders and a WebSocket client for bots.",
+    "how": "buzz-cli command groups (agents, messages, channels, canvas, reactions, emoji, gifs, dms, users, workflows, feed, social, notes, repos, projects, patches, issues, pr, media, upload, mem, pack, moderation) with structured JSON stdout, stderr errors and exit codes; buzz-sdk typed event builders; buzz-ws-client and buzz-test-client; countdown-bot example; two-tier auth (NIP-98 keypair, dev pubkey). No OpenAPI or GraphQL description of the HTTP/WS surface and no app directory.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-cli/src/lib.rs:1-60",
+      "C:/dev/buzz/crates/buzz-sdk/src/lib.rs",
+      "C:/dev/buzz/crates/buzz-ws-client/src/lib.rs",
+      "C:/dev/buzz/examples/countdown-bot",
+      "C:/dev/buzz/VISION.md:163-166"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A CLI over the public API is the cheapest way to let agents, CI and power users script Verevon Spaces; publish a machine-readable API description alongside it (Buzz does not).",
+    "notes": "Marketplace, apps tab and slash-command registry are absent (inventory), so extensibility is code-level."
+  },
+  {
+    "id": "buzz-architecture-087",
+    "category": "Apps & extensibility",
+    "name": "Workflow engine: YAML-as-code with evalexpr conditions, cron claims and unwired approvals",
+    "what": "Channel-scoped automations fire on messages, reactions, schedules or webhooks and can call webhooks or post messages, with every step traced.",
+    "how": "Definitions parsed with serde_yaml into tagged enums (4 triggers, 7 actions); conditions via evalexpr with registered string functions and a 100 ms timeout; single-pass templates; semaphore of 100 concurrent runs (no queueing, returns CapacityExceeded); cron loop ticks every 60 s and claims scheduled_for slots through a unique row (at-most-once across pods); relay ActionSink posts relay-signed messages carrying owner attribution; send_dm and set_channel_topic return NotImplemented; request_approval returns Suspended but the relay marks the run Failed (approval_not_supported) because token persistence and resume are not wired.",
+    "evidence": [
+      "C:/dev/buzz/ARCHITECTURE.md:604-662",
+      "C:/dev/buzz/crates/buzz-workflow/src/executor.rs:640-670",
+      "C:/dev/buzz/crates/buzz-workflow/src/lib.rs:215-250",
+      "C:/dev/buzz/crates/buzz-workflow/src/action_sink.rs:1-77",
+      "C:/dev/buzz/schema/tables/public/scheduled_workflow_fires.sql:12-30"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Mirror of a Verevon gap (granted approval does not resume the paused run): do not expose approval steps until suspend, persist-token and resume are one tested path.",
+    "notes": "Still stubbed at HEAD 799cfd705 (confirms the scout concern). Slack Workflow Builder is richer; the code-as-YAML angle is the differentiator."
+  },
+  {
+    "id": "buzz-architecture-088",
+    "category": "Apps & extensibility",
+    "name": "Persona packs and plugin manifests",
+    "what": "Agent personas, skills and MCP/hook configuration can be bundled and shared as packs.",
+    "how": "buzz-persona parses .persona.md files and a .plugin/plugin.json manifest (pack instructions, mcp_config, hooks_config, skills directory) with merge and validation; persona triggers (mentions, keywords, all_messages) and lifecycle hooks (on_start, on_stop, on_message); examples/meadow-core ships a three-agent pack (orchestrator plus workers).",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-persona/src/lib.rs:1-7",
+      "C:/dev/buzz/crates/buzz-persona/src/manifest.rs",
+      "C:/dev/buzz/crates/buzz-persona/src/persona.rs",
+      "C:/dev/buzz/examples/meadow-core"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A portable agent pack format (prompt, tools, hooks, skills) is useful if Verevon lets orgs share agent definitions between Spaces.",
+    "notes": "Read crate module list and manifest names only; pack distribution is via relay catalog events (NIP-AP)."
+  },
+  {
+    "id": "buzz-architecture-089",
+    "category": "Collaborative artifacts",
+    "name": "NIP-AR channel artifacts: revisioned typed records with CAS on prev",
+    "what": "Tasks, project cards and similar records live in a channel with exact optimistic concurrency, soft delete and restore, and never count as chat.",
+    "how": "Kind 45010 events carry a complete snapshot with ar, d (stable UUID), h (home channel), type (namespaced), title, op (create, update, move, delete, restore), prev and optional root; the relay advances the current revision atomically so competing edits cannot both succeed and timestamps never choose a winner; resubmitting an accepted event succeeds (no false conflict); redaction by kind 9005 withholds a revision but keeps its id valid as prev; revisions do not change unread, counts or notifications; channel read permission governs every artifact surface. Desktop UI is thin.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-AR.md:1-110",
+      "C:/dev/buzz/crates/buzz-core/src/artifact.rs",
+      "C:/dev/buzz/schema/tables/public/artifact_heads.sql",
+      "C:/dev/buzz/schema/tables/public/artifact_revisions.sql"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A clean model for Space tasks or notes: one authorization (the room) plus prev-CAS revisions and idempotent resubmission, distinct from chat counters.",
+    "notes": "Uncommon among references where tasks are separate apps. UI maturity is low (few desktop files)."
+  },
+  {
+    "id": "buzz-architecture-090",
+    "category": "Collaborative artifacts",
+    "name": "Per-channel canvas with writer-consistent head, conflict handling and history restore",
+    "what": "Each channel has one shared document with history and restore, saved against the current head so concurrent edits do not silently clobber.",
+    "how": "Kind 40100 canvas events with get/set/history/restore commands in desktop and CLI; saves set consistency:\"strong\" so the head precondition reads from the writer; desktop canvasConflict.ts, CanvasHistoryPanel and many canvas tests (refetch error recovery, rejected save reset, unverified save, restore pending guard).",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:497",
+      "C:/dev/buzz/PLANS/REPLICA_FULL_READ_ROUTING_DESIGN.md:20-52",
+      "C:/dev/buzz/desktop/src/features/channels/canvasConflict.ts",
+      "C:/dev/buzz/desktop/src/features/channels/ui/CanvasHistoryPanel.tsx"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has no Space canvas; a single versioned document per Space with strong-read head checks would be a small first artifact.",
+    "notes": "Single-document-per-channel is simpler than Slack canvases or Teams Loop."
+  },
+  {
+    "id": "buzz-architecture-091",
+    "category": "Collaborative artifacts",
+    "name": "Git hosting over object storage with an atomic manifest pointer",
+    "what": "The relay serves git smart HTTP for repositories without any persistent filesystem and signs pushes with the pusher Nostr key.",
+    "how": "Pack objects are create-only and content-addressed; the current ref state is one manifest pointer updated by compare-and-swap (S3 conditional PUT); each request hydrates an ephemeral working tree from the manifest and drops it; policy hook endpoint /internal/git/policy enforces branch protection; git-sign-nostr (NIP-GS) and git-credential-nostr (NIP-98) integrate with standard git; proofs for durability ordering, manifest reconstruction and linearizability in TLA+ relative to three object-store axioms gated per backend.",
+    "evidence": [
+      "C:/dev/buzz/docs/git-on-object-storage.md:1-60",
+      "C:/dev/buzz/docs/spec/GitOnObjectStore.tla",
+      "C:/dev/buzz/crates/buzz-relay/src/api/git/transport.rs",
+      "C:/dev/buzz/crates/git-sign-nostr/src/lib.rs"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Low relevance to Verevon rooms; the transferable idea is a stateless request path that rebuilds working state from content-addressed objects plus one CAS pointer.",
+    "notes": "Peers (Slack, Teams) have no equivalent; qm and Grok Bot do not host git."
+  },
+  {
+    "id": "buzz-architecture-092",
+    "category": "Collaborative artifacts",
+    "name": "Branch-as-channel projects with NIP-34 patches, PRs and issues in the room",
+    "what": "Creating a branch creates a channel where patches, CI results, review and the merge decision live and are archived as the record.",
+    "how": "Projects (kind 30621) group repositories and channels; branch channels via project channel requests; patches 1617, pull requests 1618/1619, issues 1621 and statuses 1630-1633; merge and review actions are signed events; agents create PRs with a channel link back to the originating conversation; buzz:// entity links render preview cards.",
+    "evidence": [
+      "C:/dev/buzz/VISION_PROJECTS.md:1-60",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:610-640",
+      "C:/dev/buzz/docs/buzz-entity-links.md:1-30",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:22-34"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Shows the conversation-as-record model: work objects and discussion share one authorization boundary (the room).",
+    "notes": "Projects UI is preview-gated per preview-features.json; I did not audit the 218-file projects feature."
+  },
+  {
+    "id": "buzz-architecture-093",
+    "category": "Collaborative artifacts",
+    "name": "Blossom media storage on S3 with thumbnails, per-community prefixes and snapshot accounting",
+    "what": "Uploads are content-addressed, validated, thumbnailed and accounted per community without scanning S3 on the relay.",
+    "how": "PUT /media/upload and GET /media/{sha256.ext} (BUD-01/02) with Blossom auth events; buzz-media validates and processes images and video (blurhash, thumbnails, ISO-BMFF checks) and writes upload records with network attribution; bucket_index classifies keys and tenant prefixes; buzz-admin storage-snapshot publishes a complete Postgres snapshot that the relay reads to export storage gauges (relay-local scans removed); bundled Silo (MinIO fork) for local deployments.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-media/src/lib.rs:1-30",
+      "C:/dev/buzz/docs/storage-accounting.md:1-30",
+      "C:/dev/buzz/crates/buzz-relay/src/api/media.rs",
+      "C:/dev/buzz/ARCHITECTURE.md:905-906"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Move storage accounting off the hot service into a snapshot worker with freshness gauges; Verevon documents-api could do the same for per-Space usage.",
+    "notes": "Media read authorization gap noted in governance records."
+  },
+  {
+    "id": "buzz-architecture-094",
+    "category": "Client shell",
+    "name": "Tauri 2 desktop shell with bundled sidecars, strict plugin set and CSP",
+    "what": "A native desktop app wraps the web UI and ships the agent runtime binaries it needs.",
+    "how": "Tauri 2 (single-instance with deep-link, window-state, dialog, updater, process, opener, global-shortcut, notification); externalBin bundles buzz-acp, buzz-agent, buzz-backend-kubernetes, buzz-dev-mcp, git-credential-nostr and buzz; overlay title bar, backgroundThrottling disabled; CSP default-src self with connect-src allowing https/http/wss/ws and custom buzz-media protocol; 377 unique Tauri commands (inventory). Desktop is excluded from the Cargo workspace and builds separately.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/tauri.conf.json:1-60",
+      "C:/dev/buzz/desktop/src-tauri/Cargo.toml:81-87",
+      "C:/dev/buzz/desktop/src-tauri/Cargo.toml:133-134",
+      "C:/dev/buzz/desktop/src-tauri/src/lib.rs:529"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon v3 is SolidJS plus a Rust gateway; bundling sidecars is only relevant if a desktop agent runtime is wanted.",
+    "notes": "CSP allows broad network egress; the app relies on egress_guard for specific secrets rather than network allowlists."
+  },
+  {
+    "id": "buzz-architecture-095",
+    "category": "Client shell",
+    "name": "Deep links with pending queues, entity links and invite codes",
+    "what": "buzz:// links open a message, repo, project, PR or issue, join a community with an invite code and policy receipt, and survive cold start.",
+    "how": "tauri-plugin-deep-link with single-instance forwarding; deep_link.rs keeps de-duplicated pending queues for community, navigation and entity links so links arriving before the UI is ready are not lost; ENTITY_LINK_HOSTS allowlist (repo, project, pr, issue); links interpreted against the current community; the CLI emits a link field that the base prompt tells agents to paste verbatim to render preview cards.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/src/deep_link.rs:1-60",
+      "C:/dev/buzz/desktop/src-tauri/src/deep_link.rs:369-430",
+      "C:/dev/buzz/docs/buzz-entity-links.md:1-60",
+      "C:/dev/buzz/VISION_MOBILE.md:62-67"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Cold-start-safe pending queues and a link field in agent tool output are small, cheap wins for Verevon room and approval deep links.",
+    "notes": "Cross-community links are not resolved; links are app-only."
+  },
+  {
+    "id": "buzz-architecture-096",
+    "category": "Client shell",
+    "name": "Release engineering: three independent lanes, immutable candidates, signed canary then promote",
+    "what": "Desktop, relay and mobile ship on separate, auditable pipelines; auto-update is wired only in configured release builds.",
+    "how": "Desktop: just release-desktop creates one deterministic candidate commit and PR, merge is the authorization event, auto-tag verifies PR identity and checks, signed/notarized macOS canary then promote-oss-desktop-release; Linux, Windows (unsigned) and macOS Intel canaries; relay: metadata PR and multi-arch image; mobile: immutable mobile-vX.Y.Z-rc.N tags to the private pipeline; tauri-plugin-updater is registered only under a buzz_updater_enabled cfg and endpoint/public key come from build env.",
+    "evidence": [
+      "C:/dev/buzz/RELEASING.md:1-60",
+      "C:/dev/buzz/desktop/src-tauri/src/lib.rs:205-220",
+      "C:/dev/buzz/desktop/src-tauri/tauri.conf.json:34-40",
+      "C:/dev/buzz/.github/workflows/signed-macos-canary.yml",
+      "C:/dev/buzz/.github/workflows/promote-oss-desktop-release.yml"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Immutable candidate PRs where the merge is the authorization event is a pattern for Verevon gated releases.",
+    "notes": "Windows builds are unsigned and agent shell needs Git Bash (README), so Windows is second-class."
+  },
+  {
+    "id": "buzz-architecture-097",
+    "category": "Client shell",
+    "name": "Multi-community workspace switching with cross-community unread observation",
+    "what": "Users keep several communities (up to fifty hosted) in a rail, reorder them and see unread across all of them.",
+    "how": "features/communities (relay set, storage, icon cache, mark-read, leave, unread observer), CommunityRail with drag sorting, communityViewTransition for animated switches, per-community theme (kind 30078) and rate-limit gate reset on switch, identity archive and shared identity settings; each community is a separate relay connection and cache scope keyed by (pubkey, relay).",
+    "evidence": [
+      "C:/dev/buzz/desktop/src/features/communities/communityUnreadObserver.ts",
+      "C:/dev/buzz/desktop/src/features/communities/communityRelaySet.ts",
+      "C:/dev/buzz/desktop/src/app/communityViewTransition.ts",
+      "C:/dev/buzz/desktop/src/shared/api/relayRateLimitGate.ts:1-12"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has no cross-room unread; a rail with a separate observer per tenant keeps multi-org users from being overwhelmed.",
+    "notes": "Per-community isolation means N sockets for N communities; fine at tens, expensive at hundreds."
+  },
+  {
+    "id": "buzz-architecture-098",
+    "category": "Client shell",
+    "name": "Test architecture: e2e bridge with mock IPC, 189 Playwright files, review-proven standards",
+    "what": "UI behaviour is tested end to end without a live relay, and tests must bind production seams and be falsifiable.",
+    "how": "desktop/src/testing/e2eBridge* mocks Tauri IPC and relay subscriptions (history, search, custom harnesses); desktop/tests/e2e holds about 189 spec and helper files; TESTING.md states the review-proven rule (regression tests bind the production seam and fail when the guard is removed; table tests over full input spaces; scoped locators); Rust side uses nextest per crate with explicit lists because nothing runs cargo test --workspace; Postgres-backed contract and race tests run in a dedicated job; mutation witnesses for formal models.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src/testing/e2eBridge.ts",
+      "C:/dev/buzz/desktop/tests/e2e/agent-availability.spec.ts",
+      "C:/dev/buzz/TESTING.md:19-34",
+      "C:/dev/buzz/Justfile:440-470"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Adopt the falsifiability rule for Verevon authority tests: every guard needs a test that fails when the guard is deleted.",
+    "notes": "Mock-Tauri browser tests explicitly do not certify native relay TTL or substrate health (agent-availability doc)."
+  },
+  {
+    "id": "buzz-architecture-099",
+    "category": "Client shell",
+    "name": "Build-time overlays: internal-only features, preview flags and enterprise adapter configuration",
+    "what": "The same codebase builds the public app and an internal app with extra features, and enterprise builds hard-wire trusted relay and identity-adapter settings.",
+    "how": "desktop/src/protectedFeatures has internal.ts/internalUi.ts for the internal build and empty public.ts exports for OSS; preview-features.json gates workflows, projects, pulse, forum and agentManagedProfiles via an Experimental settings card; BUZZ_BUILD_ENTERPRISE_AUTH_RELAYS and _ADAPTER_BASE_URL (HTTPS or loopback only) decide which relays may use NIP-FI; BUZZ_THEME_NAME/BASE_THEME brand builds; LaunchDarkly evaluator in the relay for server flags.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src/protectedFeatures/internal.ts",
+      "C:/dev/buzz/desktop/src/protectedFeatures/public.ts",
+      "C:/dev/buzz/preview-features.json",
+      "C:/dev/buzz/docs/federated-identity-adapter.md:1-30",
+      "C:/dev/buzz/crates/buzz-feature-flags/README.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon effect policies already gate features per org; Buzz shows a build-level overlay (internal vs public) for features that should not ship to every customer.",
+    "notes": "The personal agent Bestie is internal-only (defined in internal.ts; public list empty)."
+  },
+  {
+    "id": "buzz-architecture-100",
+    "category": "Client shell",
+    "name": "Single multicall binary (sprig) for deploy-anywhere agents",
+    "what": "One small binary acts as buzz-acp, buzz-agent, buzz-dev-mcp, the CLI and the git helpers depending on how it is invoked.",
+    "how": "sprig dispatches on argv[0] personality (symlinks) to buzz_acp, buzz_agent or buzz_dev_mcp (which also handles rg, tree and buzz); the same pattern gives git-credential-nostr and git-sign-nostr; Dockerfile.sprig and sprig workflows produce the image used as the Kubernetes agent body.",
+    "evidence": [
+      "C:/dev/buzz/crates/sprig/src/main.rs:1-55",
+      "C:/dev/buzz/Dockerfile.sprig",
+      "C:/dev/buzz/.github/workflows/sprig-image.yml"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A single static agent-runtime binary simplifies Verevon sandbox images and cuts startup time.",
+    "notes": "Image size claims (\"megabytes\") not verified."
+  },
+  {
+    "id": "buzz-architecture-101",
+    "category": "Client shell",
+    "name": "Mobile client architecture: Flutter with shared cross-client rules and an age gate",
+    "what": "iOS and Android clients follow written intent (offline first, responsive, do not lose drafts, do not trust relays) and shared rules with desktop for ordering, unread and autocomplete.",
+    "how": "Flutter with hooks_riverpod, nostr, secure storage, biometrics, QR scanning, deep links, app badge, native media and an age-signal gate; features for channels, forum, home, activity, search, pulse, pairing, invites; VISION_MOBILE declares the persistent store derived from events and discardable, with pending/sent/failed send states, bounded background work and push opening to the right conversation from cold start.",
+    "evidence": [
+      "C:/dev/buzz/VISION_MOBILE.md:1-67",
+      "C:/dev/buzz/mobile/pubspec.yaml",
+      "C:/dev/buzz/mobile/HUDDLES.md:1-20",
+      "C:/dev/buzz/mobile/lib/features/age_gate"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The \"do not trust the relay\" principle (critical actions enforced locally) is relevant to Verevon mobile planning.",
+    "notes": "Doc states not all intents are realized; mobile is \"being wired up\" in the README."
+  },
+  {
+    "id": "buzz-architecture-102",
+    "category": "Client shell",
+    "name": "Shortcuts, tray and accessibility posture; no command palette or i18n",
+    "what": "Power-user shortcuts and a tray with running agents exist; there is no command palette and the UI is English-only.",
+    "how": "Global shortcuts via tauri-plugin-global-shortcut (push-to-talk Ctrl+Space), in-app shortcuts for search (Cmd+K), channel search (Cmd+F), new message, create channel, zoom, reload; tray menu with Running and Recent agent activity and an action queue; aria attributes in 416 desktop files and reduced-motion handling in 74 (counts from scout greps); no i18n library or message catalogs found in desktop, web, admin-web or mobile.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src/app/useAppShellKeyboardShortcuts.ts",
+      "C:/dev/buzz/desktop/src-tauri/src/tray_menu.rs",
+      "C:/dev/buzz/desktop/src-tauri/src/ptt_shortcut.rs",
+      "C:/dev/buzz/VISION.md:208"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon needs i18n from the start (Norwegian users); Buzz shows the cost of retrofitting. A command palette is a missing table-stake relative to Slack and Teams.",
+    "notes": "Counts and absence claims come from the scout inventory greps; I did not re-run them."
+  },
+  {
+    "id": "buzz-architecture-103",
+    "category": "UX patterns & layout",
+    "name": "One event log, three lenses: Stream, Forum and Workflow with per-surface notification defaults",
+    "what": "The same data can be read as fast chat, slow threaded discussion or structured automation traces, each with its own noise level.",
+    "how": "VISION surface table: Home (personal feed), Stream (topic chat, mandatory topics to sub-replies), Forum (posts with flat replies), DMs (up to 9), Agents, Workflows (steps and approval gates), Search; channel types stream, forum, dm, workflow in the DB; auxiliary panels for threads, canvas and members; Home inbox with hidden-DM inbox.",
+    "evidence": [
+      "C:/dev/buzz/VISION.md:13-31",
+      "C:/dev/buzz/ARCHITECTURE.md:474-478",
+      "C:/dev/buzz/desktop/src/shared/layout/AuxiliaryPanelShell.tsx"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A Space could offer a fast chat lens and a slow decision lens (approvals, handoffs) over the same authorized record instead of one flat stream.",
+    "notes": "Pulse, Projects, Forum and Workflows are preview-gated in the desktop even though VISION says all seven surfaces ship."
+  },
+  {
+    "id": "buzz-architecture-104",
+    "category": "UX patterns & layout",
+    "name": "Product-design principle: facts decide, timers are a last-resort backstop",
+    "what": "Onboarding messages and agent kickoff should speak from observed state, not from stopwatches.",
+    "how": "Post-mortem of the Welcome kickoff: three failure directions (wrong story, too loud, too quiet) share one root cause, the kickoff decides what to say from timers (60 s, 15 s, 90 s) and absence of evidence, then writes it permanently; the one fact-based check is failedAfterKickoff; the guidance is to invert so facts decide wording and timers only backstop; a rejected-approaches section lists what not to retry.",
+    "evidence": [
+      "C:/dev/buzz/docs/welcome-kickoff-silent-failures.md:11-66",
+      "C:/dev/buzz/docs/welcome-kickoff-silent-failures.md:435-484"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Applies directly to Verevon agent status and onboarding in Spaces: derive UI claims from facts (run state, presence) rather than elapsed time.",
+    "notes": "Engineering culture artifact; the rejected-approaches register is itself a good practice."
+  },
+  {
+    "id": "buzz-architecture-105",
+    "category": "Realtime & sync architecture",
+    "name": "Relay-signed projection events keep thin clients correct without a second API",
+    "what": "Derived state that clients cannot compute from raw events (who is in a channel, which DMs a viewer hid, who is archived, how many replies a thread has, who is online right now) is served as ordinary signed events authored by the relay key, so any NIP-01 client can read it and a generic cache or verifier still works.",
+    "how": "The relay holds a signing key (per community in multi-tenant mode) and emits addressable or snapshot events as side effects of accepted commands: NIP-29 group metadata, admins and members (39000, 39001, 39002; the members snapshot is re-published on membership change and reconciled for very large channels), NIP-43 membership roster (13534) plus deltas (8000, 8001), membership notices (44100, 44101; clients may not submit them), per-viewer DM visibility snapshot (30622), identity archival delta and list (8002, 8003, 13535), query-time window overlays (39005 thread summary, 39006 and 39007 bounds, never stored), channel summary (40901) and a bulk presence snapshot (40902, synthesized from Redis). Reader-authorization predicates (author-only, owner-only, p-gated) apply to these kinds exactly as to client events.",
+    "evidence": [
+      "C:/dev/buzz/NOSTR.md:60-63",
+      "C:/dev/buzz/NOSTR.md:351",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:398-428",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:435-451",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:503-505",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/side_effects.rs:3351",
+      "C:/dev/buzz/crates/buzz-relay/src/handlers/side_effects.rs:3636",
+      "C:/dev/buzz/docs/nips/NIP-DV.md:1-45",
+      "C:/dev/buzz/docs/nips/NIP-IA.md:1-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon could publish Space roster, audience revision and presence as server-signed, versioned snapshots next to the transcript, so every client (browser, agent runner, future desktop) renders the same authority state instead of recomputing it.",
+    "notes": "The cost is relay-signing-key custody (a compromised key forges roster state) and write amplification on large channels (hence the large-channel reconciliation path). Slack and Teams expose the same derived state through proprietary APIs; Buzz keeps it inside the event vocabulary."
+  },
+  {
+    "id": "buzz-architecture-106",
+    "category": "Notifications & attention",
+    "name": "Encrypted author-only reminders with relay-side due scheduling (NIP-ER)",
+    "what": "A user can attach a private reminder to a message or write a standalone one; the relay surfaces it to that user at the due time without learning what it is about, and agents can be woken by stream reminders.",
+    "how": "Kind 30300 addressable event, content NIP-44 encrypted to the author (target id or address, status pending, done or cancelled, private note); only d (random, at least 128 bits), not_before (decimal unix seconds) and alt are public. The events table has not_before and delivered_at columns and a partial index for undelivered due rows. A relay worker (buzz-db reminder store) selects the latest head per (community, pubkey, d) with not_before <= now and delivered_at NULL in archived-community-excluding batches, claims a row with a stamp before publishing and releases it if the publish fails; the due signal is an EVENT frame to the author live subscriptions only (author-only kind) and is explicitly not a delivery guarantee: clients dedupe, enforce not_before locally and run recovery queries. Stream reminder kind 40007 is in the default subscription set of the agent harness and in the feed needs-action query.",
+    "evidence": [
+      "C:/dev/buzz/docs/nips/NIP-ER.md:1-30",
+      "C:/dev/buzz/crates/buzz-db/src/store/reminder.rs:43-160",
+      "C:/dev/buzz/schema/tables/public/events.sql:38-62",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:102",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:129-135",
+      "C:/dev/buzz/crates/buzz-acp/README.md:272",
+      "C:/dev/buzz/crates/buzz-db/src/store/feed.rs:196"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon has no Space notifications or scheduled send; a private due-time primitive whose payload the platform cannot read fits ZDR and doubles as a wake signal for scheduled agent work.",
+    "notes": "Relay due-delivery is best-effort by design. Teams and Slack have reminders and scheduled messages but keep content readable to the vendor; here the relay learns only that a reminder is due. Scheduled send (kind 40006) is defined but has no UI or CLI verb."
+  },
+  {
+    "id": "buzz-architecture-107",
+    "category": "Messaging core",
+    "name": "Mentions bind a label to one exact public key; ambiguity blocks the send",
+    "what": "An @mention notifies exactly the person or agent the author picked, even when two members share a display name, and a mention cannot silently turn into plain text that notifies nobody.",
+    "how": "The composer keeps a label-to-pubkey map and publishes both readable @Name text and separate p tags. Selecting a second identity with the same name reserves a qualified label that includes the full key; manually typed names with several exact-key matches are rejected with an instruction to use the picker, and the draft is kept. Pasted mentions are bound only after the community own state vouches for the identity, guarded by occurrence, generation and trust fences, and sends await pending bindings (bounded) before extracting recipients. The CLI resolves @Name against current channel members and refuses to send on an unresolved, ambiguous or non-member name; narrative names must drop the @ because every mention notifies. Sending never changes membership.",
+    "evidence": [
+      "C:/dev/buzz/docs/mention-editor.md:1-60",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:43-56",
+      "C:/dev/buzz/crates/buzz-cli/src/commands/messages.rs",
+      "C:/dev/buzz/desktop/src/features/messages/ui/useMentionSendFlow.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon person mentions are text only today; adopting exact-identity binding (a structured recipient list next to the text) is the prerequisite for mention notifications and for agent addressing that cannot be spoofed by a look-alike name.",
+    "notes": "Documentation plus tests describe the contract; I confirmed the CLI behaviour in the base prompt and did not re-read the TypeScript hooks end to end (confidence high on the contract, medium on every code path)."
+  },
+  {
+    "id": "buzz-architecture-108",
+    "category": "Messaging core",
+    "name": "Owned-agent invitation flow: ownership is not membership, and authorization is re-checked at publish time",
+    "what": "When someone @mentions an agent they own that is not yet in the channel, the composer offers Invite (add, then send) or reference-only; a failed add, a revoked policy or a cancelled attempt keeps the draft and sends nothing.",
+    "how": "Owned-agent discovery is seeded by an owner-signed kind 30177 coordinate and proven by the agent kind 0 profile carrying exactly one valid NIP-OA auth tag; owner policy that is invalid fails closed and cannot revive a legacy permission; membership comes only from the latest relay-signed kind 39002 snapshot so an owned agent can be discovered with empty channel ids. The picker and preparation phase may admit a non-member, but publication separately refreshes authorization for the exact eventual destination (including a newly created DM); cached picker evidence is never publication authorization. One synchronous pending latch and abort signal cover preparation, inventory, adds and publication; recovery of the captured text, media and exact mention refs is fenced by visit and revision so a late response cannot revive cancelled intent.",
+    "evidence": [
+      "C:/dev/buzz/docs/owned-agent-discovery.md:1-30",
+      "C:/dev/buzz/docs/remote-mention-routing.md:1-45",
+      "C:/dev/buzz/docs/forum-agent-invitation.md:1-25",
+      "C:/dev/buzz/crates/buzz-core/src/kind.rs:291"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon rooms need the same two-step gate when a user pulls an agent into a Space: discovery and invitation evidence must never double as authority, and the final Control decision must be minted for the exact destination at send time.",
+    "notes": "The design deliberately admits that membership reads and message publication are not one atomic transaction. Heavy frontend machinery (cancellation latches, draft recovery) is the price of keeping intent visible."
+  },
+  {
+    "id": "buzz-architecture-109",
+    "category": "Agents in the room",
+    "name": "Portable agent snapshots: secrets excluded by construction, optional memory levels, locked NIP-44 envelope",
+    "what": "An agent definition (prompt, runtime, model, profile and optionally its memory) can be exported as a file or as an avatar PNG, shared, previewed and imported without carrying keys or machine-local paths.",
+    "how": "buzz-agent-snapshot v1 manifest in .agent.json or in a PNG tEXt chunk; only explicit fields are copied into the definition so nsec, auth tag, env vars, relay URL, harness paths and runtime state are never serialized (asserted by tests); memory is opt-in at three levels (none, core, everything) and fetched through the owner-gated engram path derived from the resolved instance, never from the caller; locked cards wrap the manifest in a NIP-44 v2 envelope decryptable only by the owner key or the exact agent key (exact-endpoint lookup, no trial decryption, generic refusal text, pre-decrypt size caps, 10 MiB PNG ceiling checked on final bytes). Card art generation is a separate optional OpenAI call whose key never leaves Rust; team snapshots follow the same envelope.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/src/managed_agents/agent_snapshot.rs:1-45",
+      "C:/dev/buzz/desktop/src-tauri/src/managed_agents/agent_snapshot_envelope.rs:1-50",
+      "C:/dev/buzz/desktop/src-tauri/src/commands/personas/card.rs:1-35",
+      "C:/dev/buzz/desktop/src/features/agents/ui/AgentSnapshotExportDialog.tsx"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A secret-free, versioned export format for Space agent bindings and definitions would let orgs move agents between Spaces and environments; copy the allowlist-by-construction rule and the locked-envelope option for private definitions.",
+    "notes": "Trading-card minting is a delight feature; the engineering value is the exclusion-by-construction and fail-closed unlock. Zip bundles for skills are deferred to v2."
+  },
+  {
+    "id": "buzz-architecture-110",
+    "category": "Agents in the room",
+    "name": "Identity exactness: a persona or relay-signed ownership claim is never an alias for another agent key",
+    "what": "Opening a profile from a message, DM, mention or deep link always shows exactly that key; a stopped agent never redirects to a running sibling made from the same persona, and cloud or remote agents are labelled as not managed on this device without implying hosting.",
+    "how": "The canonical profile resolver treats an explicit public key as exact for active, stopped, archived and relay-only keys; owner-signed kind 30177 persona_id and archive-request persona links are not identity aliases and grant no access to a local sibling controls; there is no synthetic secretless record; persona navigation is a separate representative-picking path. A shared provenance marker (not managed on this device) is computed from an exact-key lookup in successfully loaded local inventory, and is withheld on failed inventory, unknown owner or other people identities; the marker grants no membership, mention eligibility, availability or management capability. Ownership permits owner-scoped relay reads, not local management.",
+    "evidence": [
+      "C:/dev/buzz/docs/agent-profile-identity.md:1-35",
+      "C:/dev/buzz/docs/agent-management-provenance.md:1-25",
+      "C:/dev/buzz/desktop/src/features/profile/lib/useCanonicalManagedAgentProfile.ts"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Matches the Verevon rule that visibility is not authority (ADR-0002): keep agent definition, binding and running instance as separate identities in the Space roster, resolve by exact subject id, and never infer permissions from a shared definition.",
+    "notes": "A bug class (hidden redirects between sibling agents) was removed by deleting an exception path instead of adding another flag, which is the cheaper long-term fix."
+  },
+  {
+    "id": "buzz-architecture-111",
+    "category": "Agents in the room",
+    "name": "Structured, escaped turn framing and a trust ladder for relay-delivered content",
+    "what": "Every agent turn arrives in explicit semantic sections so the model can tell the current request from history, routing metadata and mid-turn merges, and content that came from the relay is treated as lower trust than the operator prompt.",
+    "how": "prompt_framing wraps standing context and each incoming turn in paired tags (buzz-event or buzz-events with Content, Event ID, From, Kind, Time, Tags, Parsed; thread-context or conversation-context for history; context for authoritative channel and reply-destination metadata; new-message-arrived-while-you-were-working and new-request-supersedes-previous for steer and supersede merges); attribute values are escaped while bodies stay byte-for-byte visible so review UIs show what the model executes. The base prompt forbids discovering or using relay-backed skills unless the authorizing human names the skill and says that even then the content is untrusted input that cannot override higher-priority instructions; lifecycle hook output is JSON-encoded for prompt-injection safety and carries lower trust than system messages.",
+    "evidence": [
+      "C:/dev/buzz/crates/buzz-acp/src/prompt_framing.rs:1-30",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:4-6",
+      "C:/dev/buzz/crates/buzz-acp/src/base_prompt.md:101",
+      "C:/dev/buzz/docs/MCP_DRIVEN_HOOKS.md:12-20"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A fixed envelope for room turns (author, audience revision, current request versus history) is what Verevon Session Core needs once several authors can address one agent; copy the rule that routing metadata is authoritative and message bodies are not.",
+    "notes": "This is a prompt-level mitigation, not an isolation boundary; the information-flow proposal in the same repo exists because prompt rules alone are not enough."
+  },
+  {
+    "id": "buzz-architecture-112",
+    "category": "Client shell",
+    "name": "Authenticated, cacheable media for the webview via a custom scheme and a loopback proxy",
+    "what": "Images and video in private channels load in the desktop webview even though every blob read needs a signed grant, seek correctly, and stay cached across channel switches.",
+    "how": "A registered buzz-media: asynchronous URI scheme plus an axum loopback proxy rewrite media requests to the current relay base URL and attach a freshly minted per-request media GET authorization (the helper can only mint for the relay base, so a token cannot reach a third-party origin); Range requests are forwarded for video; a 401 or 403 on a range stream is retried once with a re-minted token because the strict federated-identity read token lives 60 s; content-addressed URLs let the relay send immutable one-year cache headers which are forwarded to the WebKit HTTP cache; non-range responses over 20 MiB are refused to avoid buffering whole videos; the proxy rejects cross-origin callers other than the Tauri origins.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src-tauri/src/media_proxy.rs:1-130",
+      "C:/dev/buzz/desktop/src-tauri/src/lib.rs:219",
+      "C:/dev/buzz/desktop/src-tauri/tauri.conf.json:39"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "If Verevon rooms gain attachments, keep browser credentials out of media URLs by proxying through the BFF with per-request authorization and immutable content-addressed caching.",
+    "notes": "Pairs with the media authorization gap noted elsewhere: the proxy solves transport auth, not the missing tie between a blob read and the message channel ACL."
+  },
+  {
+    "id": "buzz-architecture-113",
+    "category": "Governance, security & compliance",
+    "name": "Deployment-wide admin console on its own host with operator and moderator tiers",
+    "what": "A hosting operator gets a private dashboard for reports, feedback, communities, members, bans and timeouts across every community, served from the relay process but isolated from tenant hosts.",
+    "how": "Configured by BUZZ_ADMIN_HOST (activates /api/admin/v1 plus the admin-web SPA from BUZZ_ADMIN_WEB_DIR); every request carries NIP-98 auth and the signer is resolved to Operator (RELAY_OPERATOR_PUBKEYS, relay_operators table with audit) or Moderator capabilities; the legacy static token mode was removed and a stale variable only warns; routes cover reports (detail, resolve, reopen, cancel), feedback status, operators CRUD, cross-community member search and lookup, event preview, restrictions, direct ban and timeout; the SPA path exemption from tenant host checks is host-qualified so the same path on a tenant host stays protected; the desktop has a matching Admin Console that can browse and moderate every community; admin actions run through an outbox with leases and claim tokens.",
+    "evidence": [
+      "C:/dev/buzz/docs/admin/README.md:1-40",
+      "C:/dev/buzz/crates/buzz-relay/src/api/admin/mod.rs:50-78",
+      "C:/dev/buzz/crates/buzz-relay/src/router.rs:262-274",
+      "C:/dev/buzz/schema/tables/public/relay_operators.sql",
+      "C:/dev/buzz/schema/tables/public/relay_admin_outbox.sql",
+      "C:/dev/buzz/CHANGELOG.md:10"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon needs an operator surface that is not a customer org: separate host, signed request auth, two privilege tiers and an audit row per action, especially while Space effect policies are deny-by-default.",
+    "notes": "Operator and tenant planes share one process, so isolation relies on host qualification and middleware ordering rather than separate deployments. Admin audit lives in relay_operator_audit (migration 0039)."
+  },
+  {
+    "id": "buzz-architecture-114",
+    "category": "Realtime & sync architecture",
+    "name": "Two deployment profiles: GitOps-safe production chart and a bundled quickstart",
+    "what": "The same relay runs from a one-command Docker Compose bundle on a VPS, a Helm quickstart with bundled Postgres, Redis and object storage for evaluation, or an HA production chart that never invents secrets.",
+    "how": "Helm chart profiles selected by values: production requires an existing Secret, external Postgres, Redis and S3 endpoints and fails at helm template time through _validate.tpl when inputs are missing; chart-side randomly generated secrets are only safe under helm install because ArgoCD and Flux render with helm template where lookup is empty, so the chart refuses that path for production; quickstart bundles Postgres, Redis and Silo (a MinIO fork) with a bucket-init job and autogenerated secrets and is single replica; replicaCount above one hard-requires Redis; chart tests cover rendering, secrets, HPA, networking, validation and drain cron jobs; Compose adds a Caddy overlay for automatic TLS; hosted community limits and S3 addressing style are explicit values.",
+    "evidence": [
+      "C:/dev/buzz/deploy/charts/buzz/README.md:1-90",
+      "C:/dev/buzz/deploy/charts/buzz/values.yaml:1-60",
+      "C:/dev/buzz/deploy/charts/buzz/templates/_validate.tpl",
+      "C:/dev/buzz/deploy/compose/README.md:1-30"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon planes already ship via GitOps; the explicit rule that a chart must not generate secrets under template-only rendering, plus validation that fails early, is a cheap safeguard to copy.",
+    "notes": "Chart defaults are single replica with autoscaling off; HA values are shipped as fixtures and examples."
+  },
+  {
+    "id": "buzz-architecture-115",
+    "category": "Realtime & sync architecture",
+    "name": "Client performance budgets measured under agent load",
+    "what": "The desktop is tested for typing latency, scroll smoothness and channel switch long tasks while simulated agents flood typing indicators and live messages.",
+    "how": "Playwright perf project (separate config, one worker, no retries) with tests that read the Event Timing API: typing-latency runs an identical 80 character burst under 4x CPU throttle in a quiet scenario and a busy scenario (8 agent pubkeys emitting typing indicators every 250 ms plus a live markdown message every 2 s) and reports median, p95, max and count of keystrokes over 50 ms; cold-switch and warm-switch tests count long tasks; scroll-smoothness and a scrollback test on a bug-heavy channel; only the quiet-versus-busy delta on one machine is treated as the signal.",
+    "evidence": [
+      "C:/dev/buzz/desktop/playwright.perf.config.ts:1-25",
+      "C:/dev/buzz/desktop/tests/e2e/typing-latency.perf.ts:1-40",
+      "C:/dev/buzz/desktop/tests/e2e/cold-switch-longtask.perf.ts",
+      "C:/dev/buzz/desktop/tests/e2e/scroll-smoothness.perf.ts"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Agent-busy rooms are where Verevon will feel slow first; encode a budget (keystroke latency and long tasks with N streaming agents) as a CI-visible benchmark before enabling push realtime.",
+    "notes": "These are regression harnesses on mock data, not production telemetry; no field latency numbers were found in the repo."
+  },
+  {
+    "id": "buzz-architecture-116",
+    "category": "UX patterns & layout",
+    "name": "Agent-led onboarding: welcome channel kickoff, starter channels and built-in personas",
+    "what": "A new member lands in a Welcome channel where built-in agents greet them and introduce themselves, with starter channels and a welcome canvas already in place.",
+    "how": "Onboarding feature (about 56 files) runs a kickoff stage: the Fizz persona posts an opener, teammate agents (for example Honey and Pollen) introduce themselves in-thread once their presence is observed, and a closer follows; starter channels are created by ensure_starter_channels; welcome canvas and guide modules seed content; machine onboarding handles the agent runtime check. The post-mortem record shows the design tension: the kickoff once decided from timers and produced announcements that were wrong, too loud (agents replying to each other) or too quiet.",
+    "evidence": [
+      "C:/dev/buzz/desktop/src/features/onboarding/welcomeKickoff.ts:92",
+      "C:/dev/buzz/desktop/src/features/onboarding/welcomeCanvas.ts",
+      "C:/dev/buzz/desktop/src-tauri/src/managed_agents/personas.rs:22-41",
+      "C:/dev/buzz/desktop/src-tauri/src/commands/channels.rs:25-32",
+      "C:/dev/buzz/docs/welcome-kickoff-silent-failures.md:11-66"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "A first-run Space that is not empty (starter room, introductions by a default agent, orientation canvas) answers the empty-state problem; derive each claim from observed state, as the post-mortem advises.",
+    "notes": "Built-in personas are branded (bee-themed) and ship with the desktop; I did not audit the full onboarding flow beyond the kickoff module and persona definitions."
+  }
+]

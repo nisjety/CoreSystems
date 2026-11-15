@@ -1,0 +1,691 @@
+{
+  "category": "Governance, security & compliance",
+  "items": [
+    {
+      "id": "R-t1-10-01",
+      "title": "Make zero-data-retention binding in every plane, with typed refusals and content-free telemetry",
+      "summary": "Session Core must act on the zero_data_retention flag in the signed Control decision (today it decodes the flag and discards it): refuse durable thread, message and memory writes under ZDR with a typed code. Prove the same for the other durable stores a Space touches (sandbox-manager process output and snapshots, notification and feed projections, agent_memory and Letta), commit the typed ZDR refusal UI, and add a cross-plane ZDR test matrix. Keep telemetry content-free; add a consent gate only if analytics are ever added.",
+      "whyItMatters": "ZDR is a stated Verevon promise and an architecture rule (it must propagate). Any plane that ignores it is a compliance defect that a regulated buyer will find. GrokBot shows the pattern users expect: a persistent feature is blocked with a visible reason instead of silently storing.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot",
+        "others": [
+          "teams (AI-interaction retention controls, DOC)",
+          "qm, teams, buzz (consent-gated or scrubbed telemetry)"
+        ],
+        "prevalence": "ZDR-blocks-persistence: 1 of 5 (grokbot), unique. Consent-gated, scrubbed telemetry: 4 of 5 (grokbot, qm, teams, buzz), table-stakes.",
+        "mechanism": "The backend reports privacy mode; every persistent feature checks it at connect or write time and returns a typed no-storage error that the UI maps to a visible block state with a reason. For telemetry, analytics start disabled or deferred with a capped buffer until consent resolves, are dropped on opt-out, use closed label sets and scrub errors before send."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/session-core/src/grpc.rs:1752-1755 (zero_data_retention and third_party_processing_allowed are read from the claims and held in _privacy_processing_flags 'for the later provider/retention propagation slices'; not acted on)",
+          "apps/Application Plane/notification-core/internal/notification/delivery_worker.go:91-95 and feed_projection.go:133-137 (ZDR requests are refused for async delivery and feed projection, so the Novu-content concern raised in the baseline is at least partly handled in this service)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:80-116 and apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:292-294 (gateway raises ZDR fail-closed; Control forbids durable owner actions)",
+          "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts:1-30 (typed refusal text; reported uncommitted by the UI baseline)",
+          "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go:262-290 (process output is retained durably in sandbox_process_output; no ZDR check seen)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/observability.rs:1-25 (Prometheus metrics only; grep for sentry/posthog/analytics in verevonv3/src and package.json found no third-party telemetry SDK)"
+        ],
+        "gap": "Session Core ignores the claim, so ZDR is enforced at the edge (gateway, Control, notification-core) but not at the store that persists threads and memory. No cross-plane test proves every durable write path refuses under ZDR; the sandbox-manager and agent_memory paths are unchecked; the typed refusal UI is uncommitted. Telemetry hygiene is currently fine because no third-party SDK was found, but nothing guards it."
+      },
+      "approach": "Model Plane: in session-core CreateThread, message append and agent_memory writes, branch on claims.zero_data_retention and either persist nothing or return a typed zdr_persistence_unavailable status; model-gateway maps it to the existing typed refusal codes; letta-bridge and sandbox-manager (workspace, snapshot, process output) take the same flag from the decision. Application Plane: Space-originated notifications under ZDR carry reference-only payloads (coordinate with category 05 notification work). Frontend Plane: commit zdr-refusals.ts and render one block state per refusal code. Add a ZDR conformance test (one case per durable write path, per plane) and a CI label allowlist so Prometheus labels and error reports stay content-free. Only if analytics are added: consent state machine with a capped deferred buffer.",
+      "effort": "M",
+      "dependencies": [
+        "ZDR claim carried in every plane contract",
+        "R-t1-05-01 (content-free Space notifications)",
+        "typed refusal UX"
+      ],
+      "planeOwner": "Model Plane (session-core, model-gateway, sandbox-manager) with Application Plane and Frontend Plane",
+      "risks": "Feature regressions for ZDR orgs (persistent computers, memory, schedules) must be explicit rather than silent. A missing claim must fail closed. Pre-existing rows written before a posture change are a retention question, handled by the retention item.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Planned but not finished: the session-core code comment marks provider/retention propagation as a later slice; apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md S6.1 and S6.2 list ZDR verification cases."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-10-027",
+        "C-t1-10-037"
+      ],
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 11,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-10-02",
+      "title": "Audience-bound agent memory, owner-signed declassify and explicit context sharing into rooms",
+      "summary": "Tag every agent memory write with the Space audience (hash, revision) carried by the signed decision and filter retrieval so that what an agent learned in a private room cannot surface in a wider one. Add an owner-signed declassify action, an explicit opt-in (resource and room) before a person's personal context is used in a shared room, outbound-send labelling by recipient versus org, and, later, admin labels whose strictest source label is inherited by agent output.",
+      "whyItMatters": "The defining risk of personal agents that move between rooms is cross-room leakage. Verevon already binds threads and messages to audiences; persistent memory is the open hole. Solving it is a headline differentiator that no incumbent ships (Teams labels display on AI answers but do not carry controls).",
+      "referenceBestPractice": {
+        "bestSource": "buzz",
+        "others": [
+          "grokbot (runtime labelling of outbound Slack/Gmail/Outlook sends)",
+          "qm (sharing posture: Isolated by default, Open needs owner and room opt-in, live membership re-check)",
+          "teams (sensitivity labels; honest gap: AI output does not inherit controls)"
+        ],
+        "prevalence": "Agent flow control: 2 of 5 (buzz draft design, grokbot); sharing posture: 1 of 5 (qm); label propagation: 1 of 5 (teams, partial). Differentiator.",
+        "mechanism": "Each agent instance is bound to one audience. Memory entries carry an audience label and a membership epoch; a read is allowed only when the target audience is a subset of the source audience, unless the owner explicitly declassifies. Outbound tool sends are classified internal, external or self and sampled for review. Sharing defaults to Isolated; Open requires an owner opt-in on the resource plus a room opt-in, re-checked against live membership at turn time. Derived content takes the maximum label of its sources."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/schema.ts:853-903 (recipient audience snapshots and events) and apps/Control Plane/user-core/internal/spaces/decision.go:145-222 (audience hash and revision bound into decisions)",
+          "apps/Model Plane/rust/services/session-core/migrations/0023_thread_space_context.sql, 0024_thread_recipient_audience_revision.sql, 0025_message_space_audience_context.sql (threads and messages carry Space audience context)",
+          "apps/Model Plane/rust/services/session-core/migrations/0032_space_membership_revocations.sql (revoked members are denied run, thread and memory access)",
+          "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:214-230 (agent_memory has scope run|thread|session|user|org|global, owner and classification, but no space or audience column; 0011 and 0037 add none)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2680 (deny-by-default shared-read gate; the timeline swallows the 403 per the UI baseline)"
+        ],
+        "gap": "Thread and message storage is audience-bound, but persistent agent memory (including Letta semantic memory) is scoped by org, user or thread only. There is no declassify step, no per-resource 'share into this Space' opt-in, no output label or outbound-send classification."
+      },
+      "approach": "Model Plane session-core: add space_ref, audience_hash and audience_revision to agent_memory (new migration), set them at write time from the decision claims, filter at retrieval with the subset rule, and treat user or org scope memory read inside a Space as personal context that needs a Control decision. letta-bridge must apply the same filter. Control user-core: add context_shares (resource, Space, owner opt-in, expiry) and a declassify decision type that is owner-signed and audited. Frontend: a panel that shows which personal context the agent may use in this room, with opt-in and declassify. Outbound: integration-corev2 tags each send by recipient domain versus org and writes it to audit. Later phase: Control defines label taxonomy, Data Plane documents and Spaces carry a label, Model computes output label as the maximum of input labels and the Application Plane stores it on the message.",
+      "effort": "L",
+      "dependencies": [
+        "audience snapshots (shipped)",
+        "session-core memory migration",
+        "letta-bridge filtering",
+        "R-t1-02-03 (agent ownership model)",
+        "R-t1-10-05 (audit)"
+      ],
+      "planeOwner": "Model Plane (session-core, letta-bridge) with Control Plane decisions",
+      "risks": "Memory becomes less useful when partitioned, so declassify must be cheap. Membership epoch changes must invalidate labels correctly. Letta semantic memory may not be partitionable without bridge work. Label taxonomy can be over-applied (everything confidential).",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-10-026",
+        "C-t1-10-025",
+        "C-t1-10-012"
+      ],
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 8,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-10-03",
+      "title": "Room moderation: report, queue, tombstones, user block, and timeout or ban that also stops the person's agents",
+      "summary": "Add a Report action on every room message (human or agent-authored), a private moderation queue for owners and managers, and signed moderation actions (dismiss, delete with a visible tombstone, timeout, remove, ban) that notify the reporter and the author. Add a per-user block list. Control refuses to issue decisions for a suspended member and for agents owned by a suspended member, and the suspension event drops live subscriptions and in-flight runs.",
+      "whyItMatters": "Rooms that mix humans and agents need a way to remove harmful or leaked content, including agent output, and to stop a misbehaving participant. Without it Spaces cannot be opened to larger teams or guests. Because personal agents act like humans, a ban that does not cascade to the person's agents becomes a bypass.",
+      "referenceBestPractice": {
+        "bestSource": "buzz",
+        "others": [
+          "teams (best end-user side: report concern, block, chat-request expiry)",
+          "slack and teams moderation controls exist in the products but were not recorded in this category"
+        ],
+        "prevalence": "Moderation workflow: 2 of 5 (buzz, teams); ban cascade to owned agents: 1 of 5 (buzz). Differentiator.",
+        "mechanism": "A reports table (target, reporter hidden from the author, reason, status open/processing/resolved/dismissed/escalated) feeds an admin queue grouped by target. Actions are signed commands that write a tombstone visible in the room and notify everyone affected. A per-user block list filters delivery. The ban verdict is checked at authentication for the principal and for its owner (agent to owner link), fails closed on error, and audits which principal matched; a timeout is a write-deny until expires_at and a ban disconnects all sessions."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/schema.ts:546-716 (Space tables; lifecycle has a suspended state for the Space only; no report, block, tombstone or member-sanction table; a grep for report, tombstone, moderat, ban, mute found none for Spaces)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces and apps/gateway/src/domains/spaces.rs (grep for report/moderation/tombstone found no Space moderation route or UI)",
+          "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:1-20 (injection and PII handling for model-bound content only)",
+          "apps/Model Plane/rust/services/session-core/migrations/0032_space_membership_revocations.sql (session-core already consumes Control membership_revoked events, the hook a suspension cascade can reuse)"
+        ],
+        "gap": "No way to report or remove a message, no per-member timeout or ban, no block list, and nothing that ties an agent's right to act to its owner's standing in the Space."
+      },
+      "approach": "Application Plane convex-core: tables for reports, blocks and sanctions plus a tombstone message kind that replaces content and triggers purge in search and notification payloads; gateway routes under /api/v1/spaces/{space_ref}/reports and /sanctions gated by room role. Control user-core: a moderation decision class (signed, bound to subject, Space and audience revision) and suspended_until on space_memberships; decision issuance refuses a suspended subject and any agent whose owner is suspended (needs the agent to owner link from category 02); publish the sanction as a membership event so gateway, Convex and session-core drop subscriptions and runs. Frontend: Report on the message menu (agent messages included), admin queue in Space settings, tombstone rendering, Block in the member menu. Record every action in audit-core as metadata only.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-02-01 (room roles)",
+        "R-t1-02-03 (agent ownership and access list)",
+        "R-t1-10-05 (audit trail)",
+        "category 05 notification payload purge"
+      ],
+      "planeOwner": "Application Plane (reports, tombstones, blocks) with Control Plane (signed moderation decision, suspension)",
+      "risks": "Removal must propagate to search and graph indexes and notification payloads. Reporter privacy. A fail-closed ban check must alert instead of silently locking people out on a transient error. Under ZDR a report can store only a reference and hash, not content.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-10-006",
+        "C-t1-10-007"
+      ],
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-10-04",
+      "title": "Enterprise SSO GA and real SCIM provisioning, with deprovisioning that suspends the person's agents",
+      "summary": "Turn SSO into a per-org setting and replace the SCIM intake stub with a real SCIM 2.0 Users and Groups service in Control. Deactivating a user must revoke sessions, remove Space memberships and suspend the agents that person owns. Until the real service exists, the stub must stop returning fake success.",
+      "whyItMatters": "SSO and SCIM are table-stakes for Teams-like team use. The current SCIM endpoint is worse than absent: an identity provider that deprovisions a leaver receives success responses while nothing changes, so a departed employee's account and agents stay live.",
+      "referenceBestPractice": {
+        "bestSource": "teams",
+        "others": [
+          "qm (principal links: flat, evidence-recorded, reversible, no privilege creation)",
+          "slack",
+          "buzz"
+        ],
+        "prevalence": "SSO and identity federation: 4 of 5 (buzz, teams, qm, slack); table-stakes. SCIM is the usual enterprise companion.",
+        "mechanism": "OIDC or SAML service provider with per-org IdP configuration and home-realm discovery by email domain; SCIM 2.0 /Users and /Groups endpoints drive membership and deprovisioning; principal links map several subjects to one canonical principal with recorded evidence and no privilege inheritance."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/auth-core/src/auth/auth.ts:1005-1030 (better-auth sso plugin only when SSO_ENABLED is 'true'; the provisionUser hook only logs)",
+          "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1237-1275 (inbound /api/v1/scim/v2/* authenticates a bearer token, stores a webhook event and publishes verevon.ingestion.integration.scim_event_received; no user or group is created or changed)",
+          "apps/Ingestion Plane/integration-corev2/internal/api/server.go:2758-2776 (replies 201 to POST, 204 to DELETE and an empty list to GET regardless of what was requested)",
+          "apps/Ingestion Plane/integration-corev2/internal/db/migrations/0005_scim_tokens.sql and server.go:1133-1230 (durable per-org hashed bearer tokens, create and revoke audited)",
+          "A search of apps/Control Plane for scim_event_received or SCIM handling found no consumer"
+        ],
+        "gap": "SSO is behind a global flag with no per-org enforcement or domain verification. SCIM exists only as a token-managed intake that acknowledges requests without applying them, so deprovisioning silently does nothing and no provisioning reaches org membership or Space memberships."
+      },
+      "approach": "Control Plane owns identity. Add per-org IdP config, domain verification and an enforce-SSO flag in auth-core and org-core, and implement SCIM 2.0 Users and Groups in org-core: create, update and deactivate map to org membership, after which Control publishes the existing membership_changed event (Space memberships and session-core revocations already consume it) and auth-core revokes sessions. Deactivation also suspends owned agents using the suspension from R-t1-10-03. Reuse or re-home the per-org SCIM token store from integration-corev2. Immediately, make the integration-corev2 SCIM route return 501 so no IdP believes it succeeded. Group to Space mapping goes through the existing roster declaration.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-02-09 (the same SSO and SCIM work; build once)",
+        "R-t1-10-03 (suspension cascade)",
+        "agent to owner principal link"
+      ],
+      "planeOwner": "Control Plane (auth-core, org-core, user-core)",
+      "risks": "Group to Space mapping semantics and partial-deprovision races. IdPs expect idempotent PATCH behaviour and precise error codes. Misconfigured domain verification can lock out an org.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-10-034"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 11,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-10-05",
+      "title": "Org audit trail for admins: role-gated view, Space decisions and agent invocations, SIEM export, usage ledger export",
+      "summary": "Expose audit-core to org admins and auditors through a role-gated, cursor-paginated API and view, and an export token that streams or pulls events (metadata only). Record signed Space decisions (decision id, subject, audience revision, agent principal, privacy tier, outcome), agent invocations, approvals and moderation actions. Add per-Space and per-agent attribution and a bounded export window to the usage ledger for finance.",
+      "whyItMatters": "Enterprises that adopt an agent workspace must answer which agent did what, on whose authority. Verevon already signs decisions, so exporting them is cheap and differentiating. The current read path also looks too broad: any authenticated org member can list the org's events.",
+      "referenceBestPractice": {
+        "bestSource": "slack",
+        "others": [
+          "qm (source-level mechanics: recordOnce idempotency, audited admin reads, spend ledger and bounded export)",
+          "teams (Purview audit)"
+        ],
+        "prevalence": "SIEM-grade audit: 2 of 5 (slack DOC, qm SRC); spend export: 1 of 5 (qm). Differentiator.",
+        "mechanism": "Append-only table keyed by org and sequence with a unique idempotency key; fire-and-forget record() and exactly-once recordOnce(key); a read API filters by scope, action and time with cursor pagination; an org-admin token streams JSON events (actor, action, entity, context, details, app) to a SIEM; message bodies are never logged; each export is itself audited. Spend: a ledger by day, scope, origin and model with a bounded, token-authenticated export."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/audit-core/internal/api/api.go:106-115 (GET and POST /v1/audit, /v1/usage and GET /v1/usage/summary, service-authenticated only)",
+          "apps/Control Plane/audit-core/internal/api/api.go:197-222 (filters org_id, since, until, event, user_id, limit default 100; no cursor)",
+          "apps/Control Plane/audit-core/internal/store/schema.sql:11-33 and :45-66 (audit_events with plane, event, subject, resource_id, outcome, details, event_id, payload_hash; usage_events with tokens and cost_cents) and migrations/003_logical_control_audit_idempotency.sql",
+          "apps/Control Plane/audit-core/internal/api/service_auth.go:205-213 and :268-273 (scope audit:read:self; HMAC delegation with replay nonce binds the org; the signed X-User-Role is carried but the list handler does not consult it)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs:30-112 (session-gated proxy of /v1/audit for the Trust Center; no admin check in the handler)",
+          "apps/Control Plane/user-core/internal/spaces/decision.go (no audit emission seen; signed Space decisions are not recorded in audit-core)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx:145-259 (per-Space Activity panel)"
+        ],
+        "gap": "The audit and usage pipes exist, but there is no admin-scoped audit view or export, no cursor, no Space, agent or decision-id dimension, and decisions are not recorded. The read handler appears to rely on org binding alone, so a normal member could read all org events (needs a trace through audit-core to confirm)."
+      },
+      "approach": "audit-core: add cursor pagination, filters for plane, subject, resource_id, outcome and decision_id, require an admin or auditor role from the signed delegation (self-scope for ordinary members), and per-org export tokens with audited exports. Control user-core: emit space.decision.issued and space.decision.denied events (metadata only). Model Plane: session-core audit_publisher already records tool actions with data category and zdr; add agent-invocation and approval events. cost-core and session-core add space_ref and agent principal to usage metadata. Gateway: /api/v1/admin/audit and an export route. Frontend: an admin Audit view filterable by Space, agent and decision id. Under ZDR carry metadata only.",
+      "effort": "M",
+      "dependencies": [
+        "audit-core",
+        "Control decision ids on every effect",
+        "org admin role catalog (R-t1-02-05)"
+      ],
+      "planeOwner": "Control Plane (audit-core) with Frontend Plane gateway",
+      "risks": "An export is a mass exfiltration path, so reads must be audited and scoped. Event volume. The tool_action consumer in the Trust Center must keep working when the read path is role-gated.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-10-003",
+        "C-t1-10-045"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 1,
+        "INF": 1
+      }
+    },
+    {
+      "id": "R-t1-10-06",
+      "title": "Retention policies for rooms, files and agent sessions, plus shared-Space deletion on the existing saga",
+      "summary": "Add org and per-Space retention policies (keep, N days, ZDR) carried in Control's signed decision and enforced by per-plane sweepers that reuse the per-plane receipts of the Space deletion saga: room projections, Model Plane threads, messages and agent memory, sandbox-manager workspaces and process output, Data Plane documents bound to the Space, and notification feeds. Extend the saga from personal Spaces to shared Spaces with owner approval and write fencing. Legal hold overrides retention.",
+      "whyItMatters": "Retention is a gating enterprise question and a GDPR storage-limitation duty. Verevon has the hardest part already (cross-plane receipts, legal hold) but only for personal Space deletion, and nothing between keep-forever and ZDR.",
+      "referenceBestPractice": {
+        "bestSource": "slack",
+        "others": [
+          "teams (preserves edited and deleted originals in hidden compliance stores)",
+          "buzz (durable deletion engine with approvals and checkpoints)",
+          "qm (retention documented as absent)"
+        ],
+        "prevalence": "Retention: 3 of 5 (slack, teams, buzz doc); durable shared-space deletion: 1 of 5 (buzz). Common.",
+        "mechanism": "Policy objects at org, workspace, channel and DM scope; the most specific wins unless the org locks it, with a member override for private rooms. A scheduled sweeper deletes expired items across stores via deletion receipts; policy changes are audited and may need owner approval. Deletion: request, frozen inventory digest, owner approval, write fence, resumable executor with checkpoints, abortable until destruction starts, final receipt."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/user-core/internal/spaces/authority.go:144-175 and migrations/018_space_effect_policies.up.sql (retention_class, residency, deletion_scope are opaque required strings on the per-org effect policy, bound into every decision; no sweeper consumes them)",
+          "apps/Application Plane/convex-core/convex (a grep for retention finds only a comment in spacePresence.ts:20; no sweeper)",
+          "apps/Control Plane/org-core/migrations/002_add_enterprise_fields.up.sql:30-43 and internal/org/types.go:60-68 (dormant org_compliance table: data_retention_days, audit_log_retention_days, data_residency, require_mfa, ip_allowlist; nothing outside org-core types reads it)",
+          "apps/Control Plane/org-core/internal/http/retention_posture_handler.go:1-50 (serves ZDR intent to Auth Core only, not a retention schedule)",
+          "apps/Application Plane/convex-core/convex/spaces.ts:484-1325, spaceDeletionReceipts.ts, schema.ts:718-820 and apps/Control Plane/user-core/internal/spaces/deletion_authorization.go (personal Space deletion saga, per-plane receipts, legal hold; personal-only by the S6.3 gate)",
+          "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:214-230 (agent_memory has an expires_at column; no sweeper seen)"
+        ],
+        "gap": "No retention configuration or sweeper for any plane, only an opaque label in decisions; the schedule columns in org-core are dormant; shared-room deletion is absent, and the saga migrations are not yet applied in staging (UI baseline)."
+      },
+      "approach": "Control: retention_policies (org default, Space override within an org lock) that set retention_class and a numeric TTL in the signed decision; retire or reuse org_compliance.data_retention_days. Application Plane: a sweeper over room projections that writes per-plane deletion receipts using the existing spaceDeletionOwnerReceipts schema and reconciler; each owner plane (session-core, agent_memory, sandbox-manager, Data Plane, notification feed) accepts a purge-before request. Shared-Space deletion: owner or manager approval decisions, write fence at the Application Plane, receipts from all planes, legal hold outranks everything. Frontend: retention section in Space settings and an admin default.",
+      "effort": "L",
+      "dependencies": [
+        "deletion saga migrations 022, 023, 0026, 0027 applied in staging",
+        "legal hold",
+        "R-t1-10-05 (audit)",
+        "R-t1-02-05 (policy admin UI)"
+      ],
+      "planeOwner": "Control Plane (policy) with Application Plane (sweeper, shared-Space deletion)",
+      "risks": "Cross-plane consistency and honest receipts (partial or unknown must never read as deleted). Search and graph index purge. Copies in notification payloads. Historical Letta memory that cannot be correlated stays partial.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Deletion and export are planned and partly built: apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md S6.1 (deletion, export, retention proof) and S6.3 (personal-first rollout). A time-based retention schedule is not in the plan."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-10-009",
+        "C-t1-10-036"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 10,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-10-07",
+      "title": "Agent computer confinement: real network enforcement and resource caps, audience-bound egress, one SSRF-safe connector",
+      "summary": "Finish the agent-computer boundary. First, make egress real: run processes whose policy allows domains in a network namespace whose only route is the egress proxy (today the executor only checks that a proxy variable is set), add cgroup or rlimit caps, apply the seccomp or Landlock layers that the code comments name, and require a sandbox-manager lease for every Space agent. Second, compute an effective egress allowlist per room from the audience snapshot (intersection of members' lists, union of denies), bind it into the signed decision and enforce it in Quarry and the sandbox proxy with audited allow and deny. Third, share one SSRF-safe connector for unfurls, webhooks and agent fetches.",
+      "whyItMatters": "Grok-Bot-style agent computers are part of the Space vision, and confinement is the real security boundary under every softer control. A room-aware egress rule fits 'Space access never widens an owner-plane ACL': an agent acting for a room must not reach a destination any member's org forbids.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot",
+        "others": [
+          "qm (audience-intersection egress, audited)",
+          "buzz (SSRF-safe connector with IP pinning)"
+        ],
+        "prevalence": "Sandbox confinement: 1 of 5 (grokbot); egress policy: 2 of 5 (grokbot, qm); SSRF-safe fetch: 2 of 5 (buzz, grokbot). Differentiator.",
+        "mechanism": "A launcher takes a declarative policy {type: readonly or workspace read-write, writable roots, network: none or proxy}; on Linux it uses bubblewrap, Landlock and seccomp plus a cgroup v2 attach per process with OOM reset, and file APIs resolve real paths and refuse anything outside the root. For rooms, audienceEgressFloor intersects every member's allowlists and unions denies, binds the result to the turn and logs decisions at the proxy. SSRF: resolve the host, require a global unicast address (reject private, loopback, link-local, CGNAT, mapped and NAT64 forms), connect to the pinned IP with the original SNI, re-validate on redirects."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/executor.rs:18-30 and :113-183 (shell runs under a ReadOnly, no-network default; ReadOnly and WorkspaceWrite refuse to spawn unsandboxed; AllowDomains only requires that HTTPS_PROXY or ALL_PROXY is set)",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:14-20, :210-227 (bubblewrap with unshare pid, uts, ipc and new-session; AllowDomains keeps the network up and relies on an external proxy being honoured; wrap_command is a passthrough on hosts without bwrap, which the executor then refuses for restricted policies)",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:24-45 (host /proc stays visible because the container runs with no capabilities; documented trade-off)",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:6 and policy.rs:15 (Landlock and seccomp named only in comments; a grep found no seccomp, Landlock, cgroup or rlimit code)",
+          "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:20-37 (the inline chat code path has no run-end signal; its lease expires only by TTL and workspace edits are lost)",
+          "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go:262-290 (limits are live-process counts and output size, not CPU or memory)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs and apps/Frontend Plane/verevonv3/apps/gateway/tests/ssrf_forward_not_fetch.rs (exist; not read in depth)"
+        ],
+        "gap": "Filesystem confinement fails closed, which is good. The gaps are: domain allowlisting is advisory for any process that ignores proxy settings, there are no CPU, memory or pid caps and no syscall filter, a lease is not mandatory for Space agents, egress is not computed from the room audience, and there is no single SSRF-safe connector (unverified)."
+      },
+      "approach": "Model Plane execution-core: for AllowDomains use a netns whose only reachable address is the egress proxy (without CAP_SYS_ADMIN this needs a design spike, so test on the production image), add rlimit or cgroup caps per spawn, and apply a seccomp profile; make a sandbox-manager lease mandatory for Space agents and release it on run end. Control Plane user-core: add effective_egress to the effect policy computed from the audience snapshot and bind it into the decision. Quarry (Ingestion Plane) and the sandbox proxy enforce it and write allow and deny events to audit. A shared Rust connector crate in Quarry (resolve, check, pin, re-validate redirects) is reused by the gateway link-preview path and execution-core web tools.",
+      "effort": "L",
+      "dependencies": [
+        "sandbox-manager leases",
+        "Quarry egress proxy",
+        "audience snapshots",
+        "R-t1-10-09 (admin policy fields)",
+        "R-t1-10-05 (audit)"
+      ],
+      "planeOwner": "Model Plane (execution-core, sandbox-manager) with Ingestion Plane (Quarry) and Control Plane (egress floor)",
+      "risks": "Network namespace plus proxy plumbing is hard without extra capabilities. Over-restriction in large rooms needs clear refusal text. Production kernel behaviour differs from dev hosts. Keep Model proposes, Quarry executes.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md (sandbox lease) and the S6.2 matrix (SSRF) in VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md. Audience-intersection egress is not planned."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-10-022",
+        "C-t1-10-023",
+        "C-t1-10-032"
+      ],
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 17,
+        "DOC": 0,
+        "INF": 1
+      }
+    },
+    {
+      "id": "R-t1-10-08",
+      "title": "Agent runtime guardrails for shared rooms: member-text screening, shell command policy, room approvals, secret masking, DLP",
+      "summary": "Extend the existing screening and policy code to what other people put into a room. (a) Add a trust class for non-owner room messages and attachments to execution-core provenance and show shadow-screening agreement stats to admins. (b) Parse shell commands into a syntax tree before capability policy, with an org floor (deny, approve) and typed reason codes. (c) Route elevated-risk browser actions into the room's approval card with decision ids. (d) Mask every injected credential value (raw, URL-encoded, base64 variants) in tool output before it reaches the model or the room. (e) Apply pii_filter and secret masking to agent-authored room messages before append, and optionally to human messages as DLP.",
+      "whyItMatters": "In a multi-human room, colleagues' messages and shared files are untrusted input to someone's personal agent, and agent output posted to a room is a new leak path for credentials and personal data. The building blocks exist, so most of this is wiring them to the Space.",
+      "referenceBestPractice": {
+        "bestSource": "qm",
+        "others": [
+          "grokbot (shell AST plus one permission service with typed block reasons)",
+          "teams (inline DLP with report or override)",
+          "slack"
+        ],
+        "prevalence": "Injection screening with provenance: 1 of 5 (qm); command policy: 2 of 5 (qm, grokbot); secret and PII redaction: 4 of 5 (table-stakes); inline DLP: 1 of 5 (teams).",
+        "mechanism": "Tag every content chunk with provenance (owner, member, external, tool), screen external chunks with deterministic markers plus a classifier under a deadline, quarantine on enforce, and keep verdicts without payloads so a candidate rubric can be replayed. Commands are parsed with tree-sitter-bash into simple commands and redirects, evaluated against an org floor, and return allow, ask or deny with a reason code. Value-based masking precomputes needles for every injected secret (raw, URI-encoded, base64, base64url, ignoring very short ones) and masks stdout, stderr and errors; pattern redaction covers bearer, JWT, sk-, AWS keys, PEM and DSN userinfo."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/provenance.rs:35-60 (TrustClass covers org-internal, external web, browser-scraped and third-party MCP tool results only; no class for room-member text or attachments)",
+          "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:1-20 and :586 (deterministic injection_defense on untrusted content; pii_filter redacts emails and long numbers before provider calls; policy owned by capability-core safety_policies)",
+          "apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs (sampled shadow classifier; per the comparator, not read here)",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:1-60 (tool to capability mapping server-side, unknown tools fail closed, Ed25519 evidence, Allow, Deny, Ask)",
+          "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:195-262 (risk is decided from tool names and provider-action operations; no command parsing; a grep of Cargo.toml found no shell parser crate)",
+          "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1-45 (login, checkout, posting, destructive, cross-domain and persistent-cookie gates; downloads and uploads deliberately not covered)",
+          "apps/Model Plane/rust/services/execution-core/src/scrub.rs:47-148 and apps/Model Plane/go/services/sandbox-manager/internal/redact/redact.go:1-40 (pattern-based scrub before persistence; no value-based masking or encoded variants)"
+        ],
+        "gap": "Screening and redaction cover tool results and persisted output, not other members' room text; shell calls are gated by tool name, not by parsed command; whether browser approvals appear inside Space rooms is unverified; injected credential values are not masked by value in output shown to a room; no DLP on room messages."
+      },
+      "approach": "Model Plane execution-core and model-gateway. (a) Add a RoomMember trust class in provenance.rs and moderation.rs fed by the Application Plane message provenance (the cross-plane envelope is S2.7); expose shadow stats from semantic_screening as an admin view. (b) Add a tree-sitter-bash pre-check feeding capability_policy.rs; capability-core holds the org floor; refusals carry reason codes rendered by the Frontend like ZDR refusals. (c) Send browser_risk approvals to the Space approval card with the decision id. (d) Add value-based masking next to scrub.rs where credentials are injected, keeping scrub.rs patterns. (e) Run pii_filter and masking on agent-authored messages in the Application Plane append path through a Model Plane classification endpoint; human-message DLP later, with a typed refusal like ZDR.",
+      "effort": "L",
+      "dependencies": [
+        "room approval UI",
+        "message provenance plumbing from the Application Plane (see R-t1-05-11)",
+        "capability-core safety_policies",
+        "typed refusal UX (R-t1-10-01)"
+      ],
+      "planeOwner": "Model Plane (execution-core, model-gateway, capability-core)",
+      "risks": "False positives on colleagues' messages; parser evasion (the sandbox stays the real boundary); approval fatigue; very short secrets cause over-masking, so ignore values under about 8 characters; classification under ZDR must be stateless.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md S2.7 (cross-plane provenance and screening envelope) and S3.4 (credential broker that never returns secrets to output)."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-10-024",
+        "C-t1-10-021",
+        "C-t1-10-028",
+        "C-t1-10-030",
+        "C-t1-10-011"
+      ],
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 21,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-10-09",
+      "title": "Admin policy layer: room posting rules, agent and model allowlist, locked switches, autonomy posture, agent quotas",
+      "summary": "Extend Control's per-org space effect policy into the admin control surface: per-Space role rules (who may post, mention everyone, invite agents), an allowlist of agents and models that may join Spaces (a model enables only after a probe), org-enforced capability switches with a lock indicator and reason in the UI, a named posture (strict, standard, open) that caps the run autonomy rung with tighten-only composition and is bound into the signed decision, and separate gateway rate buckets for agent versus human principals.",
+      "whyItMatters": "Companies will want one understandable dial for agent autonomy in shared rooms, control over which personal agents and external models enter them, and protection from an agent flooding a room. Most of the mechanism exists as deny-by-default policy bits and a per-run autonomy ladder; what is missing is who can set them and how they compose.",
+      "referenceBestPractice": {
+        "bestSource": "teams",
+        "others": [
+          "qm (posture tiers and model probe fingerprint)",
+          "slack (locked settings, posting permissions)",
+          "grokbot (admin switches per capability with lock explanations)",
+          "buzz (separate rate tiers for humans and agents)"
+        ],
+        "prevalence": "Admin-locked settings: 3 of 5 (slack, teams, grokbot); agent and model allowlist: 2 of 5 (teams, qm); agent and human rate limits: 2 of 5 (buzz, qm); posture tiers and posting rules: 1 of 5 each (qm, slack DOC).",
+        "mechanism": "Settings resolve as policy over user over default per key with a source tag, and the UI receives the list of enforced keys to render a lock with an explanation. A posture enum with rank gives effective = strictest along the scope chain and maps to approval requirements, private-network deny and screening mode. A model is enabled only after a successful probe stored as a fingerprint of definition and credential. Per-principal-kind token buckets are keyed by org, principal and action."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/user-core/migrations/018_space_effect_policies.up.sql through 028_space_process_registry_effect_policy.up.sql and internal/spaces/authority.go:144-175 (one row per org of deny-by-default entitlements: thread create, retrieval, import, agent action, schedule fire, thread read, sandbox, process registry)",
+          "Per category 02 (R-t1-02-05): the effect-policy write path is service-only and the gateway and UI have no admin route",
+          "apps/Model Plane/proto/model_plane/v1/runs.proto:22-40 and apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:100-141 (per-run autonomy rung READ_ONLY, WORKSPACE_WRITE, DANGER_FULL_ACCESS, enforced per call)",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9008-9030 (the granted rung comes only from a human-approved plan grant; absent a grant it is UNSPECIFIED, meaning no graded constraint, not from org policy)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:1-20 and :269 (token bucket keyed by org, user or client IP; no human versus agent principal kind; falls back to a per-process bucket when Dragonfly errors)"
+        ],
+        "gap": "No per-Space role rules, no agent or model catalogue, no org-enforced switches with lock UI, no org or Space posture that sets or caps the autonomy rung, and the limiter cannot separate an agent flood from human traffic (an agent shares its org's bucket)."
+      },
+      "approach": "Control user-core: extend the effect policy with space_role_rules (post, mention_all, invite_agent per role), agent_allowlist (org catalogue with allowed, blocked, pending, referencing capability-core registry ids), enforced_switches {key, value, locked, reason} and autonomy_posture with a tighten-only chain org to Space to user; carry the rule revision in decision claims. model-gateway maps posture to an AutonomyRung ceiling used as the minimum with any plan grant; execution-core's check_autonomy_rung already enforces it. capability-core records the model probe fingerprint. Gateway rate_limit.rs adds principal kind and a per-Space bucket. Frontend: one admin Space-policy section (shared with R-t1-02-05) with lock chips and reasons.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-02-05 (effect-policy admin UI)",
+        "R-t1-02-03 (agent access list)",
+        "capability-core registry",
+        "R-t1-10-08 (room approval UI)"
+      ],
+      "planeOwner": "Control Plane (user-core effect policy) with Model Plane and Frontend Plane",
+      "risks": "Friction for personal agents, so defaults must be sensible. Strict posture can cause approval fatigue, so batch approvals. Moving from one row per org to per-Space rows needs a migration. The limiter fails open by design, so quotas need a documented fail mode.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-10-008",
+        "C-t1-10-017",
+        "C-t1-10-018",
+        "C-t1-10-019",
+        "C-t1-10-033"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 14,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-10-10",
+      "title": "Room content hardening: read authorization for attachments and transcripts, stricter CSP, anti-spoofing, link and download safety",
+      "summary": "Four small web changes for a UI that renders other people's and agents' content. Check room membership and audience on attachment and transcript reads and render an explicit 'restricted' state instead of swallowing the 403. Tighten the CSP (Trusted Types with a sanitiser policy, narrower connect-src and img-src, report-only candidate policy with a report endpoint, subresource integrity). Keep agent-generated HTML in the sandboxed no-network iframe and approval UI in the main origin. Mark agent-sourced links and files and serve attachments with safe headers.",
+      "whyItMatters": "An XSS or exfiltration channel in a room acts with a user's agent authority. Several cheap controls already exist; these changes close the remaining broad allowances (img-src and connect-src allow any https host) and the silent 403.",
+      "referenceBestPractice": {
+        "bestSource": "teams",
+        "others": [
+          "buzz (kind-level read policy; attachment ACL gap to avoid)",
+          "slack (link, protocol and download safety)"
+        ],
+        "prevalence": "Strict CSP with Trusted Types: 2 of 5 (teams, slack); fine-grained read authz: 1 of 5 (buzz); trusted sensitive UI: 1 of 5 (teams); link and download safety: 1 of 5 (slack).",
+        "mechanism": "CSP: default-src 'self', nonce-based script-src, require-trusted-types-for 'script' with named policies, object-src 'none', base-uri 'none', plus a Content-Security-Policy-Report-Only with a stricter candidate and SRI integrity for every build chunk. Reads: a kind-level policy consulted on every read path (query, push, search) returns not-found for hidden kinds, and attachment reads check the parent message's room ACL. Links: scheme allowlist, warnings for unusual protocols, safe download headers."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/nginx.conf:70 (enforced CSP: default-src 'self', script-src 'self' plus Turnstile and Nexi, frame-ancestors 'none', object-src 'none', base-uri and form-action 'self'; but style-src 'unsafe-inline', connect-src 'self' https:, img-src allows any https host; no Trusted Types, nonce, report-only policy or SRI)",
+          "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts:1-40 (agent HTML preview iframe with default-src 'none', connect-src 'none', img-src data and blob only, form-action 'none')",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2680 and src/features/spaces/components/SpaceRoomTimeline.tsx:201 (deny-by-default shared-read gate; the timeline swallows the 403 and shows a preview, per the UI baseline)",
+          "Per-room attachment ACL and Content-Disposition and nosniff headers on room downloads: not found or verified"
+        ],
+        "gap": "The server gate is right but the UI hides it; attachment authorization per room is not recorded; the CSP lets agent- or member-authored markdown trigger requests to arbitrary https hosts (images, fetch), which is a known exfiltration channel (inference); no Trusted Types or SRI."
+      },
+      "approach": "Frontend Plane gateway: confirm attachment fetches check room membership and audience and add not-found semantics for hidden kinds; Frontend: render a restricted state for 403. nginx.conf: add require-trusted-types-for with a DOMPurify policy, replace connect-src https: with the own API and the telemetry host, restrict img-src to own origin plus a media proxy for chat images, add a Content-Security-Policy-Report-Only candidate and a gateway report endpoint, add an SRI plugin to the Vite build. Keep approval dialogs in the main origin and agent HTML only in sandbox-html iframes. Mark agent-sourced links, allow only https and mailto without a warning, and serve attachments with Content-Disposition attachment and nosniff.",
+      "effort": "M",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane (nginx, gateway, SPA)",
+      "risks": "Third-party scripts (Turnstile, Nexi checkout) can break under Trusted Types. Remote chat-media images need a proxy. Over-tight CSP can break existing embeds, so roll out through report-only first.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-10-038",
+        "C-t1-10-041",
+        "C-t1-10-040",
+        "C-t1-10-042"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 15,
+        "DOC": 1,
+        "INF": 1
+      }
+    },
+    {
+      "id": "R-t1-10-11",
+      "title": "Compliance export, custodian legal hold, information barriers and audited admin break-glass",
+      "summary": "Create a compliance principal in Control whose org-wide read is granted only by signed, audited decisions: export of room messages, agent turns with provenance and attachments by reference (by custodian, Space, time or keyword); custodian-level legal hold that pins items from retention and keeps originals on edit or delete; later, pairwise information barriers applied at membership and delivery. Add admin break-glass for agent computers and transcripts (hibernate, snapshot, kill, read with a reason), each audited and notified to the affected user, and never usable to impersonate an agent.",
+      "whyItMatters": "Regulated buyers (finance, public sector, Nordic municipalities) cannot adopt a room product that holds agent output without hold and export. Operating personal agents with their own computers also needs a way to stop or inspect a stuck or abusive agent without widening anyone's ACL.",
+      "referenceBestPractice": {
+        "bestSource": "teams",
+        "others": [
+          "slack (Discovery API: read-only export apps versus read-write DLP apps)",
+          "grokbot (41 team-scoped admin RPCs including break-glass delete)",
+          "qm (audit on read, impersonation banner)"
+        ],
+        "prevalence": "eDiscovery, hold and barriers: 2 of 5 (teams, slack; DOC); admin break-glass: 2 of 5 (grokbot, qm SRC). Differentiator.",
+        "mechanism": "A compliance principal with org-wide read scope queries an export API by custodian, space, time and keyword; a hold pins items so retention sweepers skip them and edits or deletes keep originals in a hidden store; information barriers are pairwise segment-deny rules evaluated at membership add and message delivery. Break-glass uses a separate admin RPC namespace authorised by the admin role, every content read writes an audit row, destructive actions require a reason, and impersonation shows a persistent banner and is excluded from the agent tool surface."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/user-core/internal/spaces/deletion_authorization.go and migrations 022 and 023 (legal holds and operator audit exist, as a blocker inside the personal Space deletion saga)",
+          "apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts (per-plane receipts)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/privacy.rs:39-40 (per-user privacy export and erase)",
+          "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go:84-340 (lease, snapshot, workspace and process-registry RPCs only; no admin hibernate, kill or transcript-read RPC)",
+          "No compliance search, room export, custodian hold, communication-compliance scan or information barrier code found in the audited paths"
+        ],
+        "gap": "Legal hold exists only inside the personal Space deletion saga. There is no compliance principal, export, custodian hold, barrier or admin break-glass for agent computers."
+      },
+      "approach": "Control Plane: a compliance principal and a signed compliance decision (reason, scope, expiry) reusing decision.go, and custodian holds generalised from the deletion-saga hold. Application Plane: a server-to-server export of room projections gated by that decision. Data Plane: search over rooms. Model Plane sandbox-manager: admin RPCs for hibernate, snapshot and kill, honoured only with a signed break-glass decision; admin reads of Space content go through the shared-read gate with an audited override and an in-room notice. Information barriers later as Control membership rules. Do not impersonate agent authority.",
+      "effort": "XL",
+      "dependencies": [
+        "R-t1-10-06 (retention and hold)",
+        "R-t1-10-05 (audit export)",
+        "Data Plane search over rooms",
+        "sandbox-manager lifecycle API"
+      ],
+      "planeOwner": "Control Plane with Application Plane, Data Plane and Model Plane (sandbox-manager)",
+      "risks": "ZDR rooms have nothing to export, which must be stated. Export is a mass exfiltration path and must be heavily audited. EU consent and works-council rules for reading people's agent transcripts; the affected user must be notified.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-10-010",
+        "C-t1-10-005"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 2,
+        "INF": 2
+      }
+    },
+    {
+      "id": "R-t1-10-12",
+      "title": "Assurance long tail: hash-chained audit, formal decision model, supply-chain gates, EU-posture pinning, credential expiry states",
+      "summary": "Five independent assurance items for regulated buyers, taken after the audit export exists. (1) Chain audit rows (entry_hash over seq, actor, action, metadata, prev_hash) with a signed daily head checkpoint and a verify endpoint. (2) Model Space decision issuance in TLA+ or PlusCal, checking 'Space access never widens an owner ACL' and 'no effect without a fresh decision'. (3) Add supply-chain gates: dependency cooldown, cargo-deny and govulncheck across all Rust and Go services, signed images. (4) State an EU-only posture and pin model-provider region per org. (5) Credential lifecycle states with expiry warnings in agent settings.",
+      "whyItMatters": "None of these block the Space, but they answer the questions enterprise security questionnaires ask and make Verevon's signed-authority design verifiable. Each facet is small and independent.",
+      "referenceBestPractice": {
+        "bestSource": "buzz",
+        "others": [
+          "teams (residency and sovereign clouds)",
+          "qm (supply-chain and release integrity)",
+          "grokbot (credential lifecycle)"
+        ],
+        "prevalence": "Hash chain and formal specs: 1 of 5 each (buzz); supply chain: 2 of 5 (buzz, qm); residency: 2 of 5 (slack, teams); credential lifecycle: 1 of 5 (grokbot).",
+        "mechanism": "Audit: entry hash over the tenant id, sequence, time, event, actor, action, canonical metadata and previous hash, with an external signed anchor. Formal: spec the multi-party protocol, mutate the spec to prove the invariants are not vacuous, replay service traces against the model. Supply chain: 7-day package cooldown, prod dependency audit, signed images with digest pins. Residency: per-org home region in Control that routes data-plane calls. Credentials: state, expires_at and a warn or enforce mode with owner notice."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/audit-core/internal/store/schema.sql:11-33 (payload_hash per event, but no prev_hash or entry_hash chain; a grep found none)",
+          "A search to depth 4 of apps/ found no TLA+, Alloy or Tamarin files",
+          ".github/workflows/verevonv3-security.yml:26-51 (pnpm audit at high), quarry-v2-ci.yml:231-240 (cargo audit and govulncheck), secret-scan.yml and dependabot.yml; no release-age policy or image signing found by grep of workflows",
+          "apps/Control Plane/user-core/internal/spaces/authority.go:149-153 (a residency string is bound into every decision) and apps/Control Plane/org-core/internal/org/types.go:60-68 (dormant data_residency column); no routing or provider pinning seen",
+          "apps/Ingestion Plane/integration-corev2 credential model: expiry states not checked"
+        ],
+        "gap": "Some supply-chain checks exist for the frontend and Quarry only; the rest is absent or unchecked. Residency is a label with no enforcement."
+      },
+      "approach": "audit-core: add prev_hash and entry_hash with per-org serialised append and a signed checkpoint using existing key infrastructure. Repo CI: min-release-age, cargo-deny and govulncheck for every service, image signing in the deploy pipeline. Model Plane inference routing: per-org provider-region pinning plus a documented EU-only deployment statement (full multi-region stacks are out of scope). integration-corev2 and Frontend: credential state, expiry and warnings, aligned with the S3.4 credential broker. Formal model: write the decision protocol spec alongside the Space authority ADR.",
+      "effort": "L",
+      "dependencies": [
+        "R-t1-10-05 (audit export)",
+        "stable Space authority ADR",
+        "CI pipeline",
+        "Model provider regional endpoints"
+      ],
+      "planeOwner": "Control Plane (audit-core) with Support Plane (CI), Model Plane (routing) and Ingestion Plane (credentials)",
+      "risks": "Append serialisation limits audit throughput; checkpoint key management; formal models drift from code unless trace-checked; CI friction; sub-processor residency (Novu, Convex) limits what 'EU-only' can claim.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "low",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Credential expiry and revocation are in apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md S3.4; the other facets are not planned."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-10-004",
+        "C-t1-10-002",
+        "C-t1-10-044",
+        "C-t1-10-013",
+        "C-t1-10-031"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 18,
+        "DOC": 2,
+        "INF": 0
+      }
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t1-10-035",
+      "reason": "Low marginal value now: the BFF pattern already keeps service keys server-side and audit-core reads use HMAC delegation with a replay cache; DPoP token binding only matters for future native or API clients, so revisit with R-t1-10-04 when such clients exist."
+    }
+  ],
+  "strengthsToKeep": [
+    "Signed authority: Ed25519-signed, short-lived Control decisions bound to subject, org, Space, audience revision, privacy policy, payload digest and idempotency key, with deny-by-default effect policies (apps/Control Plane/user-core/internal/spaces/decision.go:4-130, authority.go:144-175, migrations 018-028). Stronger than GrokBot's grant fields and QM's walls.",
+    "Server-side tenant binding: org comes from the verified session, membership is re-checked per call and the gateway strips forged authority fields (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:34-115 and :4704-4746). At par with buzz and ahead of QM, which serves one org per deployment.",
+    "Rules on what AI may see: immutable audience snapshots and 'Space access never widens an owner-plane ACL' (apps/Application Plane/convex-core/convex/spaceAudience.ts:32-76, schema.ts:853-903) are more verifiable than Slack's or Teams' policy statements.",
+    "Space deletion saga with per-plane receipts, conservative aggregate status (never success on timeout) and legal hold as a first-class blocker (apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts, apps/Control Plane/user-core/internal/spaces/deletion_authorization.go); richer than buzz's single-relay deletion.",
+    "Fail-closed execution: restricted sandbox policies refuse to spawn unsandboxed, and AllowDomains refuses to run without a proxy (apps/Model Plane/rust/services/execution-core/src/executor.rs:113-183); unknown tools fail closed and capability evidence is Ed25519-verified (capability_policy.rs:1-60).",
+    "Per-run autonomy ladder with human-gated escalation and an unspecified rung that is never a grant (apps/Model Plane/proto/model_plane/v1/runs.proto:22-40, permission/mod.rs:100-141) is a sound base for QM-style postures.",
+    "Browser-action risk gates (login, checkout, posting, destructive, cross-domain, persistent cookies) honour 'Model proposes, Quarry executes' (apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1-45), ahead of QM's browser runner which bypasses approvals.",
+    "Agent-generated HTML preview runs in a sandboxed iframe with a no-network CSP (apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts:1-40), a control Teams and Slack do not need but agent rooms do.",
+    "Audit read delegation is HMAC-signed, org-bound and replay-protected, and audit events are idempotent with a payload hash (apps/Control Plane/audit-core/internal/api/service_auth.go:225-350, migrations/003_logical_control_audit_idempotency.sql).",
+    "ZDR is a first-class fail-closed flag with typed refusals and content-free notification handling (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:80-116, apps/Application Plane/notification-core/internal/notification/delivery_worker.go:91-95), more general than GrokBot's single-feature block."
+  ]
+}

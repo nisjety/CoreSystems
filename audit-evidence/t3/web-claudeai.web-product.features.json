@@ -1,0 +1,2152 @@
+[
+ {
+  "id": "web-claudeai-web-product-001",
+  "category": "Chat experience",
+  "name": "Unified chat + agent (\"one Claude\") conversation",
+  "what": "Since 2026-09-16 the user no longer picks a Chat vs Cowork mode: any conversation can answer quickly or run a long agentic task (research, spreadsheets, decks) and return editable files.",
+  "how": "Claude classifies the request and, when agentic work is needed, attaches an Anthropic-managed per-conversation VM/sandbox; quick answers stay in the chat path. Rollout gradual for Pro/Max; Enterprise via \"Chat and Cowork unified (beta)\" toggle.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude",
+   "https://support.claude.com/en/articles/12138966-release-notes",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "This is the exact product shape Verevon chat/agent pages target: one composer that escalates to a sandboxed run only when needed; Model Plane sessions/runs should be the escalation primitive.",
+  "notes": "Dated 2026-09-16 in release notes. Mode selection removed; permission setting (Auto/Manual) lives in the message box."
+ },
+ {
+  "id": "web-claudeai-web-product-002",
+  "category": "Chat experience",
+  "name": "Streaming responses with expandable thinking summary",
+  "what": "While generating, a \"Thinking\" indicator with a timer is shown; an expandable \"Thinking\" section above the answer shows a summary of the reasoning. Thinking can be truncated with a note when safety systems flag it.",
+  "how": "Thinking summaries (not raw CoT) streamed ahead of the visible answer; summaries are the UI contract, raw reasoning is withheld.",
+  "evidence": [
+   "https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon should stream a reasoning-summary channel separate from the answer channel, with a timer and collapsible panel.",
+  "notes": "Summarized rather than verbatim thinking is a deliberate anti-distillation choice (see model switching record)."
+ },
+ {
+  "id": "web-claudeai-web-product-003",
+  "category": "Chat experience",
+  "name": "Artifacts side panel (typed outputs: Docs, Slides, Design, Dashboards, Motion)",
+  "what": "Substantial outputs open beside the conversation as artifacts; since 2026-09-16 artifacts are typed templates (Docs, Slides, Design, Dashboards beta, Motion beta) plus legacy code/HTML artifacts that still render but cannot be newly created.",
+  "how": "Artifacts require \"Cloud code execution and file creation\" capability; created via chat, the \"Output\" picker in the composer, or templates in the Artifacts tab; stored in a sidebar Artifacts tab; exportable (DOCX/PDF/MD/Google Docs, PPTX/Google Slides, ZIP/HTML, MP4).",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon should treat artifacts as first-class typed documents with their own storage, templates and export paths rather than ad-hoc code blocks.",
+  "notes": "Legacy artifacts (pre 2026-09-16) remain publishable/embeddable; new ones are typed."
+ },
+ {
+  "id": "web-claudeai-web-product-004",
+  "category": "Chat experience",
+  "name": "Inline \"Edit with Claude\" on highlighted text",
+  "what": "In Docs/Markdown drafts the user highlights a passage and asks Claude to change just that section; across multiple Markdown files edit requests can be queued and sent as one batch.",
+  "how": "Selection-anchored edit requests; batching of queued edits into one model turn.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Selection-scoped edits are a cheap, high-value UX for Verevon document artifacts; batching reduces model calls.",
+  "notes": "Release note 2026-06-12 \"Edit Claude's drafts in place\"."
+ },
+ {
+  "id": "web-claudeai-web-product-005",
+  "category": "Chat experience",
+  "name": "Edit-message branching (preserves artifacts per branch)",
+  "what": "Editing an earlier message creates a separate branch of the chat with its own artifacts; previous work is preserved. Retry on a reply forks an alternative answer. The UI shows branches via small arrows, not a tree.",
+  "how": "Conversation stored as a tree; active path is what the model sees. No official branch-map UI; third-party extensions draw the tree.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://www.nodea.ai/blog/branching-ai-chat-guide"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon can differentiate with a visible branch tree and per-branch artifact lineage.",
+  "notes": "Branching is NOT yet available in the new unified experience (listed limitation in the one-Claude article)."
+ },
+ {
+  "id": "web-claudeai-web-product-006",
+  "category": "Chat experience",
+  "name": "Automatic context compaction for long conversations",
+  "what": "When a chat nears the context limit Claude summarizes earlier messages so the conversation can continue; the full history is preserved and can still be referenced; user may see Claude \"organizing its thoughts\".",
+  "how": "Requires code execution enabled; server-side summarization of older turns while keeping raw history retrievable.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Model Plane needs the same compaction primitive with retained raw history for search and audit.",
+  "notes": "Announced 2025-11-24."
+ },
+ {
+  "id": "web-claudeai-web-product-007",
+  "category": "Chat experience",
+  "name": "Context windows up to 1M tokens on paid plans",
+  "what": "Length limits depend on model: newest models up to 1M tokens on paid plans, others 500K or 200K; part of the window is reserved for the response.",
+  "how": "Per-model context budgets surfaced to the user; 1M beta first shipped with Sonnet 4.6 (2026-02-17).",
+  "evidence": [
+   "https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work",
+   "https://claude.com/pricing",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon model picker should expose per-model context budgets and reserve output space.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-008",
+  "category": "Chat experience",
+  "name": "Projects (workspaces with knowledge, instructions, own memory)",
+  "what": "Projects are self-contained workspaces with their own chat history, knowledge files, instructions and memory space; free users get 5, paid unlimited.",
+  "how": "Project knowledge is cached (cheaper on reuse), RAG auto-enables when knowledge exceeds context (10x capacity), project-scoped memory and summary.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9517075-what-are-projects",
+   "https://support.claude.com/en/articles/11473015-retrieval-augmented-generation-rag-for-projects",
+   "https://support.claude.com/en/articles/9797557-usage-limit-best-practices"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Maps to Verevon Spaces: scoped instructions + knowledge + memory, with auto-RAG fallback from Data Plane.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-009",
+  "category": "Chat experience",
+  "name": "Project RAG auto-switch with visual indicator",
+  "what": "When project knowledge approaches the context limit, Claude automatically switches to a project-knowledge search tool; a visual indicator shows a project is RAG-enabled; it switches back to in-context when knowledge shrinks.",
+  "how": "Hybrid mode: in-context when it fits, retrieval tool otherwise; no user control.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11473015-retrieval-augmented-generation-rag-for-projects"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Good pattern for Verevon: prefer full-context, fall back to retrieval transparently with a badge.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-010",
+  "category": "Chat experience",
+  "name": "New Projects beta: one conversation fanning out to parallel cloud threads",
+  "what": "A redesigned Projects (beta, Claude Code first, 2026-09-17) treats a project as one conversation where Claude splits work into parallel cloud threads, each a separate cloud session/branch/repo copy; user can open any thread to intervene.",
+  "how": "Coordinator session spawns child cloud sessions; context passed between them; overlapping edits resolved like merge conflicts; usage drawn faster.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9517075-what-are-projects",
+   "https://thenewstack.io/claude-code-parallel-projects/"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Directly relevant to Model Plane runs: a parent run that spawns parallel child runs with their own sandboxes and a merge step.",
+  "notes": "Official article confirms existence; thread mechanics from press coverage."
+ },
+ {
+  "id": "web-claudeai-web-product-011",
+  "category": "Chat experience",
+  "name": "Share chat with specific people (view-only snapshot)",
+  "what": "Invite people by email to a private snapshot of a chat; snapshot includes artifacts, excludes files (unless in-org) and raw connector/MCP tool data; \"Update shared chat\" refreshes the snapshot; invites expire in 30 days.",
+  "how": "Email-bound links; Settings > Privacy > Shared chats to review/revoke; Team/Enterprise restricted to org domain; audit logged.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16762496-share-a-chat-with-specific-people"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon sharing must snapshot and redact tool payloads; a \"Space access never widens ACL\" rule aligns with excluding files outside org.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-012",
+  "category": "Chat experience",
+  "name": "Public links for shared chats (consumer only)",
+  "what": "Free/Pro/Max can create anyone-with-the-link snapshots viewable without an account; noindex; view-only; can be turned off instantly.",
+  "how": "Long random URLs + noindex; Team/Enterprise cannot create public links.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16762437-public-links-for-shared-chats"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Low priority for Verevon (B2B) but org-internal share links matter.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-013",
+  "category": "Chat experience",
+  "name": "Conversation list \"Recents\" merging chats and tasks; rename/delete/bulk delete",
+  "what": "Quick questions and long tasks appear in one Recents list; conversations can be renamed, deleted, bulk-deleted via \"Chats and tasks\"; deletion purges backend within 30 days.",
+  "how": "Sidebar list + full history page with multi-select.",
+  "evidence": [
+   "https://support.claude.com/en/articles/8230524-delete-or-rename-a-conversation",
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Baseline; Verevon should add folders/pins which claude.ai lacks.",
+  "notes": "No folders, pins or archive documented."
+ },
+ {
+  "id": "web-claudeai-web-product-014",
+  "category": "Chat experience",
+  "name": "Search past conversations (as a tool call)",
+  "what": "Claude can search the user's earlier conversations and reference them; searches appear as visible tool calls; scoped to all non-project chats or to the current project; paid plans; toggle \"Search and reference chats\".",
+  "how": "Chat-history search exposed as a model tool with scope rules; incognito chats excluded.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon should expose session search as a model tool with Space scoping and visible tool-call cards.",
+  "notes": "Launched 2025-08-11 for Max/Team/Enterprise."
+ },
+ {
+  "id": "web-claudeai-web-product-015",
+  "category": "Chat experience",
+  "name": "Interactive input widgets (multiple choice / multi-select / ranking)",
+  "what": "When Claude needs clarification it can present clickable options at the bottom of the chat; typing a reply is always possible.",
+  "how": "Model-emitted elicitation widgets rendered by the client; no third-party service.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13641943-visual-and-interactive-content"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Structured elicitation reduces round-trips; Verevon should support a typed \"ask user\" tool with option rendering.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-016",
+  "category": "Chat experience",
+  "name": "Import from GitHub into chats/projects",
+  "what": "Users pick files/folders from GitHub repos (via Claude GitHub App) into a chat or project knowledge; projects can Sync and reconfigure file selection; only file contents on a branch are synced.",
+  "how": "GitHub App OAuth; per-branch file snapshot; no PR/commit metadata.",
+  "evidence": [
+   "https://support.claude.com/en/articles/10167454-using-the-github-integration"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon ingestion (integration-corev2) equivalent; note \"Add from GitHub\" not yet supported in unified experience.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-017",
+  "category": "Chat experience",
+  "name": "Markdown/code/LaTeX rendering with visual widgets (weather, recipes, sports)",
+  "what": "Responses render rich formatting and can include fixed-source visual widgets: weather (Google Maps data), recipe cards (Bing images), sports text; web/desktop only.",
+  "how": "Server-driven widget types tied to data sources; mobile falls back to text.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13641943-visual-and-interactive-content"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Shows a pattern of first-party typed widgets; Verevon could do the same for domain widgets.",
+  "notes": "Math article confirms equation support but not LaTeX specifics (low detail)."
+ },
+ {
+  "id": "web-claudeai-web-product-018",
+  "category": "Multimodal & creation",
+  "name": "File upload and vision",
+  "what": "Up to 20 files/chat, 500MB each; images JPEG/PNG/GIF/WebP up to 8000x8000; PDFs up to 1000 pages (visual analysis up to 100 pages, text-only 101-1000); documents PDF/DOCX/CSV/TXT/HTML/ODT/RTF/EPUB/JSON/XLSX (XLSX needs code execution).",
+  "how": "Text extraction for non-PDF; multimodal PDF parsing; project files 30MB each; clipboard paste and drag-drop.",
+  "evidence": [
+   "https://support.claude.com/en/articles/8241126-upload-files-to-claude"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon upload limits and PDF tiering can mirror these numbers.",
+  "notes": "Audio/video upload not documented."
+ },
+ {
+  "id": "web-claudeai-web-product-019",
+  "category": "Multimodal & creation",
+  "name": "No native image generation; HTML/SVG visuals instead",
+  "what": "Claude does not generate photos or illustrations; it builds diagrams, charts and interactive visuals as HTML/SVG that can be adjusted conversationally.",
+  "how": "Custom visuals beta: Claude writes HTML; download as SVG/HTML/image or save as artifact.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9002504-can-claude-produce-images",
+   "https://support.claude.com/en/articles/13979539-custom-visuals-in-chat-and-cowork"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Gap in claude.ai that Verevon can fill via multi-provider image models (Gemini/OpenAI) while keeping code-visuals.",
+  "notes": "Quality 2 relative to ChatGPT/Gemini image generation."
+ },
+ {
+  "id": "web-claudeai-web-product-020",
+  "category": "Multimodal & creation",
+  "name": "Custom interactive visuals inline in chat",
+  "what": "Claude decides when a chart/diagram helps and renders it inline; users click buttons, move sliders, expand full screen; clicking inside a visual sends a follow-up prompt; CSV upload -> interactive chart.",
+  "how": "HTML widgets rendered in-conversation; ephemeral unless saved as artifact; Opus recommended for quality.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13979539-custom-visuals-in-chat-and-cowork",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon can adopt \"widget emits prompt\" interaction (like sendPrompt) for charts.",
+  "notes": "Launched 2026-03-12; mobile 2026-03-25."
+ },
+ {
+  "id": "web-claudeai-web-product-021",
+  "category": "Multimodal & creation",
+  "name": "Cloud code execution and file creation (xlsx/pptx/docx/pdf)",
+  "what": "Claude writes and runs Python/JS in a private sandboxed container to create Excel (working formulas), PowerPoint, Word, PDF, PNG charts, scripts; files downloadable or saved to Google Drive; 30MB file limit; large PDFs processed in sandbox without entering context.",
+  "how": "Per-user isolated container with time limits; network egress policy (off / package managers / allowlist / all); on by default for consumer plans; Team default package-managers-only; Enterprise off.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Model Plane sandboxes need the same egress tiers and an \"process big files out-of-context\" path.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-022",
+  "category": "Multimodal & creation",
+  "name": "Claude Docs (collaborative living documents)",
+  "what": "Real-time multi-user editing with Claude; comments with @mentions; @Claude in a comment makes the edit and replies in-thread; tabs; version history; export DOCX/PDF/MD/Google Docs; convert to Slides.",
+  "how": "CRDT/realtime doc model (inferred); edits attributed per person or Claude; Claude acts with the requester's permissions; viewer/editor roles only; no external sharing on Team/Enterprise.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16923645-get-started-with-claude-docs"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Application Plane realtime projections + Model Plane could offer the same \"@AI in a comment\" pattern.",
+  "notes": "Known gaps: no comment-only role, charts don't auto-update, Compliance API doesn't log edits."
+ },
+ {
+  "id": "web-claudeai-web-product-023",
+  "category": "Multimodal & creation",
+  "name": "Claude Slides (presentations)",
+  "what": "Presentations built from notes/reports/chat with direct slide editing; export PPTX/PDF or open in Google Slides; keyboard and screen-reader support.",
+  "how": "Typed artifact template; F6 editor-area navigation; comment mode with \"Send to Claude\".",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/17457950-use-artifacts-with-a-keyboard-or-screen-reader"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon deck generation should include native editing, not just file export.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-024",
+  "category": "Multimodal & creation",
+  "name": "Claude Design (canvas, artboards, design systems, handoff)",
+  "what": "Creates designs, prototypes, one-pagers on a canvas of artboards/layers; refine via chat, inline comments, or direct drag/resize; design systems imported from codebases/files/Figma; export ZIP/PDF/PPTX/HTML, send to Canva/Miro/Vercel/Netlify; /design and /design-sync in Claude Code.",
+  "how": "Design system = tokens + components artifact reused by any chat; Claude validates output against the design system before showing; began as Labs product 2026-04-17 (Opus 4.7), merged into artifacts 2026-09-16; standalone closes 2026-12-14.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14604416-get-started-with-claude-design",
+   "https://support.claude.com/en/articles/14604397-set-up-your-design-system-in-claude-design",
+   "https://www.anthropic.com/news/claude-design-anthropic-labs"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon could expose a design-system artifact that constrains generated UI; the self-check-against-system loop is worth copying.",
+  "notes": "No version history yet; multi-user editing basic."
+ },
+ {
+  "id": "web-claudeai-web-product-025",
+  "category": "Multimodal & creation",
+  "name": "Claude Dashboards (beta): NL -> SQL charts with visible queries",
+  "what": "Users ask for a dashboard; Claude writes SQL per chart against Redshift/BigQuery/ClickHouse/Databricks/Snowflake or connected apps like Salesforce; each chart shows its query and last refresh time.",
+  "how": "Dashboard artifact bound to data connectors; per-chart query transparency; Pro+; Enterprise off by default.",
+  "evidence": [
+   "https://support.claude.com/en/articles/17454700-get-started-with-claude-dashboards",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Query-visible charts are a transparency pattern Verevon (Data Plane) should adopt.",
+  "notes": "Refresh cadence undocumented."
+ },
+ {
+  "id": "web-claudeai-web-product-026",
+  "category": "Multimodal & creation",
+  "name": "Claude Motion (beta): code-generated animations exported to MP4",
+  "what": "Animated explainers/charts/walkthroughs built as code (not a video model), editable by instruction or in an editor, exported as MP4; Team/Enterprise.",
+  "how": "Programmatic animation (HTML/JS, inferred) rendered to MP4 server-side.",
+  "evidence": [
+   "https://support.claude.com/en/articles/17454997"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Niche; low priority for Verevon.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-027",
+  "category": "Multimodal & creation",
+  "name": "Voice mode (hands-free and push-to-talk) with tools",
+  "what": "Talk to Claude on mobile/desktop/web; hands-free or push-to-talk; preset voices and pace; same text models (not Fable); can use web search and connected tools (Gmail, Calendar, Docs, Slack); transcripts saved; non-English beta; dictation-only in Cowork/Code.",
+  "how": "Speech fills chat input and reply is spoken; context carries across text/voice; preset voices prevent cloning.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11101966-use-voice-mode",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon voice should reuse the text session (shared context) and allow tool use mid-voice.",
+  "notes": "Not a realtime speech-to-speech model like OpenAI; STT->LLM->TTS (INF from \"speech fills the chat input\")."
+ },
+ {
+  "id": "web-claudeai-web-product-028",
+  "category": "Multimodal & creation",
+  "name": "Data analysis from CSV/TSV with ML and reports",
+  "what": "Claude analyzes uploaded data files, writes Python, builds visualizations and even ML models, and produces summary reports.",
+  "how": "Sandbox Python (pandas/numpy/matplotlib via document skills).",
+  "evidence": [
+   "https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude",
+   "https://support.claude.com/en/articles/12512198-how-to-create-custom-skills"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Standard; Verevon needs a Python sandbox with these libs preinstalled.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-029",
+  "category": "Multimodal & creation",
+  "name": "Web search image results",
+  "what": "Claude can show images from web search results (Bing) with source links, no extra setting.",
+  "how": "Bing image search integrated into web search tool results.",
+  "evidence": [
+   "https://support.claude.com/en/articles/10684626-enable-and-use-web-search"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Minor.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-030",
+  "category": "Research & web",
+  "name": "Web search with citations and web fetch",
+  "what": "Grounded answers with direct citations, source links and quotes; Claude fetches full content of user-provided URLs; location inferred from IP; in the unified experience there is no toggle (Claude searches when useful); admins can disable org-wide.",
+  "how": "Search + fetch tools; citations attached to response segments; web fetch/search NOT governed by sandbox egress rules.",
+  "evidence": [
+   "https://support.claude.com/en/articles/10684626-enable-and-use-web-search",
+   "https://support.claude.com/en/articles/13455879-use-claude-cowork-on-team-and-enterprise-plans"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon must route web search through Quarry-v2 and render citations; note egress policy vs search policy separation.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-031",
+  "category": "Research & web",
+  "name": "Research mode (/deep-research) across web + connectors",
+  "what": "Agentic multi-search investigation (5+ tool calls, ~1-3 min or more) that also draws on Gmail/Calendar/Docs connectors, producing a cited report; started via \"+\" > Research or /deep-research; paid plans.",
+  "how": "Iterative search loop with planning; can combine with extended thinking; consumes usage faster.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11088861-use-research-on-claude",
+   "https://support.claude.com/en/articles/11095361-when-should-i-use-web-search-extended-thinking-and-research",
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon deep research = Quarry crawl + Data Plane retrieval + Model Plane loop; include connector data in research.",
+  "notes": "Progress UI not documented beyond a blue indicator."
+ },
+ {
+  "id": "web-claudeai-web-product-032",
+  "category": "Research & web",
+  "name": "Guidance matrix: search vs extended thinking vs research",
+  "what": "Help content explicitly tells users when to use 1-2 tool-call search, pure reasoning, or multi-minute research, and that the two can combine.",
+  "how": "Documentation-level routing guidance (not automatic).",
+  "evidence": [
+   "https://support.claude.com/en/articles/11095361-when-should-i-use-web-search-extended-thinking-and-research"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon could automate this routing instead of documenting it.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-033",
+  "category": "Research & web",
+  "name": "Connected-app suggestions in context (no sponsored ranking)",
+  "what": "Claude proactively suggests a connected app when relevant (e.g., trails app for a hike question), uses memory to tailor suggestions, shows multiple options when several apps fit, never transacts without confirmation, no paid placement.",
+  "how": "Suggestion policy on top of connector registry; per-conversation and global opt-out.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14730684-how-claude-suggests-connected-apps"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon provider actions (integration-corev2) could surface the same opt-in suggestions with explicit no-ads policy.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-034",
+  "category": "Research & web",
+  "name": "Claude Science workbench with scientific database connectors",
+  "what": "Desktop app (macOS/Linux beta) where Claude runs long analyses in a sandbox, reads folders, pulls data from scientific databases via connectors, connects to compute clusters, and saves versioned artifacts with provenance records.",
+  "how": "Local research environment + connectors; Pro+; admin enable on Team/Enterprise.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16563838-get-started-with-claude-science",
+   "https://www.anthropic.com/news/claude-science-ai-workbench"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Provenance-recorded versioned artifacts are a model for Verevon audit of generated outputs.",
+  "notes": "Announced 2026-06-30."
+ },
+ {
+  "id": "web-claudeai-web-product-035",
+  "category": "Agent runtime",
+  "name": "Agent loop with plan, subtasks and sub-agents",
+  "what": "For complex tasks Claude analyzes, plans, splits into subtasks and coordinates sub-agents working on multiple workstreams in parallel; the user sees the plan and can steer mid-task.",
+  "how": "Agent loop runs in cloud sandbox (default) or on device; plugins may add hooks/sub-agents in Cowork/Code.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13345190-get-started-with-claude-cowork",
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Model Plane run = plan + subtasks + child runs; expose plan to UI for steering.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-036",
+  "category": "Agent runtime",
+  "name": "Cloud sessions that continue after the client closes",
+  "what": "Long tasks run on Anthropic servers and continue when the laptop or page is closed; sessions and files save to the account and sync across web/desktop/mobile.",
+  "how": "Per-session ephemeral sandbox; conversation-level VM stops after idle minutes with encrypted disk snapshot; sandbox expires 30 days after creation then a fresh environment continues the conversation.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13345190-get-started-with-claude-cowork",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization",
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Key design for Verevon: detachable runs with snapshot/restore of sandbox disk, 30-day TTL.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-037",
+  "category": "Agent runtime",
+  "name": "Parallel tasks",
+  "what": "Users can run several tasks at once in separate conversations; Claude Code web runs parallel isolated VMs per task.",
+  "how": "Independent sessions/sandboxes.",
+  "evidence": [
+   "https://claude.com/product/overview",
+   "https://support.claude.com/en/articles/12618689-claude-code-on-the-web"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Model Plane must support N concurrent runs per user with per-run sandboxes and usage accounting.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-038",
+  "category": "Agent runtime",
+  "name": "Scheduled tasks (cloud cron) created conversationally or manually",
+  "what": "Recurring/on-demand tasks (hourly, daily, weekly, weekdays, manual) that run remotely even when the device is off; created by describing cadence in chat (Claude proposes name/schedule/instructions) or a manual form with prompt, approval mode, frequency, model, working folder; each run is its own session with reviewable results.",
+  "how": "Scheduler service spawning cloud sessions; local-resource tasks run locally; admin can disable cloud scheduled tasks.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13854387-schedule-recurring-tasks-in-claude-cowork",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon automations: conversational task creation with a confirm step and per-run session records.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-039",
+  "category": "Agent runtime",
+  "name": "Cross-surface task handoff and steering",
+  "what": "Start a task on desktop, monitor/answer questions/redirect from mobile or web, pick up outputs anywhere; push notification when finished or when approval is needed.",
+  "how": "Session state in the account; desktop app bridges local resources.",
+  "evidence": [
+   "https://support.claude.com/en/articles/15520349-use-claude-cowork-on-web-desktop-and-mobile",
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon mobile/web parity depends on server-side session state and a notification channel (Application Plane).",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-040",
+  "category": "Agent runtime",
+  "name": "Dispatch: single persistent thread spanning Code and Cowork (limited beta, closed to new users)",
+  "what": "One continuous conversation that routes dev tasks to Claude Code and knowledge tasks to Cowork, reports outcomes rather than steps, with phone push notifications.",
+  "how": "Router that spawns typed sessions visible in their own sidebars.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13947068-assign-tasks-from-anywhere-in-claude-cowork"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "The \"outcome-first\" reporting style and typed-session routing are reusable ideas.",
+  "notes": "Superseded by the unified experience; not available to new users."
+ },
+ {
+  "id": "web-claudeai-web-product-041",
+  "category": "Agent runtime",
+  "name": "Agent tasks in Slack via Claude Tag (ambient mode, self-scheduling)",
+  "what": "Tag @Claude in a channel; it stages the work, uses tools, replies in-thread; ambient mode flags info and follows up on stalled threads; one Claude identity per channel with scoped memory; can plan tasks over hours/days.",
+  "how": "Channel-scoped identities and memory; admin spend caps per channel; action log.",
+  "evidence": [
+   "https://www.anthropic.com/news/introducing-claude-tag"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon Channel Plane is docs-only; Tag is the reference for channel-scoped agent identities and budgets.",
+  "notes": "Beta 2026-06-23, Team/Enterprise."
+ },
+ {
+  "id": "web-claudeai-web-product-042",
+  "category": "Agent runtime",
+  "name": "Error recovery helper for artifacts (\"Try fixing with Claude\")",
+  "what": "When an artifact throws an error a button lets Claude attempt a fix; success not guaranteed.",
+  "how": "Error text fed back into a repair turn.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Cheap to add in Verevon artifact runtime.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-043",
+  "category": "Agent runtime",
+  "name": "Browser task continuity and notifications in Chrome",
+  "what": "Multi-step browser tasks keep running when the user switches tabs; notifications when input is needed; scheduled browser tasks daily/weekly/monthly/annually.",
+  "how": "Extension background execution with notification API.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12012173-get-started-with-claude-in-chrome"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Quarry-executed browser runs should emit \"needs input\" events to the UI.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-044",
+  "category": "Tools, plugins & extensibility",
+  "name": "Connectors = MCP (940 in directory), remote custom MCP for all plans",
+  "what": "Users connect directory connectors (OAuth) or add custom remote MCP servers by URL (Free limited to one); sign-in modes \"now / when needed / none\"; OAuth client via Claude's published identity, dynamic registration, or own client; API-key/bearer headers supported.",
+  "how": "Claude cloud dials the MCP server (must be public; allowlist Anthropic IPs); tokens held server-side so connector credentials never enter the sandbox.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities",
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview",
+   "https://claude.com/marketplace/connectors-plugins"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon should keep connector auth server-side (as CoresSystem rules require) and support remote MCP with the same three sign-in modes.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-045",
+  "category": "Tools, plugins & extensibility",
+  "name": "Interactive MCP apps (MCP Apps / SEP-1865) rendered in chat",
+  "what": "Some connectors render live UIs (dashboards, task boards, design tools from Canva, Figma, Slack, Asana, Hex, Amplitude, monday.com, Box, Clay, Salesforce) inside the conversation; marketplace marks them \"Interactive\".",
+  "how": "MCP Apps extension of MCP (first official extension; builds on MCP-UI and OpenAI Apps SDK patterns); launched 2026-01-26 on web/desktop paid plans.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities",
+   "https://thenewstack.io/anthropic-extends-mcp-with-an-app-framework/",
+   "https://sdtimes.com/ai/anthropic-makes-tools-within-claude-interactive/"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon should implement the MCP Apps host contract to get third-party UIs for free.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-046",
+  "category": "Tools, plugins & extensibility",
+  "name": "Tool access modes (Auto / Always available / On demand)",
+  "what": "Per-conversation setting controlling connector loading: Auto lets Claude pick; Always loads all (<10 connectors); On demand searches and loads relevant connectors (10+), trading an extra step for context space.",
+  "how": "Lazy tool loading / tool search to protect the context window.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13730515-manage-claude-s-tool-access"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Model Plane should implement deferred tool schemas with a tool-search step (same as Claude Code ToolSearch).",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-047",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skills (Agent Skills open standard, SKILL.md, progressive disclosure)",
+  "what": "Skills are folders with SKILL.md (YAML name<=64, description<=200, optional dependencies) plus resources/scripts; Claude reads metadata, then body, then referenced files only when needed; Anthropic, custom, org-provisioned and partner skills; same skill works in Claude.ai, Code and API.",
+  "how": "Progressive disclosure loader; needs code execution; can install PyPI/npm packages in claude.ai but not in API containers; ZIP upload; enable in Customize > Skills.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12512176-what-are-skills",
+   "https://support.claude.com/en/articles/12512198-how-to-create-custom-skills",
+   "https://claude.com/skills"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Adopt agentskills.io spec verbatim in Verevon so partner skills work unchanged.",
+  "notes": "Released for orgs 2025-12-18."
+ },
+ {
+  "id": "web-claudeai-web-product-048",
+  "category": "Tools, plugins & extensibility",
+  "name": "Record a skill from a screen recording (Mac)",
+  "what": "In Cowork on Mac, record your screen (~10 min) while narrating; Claude proposes a new skill or an update to an existing one; video/audio not retained, screenshots stay in the task.",
+  "how": "Screen + audio capture -> skill synthesis; needs Accessibility & Screen Recording permissions; Pro/Max/Team.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12512198-how-to-create-custom-skills",
+   "https://claude.com/product/overview"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Strong \"learns from the user\" feature; Verevon could do this from browser session recordings via Quarry.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-049",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugins (skills + connectors + commands + sub-agents + hooks + local MCP)",
+  "what": "Plugins bundle skills, connectors, commands, sub-agents, hooks and MCP servers; installed from Anthropic marketplaces (Knowledge Work default; Life Sciences, Financial Services, Legal) or Git repos; sync from claude.ai to Claude Code; Plugin Create and Customize helpers.",
+  "how": "Marketplace manifest in Git; hooks/sub-agents/local MCP run only in Cowork/Code; `syncClaudeAiPlugins` setting.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13837440-use-plugins-in-claude",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon plugin format could mirror Claude's to reuse the 342 existing plugins.",
+  "notes": "Developer portal for submitting plugins launched 2025-09-25."
+ },
+ {
+  "id": "web-claudeai-web-product-050",
+  "category": "Tools, plugins & extensibility",
+  "name": "Unified directory: Skills / Connectors / Plugins with \"Your organization\" tab",
+  "what": "One Customize surface with Discover tabs; org-published and provisioned items in \"Your organization\"; publishing policy Open or Requires review; direct sharing bypasses the directory.",
+  "how": "Org-scoped registry with review workflow.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14328846-browse-skills-connectors-and-plugins-in-one-directory"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon Control Plane could own an org registry with review gates.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-051",
+  "category": "Tools, plugins & extensibility",
+  "name": "Slash commands and \"+\" composer menu",
+  "what": "Typing \"/\" or clicking \"+\" exposes commands and options (Research, web search, connectors, memory off, Output type, Add from GitHub); Chrome supports saved \"/\" shortcuts that can be scheduled.",
+  "how": "Command palette inside the composer.",
+  "evidence": [
+   "https://support.claude.com/en/articles/8114491-get-started-with-claude",
+   "https://support.claude.com/en/articles/12012173-get-started-with-claude-in-chrome",
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Standard composer affordance.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-052",
+  "category": "Tools, plugins & extensibility",
+  "name": "Desktop extensions (MCPB) for local tools",
+  "what": "Local MCP servers packaged as desktop extensions run in Claude Desktop/Code only (filesystem, localhost DBs, clipboard); admins can block via MDM keys isLocalDevMcpEnabled / isDesktopExtensionEnabled.",
+  "how": "MCPB bundle format; app-hosted local MCP.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11725091-when-to-use-desktop-and-web-connectors",
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon is web-first; local bridge would need a desktop companion like Claude Desktop.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-053",
+  "category": "Tools, plugins & extensibility",
+  "name": "Enterprise-managed MCP authorization via IdP",
+  "what": "Admin authorizes a connector once through Okta; members get access by IdP role/group; scopes narrowed per role; deprovisioning revokes; fallback to individual sign-in.",
+  "how": "IdP-federated OAuth for MCP servers (Asana, Atlassian, Canva, Datadog, Figma, Granola, Linear, Notion, Slack, Supabase).",
+  "evidence": [
+   "https://support.claude.com/en/articles/15537633-authorize-mcp-connectors-for-your-entire-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Control Plane could provide org-level connector grants mapped from SSO groups.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-054",
+  "category": "Tools, plugins & extensibility",
+  "name": "Agent SDK / claude -p usage under consumer plans; monthly API credits",
+  "what": "Agent SDK, `claude -p` and third-party apps draw from subscription limits; Max/Team get monthly API credits ($100/$200 Max, pooled $500 Team) claimable by linking a Console org.",
+  "how": "Plan entitlements extended to programmatic use.",
+  "evidence": [
+   "https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan",
+   "https://claude.com/pricing",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon could let plan usage cover API/agent usage to encourage building on it.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-055",
+  "category": "Tools, plugins & extensibility",
+  "name": "Artifacts that call Claude and connected apps (no API keys)",
+  "what": "Artifacts can embed Claude calls (viewers sign in; usage charged to the viewer's plan) and read/write connected apps (Asana, Calendar, Slack, custom connectors) with per-tool approval; per-action-approval tools excluded; 20MB personal or shared text storage per artifact.",
+  "how": "Artifact runtime capabilities: claude completion, connector tool calls, personal/shared KV storage.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Direct template for Verevon artifact capabilities: viewer-paid AI calls, viewer-scoped connectors, shared storage with confirmation.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-056",
+  "category": "Computer & environment control",
+  "name": "Cloud sandbox per session with mandatory egress proxy",
+  "what": "Code runs in an ephemeral per-session sandbox isolated from Anthropic corporate/training networks; cannot reach private/link-local/metadata addresses; all egress through a non-bypassable allow-listing proxy; only hours-lived session tokens inside.",
+  "how": "Anthropic-managed infra; org network policy tiers; Enterprise default no network.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Model Plane sandbox spec should copy: deny-by-default reachability, proxy egress allowlist, short-lived scoped tokens, connector calls outside sandbox.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-057",
+  "category": "Computer & environment control",
+  "name": "Local VM for code execution (Apple Virtualization / Hyper-V)",
+  "what": "In local sessions shell and generated code run in an isolated Linux VM with egress filtering, syscall restrictions, per-session user isolation; file/web tools keep working if the VM is down (\"workspace unavailable\").",
+  "how": "Hypervisor isolation; native agent loop on device with app-layer permission system.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Reference for a Rust desktop companion if Verevon ever needs local execution.",
+  "notes": "EDR tools cannot inspect the VM (documented visibility gap)."
+ },
+ {
+  "id": "web-claudeai-web-product-058",
+  "category": "Computer & environment control",
+  "name": "Desktop bridge: cloud session reaches local files/browser through the desktop app",
+  "what": "When a cloud session needs a local folder or browser, requests are routed through Claude Desktop over an Anthropic-brokered connection; each call checked against the member's folder permissions; offline app = no device access.",
+  "how": "Brokered relay (protocol unnamed); trusted folders list; \"Require Trusted Devices\" option.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview",
+   "https://support.claude.com/en/articles/15520349-use-claude-cowork-on-web-desktop-and-mobile",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Matches Verevon rule \"Model proposes, Quarry executes\"; a brokered device agent is the way to add local reach to a web product.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-059",
+  "category": "Computer & environment control",
+  "name": "Built-in browser side panel (Cowork)",
+  "what": "A browser inside the desktop app runs next to the task so users watch Claude navigate/click/type; cookies importable site-by-site (banking/email/SSO unchecked by default); logins persist across sessions; first-use site permission; high-risk sites blocked; actions checked against the request.",
+  "how": "Separate browser profile hosted by the desktop app; preferred-browser setting vs Claude in Chrome; works from web/mobile only while desktop app online.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16607400-use-the-built-in-browser-in-claude-cowork"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Quarry-v2 browser is Verevon's equivalent; copy the cookie-import consent UX and the \"preferred browser\" fallback messaging.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-060",
+  "category": "Computer & environment control",
+  "name": "Claude in Chrome extension (side panel, multi-tab, workflow recording, console logs, 1Password)",
+  "what": "Acts in the user's own Chrome: reads/clicks/types/fills forms, uploads images, works across tabs in a tab group, records workflows to repeat, reads console/network/DOM for debugging, launches from desktop, 1Password biometric sign-in so Claude never sees passwords, site-specific handling for Slack/Gmail/Docs/GitHub.",
+  "how": "Chrome extension with scripting/debugger/tabs permissions; side panel runs as a Cowork session on Max/Team.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12012173-get-started-with-claude-in-chrome",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Workflow recording + console access are differentiators Verevon could add to Quarry; credential-manager handoff is a strong safety pattern.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-061",
+  "category": "Computer & environment control",
+  "name": "Computer use (beta, Pro/Max): screen control of desktop apps with tool hierarchy",
+  "what": "Claude prefers connectors, then browser, then direct screen interaction; per-app approval, blocklist (finance/crypto apps auto-denied), background-window operation on macOS 15+ without stealing pointer; no sandbox between Claude and apps.",
+  "how": "Screenshot-driven GUI agent in Claude Desktop; action review scans for prompt injection; \"Full control\" setting optional.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14128542-let-claude-use-your-computer-in-cowork",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon should encode the same \"most precise tool first\" hierarchy in Model Plane tool selection.",
+  "notes": "Research preview 2026-03-23; Team/Enterprise excluded."
+ },
+ {
+  "id": "web-claudeai-web-product-062",
+  "category": "Computer & environment control",
+  "name": "Claude Code on the web: per-task VM, GitHub proxy auth, PR creation",
+  "what": "Pick a GitHub repo in the browser, describe a task; each task gets an isolated VM with repo setup commands, configurable internet access; Claude pushes a branch and a PR is created; parallel tasks per repo; \"Open in CLI\" handoff.",
+  "how": "Secure GitHub credential proxy (creds never in the VM); environment config in repo.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12618689-claude-code-on-the-web"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Model Plane cloud coding runs: VM per run, proxied git credentials, PR as output.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-063",
+  "category": "Computer & environment control",
+  "name": "Claude Code Desktop: worktrees, environments (local/cloud/SSH/WSL), panes, browser pane, diff review",
+  "what": "GUI for Claude Code with parallel sessions, git worktree isolation, permission modes (Manual/Accept edits/Plan/Auto/Bypass), draggable panes (chat, diff, browser, terminal, editor, plan, tasks, subagents), browser preview with auto-verify via .claude/launch.json, inline diff comments, CI polling with auto-fix/auto-merge, side chats (/btw), cross-session messaging.",
+  "how": "Same engine as CLI sharing CLAUDE.md/MCP/hooks; /desktop and /resume bridge CLI sessions.",
+  "evidence": [
+   "https://code.claude.com/docs/en/desktop"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon is not an IDE but the pane model (plan/tasks/subagents/diff panes) and browser auto-verify loop are worth borrowing for agent pages.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-064",
+  "category": "Computer & environment control",
+  "name": "Trusted folders and storage folder (desktop)",
+  "what": "Local file access limited to folders the user connected (\"Trusted folders\"); storage folder configurable; Claude asks before permanently deleting files in any mode.",
+  "how": "App-layer folder ACL; MDM can restrict connectable folders.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization",
+   "https://support.claude.com/en/articles/13364135-use-claude-cowork-safely"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon desktop companion (if any) should model folder grants like browser grants.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-065",
+  "category": "Computer & environment control",
+  "name": "Mobile OS integrations (iOS intents/shortcuts/widgets, Action button; health, location, calendar)",
+  "what": "iOS app intents, Shortcuts, widgets, Lock Screen/Control Center/Action button; health & fitness data (US, Pro/Max), location/maps/calendar access on iOS/Android.",
+  "how": "Native OS integrations surfaced as tools/context.",
+  "evidence": [
+   "https://support.claude.com/en/articles/10263469-use-claude-app-intents-shortcuts-and-widgets-on-ios",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Out of scope for Verevon web, but shows device-context tools.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-066",
+  "category": "Coding capability",
+  "name": "Code review on GitHub PRs with parallel agents and verification",
+  "what": "Research preview (Team/Enterprise): multiple agents scan a PR for different issue classes, a verification step filters false positives, findings are deduped/ranked and posted as inline comments (Normal/Nit/Pre-existing), threads auto-resolve on fix; REVIEW.md/CLAUDE.md customize; ~$15-25 per review billed via credits; spend caps and analytics.",
+  "how": "Claude GitHub App; triggers per repo (open/push/manual \"@claude review\").",
+  "evidence": [
+   "https://support.claude.com/en/articles/14233555-set-up-code-review-for-claude-code"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Multi-agent + verification pass is a reusable review harness for Verevon coding agents.",
+  "notes": "Not available to ZDR orgs."
+ },
+ {
+  "id": "web-claudeai-web-product-067",
+  "category": "Coding capability",
+  "name": "Claude Security: parallel codebase vulnerability scanning with validated findings",
+  "what": "Enterprise beta: scans repos for multi-file vulnerabilities, multi-stage self-verification to cut false positives, severity by exploitability, findings exportable (CSV/MD/webhooks), patch review opens in Claude Code on the web; runs on Claude Mythos 5 without direct model access.",
+  "how": "Agentic scanner at claude.ai/security; GitHub.com/GHES only; billed at token cost.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14661296-use-claude-security"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Shows a \"restricted model behind a product\" pattern; Verevon could gate powerful models behind task-specific products.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-068",
+  "category": "Coding capability",
+  "name": "Automated security reviews in Claude Code (/security-review, GitHub Actions)",
+  "what": "Security review command and CI action (2025-08-06).",
+  "how": "CLI command + Action.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12138966-release-notes",
+   "https://support.claude.com/en/articles/11932705-automated-security-reviews-in-claude-code"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Low priority.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-069",
+  "category": "Coding capability",
+  "name": "Artifacts from Claude Code sessions and design handoff",
+  "what": "Claude Code can publish session output as artifacts and create designs/docs; /design imports a design to a codebase or builds the product from it; /design-sync reads tokens from React code.",
+  "how": "Shared artifact store between Code and chat.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/14604416-get-started-with-claude-design"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon artifacts should be reachable from agent runs, not just chat.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-070",
+  "category": "Coding capability",
+  "name": "Claude in Xcode and Microsoft Foundry",
+  "what": "Claude available inside Xcode and via Microsoft Foundry.",
+  "how": "IDE/platform integrations.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12293051-use-claude-in-xcode",
+   "https://support.claude.com/en/articles/12864745-use-claude-in-microsoft-foundry"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "None.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-071",
+  "category": "Memory, learning & personalization",
+  "name": "Topic-based memory with editable entries",
+  "what": "Memory is saved as individual categorized topics during chat (not a nightly summary); users see, edit or delete every topic in Settings > Memory; \"remember this/forget this\" in chat; pause or reset memory; on by default for consumer, opt-in per member on Team/Enterprise.",
+  "how": "Entry-level memory store shared by chat and cloud Cowork; replaced 24h summary memory (2026-07-10).",
+  "evidence": [
+   "https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon memory should be inspectable per entry, with pause/reset and org opt-in; local-only tasks keep separate memory.",
+  "notes": "Memory for free users since 2026-03-02."
+ },
+ {
+  "id": "web-claudeai-web-product-072",
+  "category": "Memory, learning & personalization",
+  "name": "Project-scoped memory",
+  "what": "Each project has its own memory space and summary, separate from other projects and from non-project chats; Cowork projects also keep per-project memory.",
+  "how": "Memory namespaced by project id.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context",
+   "https://support.claude.com/en/articles/14116274-organize-your-tasks-with-projects-in-claude-cowork"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Space-scoped memory in Verevon, never widening ACLs.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-073",
+  "category": "Memory, learning & personalization",
+  "name": "Sensitive-topic exclusion with opt-in and hard never-store list",
+  "what": "Health, politics, religion, gender identity are not stored by default; user can opt in (\"Include sensitive topics\") with a notice when saved; government IDs, financial account numbers, criminal history, immigration status are never saved.",
+  "how": "Classifier-gated memory writes with policy allowlist/denylist.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Copy this policy into Verevon memory writer.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-074",
+  "category": "Memory, learning & personalization",
+  "name": "Per-chat memory off and incognito chats",
+  "what": "Turn memory off for one chat via \"+\" before the first message (chat still saved and searchable), or use incognito (ghost icon): not saved to history/memory/recap, 30-day retention, cannot be reopened; still appears in org exports/Compliance API.",
+  "how": "Flags on conversation; incognito uses the legacy experience (no files/code).",
+  "evidence": [
+   "https://support.claude.com/en/articles/12260368-use-incognito-chats",
+   "https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon needs ZDR/incognito semantics that propagate to memory and search.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-075",
+  "category": "Memory, learning & personalization",
+  "name": "Memory import/export (portable memory)",
+  "what": "Paste memories exported from another AI service; Claude converts them to entries; \"See what Claude learned about you\" summary chat; export by viewing memory or asking Claude to write it verbatim.",
+  "how": "Plain-text import parser; experimental.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12123587-import-and-export-your-memory-from-claude",
+   "https://claude.com/import-memory"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Easy switching lever for Verevon: import memory from Claude/ChatGPT.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-076",
+  "category": "Memory, learning & personalization",
+  "name": "Instructions for Claude (global) + project instructions + organization instructions",
+  "what": "Account-wide preferences; project-level instructions; org-level instructions (<=3000 chars, Owners only) that override user instructions on conflict and propagate within an hour.",
+  "how": "Three-tier prompt composition: org > user > project (interaction with project not documented).",
+  "evidence": [
+   "https://support.claude.com/en/articles/10185728-understanding-claude-s-personalization-features",
+   "https://support.claude.com/en/articles/14546867-set-organization-instructions"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon should define a documented precedence chain org > space > user.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-077",
+  "category": "Memory, learning & personalization",
+  "name": "Monthly recap and reflection (Settings > Reflect)",
+  "what": "Beta: headline summary, most active day/hour, topic percentages, \"AI fluency\" observations (Delegation, Description, Discernment, Diligence) with next steps; excludes incognito/Cowork/Code; generated only when opened; consumer plans.",
+  "how": "Built from recent chats + memory; sensitive topics not itemized.",
+  "evidence": [
+   "https://support.claude.com/en/articles/15672559-see-your-monthly-recap",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "A \"how you use the assistant\" reflection surface is a differentiator Verevon could offer per org/user.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-078",
+  "category": "Memory, learning & personalization",
+  "name": "Break reminders and quiet hours",
+  "what": "Self-set daily time budget and quiet hours with soft reminders; applies across surfaces; separate from usage limits.",
+  "how": "Client-side wellbeing nudges.",
+  "evidence": [
+   "https://support.claude.com/en/articles/15672868-set-break-reminders-and-quiet-hours"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Low priority.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-079",
+  "category": "Memory, learning & personalization",
+  "name": "Memory used by agent tasks and suggestions",
+  "what": "Memory informs tasks, scheduled runs (cloud), connected-app suggestions and voice; local-only Cowork memory stays with those tasks.",
+  "how": "Shared memory service across surfaces.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude",
+   "https://support.claude.com/en/articles/14730684-how-claude-suggests-connected-apps"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Model Plane runs should receive memory context the same way chat does.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-080",
+  "category": "Models & routing",
+  "name": "Model picker with per-plan model entitlements",
+  "what": "Models: Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1, Opus 5, Sonnet 5, Fable 5, Opus 4.7/4.6/4.8, Sonnet 4.6, Mythos (restricted); Free gets Sonnet/Haiku; Pro adds Opus; Max/Team premium/Enterprise add Fable (50% of weekly limit); Enterprise admins set default model and allowlists per role.",
+  "how": "Model entitlement service per plan/role; \"More models\" submenu.",
+  "evidence": [
+   "https://claude.com/pricing",
+   "https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings",
+   "https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan",
+   "https://support.claude.com/en/articles/15694740-manage-model-access-for-your-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon multi-provider picker needs plan/role entitlements and per-model budgets.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-081",
+  "category": "Models & routing",
+  "name": "Effort levels (low/medium/high/xhigh/max) + thinking toggle",
+  "what": "Effort controls reasoning depth, independent of the thinking toggle; defaults marked per model; xhigh on Opus 4.7+; thinking cannot be disabled on 5.x models in the app; admins can restrict effort per role.",
+  "how": "Effort maps to API effort param; between_tools thinking setting referenced.",
+  "evidence": [
+   "https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Model Plane should expose effort + thinking as orthogonal controls with per-model defaults.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-082",
+  "category": "Models & routing",
+  "name": "Automatic safety fallback model switching (Fable -> Opus)",
+  "what": "Classifiers scan requests and everything the model reads (memory, connectors, search, files); blocked categories (offensive cyber, dual-use bio, distillation, frontier LLM dev) switch the conversation to Opus 5 or Opus 4.8 with a notice and model label; user can disable switching (then the chat pauses).",
+  "how": "Request-time classifier -> fallback routing; billed at Opus rates with cache-miss credit; API requires opt-in.",
+  "evidence": [
+   "https://support.claude.com/en/articles/15363606-why-claude-switched-models-in-your-conversation-with-fable-5-or-fable-5-1"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon routing layer could implement policy-driven fallbacks with transparent labeling.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-083",
+  "category": "Models & routing",
+  "name": "Efficient mode (org/role): restrict to Sonnet/Haiku at low effort",
+  "what": "Enterprise admins can force members to cheaper models with low-effort defaults, org-wide or per role.",
+  "how": "Policy applied at session creation.",
+  "evidence": [
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Cost governance knob for Verevon orgs.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-084",
+  "category": "Models & routing",
+  "name": "Prompt caching of project knowledge surfaced to users",
+  "what": "Project content is cached and counts less against limits when reused; caches expire after inactivity.",
+  "how": "Prompt caching exposed as a usage benefit.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9797557-usage-limit-best-practices"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon cost meter should reflect cache hits.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-085",
+  "category": "Models & routing",
+  "name": "Voice model continuity",
+  "what": "Voice uses the last text model and auto-advances to that model's latest generation; Fable excluded.",
+  "how": "Model lineage mapping.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11101966-use-voice-mode"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Minor.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-086",
+  "category": "Models & routing",
+  "name": "Cloud provider choice (Bedrock, Vertex, Foundry) for enterprise surfaces",
+  "what": "Microsoft 365 add-ins and some surfaces can run on Amazon Bedrock, Google Cloud Vertex AI or Microsoft Foundry instead of a Claude account.",
+  "how": "Provider backends behind the same UI.",
+  "evidence": [
+   "https://claude.com/product/overview",
+   "https://claude.com/claude-for-microsoft-365"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already multi-provider; note plugin sync does not work with API-key/Bedrock auth.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-087",
+  "category": "Transparency, observability & control",
+  "name": "Usage meter (session + weekly bars, resets, credits)",
+  "what": "Settings > Usage shows the 5-hour session bar with time remaining, weekly bars (all models, Fable), usage credits/bundle balance, and \"Reset for free\" offers with expiry.",
+  "how": "Account-level usage service; limits shared across claude.ai, Code, Desktop.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9797557-usage-limit-best-practices",
+   "https://support.claude.com/en/articles/17007452-what-is-a-limit-reset",
+   "https://support.claude.com/en/articles/14246112-buy-usage-bundles"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon needs a per-user/per-org usage page with session/weekly windows and credits.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-088",
+  "category": "Transparency, observability & control",
+  "name": "Visible tool calls (chat search, connectors, research)",
+  "what": "Tool invocations such as past-chat search appear as tool calls in the transcript; web results show citations.",
+  "how": "Tool-call cards in the message stream.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Baseline; DeepSeek harness offers more detail.",
+  "notes": "No documented raw-parameter inspection in the consumer UI."
+ },
+ {
+  "id": "web-claudeai-web-product-089",
+  "category": "Transparency, observability & control",
+  "name": "OpenTelemetry event export (prompts, tool calls, file access, approvals, cost)",
+  "what": "Team/Enterprise admins set an OTLP endpoint (HTTP/JSON or protobuf, headers encrypted at rest); events include full prompt text, MCP/tool name + parameters + duration, file paths touched, skills invoked, approval decisions, model/token/cost; prompt.id correlates a turn.",
+  "how": "OTel collector fan-out to Splunk/Datadog/Honeycomb/ClickHouse etc.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14477985-monitor-claude-cowork-activity-with-opentelemetry"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Model Plane should emit this exact event taxonomy (prompt.id, tool_parameters, approval decisions).",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-090",
+  "category": "Transparency, observability & control",
+  "name": "Compliance API (chats, files, Cowork, Code, M365, Science)",
+  "what": "Enterprise Primary Owner enables an API exposing activity events, chat data and file content across surfaces for monitoring/audit; integrations with security tools (2026-05-21).",
+  "how": "Parent-org scoped keys; excludes Claude Code cloud sessions and Bedrock/Vertex.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13015708-access-the-compliance-api",
+   "https://support.claude.com/en/articles/12138966-release-notes"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Control Plane audit export equivalent.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-091",
+  "category": "Transparency, observability & control",
+  "name": "Audit logs (180-day export)",
+  "what": "Enterprise owners export audit events (sign-ins, project/file/conversation CRUD, invites, SSO changes, data exports) with actor, IP, device, platform; content excluded.",
+  "how": "Entity/event model; CMEK orgs use Compliance API instead.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9970975-access-audit-logs"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Baseline for Verevon Control Plane audit.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-092",
+  "category": "Transparency, observability & control",
+  "name": "Analytics API and Smart reports",
+  "what": "Enterprise Analytics API gives daily per-org usage (2026-02-13); Claude Code usage analytics; Smart reports (beta, 2026-09-10) analyze team usage, cost, friction and reusable patterns.",
+  "how": "Aggregated usage/insight endpoints.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12138966-release-notes",
+   "https://support.claude.com/en/articles/12157520-claude-code-usage-analytics"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon could offer usage analytics + AI-generated adoption reports.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-093",
+  "category": "Transparency, observability & control",
+  "name": "Dashboard chart query and refresh-time transparency",
+  "what": "Every dashboard chart displays the SQL it ran and when the data was last refreshed.",
+  "how": "Query metadata stored with chart.",
+  "evidence": [
+   "https://support.claude.com/en/articles/17454700-get-started-with-claude-dashboards"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Copy for Verevon data visualizations.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-094",
+  "category": "Transparency, observability & control",
+  "name": "Model switch notice and per-response model label",
+  "what": "When routing changes the model, a notice explains and each response is labeled with the answering model.",
+  "how": "Per-message model attribution.",
+  "evidence": [
+   "https://support.claude.com/en/articles/15363606-why-claude-switched-models-in-your-conversation-with-fable-5-or-fable-5-1"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon should label each message with provider/model/effort.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-095",
+  "category": "Transparency, observability & control",
+  "name": "Docs edit attribution and version history",
+  "what": "Every Docs change is attributed to a person or to Claude; version history panel.",
+  "how": "Per-edit authorship metadata.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16923645-get-started-with-claude-docs"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Application Plane realtime docs should attribute AI edits.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-096",
+  "category": "Transparency, observability & control",
+  "name": "Inference hooks (Enterprise beta): allow/deny every prompt via customer server",
+  "what": "Claude sends each prompt, tool response and uploaded file text to a customer-hosted endpoint before generating; only allow/deny; covers Claude, Code, Cowork, skills, plugins, connectors; signed requests.",
+  "how": "Synchronous policy webhook inside Anthropic infra.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16059458-inference-hooks-overview"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Strong enterprise DLP pattern for Model Plane: pre-inference policy hook.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-097",
+  "category": "Safety, permissions & governance",
+  "name": "Permission modes: Manual (default) / Auto / Skip all approvals",
+  "what": "Manual asks before each action; Auto reviews each action with automated safety checks and pauses when needed; Skip disables checks; admins can disable Auto and Skip; deletion always asks; computer use asks per app.",
+  "how": "Classifier-backed action review in Auto; mode persisted per user; in-composer selector.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13364135-use-claude-cowork-safely",
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude",
+   "https://support.claude.com/en/articles/12902446-claude-in-chrome-permissions-guide",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon permission modes should match this three-level scheme with admin caps and hard-coded deletion prompts.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-098",
+  "category": "Safety, permissions & governance",
+  "name": "Prompt-injection defenses (training + classifiers + action review)",
+  "what": "Model trained to refuse injected instructions; classifiers scan untrusted content; browser/computer actions compared against the user's request; documentation openly states risk is non-zero and gives trust-boundary guidance.",
+  "how": "Two-condition threat model: untrusted content read + consequential action available.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13364135-use-claude-cowork-safely",
+   "https://support.claude.com/en/articles/16607400-use-the-built-in-browser-in-claude-cowork"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon: Quarry rejects proposed actions failing injection checks; document residual risk honestly.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-099",
+  "category": "Safety, permissions & governance",
+  "name": "Connector tool policies (Always allow / Needs approval / Blocked) and read-only gating",
+  "what": "Owners set per-tool or per-category policy; \"Always allow for connector tools\" off by default so write-capable tools need approval per task; custom connectors rarely mark read-only so their tools are gated; policies enforced outside the sandbox.",
+  "how": "Server-side policy enforcement on each MCP call.",
+  "evidence": [
+   "https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities",
+   "https://support.claude.com/en/articles/13455879-use-claude-cowork-on-team-and-enterprise-plans",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Model Plane tool gateway should enforce org tool policy outside the sandbox with read-only annotations.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-100",
+  "category": "Safety, permissions & governance",
+  "name": "Browser site permissions, allowlists/blocklists, prohibited actions",
+  "what": "First-action approval per site; \"always allow\" per site; sensitive actions (downloads, entering sensitive info, authorizations, changing permissions) always require approval; prohibited in any mode: purchases/trades, account creation, card/ID data, untrusted downloads, system files, permanent deletes, following instructions from content; admin allow/blocklists.",
+  "how": "Extension-level policy + model policy.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12902446-claude-in-chrome-permissions-guide"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Quarry browser grants should encode this exact list.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-101",
+  "category": "Safety, permissions & governance",
+  "name": "Sandbox network egress policy tiers",
+  "what": "Off / package managers only / package managers + domains / all domains; defaults differ by plan; changes apply to new sessions; web search/fetch/MCP/Chrome not covered.",
+  "how": "Proxy allowlist configuration per org.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude",
+   "https://support.claude.com/en/articles/13455879-use-claude-cowork-on-team-and-enterprise-plans"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Model Plane sandbox policy should offer the same tiers.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-102",
+  "category": "Safety, permissions & governance",
+  "name": "Credential isolation: connector tokens never in sandbox; 1Password handoff",
+  "what": "Connector auth is server-side; sandbox only holds session-scoped tokens; Chrome can request logins through 1Password with biometric approval so Claude never sees passwords.",
+  "how": "Broker pattern for secrets.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview",
+   "https://support.claude.com/en/articles/12012173-get-started-with-claude-in-chrome"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon secrets handling: broker all credentials outside model-reachable environments.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-103",
+  "category": "Safety, permissions & governance",
+  "name": "Skill and plugin security scanning (Enterprise beta)",
+  "what": "Uploaded/installed skills and plugins are scanned on install/update; malicious ones blocked, risky ones show a caution banner.",
+  "how": "Static/LLM scanning pipeline (unspecified).",
+  "evidence": [
+   "https://support.claude.com/en/articles/12138966-release-notes",
+   "https://support.claude.com/en/articles/13837440-use-plugins-in-claude"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon plugin registry should scan artifacts before enabling.",
+  "notes": "Launched 2026-08-06."
+ },
+ {
+  "id": "web-claudeai-web-product-104",
+  "category": "Safety, permissions & governance",
+  "name": "Enterprise identity and access: SSO/SCIM/JIT, custom roles, groups, spend limits, IP allowlisting, tenant restrictions, Trusted Devices",
+  "what": "Role-based access with custom roles and SCIM groups; group spend limits and pooled budgets; IP allowlisting; network tenant restrictions; trusted-device enrollment for remote control; domain capture; Intune/MDM deployment.",
+  "how": "Control-plane style admin console + Admin API.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13930458-set-up-role-based-permissions-on-enterprise-plans",
+   "https://support.claude.com/en/articles/13200993-restrict-access-to-claude-with-ip-allowlisting",
+   "https://support.claude.com/en/articles/13198485-enforce-network-level-access-control-with-tenant-restrictions",
+   "https://support.claude.com/en/articles/12138966-release-notes",
+   "https://claude.com/pricing"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon Control Plane parity list.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-105",
+  "category": "Safety, permissions & governance",
+  "name": "Data retention controls, ZDR/HIPAA/CMEK constraints",
+  "what": "Enterprise custom retention (>=30 days, chats/projects; deletion at midnight UTC); ZDR, HIPAA-ready and CMEK orgs are excluded from the unified experience, memory, Code Review and live-artifact edits; HIPAA requires local-mode Cowork/Code; consumer content not used for training on business plans.",
+  "how": "Retention engine scoped to chats/projects; feature gating by compliance configuration.",
+  "evidence": [
+   "https://support.claude.com/en/articles/10440198-configure-custom-data-retention-controls-for-enterprise-plans",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization",
+   "https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context",
+   "https://support.claude.com/en/articles/14233555-set-up-code-review-for-claude-code"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon ZDR propagation rule mirrors this; note how many features claude.ai must disable under ZDR, a gap Verevon could close by designing ZDR-first.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-106",
+  "category": "Safety, permissions & governance",
+  "name": "Sharing governance (org-only artifacts, external invite limits, admin revoke)",
+  "what": "Team/Enterprise artifacts stay in-org by default; owners control external sharing and invites (Team on, Enterprise off); 50 outside invitees, 30-day pending expiry; admins can revoke and audit sharing; \"Share cloud sessions\" gate for sandboxed chats.",
+  "how": "ACL on artifact/chat with org policy overrides.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9547008-share-artifacts",
+   "https://support.claude.com/en/articles/16762496-share-a-chat-with-specific-people",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Aligns with \"Space access never widens owner ACL\".",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-107",
+  "category": "Safety, permissions & governance",
+  "name": "Model entitlement/effort restrictions and content-filter transparency",
+  "what": "Admins restrict models and effort levels per role; thinking may be truncated with an explicit note when safety flags content; \"Output blocked by content filtering\" errors documented.",
+  "how": "Policy at model-selection and output-filter layers.",
+  "evidence": [
+   "https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings",
+   "https://support.claude.com/en/articles/12138966-release-notes",
+   "https://support.claude.com/en/articles/9205721-why-am-i-receiving-an-output-blocked-by-content-filtering-policy-error"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon should surface filter events explicitly rather than silently failing.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-108",
+  "category": "Safety, permissions & governance",
+  "name": "AI-generated content marking",
+  "what": "Help article documents how Claude marks AI-generated content.",
+  "how": "Content provenance marking (details not fetched).",
+  "evidence": [
+   "https://support.claude.com/en/articles/16266773-how-claude-marks-ai-generated-content"
+  ],
+  "provenance": "DOC",
+  "confidence": "low",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Consider C2PA-style marking for Verevon exports.",
+  "notes": "Not fetched; title-level evidence only."
+ },
+ {
+  "id": "web-claudeai-web-product-109",
+  "category": "UI/UX & product design",
+  "name": "Composer-centric UI: \"+\" menu, \"/\" commands, Output picker, model/effort picker, permission mode",
+  "what": "All major controls live in the message box: attachments, connectors, research, memory toggle, output type (Docs/Slides/Design/Dashboards/Motion), model + effort + thinking, Auto/Manual permission; model shown next to send button.",
+  "how": "Single composer with inline menus.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude",
+   "https://support.claude.com/en/articles/8664678-change-the-model-effort-and-thinking-settings",
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/8114491-get-started-with-claude"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon composer should consolidate controls similarly; T3-style clarity.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-110",
+  "category": "UI/UX & product design",
+  "name": "Sidebar: Recents, Projects, Artifacts tab, Scheduled, Customize, Code tab",
+  "what": "Left sidebar lists conversations (chats + tasks), projects, the Artifacts tab (gallery + templates), Scheduled tasks page, Customize (skills/connectors/plugins); desktop has Chat/Cowork/Code tabs.",
+  "how": "Navigation shell shared across web/desktop.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/13854387-schedule-recurring-tasks-in-claude-cowork",
+   "https://support.claude.com/en/articles/14328846-browse-skills-connectors-and-plugins-in-one-directory",
+   "https://code.claude.com/docs/en/desktop"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon navigation map.",
+  "notes": "Sidebar cannot be fully hidden (appearance article)."
+ },
+ {
+  "id": "web-claudeai-web-product-111",
+  "category": "UI/UX & product design",
+  "name": "Appearance: light/dark/system, dyslexic-friendly font",
+  "what": "Settings > Appearance offers color mode and chat font (Default/System/Dyslexic Friendly).",
+  "how": "Client theme settings.",
+  "evidence": [
+   "https://support.claude.com/en/articles/8887527-customizing-your-appearance-settings"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Minimal theming; Verevon can exceed it.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-112",
+  "category": "UI/UX & product design",
+  "name": "Interface localization (11 languages) with independent voice language",
+  "what": "UI in EN/FR/DE/HI/ID/IT/JA/KO/PT-BR/ES-LA/ES-ES; chat responds in any language; voice language set separately.",
+  "how": "i18n of shell; model language-agnostic.",
+  "evidence": [
+   "https://support.claude.com/en/articles/10769299-how-to-use-claude-in-your-preferred-language"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon i18n (Norwegian not in Claude's list — an opening).",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-113",
+  "category": "UI/UX & product design",
+  "name": "Accessibility: keyboard navigation and screen-reader support in artifacts/Docs/Slides",
+  "what": "Tab/Escape panel model, F6 editor regions, comment mode via keyboard, screen-reader announcements; documented known gaps (VoiceOver in Chrome 150-152, text layers need mouse in Design).",
+  "how": "ARIA + focus management; Docs keyboard shortcut article.",
+  "evidence": [
+   "https://support.claude.com/en/articles/17457950-use-artifacts-with-a-keyboard-or-screen-reader",
+   "https://support.claude.com/en/articles/17458093-claude-docs-keyboard-shortcuts"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon should publish an a11y contract for artifact panels.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-114",
+  "category": "UI/UX & product design",
+  "name": "Desktop quick entry, deep links, Code keyboard shortcut list",
+  "what": "Mac quick entry shortcut; open Claude Desktop with a link; Cmd+/ lists shortcuts in Code tab; Cmd+; side chat.",
+  "how": "Global hotkey + URL scheme.",
+  "evidence": [
+   "https://support.claude.com/en/articles/12626668-use-quick-entry-with-claude-desktop-on-mac",
+   "https://support.claude.com/en/articles/14729294-open-claude-desktop-with-a-link",
+   "https://code.claude.com/docs/en/desktop"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon web can offer deep links to sessions/artifacts.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-115",
+  "category": "UI/UX & product design",
+  "name": "Mobile parity: artifacts tab, interactive apps, task monitoring, push notifications",
+  "what": "iOS/Android can create/view/edit artifacts, see interactive charts (since 2026-03-25), monitor and redirect tasks, receive push notifications; sharing settings only on web/desktop; some visuals text-only.",
+  "how": "Native apps against the same session store.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/12138966-release-notes",
+   "https://support.claude.com/en/articles/15520349-use-claude-cowork-on-web-desktop-and-mobile"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon responsive web should at least match monitoring + notifications.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-116",
+  "category": "UI/UX & product design",
+  "name": "Onboarding via templates and Artifacts gallery",
+  "what": "Users start from templates in the Artifacts tab or \"Output\" picker; Design starts with a design-system onboarding.",
+  "how": "Template gallery.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://www.anthropic.com/news/claude-design-anthropic-labs"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Template-first onboarding for Verevon artifacts.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-117",
+  "category": "UI/UX & product design",
+  "name": "Usage-aware UX: limit messages with inline reset, upgrade or credits",
+  "what": "When a limit is hit the message offers \"Reset for free\" (if available), wait, upgrade, or continue on credits.",
+  "how": "Limit-state UI.",
+  "evidence": [
+   "https://support.claude.com/en/articles/17007452-what-is-a-limit-reset",
+   "https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon billing UX.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-118",
+  "category": "Platform architecture",
+  "name": "Two execution modes: cloud session (default) vs local session (desktop)",
+  "what": "Agent loop + code execution either in an Anthropic cloud sandbox or natively on device with a Linux VM; same architecture for all plans; MDM keys for device policy.",
+  "how": "Documented in the Cowork architecture overview.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Model Plane = cloud mode; a Rust desktop agent could add local mode later.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-119",
+  "category": "Platform architecture",
+  "name": "Per-conversation VM lifecycle: idle stop, encrypted snapshot, 30-day expiry",
+  "what": "Each agentic conversation gets its own VM that stops after minutes idle, persists disk as an encrypted snapshot, and expires 30 days after creation (conversation continues in a fresh env).",
+  "how": "Snapshot/restore sandbox orchestration.",
+  "evidence": [
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Direct spec for Verevon sandbox lifecycle.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-120",
+  "category": "Platform architecture",
+  "name": "Connector execution outside the sandbox (server-side MCP client)",
+  "what": "MCP calls are made by Anthropic servers with server-held tokens; policy checks happen outside the sandbox on every call.",
+  "how": "Tool gateway separated from execution sandbox.",
+  "evidence": [
+   "https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Same separation as Verevon planes (Model proposes; Ingestion/Quarry executes).",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-121",
+  "category": "Platform architecture",
+  "name": "Surfaces: web, desktop (Chat/Cowork/Code tabs), iOS/Android, Chrome side panel, M365 add-ins, Google Workspace sidebar, Slack (Tag), Xcode",
+  "what": "One account and session store across many surfaces; desktop hosts local resources and bridges; Chrome side panel can run Cowork sessions.",
+  "how": "Shared backend + per-surface clients.",
+  "evidence": [
+   "https://claude.com/product/overview",
+   "https://support.claude.com/en/articles/15520349-use-claude-cowork-on-web-desktop-and-mobile",
+   "https://support.claude.com/en/articles/12012173-get-started-with-claude-in-chrome",
+   "https://claude.com/claude-for-microsoft-365",
+   "https://support.claude.com/en/articles/16951679-use-claude-in-google-docs-sheets-and-slides"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon starts web-only; design the session API so other surfaces can attach.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-122",
+  "category": "Platform architecture",
+  "name": "Artifact storage model: personal vs shared KV, viewer-scoped connectors",
+  "what": "Artifacts hold up to 20MB text per artifact in personal or shared storage; shared artifacts bind to the viewer's connectors (not the creator's); unpublishing legacy artifacts deletes stored data.",
+  "how": "Artifact-scoped datastore with per-viewer identity.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/14729249-use-live-artifacts-in-claude-cowork"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon artifact DB design (per-artifact collections, viewer identity).",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-123",
+  "category": "Platform architecture",
+  "name": "Plugin/skill portability across chat, Cowork, Code and API",
+  "what": "Same skill folders and plugins run in claude.ai, Claude Code and the API; plugins sync from account to CLI (not with API-key auth).",
+  "how": "Account-scoped registry replicated to clients.",
+  "evidence": [
+   "https://support.claude.com/en/articles/13837440-use-plugins-in-claude",
+   "https://claude.com/skills"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon should treat skills as data in Control/Data Plane, consumed by any runtime.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-124",
+  "category": "Platform architecture",
+  "name": "Remote Control linking cloud/web sessions to a member's computer",
+  "what": "Web/mobile can reach a linked computer's Claude Code sessions; admins can disable remote control or require Trusted Devices.",
+  "how": "Device-linked session relay.",
+  "evidence": [
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization",
+   "https://support.claude.com/en/articles/12138966-release-notes",
+   "https://code.claude.com/docs/en/desktop"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Pattern for Verevon browser grants to a user-owned device.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-125",
+  "category": "Platform architecture",
+  "name": "Pricing/limits model: 5-hour session + weekly windows, seat tiers, usage credits/bundles, monthly API credits",
+  "what": "Free/Pro $20/Max $100-200/Team $20-25 standard & $100-125 premium/Enterprise $20 seat + usage; paid limits = session + weekly; Fable capped at 50% weekly; usage bundles discounted 10-30%; Max/Team monthly API credits.",
+  "how": "Entitlement + metering service shared across surfaces.",
+  "evidence": [
+   "https://claude.com/pricing",
+   "https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work",
+   "https://support.claude.com/en/articles/14246112-buy-usage-bundles"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon billing (Control Plane) could copy session/weekly windows and prepaid bundles.",
+  "notes": "Prices as fetched 2026-10-13."
+ },
+ {
+  "id": "web-claudeai-web-product-126",
+  "category": "Platform architecture",
+  "name": "Legacy vs new artifacts and live artifacts migration",
+  "what": "Pre-2026-09-16 code artifacts remain viewable/publishable/embeddable; pre-2026-08-19 Cowork live artifacts are read-only until republished; ZDR/CMEK/HIPAA orgs keep live artifacts.",
+  "how": "Versioned artifact runtimes coexisting.",
+  "evidence": [
+   "https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them",
+   "https://support.claude.com/en/articles/14729249-use-live-artifacts-in-claude-cowork"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Lesson: version the artifact runtime contract from day one.",
+  "notes": ""
+ },
+ {
+  "id": "web-claudeai-web-product-127",
+  "category": "Platform architecture",
+  "name": "Known limitations of the unified experience (as of 2026-10)",
+  "what": "No Add from GitHub, no branching, incognito uses legacy path (no files/code), search excludes old Cowork tasks, Dispatch closed to new users; Enterprise unified beta excludes ZDR/HIPAA/CMEK.",
+  "how": "Documented limitation list.",
+  "evidence": [
+   "https://support.claude.com/en/articles/16761823-claude-cowork-and-chat-are-one-claude",
+   "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon can ship branching + ZDR-compatible agent runs as differentiators.",
+  "notes": ""
+ }
+]

@@ -1,0 +1,847 @@
+[
+  {
+    "finalId": "F-t3-072",
+    "title": "Resilient routing: failure vocabulary, credential pools, benching, usage-limit and refusal fallbacks, provider health",
+    "searches": [
+      "Model Plane: FailureCode|failure_code|FailureClass|ProviderFailure|RetryPolicy|cooldown (files)",
+      "Model Plane: cooldown|credential.?pool|auth.?profile|bench|failover (case-insensitive)",
+      "Model Plane: usage.?limit|reset_at|resets_at|switch.?back|subscription_failure|SubscriptionFailure",
+      "Model Plane: refusal.*(fallback|reroute)|RoutingDecision|RoutingPolicy|cheap_fallback|BudgetPosture",
+      "Model Plane: provider.?health|health.?map|ListModels|list_models|availability",
+      "Model Plane: fallback_model|fallbackModel|fallback model|switch back (rust, go)",
+      "Frontend src: unavailable|greyed|disabledReason|modelHealth|providerStatus",
+      "Repo docs: BKL #25|auth-profile|usage limit|credential rotation",
+      "Go: importers of internal/failover outside _test.go files",
+      "Read: inference-core provider/mod.rs ProviderError enum; fallback.rs FallbackChain and ThrottleState"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+        "line": 940,
+        "why": "ProviderError typed failure enum: RateLimited, SubscriptionRefused, TooLong, AllExhausted; no auth/quota/timeout variant",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+        "line": 75,
+        "why": "FallbackChain: ordered providers with max_retries; no per-credential cooldown or benching map",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+        "line": 316,
+        "why": "ThrottleState: walk-scoped soonest retry-after, TooLong and refusal; not persisted benching",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+        "line": 299,
+        "why": "Rate-limit max wait from INFERENCE_RATE_LIMIT_MAX_WAIT_MS; in-request wait only",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+        "line": 309,
+        "why": "Maps subscription_usage_limit to typed UsageLimit refusal with plausible resets_at",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+        "line": 1485,
+        "why": "Test: usage-limit refusal carries reset time and retry-after",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/intent.rs",
+        "line": 207,
+        "why": "Exhausted budget forces RoutingPolicy.cheap_fallback; budget-triggered, not usage-limit-triggered",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/intent.rs",
+        "line": 223,
+        "why": "Per-turn Decision struct (model, mode, complexity, posture); docs say only logged",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/router-policy/components/RouterPolicyPage.tsx",
+        "line": 158,
+        "why": "Router policy UI has a Cheap fallback model setting",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/http_health.rs",
+        "line": 89,
+        "why": "Only healthz, readyz, metrics and policy routes; no provider health map",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/inference.proto",
+        "line": 493,
+        "why": "ModelInfo has features, privacy_tier and residency; no availability or health field",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/failover/failover.go",
+        "line": 1,
+        "why": "Go failover package: RetryPolicy, CircuitState, ProviderHealth types; no non-test importer found",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/failover/failover_test.go",
+        "line": 72,
+        "why": "Contract tests for failover config validation and JSON round-trip",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/availability.go",
+        "line": 122,
+        "why": "Capability availability derives state, reason_code and reason per capability",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx",
+        "line": 176,
+        "why": "Picker disables subscription model only for ZDR blocking, tooltip gives reason",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs",
+        "line": 280,
+        "why": "Redis-only cooldown breaker, not provider benching (weak match)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subscription_refusal.rs",
+        "line": 1,
+        "why": "Execution-core typing of ChatGPT-subscription refusals; contract module",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/subscription_failure.rs",
+        "line": 43,
+        "why": "Gateway trailer constants x-mp-retry-after-ms and x-mp-resets-at carry refusal timing",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/subscription_failure_contract.rs",
+        "line": 8,
+        "why": "Contract test: a usage-limit reset must reach the caller",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "line": 242,
+        "why": "Typed subscription refusal reasons with resets_at and retry fields",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md",
+        "line": 197,
+        "why": "BKL #25: multi-provider auth-profile failover in FallbackChain, open item",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+        "line": 140,
+        "why": "Audit: auth-profile rotation partial; no subscription-route failover by design",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/product-recordings/evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
+        "line": 237,
+        "why": "Recorded behaviour: usage-limit reset shown; no retry, no model switch",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+        "line": 128,
+        "why": "Doc: no RoutingDecision type; routing is request-level only",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+        "line": 634,
+        "why": "Doc: only sequential provider fallback exists, not a per-turn multi-model plan",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md",
+        "line": 70,
+        "why": "Status: Z-00 stopped silent subscription re-route under token ZDR, implemented",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/docs/gap-analysis.md",
+        "line": 34,
+        "why": "Doc says failover package has ProviderHealth; no runtime importer found",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/ZDR.md",
+        "line": 175,
+        "why": "Doc: inference-core ZDR refusal surfaced as a non-retryable error",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/README.md",
+        "line": 703,
+        "why": "Doc: subscription_usage_limit 429 contract, Retry-After and resets_at fields",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-074",
+    "title": "Editable permission rules, CEL policy and an MCP tool gate with consent receipts",
+    "searches": [
+      "Model Plane + Frontend src: PermissionRule|permission_rule|RuleStore|strictest|ask_session|dont_ask|always_allow|always allow",
+      "Model Plane + Frontend src + gateway: \\bcel\\b|cel-go|cel_interpreter|common expression language",
+      "Model Plane: consent.?receipt|argument_hash|canonical_args|canonical_json|single.?use",
+      "Model Plane: mcp__|mcp_call|mcp_catalog|dynamic MCP|reserved (execution-core, model-gateway, capability-core)",
+      "capability-core engine.go and execution-core capability_policy.rs: Allow/Deny/Ask decision types",
+      "execution-core hook/mod.rs: rule matcher and allow/deny/ask decisions",
+      "Frontend spaces approval UI: always/alltid button assertions",
+      "Repo docs (plans, Model Plane docs): dont-ask-again|standing rule|permission rule|editable rule"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx",
+        "line": 25,
+        "why": "Design note: one decision per approval; no standing always-allow scope",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.test.tsx",
+        "line": 45,
+        "why": "Test asserts no always-allow button in the approval room",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/policy/engine.go",
+        "line": 23,
+        "why": "Allow, deny and ask decisions per capability; no target-typed rules",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/policy/engine.go",
+        "line": 97,
+        "why": "EvaluateCapability keys on run, agent, org and scope; no domain or recipient targets",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/policy/engine.go",
+        "line": 199,
+        "why": "Durable scope-grant check per capability, org and scope; grants are capability-level",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+        "line": 25,
+        "why": "CapabilityDecision enum: Allow, Deny, Ask; no ask-for-session level",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+        "line": 836,
+        "why": "Dynamic MCP tools rejected until capability-core supplies a durable binding",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "line": 641,
+        "why": "Read-only gate refuses mcp__ names, mcp_call and mcp_catalog inline",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/hook/mod.rs",
+        "line": 55,
+        "why": "Hook rules match exact, prefix-star or any tool; allow, deny or ask decisions",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/hook/mod.rs",
+        "line": 192,
+        "why": "Test: ask rule with mcp__ prefix matcher on PreToolUse",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs",
+        "line": 8,
+        "why": "Bridge lists and proxies gateway MCP tools; best-effort, mcp__ namespaced",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/attestation.rs",
+        "line": 1,
+        "why": "Ed25519 provider-write attestation signer with jti; closest existing receipt analogue",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/attestation.rs",
+        "line": 234,
+        "why": "payload_sha256 over canonical JSON for provider writes only; no MCP use",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "line": 8727,
+        "why": "Single-use plan approval: claim by compare-and-swap before any injection",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+        "line": 437,
+        "why": "Compare-and-swap transition enforcing single-use plan approval",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 163,
+        "why": "Single-use state hash consumed on read; not bound to arguments",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/mcp_dns_revalidator.go",
+        "line": 14,
+        "why": "MCP server hostname re-resolution on an interval; egress guard, not a tool gate",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/models/capability.go",
+        "line": 16,
+        "why": "Capability kinds include mcp_server; registry-owned MCP records exist",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/go.work.sum",
+        "line": 32,
+        "why": "cel-go v0.25.0 checksum only; no CEL import found in Go or Rust code",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_DESIGN.md",
+        "line": 413,
+        "why": "Design target: Dont ask again shows and edits exact rule; not built",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-092",
+    "title": "Model Council: parallel multi-model answers with a disagreement synthesis",
+    "searches": [
+      "Model Plane rust/go/proto/python, Frontend src and gateway: council (case-insensitive) - no code hits",
+      "Model Plane rust/go and Frontend src: fan.?out|multi.?model|side.by.side|compare.?models|ensemble",
+      "Model Plane rust/go and Frontend src: synthesi[sz]|disagree|consensus",
+      "Frontend src: Sammenlign|compare models (UI strings)",
+      "Repo docs (Model Plane docs, plans): council|multi-model|model comparison"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotPlayground.tsx",
+        "line": 102,
+        "why": "Disabled Compare AI models button; comment says model comparison has no backend",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotPlayground.tsx",
+        "line": 116,
+        "why": "Playground model selector is a static GPT-5, GPT-5 mini, GPT-4.1 list",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs",
+        "line": 1,
+        "why": "Fans out N parallel research items of one model into one merged digest",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 4293,
+        "why": "subagent.research_fan_out: parallel isolated items merged with per-item status",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 13470,
+        "why": "Test: parent synthesis round over three partial findings, single model",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+        "line": 634,
+        "why": "Doc: only sequential provider fallback exists; deliberate multi-model plan is proposed",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+        "line": 3757,
+        "why": "Doc roadmap list item 5: selective multi-model ensembles (future)",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/skills/cost-aware-llm-pipeline.md",
+        "line": 182,
+        "why": "Skill doc mentions multi-model architectures; no implementation",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t3-095",
+    "title": "Second-order latency and cache levers: speed tier, prewarm, cache-preserving in-band changes, Responses continuation",
+    "searches": [
+      "Model Plane rust/go/proto, Frontend src and gateway: service_tier|serviceTier|speed tier|priority processing|prefer_priority",
+      "Model Plane, Frontend src and gateway: prewarm|pre_warm|warm-up - only unrelated warmups",
+      "Model Plane rust/go/python and Frontend src: previous_response_id|/v1/responses|Responses API - comments only",
+      "Model Plane rust/services: system_hash|tools_hash|prompt_cache_key|cache_control|cache.?preserv|prompt_context",
+      "Model Plane: latency_levers|turn_timing|cache.rs (model-gateway and inference-core)",
+      "Frontend src: fast mode / speed / priority toggle - only hurtig false positives",
+      "cost-core (Go): multiplier|priority pricing - no hits",
+      "Repo docs: prewarm|speed tier|previous_response_id - only a product recording doc"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+        "line": 153,
+        "why": "Request flag prefer_priority_service_tier: speed tier for subscription models only",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+        "line": 166,
+        "why": "codex_service_tier maps flag and thinking budget to serviceTier priority",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+        "line": 1046,
+        "why": "Tests: serviceTier absent unless priority is requested",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/source_validation.rs",
+        "line": 2281,
+        "why": "Gateway sets priority-tier flag internally from tool_reporting; no user toggle",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 1385,
+        "why": "Execution loop sets priority-tier flag false by default",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/latency_levers.rs",
+        "line": 1,
+        "why": "Kill-switch env pattern for latency levers; reusable for new levers",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+        "line": 93,
+        "why": "turn_timing module declared; per-turn timing instrumentation exists",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/cache.rs",
+        "line": 1,
+        "why": "In-memory non-streaming response cache: blake3 key, 5-minute TTL, ZDR bypass",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+        "line": 251,
+        "why": "Anthropic prefix cache_control breakpoints on tools, system and messages",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/openai.rs",
+        "line": 372,
+        "why": "OpenAI cache-write token accounting; Responses API named only in comments",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/product-recordings/evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
+        "line": 237,
+        "why": "Doc: product records no model switch and no retry before usage-limit reset",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-087",
+    "title": "Multi-file app build and preview: static web bundles first, built output next, screenshots through Quarry",
+    "searches": [
+      "model-gateway artifacts.rs and Frontend chat: ArtifactKind|artifact kind|bundle|files map",
+      "Frontend chat components: srcdoc|sandbox=|allow-scripts|allow-same-origin",
+      "Model Plane and Frontend src: multi.?file|project_files|ArtifactBundle (only a test hit)",
+      "Model Plane and gateway: preview_url|previewUrl|dev.server|expose_port|per-run origin (none)",
+      "execution-core: NO NETWORK|process_start|bwrap|background process",
+      "execution-core: screenshot|screenshot_ref (browser agent)",
+      "Repo docs: dev server|authenticated preview|static web bundle (none in improvement and audit docs)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+        "line": 33,
+        "why": "ArtifactKind: Code, Document, Html (one complete document), Spreadsheet, File, Image; no multi-file kind",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+        "line": 518,
+        "why": "HTML artifact in srcdoc iframe, sandbox allow-scripts, no same-origin",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 4090,
+        "why": "process_start: long-running background process in Space workspace; no network",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 4224,
+        "why": "Python or sh sandbox tool: no network, ephemeral workspace, files returned as base64",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+        "line": 1,
+        "why": "Hermetic code sandbox module: no network, read-only filesystem, workspace deleted per call",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/process_tools.rs",
+        "line": 1,
+        "why": "process_* tool family for background processes under one capability (S4.2)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/process_host.rs",
+        "line": 1,
+        "why": "OS side of background processes (S4.2 step 4); no preview or port exposure",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+        "line": 179,
+        "why": "Browser agent result type carries a screenshot_ref field",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAttachmentCanvas.tsx",
+        "line": 26,
+        "why": "Attachment preview component for chat files; not an app or site preview",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/tests/source_review_live.rs",
+        "line": 175,
+        "why": "Test: source review keeps multi-file context in one request; not an app build",
+        "kind": "test"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-088",
+    "title": "Code edit quality on demand: post-write diagnostics (decision H11) and an optional apply_patch format where a provider benefits",
+    "searches": [
+      "execution-core and model-gateway: post_mutation|post-mutation|diagnostic",
+      "Model Plane rust: apply_patch|applyPatch|apply patch|unified diff|patch format",
+      "model-gateway: lsp|LspQuery|language server",
+      "execution-core and model-gateway: lint|eslint|clippy|ruff|syntax check (no code-artifact lint hook)",
+      "Model Plane rust: file_edit|fs.edit|str_replace|write_file|edit_file",
+      "Repo plans: H11|post-write diagnostics|apply_patch"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/post_mutation.rs",
+        "line": 1,
+        "why": "Post-mutation verifier re-reads system of record for writes; not code diagnostics",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/lsp.rs",
+        "line": 1,
+        "why": "LSP bridge: typed pass-through to external LSP_BRIDGE_URL; no post-write diagnostics",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/coordinator.rs",
+        "line": 7,
+        "why": "Doc comment names write tool file_edit; no such tool is defined",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 1598,
+        "why": "Test fixture defines read_file, write_file and list_dir only; no edit tool",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 270,
+        "why": "H11 post-write diagnostics deferred to Wave 6; default is to skip",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 276,
+        "why": "H11 revisit only on a concrete user need",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 503,
+        "why": "OD18 options: skip H11 and H12, or build",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t3-070",
+    "title": "Tool efficiency at scale: a deferred tool index, typed tool outputs, code mode through a gated sandbox bridge, background jobs and WebMCP page tools",
+    "searches": [
+      "Model Plane rust/go, Frontend src and gateway: mcp_catalog|mcp_call|tool_search|tool_describe|staged disclosure",
+      "Model Plane rust/go: code.?mode|QuickJS|V8|isolate|tool.?RPC",
+      "Model Plane rust, Frontend shared/actions and gateway: output_schema|outputSchema|result_schema|typed output|structured_output_schema",
+      "Model Plane and Frontend src: webmcp|navigator.modelContext (no WebMCP hits)",
+      "execution-core, capability-core, gateway: run_in_background|background process|process_start|notify|watch",
+      "Repo docs: code mode|MCP code|WebMCP|BKL #11 (Model Plane docs, CHAT_PARITY_AUDIT)",
+      "Read: tool_result_handles.rs header; code_interpreter.rs header; runtime_registries.rs MCP tool definitions"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 594,
+        "why": "Staged disclosure: synthetic mcp_catalog and mcp_call tools (Level-1 summaries, Level-2 schema)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "line": 56,
+        "why": "MCP catalog cached for 60 seconds before refresh",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/argument_repair.rs",
+        "line": 5,
+        "why": "Argument repair for the staged mcp_call path (MP section 23.12)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs",
+        "line": 53,
+        "why": "Tool result handles: 900-second TTL, paged reads, 512 live-handle cap",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs",
+        "line": 76,
+        "why": "ToolResultHandle struct: stored tool payload with shape descriptor",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 4293,
+        "why": "subagent.research_fan_out: parallel isolated read-only items merged into one digest",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 2329,
+        "why": "Research fan-out takes a result_schema_hint for per-item output (hint only)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/llm_planner.rs",
+        "line": 204,
+        "why": "Planner call takes a structured_output_schema string; typed output, planner only",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+        "line": 1,
+        "why": "Code sandbox: JSON in and out, no network; no tool-RPC bridge back to Verevon tools",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+        "line": 774,
+        "why": "Background-process family (S4.2) gated under one capability id",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/process_tools.rs",
+        "line": 1,
+        "why": "process_* family owns background OS processes via ProcessHost (S4.2)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs",
+        "line": 8,
+        "why": "Bridge: ListMcpTools and ProxyMcpTool to gateway registry; best-effort",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/watch.go",
+        "line": 1,
+        "why": "S4.3 general Watch primitive: standing notify-me intent for runs and jobs",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 396,
+        "why": "Route /v1/runs/:run_id/watchers: notify-when-run-finishes subscription",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs",
+        "line": 1,
+        "why": "Gateway proxy for notify-when-run-finishes watchers, backed by capability-core",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+        "line": 221,
+        "why": "Doc matrix row: section 23.4 MCP code mode is GREENFIELD",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+        "line": 1888,
+        "why": "Doc section 23.4 MCP code mode and 23.5 code-mode safety",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+        "line": 43,
+        "why": "Audit: code mode not built; code_interpreter cannot call Verevon tools (BKL #11)",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-082",
+    "title": "Upgrade voice input: streaming dictation with a cleanup pass first, local speech-to-text for ZDR later, realtime delegation only if un-parked",
+    "searches": [
+      "Frontend src, gateway and Model Plane: dictat (files)",
+      "Frontend src: AudioWorklet|MediaRecorder|getUserMedia|16000|pcm",
+      "Model Plane, gateway and Frontend src: realtime|webrtc|RTCPeerConnection|realtime/session",
+      "Model Plane and Frontend src: whisper|sherpa|wasm speech|local transcription",
+      "features/voice and bridge-core: stay_silent|delegate tool (none)",
+      "features/voice: interim|partial transcript (none)",
+      "Frontend voice and audio-client: cleanup|clean-up (LLM cleanup pass present)",
+      "Repo plans and docs: OD19|duplex|parked"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts",
+        "line": 34,
+        "why": "Dictation returns cleaned text plus raw transcript and a cleaned flag",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts",
+        "line": 57,
+        "why": "dictateAudioBlob posts the whole recording to /api/v1/ai/dictate; no streaming",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts",
+        "line": 55,
+        "why": "Capture via MediaRecorder (webm/opus); no AudioWorklet or 16 kHz PCM path",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-mode-state.ts",
+        "line": 9,
+        "why": "VoicePhase union (blocked, ready, speaking, ...); no partial-transcript state",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx",
+        "line": 522,
+        "why": "UI shows the raw transcript when cleanup is unavailable",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+        "line": 1887,
+        "why": "Composer runs dictateAudioBlob after a take; one governed call per utterance",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs",
+        "line": 55,
+        "why": "Gateway routes dictate, speech and transcribe; proxies to model-gateway",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 425,
+        "why": "model-gateway /v1/ai/dictate route; one-shot audio request, no socket",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 448,
+        "why": "Realtime routes /v1/ai/realtime, /session and /models exist (session mint)",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs",
+        "line": 633,
+        "why": "realtime_voice content route is ZDR-refused via decide_content_route",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/realtime.rs",
+        "line": 1,
+        "why": "Realtime session broker module; no browser WebRTC client found in Frontend",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/speech.rs",
+        "line": 15,
+        "why": "Server-side STT via OpenAI whisper-1 and Azure whisper deployment; no local STT",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/voice/pipeline.go",
+        "line": 11,
+        "why": "STT, LLM and TTS provider interfaces for a voice pipeline; interfaces only",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/speech-playback.ts",
+        "line": 75,
+        "why": "16 kHz WAV header for TTS playback, not microphone capture",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/phase-6/voice.md",
+        "line": 60,
+        "why": "Doc: voice catalogue metadata and regional availability notes",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 230,
+        "why": "Doc: OD19 owner ruling listed as needed; duplex-voice parking not verified here",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  }
+]

@@ -1,0 +1,241 @@
+[
+  {
+    "finalId": "F-t3-086",
+    "title": "Review as a run: read-only reviewer subagent with strict P0-P3 findings, merged with the deterministic source checks",
+    "searches": [
+      "rg -i 'review_run|ReviewRun|review/start|ReviewStart|code_review|CodeReview|review_profile|subagent.review|findings_card|overall_correctness|code_location' over apps (code only)",
+      "rg word-bounded P0 to P3 priority regex and severity enums in model-gateway, execution-core and verevonv3 chat",
+      "rg 'source_validation|revision_preservation|ReviewProposalRule' in Model Plane model-gateway src",
+      "rg 'EvaluatorOptimizer|evaloptimizer|VerdictSchema|judge' in orchestrator-core and python eval-lab",
+      "rg 'verifier|critic|self_review|second_opinion|reviewer' in execution-core, model-gateway and orchestrator-core",
+      "rg -i 'review' in verevonv3 features/chat components and shared/chat-nodes (UI strings)",
+      "rg docs: 'review (run|start|subagent|profile|findings)|code review|findings card|P0 to P3' in *.md"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/source_validation.rs", "line": 1, "why": "Bounded review of exact text against attachments; part of the artifact path.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/source_validation.rs", "line": 7, "why": "Imports ReviewProposalRule; a rule type for review proposals already exists.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/revision_preservation.rs", "line": 1, "why": "Copies protected Markdown sections byte for byte from the accepted artifact.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/postcondition.rs", "line": 1, "why": "Deterministic postcondition verifiers for actions; not code or document review.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/internal/evaloptimizer/verdict.go", "line": 14, "why": "Judge verdict JSON schema: passed, score, feedback; additional properties refused.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/internal/evaloptimizer/loop.go", "line": 1, "why": "Evaluator-optimizer generator and judge loop with bounded rounds; I/O-free.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/evaluator_optimizer.go", "line": 14, "why": "EvaluatorOptimizerInput: configuration for a generator and judge run.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go", "line": 132, "why": "EvaluatorOptimizerWorkflow is on the StartWorkflow allowlist.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/cmd/main.go", "line": 387, "why": "Temporal worker registers EvaluatorOptimizerWorkflow.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/python/eval-lab-py/src/eval_lab/judge.py", "line": 1, "why": "Eval-lab LLM judge scores answers against a rubric; evaluation tooling.", "kind": "code"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-075",
+    "title": "Privacy by construction and a closed telemetry contract: user-content newtypes, allow-list scrubbing of telemetry, then org analytics and customer-owned telemetry export",
+    "searches": [
+      "rg 'RedactedString|Redacted<|UserContent|user_content|PrivacyContext|NoLog|SecretString|Sensitive<' in Model Plane rust, go and proto",
+      "rg 'allow.?list|ALLOWED_(LABEL|EVENT|NAME)|closed enum|saniti[sz]e|scrub_(label|attr|metric)' in mp-telemetry, mp-contracts and gateway metrics",
+      "rg 'scrub_json_value|scrub_string|fn scrub' in execution-core",
+      "rg 'OTEL_EXPORTER_OTLP|OTEL_LOG_USER_PROMPTS|capture_content|customer telemetry|telemetry export' across Model Plane, Control Plane and verevonv3",
+      "rg 'insights|SummariseUsage|usage summary|per user|by user' in verevonv3 features and audit-core",
+      "rg 'resolve|ZDR|zdr_retention|golden' in mp-contracts",
+      "rg docs: 'UserContent|RedactedString|allow-list telemetry|telemetry contract|customer telemetry|closed vocabulary'"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox_manager_client.rs", "line": 98, "why": "RedactedArgv: argv pre-redacted before registry; a type-level precedent only.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/scrub.rs", "line": 11, "why": "Scrubbing runs before any persistence, including SaveCheckpoint writes.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/scrub.rs", "line": 148, "why": "scrub_string: string-level scrubbing helper used before persistence.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/security_events.rs", "line": 7, "why": "Security events carry metadata and content hashes only, never flagged content.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/gateway_metrics.rs", "line": 1, "why": "Prometheus metrics setup and middleware for model-gateway requests and streams.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-telemetry/src/lib.rs", "line": 35, "why": "Reads OTLP endpoint from env; no allow-list match in this crate.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/deploy/docker-compose.yml", "line": 218, "why": "Compose sets OTLP endpoint to otel-collector; no customer export config found.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/retention.rs", "line": 1, "why": "ZDR retention resolver: the single pure decision for zero-retention turns.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/tests/zdr_retention_matrix.rs", "line": 338, "why": "Golden test: the real ZDR resolver answers every enforcement row.", "kind": "test"},
+      {"path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/store/store.go", "line": 425, "why": "UsageSummary rolled-up shape feeding the settings usage route.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/api.go", "line": 33, "why": "SummariseUsage on the audit API interface; org-scoped usage rollups.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/insights/components/UserUsageSection.tsx", "line": 28, "why": "Insights section shows AI usage per user across the team.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/insights/components/InsightsPage.tsx", "line": 21, "why": "Insights page mounts the per-user usage section.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/insights/lib/knowledge-insights.ts", "line": 4, "why": "Knowledge insights snapshot type, not agent-run outcome analytics.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/gap-quarry.md", "line": 296, "why": "Quarry docs: OpenTelemetry exporters wired in Rust and Go services.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-071",
+    "title": "Coordinator-mode orchestration on Temporal with typed child results, a fleet panel and gated fan-out",
+    "searches": [
+      "rg -i 'coordinator' in Model Plane rust, go and proto, verevonv3 src and gateway",
+      "rg -i 'fleet' in Model Plane, verevonv3 src and gateway; rg '/v1/fleets' across apps",
+      "rg 'TeamWorker|team_worker|TeamCreate|TeamList|TeamDelete' across apps",
+      "rg -i 'structured_output|StructuredOutput|output_schema|outputSchema|result_schema' in Model Plane and verevonv3",
+      "rg -i 'WideResearch|wide_research|DeepTask|deep_task|best-of-N|bestOfN|battle mode' in Model Plane and verevonv3",
+      "rg 'StartWorkflow|start_workflow|DefaultWorkflowType' in capability-core, orchestrator-core, Rust services and gateway",
+      "rg 'batch_id|batchId' in subagent, proto and chat UI; rg 'FleetOrchestrator' across apps",
+      "rg docs: 'coordinator mode|fleet console|best-of-N|typed handoff|handoff report' in *.md"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/coordinator.rs", "line": 1, "why": "Header: plan-mode and team-worker stores, both intentionally in-memory.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/coordinator.rs", "line": 401, "why": "TeamWorkerStore is an in-memory DashMap; worker states are pending through completed or failed.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc.rs", "line": 1399, "why": "TeamCreate, TeamDelete and TeamList RPC handlers wired to the in-memory team store.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/gateway.proto", "line": 80, "why": "TeamCreate, TeamDelete and TeamList RPCs declared for coordinator-mode worker tracking.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go", "line": 126, "why": "WideResearchWorkflow and DeepTaskWorkflow are on the StartWorkflow allowlist.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go", "line": 132, "why": "EvaluatorOptimizerWorkflow is allowlisted: generator and judge loop with bounded rounds.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/wide_research.go", "line": 37, "why": "WideResearchWorkflow: parallel query fan-out with fan-in merge.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go", "line": 73, "why": "InteractiveRunSupervision: Temporal workflow driving an agent run with approval and cancel signals.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher.go", "line": 229, "why": "Scoped scheduled fires reject every workflow type except InteractiveRunSupervision.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx", "line": 84, "why": "Schedules UI offers only InteractiveRunSupervision; DeepTask and WideResearch hidden as unfireable.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs", "line": 1, "why": "subagent.research_fan_out: N parallel items with structured per-item results and merged digest.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs", "line": 42, "why": "Fan-out kill switch via WIDE_RESEARCH_FAN_OUT_ENABLED and a concurrency env var.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs", "line": 2329, "why": "Fan-out item prompts carry an optional result_schema_hint from the parent call.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/orchestration.proto", "line": 980, "why": "Two or more attached edges sharing a batch_id render as one fan-out group.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx", "line": 210, "why": "Wide-research fan-out cards already render in the chat run rail for batched items.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx", "line": 690, "why": "Fan-out card grid appears once a run has at least two items sharing a batchId.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx", "line": 573, "why": "Agent run console names fan-out items from subagent-attached events.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx", "line": 28, "why": "Fleet console fetches GET /v1/fleets/:id and budget from the same origin.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/app/App.tsx", "line": 216, "why": "Route /agents/fleets/:fleetId mounts FleetRunConsole.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/nginx.conf", "line": 74, "why": "Only location /api/ is proxied to the gateway; no /v1/ location block exists.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/fleet_routes.rs", "line": 219, "why": "Quarry-v2 edge serves POST /v1/fleets; the route lives outside the Verevon gateway.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/fleet/fleet.go", "line": 4, "why": "Quarry FleetOrchestrator Temporal workflow drives fleet budget and member fan-out.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/migrations/014_fleets.sql", "line": 1, "why": "Durable fleet envelope for budget-coordinated agent batches in Quarry-control.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md", "line": 1812, "why": "Decision: typed handoff report deferred until code must branch on outcomes.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md", "line": 3389, "why": "States adaptive test-time compute is replacing fixed best-of-N.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md", "line": 186, "why": "Plan mentions a fleet console compatibility check; document only.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-097",
+    "title": "Tighten-only runtime monitors: asynchronous action reviewer and information-flow control",
+    "searches": [
+      "rg -i 'auto_review|auto-review|guardian|risk_score|riskScore|reviewer_model|classifier_verdict' in Model Plane and verevonv3 (none found)",
+      "rg -i 'taint|information_flow|classification_level|sensitivity|downgrade|max_input_level|data_classification' across Model Plane, verevonv3, Control Plane and Data Plane",
+      "rg -i 'consecutive_denials|circuit_breaker|NeverAuto|force_ask|forceAsk|restricted_context' in execution-core, capability-core and crates",
+      "rg 'is_restricted_context_write|requires_consent_to_disclose|is_risky_call|is_risky_tool|evaluate_call' in execution-core permission/mod.rs",
+      "rg -i 'privacy_tier|privacy tier' in capability-core migrations and verevonv3 shared/api",
+      "rg 'ContentSafety|shadow|semantic' in model-gateway semantic_screening.rs and tool_loop.rs",
+      "rg docs: 'auto-review|guardian|taint|information-flow|data classification'; read ownership matrix rule 12"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs", "line": 31, "why": "evaluate: policy by mode and tool name; no reviewer step found.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs", "line": 43, "why": "evaluate_call: per-call policy evaluation entry point.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs", "line": 160, "why": "requires_consent_to_disclose: consent predicate for the subagent results read tool.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs", "line": 181, "why": "is_restricted_context_write: blocks save_memory writes in restricted contexts.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs", "line": 195, "why": "is_risky_call: argument-aware risk classifier for tool calls.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs", "line": 229, "why": "is_risky_tool: keyword-list risk check by tool name, per its doc comment.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs", "line": 1, "why": "ContentSafety shadow pass on external tool payloads; never changes what the model reads.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs", "line": 639, "why": "inline_tool_allowed: inline tool admission gate; described in code as a denylist.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql", "line": 15, "why": "Adds privacy_tier column with default unspecified to the models table.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/privacy-tier.ts", "line": 143, "why": "Privacy-tier routing: sovereign pinning narrows the provider fleet to Norway-resident providers.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/integrations-client.ts", "line": 77, "why": "Integration data classification label: public, organization or customer.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/support.rs", "line": 261, "why": "Ticket summaries carry a data_classification field set to support_summary.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/master-ownership-matrix.md", "line": 168, "why": "Ownership rule 12: provider execution never invents approval authority.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-084",
+    "title": "Per-Space environment specs and prebuilt sandbox images",
+    "searches": [
+      "rg 'setup_script|setupScript|base_image|baseImage|prebuild|prebuilt|environment_spec|EnvironmentSpec|env_spec' in Model Plane and verevonv3 (only Azure prebuilt model ids matched)",
+      "rg 'image_build|ImageBuild|build_image|sandbox_image|sandboxImage|DEFAULT_IMAGE|SANDBOX_IMAGE' in execution-core and sandbox-manager",
+      "rg -i 'image' in sandbox-manager non-test sources",
+      "rg 'network_policy|NetworkPolicy|MpNetworkPolicy|AllowDomains' in execution-core",
+      "rg 'secret_ref|secretRef|SecretRef|injection proxy|credential_proxy' in execution-core and sandbox-manager (no hits)",
+      "rg docs: 'environment spec|prebuilt sandbox image|setup script|base image' (only unrelated setup-script docs)"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs", "line": 94, "why": "Fixed runtime image: python with pandas, openpyxl and matplotlib; no per-Space spec.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs", "line": 581, "why": "Code interpreter network policy is hard-set to Disabled.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/policy.rs", "line": 23, "why": "MpNetworkPolicy enum: Disabled or AllowDomains; a per-call policy, not a Space spec.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs", "line": 356, "why": "Some tool classes get an AllowDomains egress list per call.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/Dockerfile", "line": 33, "why": "Dockerfile sets image labels only; no environment or setup configuration.", "kind": "config"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/inference.proto", "line": 1013, "why": "False positive: prebuilt-layout is an Azure Document Intelligence model id.", "kind": "code"}
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t3-085",
+    "title": "Sandbox computer extensions: persistent machine mode, execution-target picker, authenticated dev-server preview",
+    "searches": [
+      "rg 'device_ref|deviceRef|execution_target|executionTarget|cloud_computer|cloudComputer' in Model Plane, verevonv3 src and gateway (no hits)",
+      "rg 'persistent_(disk|machine|sandbox|lease|workspace)|persist_disk|keep_disk|always_on|persistent' in execution-core code_interpreter and sandbox-manager",
+      "rg 'listening_port|port_forward|dev_server|preview_url|previewUrl|preview_port|SandboxPreview' in Model Plane and verevonv3 (only file previews matched)",
+      "rg 'BrowserGrant|browser_grant|validate_browser_grant|hosted browser' in execution-core and gateway browser domain",
+      "rg 'srcdoc|sandbox=' in ChatArtifactPanel and ChatAttachmentCanvas",
+      "rg docs: 'persistent (machine|computer|disk)|cloud computer|dev-server preview|device_ref|execution target'"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs", "line": 375, "why": "Names a Space-scoped lease persistent workspace directory; file-level persistence only.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs", "line": 521, "why": "Ephemeral versus Space-scoped persistent root, selected by a persistent flag.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs", "line": 1245, "why": "Test: persistent workspace is reused and not deleted between calls.", "kind": "test"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go", "line": 104, "why": "UpsertOverlay: Space-scoped workspace overlay rows keyed by org, Space and run.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs", "line": 36, "why": "ValidatedBrowserGrant type; browser actions take a validated grant argument.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs", "line": 1259, "why": "Comment discusses durable BrowserGrant record issuance; current status not read.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAttachmentCanvas.tsx", "line": 180, "why": "Attachment canvas renders previewUrl in an iframe; file previews, not dev servers.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx", "line": 518, "why": "HTML artifacts render in a sandboxed srcdoc iframe with allow-scripts only.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md", "line": 215, "why": "Research note describes a persistent cloud computer with browser and filesystem.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/FOLLOWUP_TASKS_2026-08-28.md", "line": 319, "why": "Quarry follow-up task W1 proposes per-agent dedicated cloud computer isolation.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-076",
+    "title": "Changed-files card per turn and a review gate before workspace promotion (accept or reject by file or hunk, with feedback to the agent)",
+    "searches": [
+      "rg 'ChangedFile|changed_files|changedFiles|WorkspaceChangedFile' in Model Plane rust, go and proto, and verevonv3 src and gateway",
+      "rg 'diff_and_upload|workspace_hydrate|base_hash' in execution-core",
+      "rg 'PromoteWorkspace|UpsertOverlay|promote_workspace|overlay' in sandbox-manager and proto",
+      "rg -i 'accept(File|Hunk|Change)|reject(File|Hunk|Change)|hunk' in verevonv3 chat, spaces and chat-nodes (no accept or reject controls found)",
+      "rg 'turn diff|showChanges|DiffView|revisionDiff|parseUnifiedDiff' in verevonv3 chat",
+      "rg 'endrede filer|filer endret|files changed|changed files' in verevonv3 src (no hits)",
+      "rg docs: 'changed files card|review gate|accept.{0,20}reject|per-hunk|PromoteWorkspace' in *.md"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs", "line": 35, "why": "diff_and_upload output type: changed or new file with hash and base_hash.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs", "line": 102, "why": "diff_and_upload compares the workspace to its baseline and returns changed files.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs", "line": 503, "why": "Diff runs at lease release; output feeds the SnapshotSandbox overlay upload.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/state.rs", "line": 91, "why": "Run keeps its workspace baseline so diff_and_upload can run at release.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go", "line": 42, "why": "sandbox-manager ChangedFile record for a run's overlay rows.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go", "line": 227, "why": "SnapshotSandbox writes changed files into the Space workspace overlay.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go", "line": 309, "why": "PromoteWorkspace merges a Space-scoped lease's own workspace files into the Space.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sandboxes.proto", "line": 252, "why": "Comment: PromoteWorkspace uses a compare-and-swap merge, not SnapshotSandbox.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sandboxes.proto", "line": 193, "why": "Repeated WorkspaceChangedFile changed_files field exists in the sandbox proto.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx", "line": 1942, "why": "DiffView renders unified diffs in chat; no accept or reject controls found.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx", "line": 2086, "why": "Tool outputs rendered through parseUnifiedDiff into DiffView.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx", "line": 413, "why": "Artifact panel shows revision diffs through DiffView.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts", "line": 137, "why": "Hunk computation between two texts with bounded context.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md", "line": 594, "why": "Design doc defines an explicit PromoteWorkspace step with lease and backend ids.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t3-069",
+    "title": "Rewind with undo preview, read-only side chat and spin-off tasks, built on the message tree",
+    "searches": [
+      "rg -i 'rewind' across apps code and docs (no user-facing rewind in code)",
+      "rg -i 'side[_ -]?chat|sidechat|SideChat|sidePane|side_pane' across apps code (no hits)",
+      "rg -i 'spin[_ -]?off|spinoff|spawn_task|spawnTask|backlog chip|draft thread' across apps code (no hits)",
+      "rg 'active_leaf|parent_message_id|parentMessageId|message_tree|fork_thread|ephemeral_(child|fork|session)' across apps code",
+      "rg 'RestoreCheckpoint|restore_checkpoint|SaveCheckpoint|save_checkpoint|undo_(turn|run|edit)' across apps code",
+      "rg -i 'regenerat|editMessage|edit_message|retryTurn|resendMessage|siblings' in verevonv3 chat, shared and session-core",
+      "rg -i 'temporary[_ -]?chat|ephemeral[_ -]?(chat|turn|thread)' in verevonv3 and model-gateway; rg 'inline_tool_allowed' in model-gateway",
+      "rg docs: 'rewind|side chat|spin-off|parent_message_id' in *.md and *.json"
+    ],
+    "hits": [
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs", "line": 4872, "why": "SaveCheckpoint RPC persists run checkpoints; no user-facing restore path found.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/compaction.rs", "line": 1, "why": "Periodic additive checkpoint compaction loop; inserts watermark checkpoints per run.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs", "line": 184, "why": "Artifact store fork_thread creates per-thread draft version state, not a chat fork.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs", "line": 2143, "why": "Forks artifact version state per session thread during a turn.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/gateway.proto", "line": 250, "why": "InvokeRequest parent_message_id (field 21) declared; no Rust or Go handler reads it.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts", "line": 335, "why": "Frontend parses parentMessageId from AG-UI payloads; no server-side branching seen.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions.ts", "line": 2, "why": "Client-only sibling versions for regenerate or edit of the final exchange; not persisted.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts", "line": 557, "why": "Turn flags mark regenerate and edited resubmit sends for the feedback classifier.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts", "line": 315, "why": "Versions deliberately not persisted; reload clears sibling answers.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx", "line": 185, "why": "Effectful turns cannot be edited or regenerated in place; relevant to non-rewindable marking.", "kind": "code"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions.test.ts", "line": 38, "why": "Test: creating sibling versions for the trailing exchange.", "kind": "test"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md", "line": 0, "why": "Spec referenced by chat-versions.ts; file exists in Model Plane docs.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md", "line": 71, "why": "Backlog item 7: checkpoint and rewind of conversation plus workspace state.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Model Plane/docs/chat-parity-audit.md", "line": 240, "why": "Branch and fork rated partial; message-level fork via parent_message_id not built.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md", "line": 252, "why": "Plan item I11 schedules checkpoint and rewind with non-rewindable marking.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-parity-audit-2026-10-01.json", "line": 1000, "why": "Audit marks restore-conversation missing; event-sourced per-turn snapshot needed.", "kind": "doc"},
+      {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md", "line": 268, "why": "Doc notes the QM reference lacks siblings and rewind; both were planned P2.", "kind": "doc"}
+    ],
+    "impression": "partial"
+  }
+]

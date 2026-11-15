@@ -1,0 +1,1079 @@
+[
+ {
+  "finalId": "F-t3-054",
+  "title": "Web reading upgrade: chunked long-page reader and a batched, reference-id web tool",
+  "searches": [
+   "rg -i \"MAX_FETCH_CHARS|fetch_url\" model-gateway, execution-core",
+   "rg \"read_page|find_in_page|outline|chunk\" model-gateway, execution-core (no chat-tool hits)",
+   "rg \"ToolResultHandle|result_query|handle_or_inline\" model-gateway",
+   "rg \"web_search|queries\" model-gateway, execution-core",
+   "rg \"select_passages|scrape_readable|dns_guard\" model-gateway, Quarry-v2",
+   "NEG repo-wide \"read_page|find_in_page|findInPage|readPage\": only deep_research read_pages and unrelated paging hits",
+   "rg -i \"4,000 char|MAX_FETCH\" repo docs"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 125,
+    "why": "fetch_url inline cap of 4,000 characters; longer pages are cut.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 4304,
+    "why": "web_search schema takes one query plus limit; no queries array.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 4359,
+    "why": "fetch_url schema takes only url; no chunk, outline or reference parameters.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 2987,
+    "why": "fetch_url arm calls scrape_readable with one browser escalation.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/quarry.rs",
+    "line": 606,
+    "why": "scrape_readable returns readable page text from Quarry; escalates to browser once.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grounding.rs",
+    "line": 438,
+    "why": "select_passages picks question-relevant passages from page text.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grounding.rs",
+    "line": 976,
+    "why": "Deep research passes page text through select_passages.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "line": 3220,
+    "why": "Sub-queries run concurrently through the audited web_search path (deep research only).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "line": 3303,
+    "why": "read_pages is the deep-research page-read phase, not a chat tool.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs",
+    "line": 76,
+    "why": "ToolResultHandle plus result_query paging for large structured results.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 2188,
+    "why": "Built-in Verevon reads park oversized JSON under handles; web tools do not.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 2328,
+    "why": "duplicate_call_signature suppresses exact repeats of fetch_url and web_search.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/web_tools.rs",
+    "line": 38,
+    "why": "execution-core fetch path caps at 8,000 characters with a truncation marker.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/web_tools.rs",
+    "line": 313,
+    "why": "Fetch truncates markdown and appends a dropped-characters note.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fetch.rs",
+    "line": 14,
+    "why": "Quarry fetch uses dns_guard pinned resolver; SSRF preflight present.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs",
+    "line": 21,
+    "why": "dns_guard module exported from quarry-runtime.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "line": 194,
+    "why": "Deep research budgets 5,000 characters per wanted page.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grounding.rs",
+    "line": 238,
+    "why": "MAX_PAGE_SCAN_CHARS: 60,000 character scan window per page.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 186,
+    "why": "MAX_TOOL_OUTPUT_CHARS 8,000 inline cap for tool results.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/WEB_SOURCE_QUALITY_AUDIT_2026-09-15.md",
+    "line": 302,
+    "why": "Audit records 4,000 fetch and 8,000 tool output caps.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PAGE_GAP_PLAN_2026-09-28.md",
+    "line": 220,
+    "why": "Plan records long-document visibility bug at 8,001 to 24,000 characters.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-056",
+  "title": "Connectors: in-chat suggestion cards with resumable connect, and editable write confirmation with per-tool policy",
+  "searches": [
+   "NEG repo-wide \"suggest_connector|suggestConnector|connect_intent|connectIntent|use_when\": no code hits",
+   "rg \"is_write|CatalogOp|requires_approval|risk_level\" execution-core, capability-core",
+   "rg \"always ask|ask once|always allow|blocked\" tool policy levels: none found",
+   "rg \"ApprovalCard|ProposalCard|MailDraft|CalendarEventCard|awaiting_approval\" frontend chat and shared",
+   "rg \"HookDecision|Decision::Ask|decision.*ask\" execution-core",
+   "rg \"awaiting_approval|onApproval\" chat-client, ChatLiveRunPanel",
+   "rg \"G7|G8|G13\" CHAT_GAP_CLOSURE_PLAN doc rows"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs",
+    "line": 56,
+    "why": "CatalogOp carries is_write for each provider operation.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs",
+    "line": 76,
+    "why": "Write operations flagged, e.g. pages.post and WhatsApp send.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs",
+    "line": 101,
+    "why": "gmail.send and mail.send flagged is_write; read operations separate.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs",
+    "line": 71,
+    "why": "Static agent-facing CATALOG; no suggestion or use_when text.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+    "line": 221,
+    "why": "requires_approval flag on each tool feeds the policy evaluation.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+    "line": 399,
+    "why": "Policy decisions allow, ask or deny; no user-set policy levels.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/hook/mod.rs",
+    "line": 43,
+    "why": "HookDecision allow, deny or ask; ask routes to approval.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "line": 561,
+    "why": "Hook Ask returns awaiting_approval, pausing the run.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/availability.go",
+    "line": 151,
+    "why": "Availability exposes requires_approval and risk_level per capability.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/ActionCommand.tsx",
+    "line": 68,
+    "why": "Action preview shows approval gated or direct run.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+    "line": 338,
+    "why": "Live approval events feed the run activity panel.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.ts",
+    "line": 224,
+    "why": "awaiting_approval status mapped to a UI event.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs",
+    "line": 1,
+    "why": "Post-approval continuation dispatcher runs approved actions.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 241,
+    "why": "G7: calendar, drive and sheet write operations planned, not built.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-063",
+  "title": "Loop guard, durable org hooks and universal tool-output handles in both loops",
+  "searches": [
+   "NEG repo-wide \"LoopGuard|loop_detected|loop_guard|no_progress\": only unrelated orchestrator dual-write SelfLoopGuard test",
+   "rg \"MAX_TOOL_ROUNDS|DEFAULT_MAX_ROUNDS|max_steps\" model-gateway, execution-core",
+   "rg \"duplicate_call_signature|exact repeat|duplicate knowledge_search\"",
+   "rg \"retry|truncated_tool_call|length\" model-gateway, execution-core",
+   "rg \"hook_context|HookRegistry|hook_context_json\" model-gateway, execution-core, proto",
+   "rg \"ToolResultHandle|handle_or_inline_output|result_query\" model-gateway",
+   "NEG rg \"repetition|degenerate|n-gram\" response repetition detector: none"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 52,
+    "why": "Default 12 tool rounds, ceiling 32, env override.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 6490,
+    "why": "Seen-call state persists across rounds, so later exact repeats are caught.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 6598,
+    "why": "Tool loop is a bounded for-loop over rounds; stops on max rounds, not no-progress.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "line": 270,
+    "why": "Agent loop: default 12 rounds, ceiling 32.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "line": 2745,
+    "why": "Step loop ends with reason max_steps exceeded.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 2320,
+    "why": "duplicate_call_signature suppresses exact repeats of read-only calls.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 7191,
+    "why": "Identical calls in the same round are deduplicated like repeats.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "line": 1829,
+    "why": "Exact duplicate knowledge_search suppressed; model told to reformulate.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs",
+    "line": 214,
+    "why": "truncated_tool_call_index refuses a cut-off final tool call.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "line": 3143,
+    "why": "Empty plan gets one retry on the turn's model (deep research only).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+    "line": 2003,
+    "why": "HookRegistry lives in gateway memory; not durable across restarts.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+    "line": 2032,
+    "why": "hook_context_json serializes an org's enabled hooks for execution-core.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tools.rs",
+    "line": 211,
+    "why": "code_interpreter step forwards org hook rules to execution-core.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+    "line": 418,
+    "why": "Browser runs forward hook_context to execution-core steps.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "line": 285,
+    "why": "ExecuteStepRequest has hook_context; the agent run request has none.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/hook/mod.rs",
+    "line": 43,
+    "why": "HookDecision allow, deny or ask; rules arrive via hook_context JSON.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs",
+    "line": 76,
+    "why": "ToolResultHandle store; result_query pages a parked result.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 2188,
+    "why": "verevon_read_outcome parks oversized built-in read results under handles.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 3805,
+    "why": "Handles are skipped on ZDR turns; raw truncation kept.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 186,
+    "why": "MAX_TOOL_OUTPUT_CHARS 8,000 inline threshold for tool results.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/internal/compat/e2e_test.go",
+    "line": 377,
+    "why": "Unrelated: dual-write SelfLoopGuard test in orchestrator-core.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+    "line": 1941,
+    "why": "Design doc sketches the ToolResultHandle interface.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/GATEWAY_DEDUPLICATION_PLAN.md",
+    "line": 130,
+    "why": "Plan text: forward hook_context to ExecuteStepRequest for execution-core hooks.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-053",
+  "title": "Claim-level citations and research deliverables: chips bound by number, per-claim support view, a cited-passage source viewer, finished export and provenance on reports",
+  "searches": [
+   "rg \"claim_id|claim anchor|citation_anchors\" model-gateway and frontend chat",
+   "rg \"InlineCitationMarker|only promoted|[n]\" frontend chat",
+   "rg \"authority|sourceAuthority\" Data Plane, frontend, gateway",
+   "NEG repo-wide \"source_viewer|SourceViewer|passage_locator|cited passage\": no code hits",
+   "rg \"export|docx|pdf|sources\" chat-export and ChatArtifactPanel",
+   "rg \"SourcesPanel|sourceGroupId\" frontend chat",
+   "NEG rg \"check sources|per-claim|claimSupport|supportView\" repo: no code hits",
+   "rg \"sourceTrace|provenance\" frontend and gateway"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs",
+    "line": 5,
+    "why": "Server claim anchors: claim_id plus character offsets for markers.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs",
+    "line": 119,
+    "why": "claim_id built per paragraph segment; anchors answer text, not the source.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "line": 205,
+    "why": "Citation event carries claim_id, start and end offsets.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "line": 2139,
+    "why": "report_context_message restates the [n] citation contract for the answer model.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "line": 105,
+    "why": "Citation model carries sourceGroupId and label; no passage locator.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "line": 1353,
+    "why": "normalizeCitation keeps server claimId and sourceGroupId.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+    "line": 1118,
+    "why": "Client promotes [n] markers only when in range; never guesses support.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+    "line": 1127,
+    "why": "InlineCitationMarker chip with grouped source popover.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "line": 637,
+    "why": "SourcesPanel shows evidence sources for the latest answer.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "line": 243,
+    "why": "Export passes citation titles and URLs to the export helper.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/docx.ts",
+    "line": 242,
+    "why": "Word export appends a Sources section with titles and URLs.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "line": 253,
+    "why": "Export menu offers Word, Excel, PowerPoint and PDF.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/ingestions-client.ts",
+    "line": 69,
+    "why": "Ingestion record exposes a sourceTrace object; not a passage locator.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAttachmentCanvas.tsx",
+    "line": 146,
+    "why": "Attachment provenance label only; no link to a cited passage.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/data-quality-go/internal/trust/scorer.go",
+    "line": 25,
+    "why": "Data Plane trust scorer has a sourceAuthority map; not shown in chat.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/pdf.rs",
+    "line": 99,
+    "why": "PDF pages iterated with page numbers; a page-level locator building block.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md",
+    "line": 149,
+    "why": "Plan: server-issued claim anchors and source groups.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_DESIGN.md",
+    "line": 395,
+    "why": "Claim-level span binding logged as an unbuilt UI marker.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 218,
+    "why": "I6: citation chips bind by number; planned.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/feature.md",
+    "line": 673,
+    "why": "Source viewer named in a Model Plane feature list; status unclear.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 228,
+    "why": "Exit criteria require a real PDF download from an answer (H3).",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-047",
+  "title": "Event-triggered automations: normalised connector events from Ingestion wake budgeted runs, with wake gates, dry runs, blueprints and consent-first suggestions",
+  "searches": [
+   "rg \"Trigger|trigger_id|event_trigger|on_event\" capability-core, execution-core, gateway",
+   "NEG rg \"wake_gate|wakeGate|source_hash|SILENT\" capability-core and gateway: no hits",
+   "rg \"automation|scheduled_run|cron\" capability-core, orchestrator-core, gateway",
+   "rg \"suggestion|dedup|latch\" capability-core and gateway (no trigger suggestions)",
+   "rg \"webhook_received|provider.webhook|Publish|Subscribe\" integration-corev2, Application Plane, Model Plane",
+   "NEG rg \"dry_run|dryRun|blueprint\" in capability-core: none (blueprints are agent UI only)",
+   "rg \"TriggerOnce|TriggerContinuous|SourceKind\" capability-core watch",
+   "NEG repo-wide \"webhook_received\" consumers in Model Plane: none"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/watch.go",
+    "line": 87,
+    "why": "Watch trigger modes once and continuous; continuous unimplemented, process-output only.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/predicate.go",
+    "line": 10,
+    "why": "Closed predicate set (any, contains, state change); deliberately no regex.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/watch.go",
+    "line": 97,
+    "why": "Only source kind is process_output; no connector or provider source.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql",
+    "line": 1,
+    "why": "Watch primitive: standing intent bound to one resource in one Space.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go",
+    "line": 8,
+    "why": "JetStream durable consumer with manual ack; run-finished notify only.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "line": 584,
+    "why": "startRunWatchConsumer binds the run-watch JetStream consumer.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "line": 778,
+    "why": "Learning-review JetStream consumer: existing event-consumer wiring pattern.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/nats.rs",
+    "line": 1,
+    "why": "JetStream consumer for tool-completion events in session-core.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/cmd/main.go",
+    "line": 152,
+    "why": "StartScheduledRunActivity registered; scheduled runs run through Temporal.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "line": 51,
+    "why": "/api/v1/cron routes: time-based schedules with expression and timezone.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "line": 449,
+    "why": "create_cron proxies to capability-core; validates expression, seeds next_fire_at.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx",
+    "line": 149,
+    "why": "\"Schedule this request\" starts a time-based scheduled run from chat.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/schedule-from-chat.ts",
+    "line": 30,
+    "why": "createScheduleFromChat client: time-based schedules only, no event filter.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs",
+    "line": 1,
+    "why": "Notify-when-run-finishes subscription; not an event trigger.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts",
+    "line": 146,
+    "why": "Immediate scheduled-run trigger; its comment says control-plane stub.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 2663,
+    "why": "\"Trigger integration sync\" is manual, on-demand, not event-driven.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+    "line": 1079,
+    "why": "Publishes verevon.ingestion.integration.webhook_received for normalised webhooks.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/services/webhook-normalizer-rs/src/lib.rs",
+    "line": 80,
+    "why": "Normalises inbound provider webhooks to provider.webhook event type.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/events/publisher.go",
+    "line": 68,
+    "why": "NATS publisher; subject derived from event type with configurable prefix.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/consumers/webhook_received_consumer.go",
+    "line": 18,
+    "why": "Application Plane consumes webhook_received; no Model Plane consumer found.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/provisioner/provisioner.go",
+    "line": 355,
+    "why": "Audit consumer subscribes to webhook_received.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+    "line": 259,
+    "why": "Slack and Teams continuity blocked behind S4 and Channel Plane.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_RELEASE_EVIDENCE.md",
+    "line": 1109,
+    "why": "Learning NATS trigger test on RUN_COMPLETED subscription.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/INGESTION_PLANE_DEEP_DIVE.md",
+    "line": 85,
+    "why": "Lists support-event-triggered operational automations as intent.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-059",
+  "title": "Plugin manifest loader with supply-chain pins, cross-vendor adapters and an org-curated catalogue",
+  "searches": [
+   "rg \"plugin\" capability-core internal and cmd",
+   "rg \"plugin_packages\" capability-core migrations",
+   "rg \"manifest|digest|sha256|commit|kill|removed\" plugin files",
+   "NEG repo-wide \"agent-plugins|claude-plugin|codex-plugin|cursor-plugin|plugin loader\": docs only, no code",
+   "rg \"PluginsSection|plugins-client|/api/v1/plugins\" frontend and gateway",
+   "NEG rg \"catalog|catalogue\" with plugins: none"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/plugins.go",
+    "line": 15,
+    "why": "Durable per-org plugin registry; manifest may contribute tools, skills, hooks.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/plugins.go",
+    "line": 18,
+    "why": "Registration is inert until a host loads the manifest; no loader found.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/plugins.go",
+    "line": 41,
+    "why": "/api/v1/plugins list, create, get, update and delete routes.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/plugins.go",
+    "line": 124,
+    "why": "New plugins default disabled and unpinned for safe rollout.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0003_capabilities_registry.up.sql",
+    "line": 240,
+    "why": "plugin_packages: manifest_json, enabled, pinned; no digest or commit column.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/models/capability.go",
+    "line": 15,
+    "why": "KindPlugin in the single capability registry.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/commands/types.go",
+    "line": 14,
+    "why": "Plugin command category declared.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "line": 46,
+    "why": "Gateway plugin routes proxied to model-gateway and capability-core.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "line": 302,
+    "why": "Plugin registration is admin-only, proxied to capability-core.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx",
+    "line": 66,
+    "why": "UI parses pasted manifest JSON; no install, fetch or load step.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/plugins-client.ts",
+    "line": 5,
+    "why": "Client for registry rows; manifest_json typed unknown.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+    "line": 2219,
+    "why": "Doc notes the Agent Plugins open spec as a new standard.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-058",
+  "title": "One versioned lifecycle for authored behaviours (skills, slash templates, agent presets) with a /learn command and skill curation",
+  "searches": [
+   "rg \"version|digest|draft|publish\" skill files in capability-core, skills-client, gateway",
+   "NEG rg \"/learn|save_as_skill|saveAsSkill|Save as skill|linter|doctrine\": no hits",
+   "rg \"UpsertAgentSkill|skillsink|sessionreview|learning\" capability-core",
+   "NEG repo-wide \"AgentPreset|agent_preset|preset revision\": none",
+   "rg \"retire|staleness|consolidat|use_count\" capability-core, session-core",
+   "rg \"scope|shared_with\" skills-client"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/learning/learning.go",
+    "line": 1,
+    "why": "Closed learning loop: an LLM proposes skill candidates after a session.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/learning/learning.go",
+    "line": 152,
+    "why": "Candidate only for a recurring pattern not covered by an existing skill.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go",
+    "line": 46,
+    "why": "Review consumer writes skills through UpsertAgentSkill.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go",
+    "line": 41,
+    "why": "Persist writes each candidate via UpsertAgentSkill.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/skills.rs",
+    "line": 1,
+    "why": "Skills loader: in-memory registry from disk or gRPC; no versions.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts",
+    "line": 21,
+    "why": "User skills private until shared; no version or draft fields.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts",
+    "line": 26,
+    "why": "Skill scope is org or user with shared_with; no Space scope.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "line": 266,
+    "why": "Retirement logic exists for memory rows, not for skills.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+    "line": 1709,
+    "why": "Doc proposes immutable policy and skill version blocks.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+    "line": 3370,
+    "why": "Doc lists skill versions among tracked change types.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/feature.md",
+    "line": 760,
+    "why": "Doc: scorecards tied to capability and skill versions, planned.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 223,
+    "why": "I13: slash templates planned; no versions or libraries in plan.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 274,
+    "why": "I23: skill-from-real-run proof deferred to a later wave.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-028",
+  "title": "Live run-cost meter with pre-run estimate, cost by token category, quota display and allowance warnings",
+  "searches": [
+   "NEG repo-wide \"usage_progress|UsageProgress\": only a planned entry in a plan JSON",
+   "rg \"cache_read_input_tokens|cache_creation|cache_write|reasoning\" cost-core, inference-core, frontend",
+   "rg \"allowance|Allowance\" frontend insights, gateway billing, model-gateway",
+   "rg \"estimate|estimated_cost|pre_run\" cost, chat and action frontend",
+   "rg \"80%|0.8|warn|ceiling|budget\" model-gateway, cost-core, chat",
+   "rg \"cost/run|budget/check|api/v1/cost\" cost-core, gateway, frontend",
+   "rg \"onUsage|ChatUsageEvent|costBasis\" frontend chat and agents",
+   "rg \"max_cost_per_run_usd_micros|org_quota\" model-gateway, gateway, frontend"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "line": 268,
+    "why": "Usage event is end-of-turn only; no progress variant in ChatEvent.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/org_quota.rs",
+    "line": 24,
+    "why": "Per-run USD and token ceiling constants; limits read from Control Plane.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/budget.rs",
+    "line": 44,
+    "why": "Pre-flight org ceiling check; over budget returns 402, failures fail closed.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/server/server.go",
+    "line": 142,
+    "why": "GET /api/v1/cost/run per-run aggregate; no frontend or gateway consumer.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/server/server.go",
+    "line": 149,
+    "why": "POST /api/v1/budget/check: cost-core accounts usage against the caller cap.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/server/server.go",
+    "line": 82,
+    "why": "Usage totals include cache read and cache creation token counts.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/pricing/pricing.go",
+    "line": 207,
+    "why": "CostWithCache prices cache read and cache write legs.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/migrations/0004_cache_tokens.up.sql",
+    "line": 9,
+    "why": "Migration adds cache read and creation token columns to usage.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/openai.rs",
+    "line": 372,
+    "why": "OpenAI cache_write_tokens parsed into cache creation tokens.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+    "line": 519,
+    "why": "Reasoning output tokens deliberately not read; output already includes them.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/codexsubscription/manager.go",
+    "line": 115,
+    "why": "Codex output tokens already include reasoning tokens: subset, not disjoint.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/cost.rs",
+    "line": 37,
+    "why": "Cost routes: summary, users, analytics, entries, pricing; no per-run route.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 335,
+    "why": "ChatUsageEvent carries cost, cost basis, cache tokens and servedBy.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 1386,
+    "why": "usage frame parsed into onUsage; no running-spend frame handled.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "line": 289,
+    "why": "Message costBasis; subscription turns carry no list-price cost.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "line": 1741,
+    "why": "Per-message cost row, or subscription label instead of a cost.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "line": 932,
+    "why": "Run metrics: output tokens, tokens per second, prompt cache read.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+    "line": 285,
+    "why": "Live usage merged into run telemetry; cost arrives with turn-end usage.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/OrgQuotasSection.tsx",
+    "line": 47,
+    "why": "Settings UI for per-run cost and token ceilings with reset period.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/insights/components/BillingAllowancesSection.tsx",
+    "line": 1,
+    "why": "Plan allowance and overage display for the organization subscription.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/insights/components/UsageAnalyticsSection.tsx",
+    "line": 53,
+    "why": "API and subscription meters with basis filter; historical, not live.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/cost/components/CostDashboardPage.tsx",
+    "line": 61,
+    "why": "Metered spend shown apart from subscription tokens; historical totals.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/ActionCommand.tsx",
+    "line": 70,
+    "why": "Action estimate is a risk-tier label, not a run cost forecast.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/org-quota-client.ts",
+    "line": 28,
+    "why": "Quota key names and reset periods mirror model-gateway constants.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "line": 1707,
+    "why": "Tests cost_basis parsing on usage frames; no progress-frame test.",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+    "line": 48,
+    "why": "Live credit meter listed as not built, gap.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-gap-closure-plan-2026-10-01.json",
+    "line": 1544,
+    "why": "Plan adds ChatEvent::UsageProgress; not yet implemented.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 225,
+    "why": "Row I16: live usage meter during a run, planned.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PAGE_GAP_PLAN_2026-09-28.md",
+    "line": 104,
+    "why": "Live credit meter while running: Space hard-stop only, listed as gap.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/docs/tenant-metering-and-privacy.md",
+    "line": 12,
+    "why": "Subscription allowance reported separately from token-priced API cost.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ }
+]

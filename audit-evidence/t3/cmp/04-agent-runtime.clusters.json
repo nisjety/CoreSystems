@@ -1,0 +1,4816 @@
+{
+ "category": "Agent runtime",
+ "excluded": [
+  {
+   "id": "antigravity-architecture-104",
+   "reason": "Gamification and internal-only Google code paths in the shipped backend: implementation trivia with no product relevance for Verevon."
+  },
+  {
+   "id": "claude-runtime-architecture-022",
+   "reason": "Transcript search in a worker thread: an implementation detail of a local desktop store; conversation search belongs to the chat-core category."
+  },
+  {
+   "id": "web-chatgpt-web-product-151",
+   "reason": "Legacy ChatGPT agent/Operator, retired; superseded by records in other clusters."
+  },
+  {
+   "id": "web-manus-web-product-095",
+   "reason": "Vendor speed/quality benchmark claims (marketing), not a capability."
+  },
+  {
+   "id": "web-perplexity-web-product-055",
+   "reason": "Enterprise Workflows retired and migrated to Skills; no runtime capability left (skills belong to the extensibility category)."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t3-04-001",
+   "name": "Typed step/turn model and loop state machine",
+   "description": "Every turn is a sequence of typed, status-bearing steps or items (model response, tool call, user input, checkpoint, system message) with explicit phase transitions, a closed turn-end vocabulary and a canonical event taxonomy, so the UI, replay, cancel, fork and revert can all act on one model.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "t3code"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-027",
+    "antigravity-architecture-031",
+    "antigravity-architecture-032",
+    "antigravity-architecture-048",
+    "codexagent-agent-runtime-and-models-027",
+    "cursor-harness-architecture-001",
+    "cursor-harness-architecture-029",
+    "deepseek-harness-architecture-001",
+    "deepseek-harness-architecture-003",
+    "deepseek-harness-architecture-127",
+    "deepseek-harness-architecture-128",
+    "hermes-architecture-and-surfaces-001",
+    "t3code-architecture-040",
+    "t3code-architecture-041"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-001",
+     "deepseek-harness-architecture-003",
+     "deepseek-harness-architecture-128",
+     "antigravity-agent-ux-and-gemini-027"
+    ],
+    "why": "DeepSeek (q5, SRC) makes each request a pure function of an append-only log with documented interception points and exactly one logged turn-end reason; Antigravity's 118-type step enum (q5) is the richest step vocabulary. Together they give replayable, inspectable turns."
+   },
+   "mechanism": "Persist an append-only log of typed records per run: step{id, run_id, ordinal, kind(enum), status(pending|running|done|error|cancelled), source, started_at, ended_at, payload}. Build each model request as a pure fold over the log (prompt reconciliation, admission of queued input, tool history). Close every turn with exactly one reason (completed, max_rounds, max_tokens, cancelled, tool_concluded, error). Emit the same records as SSE events with a monotonic id so live UI, resume and replay share one source. Reject events whose turn id is not the active one (T3 lifecycle guard).",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-066",
+     "v-modelplane-069",
+     "v-planned-decisions-060"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:169-273",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:196",
+     "apps/Model Plane/rust/services/session-core/src/terminalization.rs:1-8",
+     "apps/Model Plane/rust/services/session-core/src/main.rs:190-195",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:144"
+    ],
+    "gap": "Verevon has append-only runs/events rows, a 23-variant typed SSE ChatEvent taxonomy and managed terminal receipts. Weaker: no single closed turn-end vocabulary shared by both loops, and request building is not a pure fold of the log (two loops kept by decision).",
+    "strengths": "Typed SSE taxonomy CI-checked against the SPA, durable replay via /v1/runs/:id/events, terminalization receipts with finalization_pending instead of fake success. Keep the gateway as a byte-verbatim pipe."
+   },
+   "benefit": "Already in place; a closed turn-end vocabulary would let the Work panel and evals branch on outcomes reliably.",
+   "approach": "Add a TurnEndReason enum to mp-contracts, emitted by both loops in the terminal receipt; no loop unification (HARN-1/2 rejected).",
+   "effort": "S",
+   "dependencies": [
+    "session-core terminalization"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low; must not reopen the rejected loop-unification decision.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is roughly at parity; only polish remains.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 14,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-002",
+   "name": "Loop budgets and termination controls",
+   "description": "Explicit caps on model invocations, rounds, tokens and wall-clock time, with a reserved concluding call and a visible card when a run stops on budget.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "hermes",
+     "manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-028",
+    "codexagent-agent-runtime-and-models-020",
+    "hermes-architecture-and-surfaces-002",
+    "manus-product-ux-056"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-028",
+     "manus-product-ux-056"
+    ],
+    "why": "Antigravity's executor config (q5) exposes max invocations, forced continuations, terminal step types and require-finish-tool; Manus turns budget exhaustion into a 'may be stuck' card with Continue."
+   },
+   "mechanism": "Resolve a budget server-side per run {max_rounds, max_tokens, wall_clock_s, max_children}; when the next round would exceed it, run one concluding no-tool round so the user still gets an answer; surface the stop reason as a typed event that the UI renders with a Continue action starting a new budgeted run.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-068",
+     "v-planned-decisions-062"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/run_budget.rs:1-60",
+     "apps/Model Plane/rust/services/execution-core/src/run_budget.rs:15",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/run_budget.rs",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs:9162"
+    ],
+    "gap": "Budgets, concluding round and wall-clock guard are shipped. Missing: a user-facing 'stopped on budget, continue?' card; and the 300 s delegated bearer (OD8) bounds every run regardless of budget.",
+    "strengths": "Server-resolved budget never taken from the client, atomic shared subagent budget, concluding round. Keep."
+   },
+   "benefit": "A Continue card makes budget stops recoverable instead of looking like failures.",
+   "approach": "Emit a budget_exhausted terminal reason and render a Continue card in ChatMessages; handle OD8 with the goals work (C34).",
+   "effort": "S",
+   "dependencies": [
+    "OD8 bearer ceiling decision"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Continue must re-resolve the budget server-side and never trust client counts.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Parity on mechanics; only a small UX addition.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-003",
+   "name": "Mid-turn steering and message queueing",
+   "description": "While the agent works, the user can queue a follow-up, steer the running turn, or interrupt; messages have delivery states and survive connection loss.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "manus",
+     "t3code"
+    ],
+    "n": 8,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-architecture-039",
+    "claude-runtime-architecture-011",
+    "codexagent-agent-runtime-and-models-002",
+    "codexagent-plugins-and-extensibility-113",
+    "cursor-ai-features-031",
+    "cursor-harness-architecture-002",
+    "deepseek-harness-architecture-002",
+    "hermes-architecture-and-surfaces-011",
+    "manus-computer-control-architecture-069",
+    "t3code-ui-and-multimodel-107"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-011",
+     "deepseek-harness-architecture-002",
+     "antigravity-architecture-039"
+    ],
+    "why": "Claude (q5) runs a delivery state machine with held steers, deferred sends and replay after loss; DeepSeek uses one durable inbox with next-turn/next-step targets and a wake flag."
+   },
+   "mechanism": "Durable inbox per run {message_id, target next_step|next_turn, state queued|delivered|refused}; delivered at the next tool-round boundary; echo uuids for idempotency; held across disconnects and replayed; UI shows pending/delivered/refused.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:1-20"
+    ],
+    "gap": "Baseline narrative: POST /v1/invoke/:id/queue delivers at the next tool-round boundary and the model classifies the pause (shipped), shown as pending/delivered/refused in the SPA. The queue registry is in-memory and single-replica, so queued input is lost on restart or another replica.",
+    "strengths": "The 'pause the model classifies' semantics is an owner decision more nuanced than steer/followUp."
+   },
+   "benefit": "Reliability under multi-replica deploys.",
+   "approach": "Move the queued-input registry to session-core (durable inbox rows keyed by run) or Redis like the stream buffer.",
+   "effort": "M",
+   "dependencies": [
+    "session-core"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Ordering across replicas.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Feature shipped; durability is the gap.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-004",
+   "name": "Interrupt semantics and tool-history repair",
+   "description": "Stopping a run keeps the text the user already saw, closes unanswered tool calls with explicit outcomes (aborted, not started, unknown), and confirms before stopping work that cannot resume.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "hermes",
+     "manus",
+     "t3code"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-003",
+    "deepseek-harness-architecture-004",
+    "deepseek-harness-architecture-005",
+    "hermes-architecture-and-surfaces-005",
+    "manus-product-ux-058",
+    "t3code-architecture-036"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-004",
+     "deepseek-harness-architecture-005",
+     "hermes-architecture-and-surfaces-005"
+    ],
+    "why": "DeepSeek (q5, SRC) records the delivered prefix as an interrupted assistant message and always repairs paired tool history; Hermes closes failed turns with a system-authored row."
+   },
+   "mechanism": "On cancel: persist delivered text/reasoning as assistant{interrupted:true}; for each tool call without a result append ABORTED_BEFORE_DISPATCH, TOOL_NOT_STARTED or TOOL_OUTCOME_UNKNOWN (telling the model to retry only idempotent work); close the turn with reason cancelled.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:58"
+    ],
+    "gap": "Cooperative stop/cancel is shipped (baseline narrative, cancel_registry.rs, in-memory). Not verified: persistence of the partial assistant text and synthetic results for unanswered tool calls after cancel.",
+    "strengths": "Cancel is bound to tenant, user and run; unconfirmed cancels are reconciled in the SPA."
+   },
+   "benefit": "Follow-ups after Stop stay coherent; effectful calls with unknown outcome are not blindly retried.",
+   "approach": "Check session_flow.rs; if missing, add interrupted-message persistence and tool-history closers in both loops.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Retrying an effect with unknown outcome; tie to C22.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small, correctness-relevant.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-005",
+   "name": "Durable execution, crash recovery and continuation",
+   "description": "Runs survive process crashes, restarts and approval pauses: work is made durable before effects, a lease prevents double writers, interrupted runs resume automatically and an approved pause continues the agent loop.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "manus"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-087",
+    "cursor-ai-features-045",
+    "deepseek-harness-architecture-006",
+    "deepseek-harness-architecture-129",
+    "hermes-architecture-and-surfaces-035",
+    "manus-computer-control-architecture-067",
+    "manus-computer-control-architecture-081"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-006",
+     "deepseek-harness-architecture-129",
+     "hermes-architecture-and-surfaces-035",
+     "cursor-ai-features-045"
+    ],
+    "why": "DeepSeek (q4, SRC) checkpoints before model requests, tool effects and next steps and repairs the tail on cold resume; Hermes holds a refreshed turn lease with a stall watchdog; Cursor auto-continues interrupted agents and delivers questions durably."
+   },
+   "mechanism": "Persist before each model call and before each effectful tool; on resume take write ownership (lease row with heartbeat), append crash closers for interrupted calls, then rebuild the request from the log and continue; an approval decision re-enters the same loop with the saved state instead of only re-executing the approved effect.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-062",
+     "v-planned-decisions-059",
+     "v-modelplane-069",
+     "v-modelplane-070",
+     "v-chat-agents-ui-073"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/main.rs:28-31",
+     "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/continuation_crypto.rs:1",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs",
+     "apps/Model Plane/rust/services/session-core/src/terminalization.rs:1-8",
+     "apps/Model Plane/rust/services/session-core/src/main.rs:190-195",
+     "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20",
+     "apps/Model Plane/rust/services/model-gateway/src/drain.rs:103",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:1241-1528"
+    ],
+    "gap": "Terminalization receipts, recovery worker, drain on redeploy and stream resume are shipped. Missing: after an approval the LLM loop does not resume reasoning (only 3 effect types are re-executed from an encrypted descriptor), the descriptor key is empty on the stack so pauses return unavailable, and there is no resume of an interrupted mid-run loop.",
+    "strengths": "Exact-effect descriptor with postcondition check is a safer primitive than most sources have."
+   },
+   "benefit": "Blocks the agent vision: an approval that does not continue the task, or a crash that loses it, breaks trust in Do mode.",
+   "approach": "Persist loop state (log fold inputs) in session-core at each round; on approval or crash, a continuation worker in execution-core re-enters run_rounds from the saved state under the original grant; configure SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY.",
+   "effort": "L",
+   "dependencies": [
+    "session-core run state",
+    "durable grant carrier",
+    "300 s bearer (OD8)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Double execution if the lease is wrong; authority re-check required at resume (Control reauthorizer).",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Core reliability gap for every agentic flow.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-006",
+   "name": "Exactly-once side effects (action ledger)",
+   "description": "Each effectful tool call carries a stable action id; a ledger keyed by session and action with a payload digest replays the stored result instead of repeating the effect.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "manus-computer-control-architecture-029"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-029"
+    ],
+    "why": "Only source (q5, SRC): (sessionUid, actionId) key, payload digest and a 10-minute replay horizon."
+   },
+   "mechanism": "For non-read side-effect classes compute key = hash(run_id, action_id); if a completed row exists with the same digest return the stored result; if digests differ refuse; otherwise execute and store; expire after a replay horizon.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-062",
+     "v-modelplane-063"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/main.rs:28-31",
+     "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60",
+     "apps/Model Plane/rust/services/execution-core/src/postcondition.rs:1-10",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/post_mutation.rs:1-8",
+     "apps/Model Plane/rust/services/model-gateway/src/security_events.rs:70"
+    ],
+    "gap": "Idempotent send/regenerate registry (in-memory), keyed-MAC start keys, and exact-effect descriptors with postconditions exist; no general per-tool-call action ledger for provider writes was found.",
+    "strengths": "Postcondition verification after effects is stronger than a ledger alone."
+   },
+   "benefit": "Safe retries and resumes for provider writes (Visma, mail, shipping).",
+   "approach": "Add an action ledger table in execution-core keyed by (run_id, tool_call_id) with payload digest, consulted before execute_provider_action.",
+   "effort": "M",
+   "dependencies": [
+    "C21"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low; storage growth.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small table, large safety gain for C21.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-007",
+   "name": "Provider and stream retry with error taxonomy and failover",
+   "description": "Model-call and stream failures are classified into typed reasons with recovery hints, retried with backoff and jitter, failed over to another route or model, and parked with a visible countdown when exhausted.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-041",
+    "antigravity-architecture-047",
+    "claude-runtime-architecture-016",
+    "codexagent-agent-runtime-and-models-021",
+    "cursor-harness-architecture-011",
+    "deepseek-harness-architecture-008",
+    "hermes-architecture-and-surfaces-003",
+    "hermes-architecture-and-surfaces-004"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-003",
+     "hermes-architecture-and-surfaces-004",
+     "codexagent-agent-runtime-and-models-021",
+     "cursor-harness-architecture-011"
+    ],
+    "why": "Hermes (q4) classifies about 30 failover reasons with recovery flags and parks exhausted turns with a countdown; Codex reconnects visibly and can switch model per step; Cursor detects stalled streams."
+   },
+   "mechanism": "classify(error) -> {reason, retryable, failover_ok, user_message}; exponential backoff with jitter; stall detector on the stream; failover chain across routes; when exhausted, park the turn with a resume-at time instead of failing.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-modelplane-064",
+     "v-modelplane-067"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:37",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:149",
+     "apps/Model Plane/rust/services/inference-core/src/provider/overflow.rs:1-10",
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:950"
+    ],
+    "gap": "Tool-call retry (3 attempts) and prompt-too-long recovery are shipped. Check inference-core for a provider failover chain and stream stall detection; neither appears in the baseline.",
+    "strengths": "Shared failure vocabulary pinned by a contract test."
+   },
+   "benefit": "Fewer user-visible failures on provider outages.",
+   "approach": "Add a typed ProviderFailure enum and a route failover list in inference-core; park-and-resume via C21.",
+   "effort": "M",
+   "dependencies": [
+    "inference-core routes"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Failover must respect ZDR-attested routes only.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common reliability feature; partially present.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-008",
+   "name": "User-facing typed error states and recovery actions",
+   "description": "Failures are shown as specific cards by error class (quota, credits, engine crash, sandbox failure) with targeted recovery actions such as retry, refund-aware retry or 'try fixing'.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "manus",
+     "web-claudeai",
+     "web-manus"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-048",
+    "claude-runtime-architecture-015",
+    "manus-product-ux-057",
+    "web-claudeai-web-product-042",
+    "web-manus-web-product-039"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-015",
+     "antigravity-agent-ux-and-gemini-048",
+     "manus-product-ux-057"
+    ],
+    "why": "Claude (q5) classifies engine/stream/network failures into targeted messages; Antigravity separates user and model error messages; Manus offers refund-aware retry."
+   },
+   "mechanism": "Error event {class, user_message, model_message, retryable, actions[]}; UI maps classes to cards; model-visible message differs from the user one.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-073"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:1241-1528"
+    ],
+    "gap": "Error recovery for interrupted and unresumable turns is shipped; no refund-aware or credit-specific cards were found in the baseline.",
+    "strengths": "Durable-outcome reconciliation when a stream cannot resume."
+   },
+   "benefit": "Polish.",
+   "approach": "Add credit/quota error classes once Control-plane billing exposes them.",
+   "effort": "S",
+   "dependencies": [
+    "Control plane billing"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "At parity for core cases.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-009",
+   "name": "Capacity- and credit-aware run admission (queue, pause, resume)",
+   "description": "When capacity or credits run out, tasks wait in a queue with an estimate or pause instead of failing, and resume automatically when credits return.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-perplexity"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "manus-product-ux-048",
+    "web-perplexity-web-product-049"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-049",
+     "manus-product-ux-048"
+    ],
+    "why": "Perplexity (q4, DOC) pauses rather than cancels on credit exhaustion; Manus (q4, SRC) shows per-tier wait estimates and alternatives."
+   },
+   "mechanism": "Before each round check the cost reservation; on shortfall set run status paused_for_credit and persist state; a billing event resumes it; at admission show queue position or a cheaper tier.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check Control-plane billing and Model-plane cost reservation (proposal section 18 is listed as not built).",
+    "strengths": ""
+   },
+   "benefit": "Long runs do not die on a credit boundary.",
+   "approach": "Implement after C21 (needs resumable state) with Control-plane billing events.",
+   "effort": "M",
+   "dependencies": [
+    "C21",
+    "cost reservation/commit"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Billing correctness.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Depends on C21; modest impact.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-010",
+   "name": "Loop hygiene: repetition, no-progress and stop gates",
+   "description": "The runtime detects repeated text, identical failing tool calls and no-progress cycles, nudges or stops the model, recovers from output-limit or empty responses, and can turn a premature prose answer into another iteration.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-033",
+    "cursor-harness-architecture-005",
+    "cursor-harness-architecture-006",
+    "cursor-harness-architecture-026",
+    "deepseek-harness-architecture-009",
+    "deepseek-transparency-and-customization-111",
+    "hermes-architecture-and-surfaces-006",
+    "hermes-architecture-and-surfaces-007"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-007",
+     "cursor-harness-architecture-005",
+     "deepseek-harness-architecture-009",
+     "hermes-architecture-and-surfaces-006"
+    ],
+    "why": "Hermes (q4) runs a side-effect-free controller for repeat, cycle and no-progress detection plus stop gates; Cursor detects streamed text repetition; DeepSeek escalates reminders at 3, 5 and 8 repeats."
+   },
+   "mechanism": "Keep a rolling window of (tool, args hash, result class); on N identical failing calls or no new information inject an escalating reminder, then stop with a loop reason; a streaming detector for repeated lines (code-fence aware); bounded retry on empty or max-tokens responses with a note to the model.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-044"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:214"
+    ],
+    "gap": "Only the truncated final tool call in a length-stopped message is refused (shipped). No repetition or no-progress detector found (SRC grep for repeat/loop guard found none); loop-family stall detection is a proposal (MODEL_PLANE_IMPROVEMENTS section 21).",
+    "strengths": "Precise handling of length-stopped tool calls."
+   },
+   "benefit": "Saves tokens and avoids stuck runs, which users notice as 'it keeps doing the same thing'.",
+   "approach": "Add a LoopGuard in mp-contracts used by both loops: args-hash window plus reminder ladder; emit a typed loop_detected end reason.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "False positives on legitimate polling.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small, high-value guard present in three strong harnesses.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-011",
+   "name": "Tool execution pipeline: validation, repair, timeouts and typed failures",
+   "description": "Tool arguments are validated strictly, malformed JSON is repaired, calls have deadlines, and failures carry a type plus separate user-visible and model-visible messages.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-130",
+    "antigravity-architecture-046",
+    "cursor-harness-architecture-004",
+    "cursor-harness-architecture-136",
+    "deepseek-harness-architecture-010",
+    "hermes-architecture-and-surfaces-010"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-136",
+     "cursor-harness-architecture-004",
+     "antigravity-agent-ux-and-gemini-130"
+    ],
+    "why": "Cursor (q5) has a typed tool-failure taxonomy with split client/model messages and argument repair; Antigravity validates strictly with per-call timeouts."
+   },
+   "mechanism": "validate(args, schema) before dispatch; repair common JSON faults; enforce declared timeout via cancellation; failures typed {invalid_args, timeout, user_rejected, provider_error, ...} with a short UI message and an actionable model message.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-065",
+     "v-modelplane-064"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/crates/mp-contracts/src/tool_arguments.rs:1-5",
+     "apps/Model Plane/rust/services/model-gateway/src/argument_repair.rs:71",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:37",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:149"
+    ],
+    "gap": "Schema validation, MCP argument repair and argument grounding are shipped. Not verified: split user/model failure messages and per-tool deadlines.",
+    "strengths": "The grounding gate that refuses fabricated user-only arguments is beyond the reference sources."
+   },
+   "benefit": "Keep.",
+   "approach": "Optionally add split messages to the shared failure vocabulary.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "At or above parity.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-012",
+   "name": "Streaming tool execution overlapped with generation",
+   "description": "Tool calls start executing as soon as their arguments finish streaming, while the model is still generating later output.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-034",
+    "cursor-harness-architecture-003"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-003",
+     "cursor-ai-features-034"
+    ],
+    "why": "Only source (q5, SRC): a tee on the model stream dispatches each completed tool call immediately."
+   },
+   "mechanism": "Tee the provider stream; accumulate text into the assistant message; on tool-call-complete dispatch read-only calls immediately (effectful calls still wait for the gate); guard duplicate ids; join results before the next round.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-modelplane-052"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:1-12",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:52-67"
+    ],
+    "gap": "The tool phase streams, but dispatch appears to happen after the response completes (join_all per round). Check tool_loop.rs for early dispatch.",
+    "strengths": ""
+   },
+   "benefit": "Lower latency on multi-tool rounds.",
+   "approach": "Early-dispatch read-only tools only; keep effectful calls behind the capability gate.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Executing calls from a response that is later cancelled.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Latency gain only; one source.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-013",
+   "name": "Safe parallel tool scheduling",
+   "description": "Independent tool calls in one response run concurrently with a cap, while interactive or side-effecting calls act as barriers and path-conflicting calls are serialized.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-042",
+    "cursor-harness-architecture-137",
+    "deepseek-harness-architecture-007",
+    "deepseek-transparency-and-customization-116",
+    "hermes-architecture-and-surfaces-008",
+    "hermes-architecture-and-surfaces-009"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-008",
+     "deepseek-harness-architecture-007",
+     "hermes-architecture-and-surfaces-009"
+    ],
+    "why": "Hermes (q5) splits a batch into ordered parallel and sequential segments by path scope; DeepSeek runs a fail-closed bounded scheduler (default 10)."
+   },
+   "mechanism": "Classify each call (read-only, effectful, interactive); group consecutive read-only calls without path overlap into parallel segments; effectful/interactive calls are barriers; serialize approval prompts; cap concurrency.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-056",
+     "v-planned-decisions-042"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1874",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:7156",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1874",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:7156"
+    ],
+    "gap": "Parallel dispatch with join_all in both loops is shipped with an atomic shared subagent budget. Not found: barrier semantics for effectful calls within a batch or a concurrency cap.",
+    "strengths": "Adopted from DeepSeek's executionMode idea with a shared budget."
+   },
+   "benefit": "Mostly at parity.",
+   "approach": "Add effectful-call barriers to the dispatcher (is_risky_call already exists).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Ordering bugs on concurrent provider writes.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Shipped; small hardening.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-014",
+   "name": "Large tool output spill to files or handles",
+   "description": "Oversized tool output is replaced by a head/tail preview and a reference to the full content that the agent can search or read later.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-035",
+    "deepseek-harness-architecture-016",
+    "hermes-architecture-and-surfaces-019"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-016",
+     "hermes-architecture-and-surfaces-019",
+     "cursor-ai-features-035"
+    ],
+    "why": "DeepSeek (q4) spills to private 0700 files with opaque locators inside a shared token budget; Hermes adds a per-turn budget."
+   },
+   "mechanism": "If output > max_inline_tokens, store full text as a run-scoped blob, return {preview_head, marker, preview_tail, handle, size}; a read/query tool fetches ranges from the handle; blobs expire with the run (and are never stored on ZDR turns).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs:1-12"
+    ],
+    "gap": "Baseline narrative: large MCP results become queryable handles (result_query). Not found for built-in tools (fetch_url, knowledge, provider actions).",
+    "strengths": "Result handles already exist as a primitive."
+   },
+   "benefit": "Protects the context window in Do runs that read large documents or exports.",
+   "approach": "Generalize ToolResultHandle to every tool result above a threshold in both loops.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "ZDR: handles must not persist on ZDR turns.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Reuses an existing primitive.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-015",
+   "name": "Deferred tool loading and tool search",
+   "description": "Tool schemas are not all sent up front; the model searches for tools by name or description and loads only those it needs.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "web-manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-129",
+    "codexagent-agent-runtime-and-models-015",
+    "web-manus-web-product-031"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-015",
+     "antigravity-agent-ux-and-gemini-129",
+     "web-manus-web-product-031"
+    ],
+    "why": "Codex (q5) ranks tools with BM25 and supports direct vs deferred exposure; Antigravity loads MCP tools lazily; Manus starts lean and loads capabilities on demand."
+   },
+   "mechanism": "Expose a tool_search{query,limit} tool returning names and schemas; mark tools direct or deferred per server; loaded tools join the offered set for the rest of the run.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:559-616"
+    ],
+    "gap": "Baseline narrative: above 40 MCP tools the catalogue collapses to mcp_catalog + mcp_call. But MCP tools are not invocable by either loop (capability gate denies mcp__*), so this is not effective today.",
+    "strengths": "Staged disclosure already designed."
+   },
+   "benefit": "Only valuable once MCP invocation works.",
+   "approach": "Fix the MCP capability binding first (extensibility category), then extend staged disclosure to built-in tool families.",
+   "effort": "S",
+   "dependencies": [
+    "MCP capability binding"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Blocked by an upstream gap.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-016",
+   "name": "Lifecycle hooks around tools, prompts and sessions",
+   "description": "User-, admin- or plugin-defined handlers run before and after tool calls, model calls, prompts, compaction and stop, and can allow, deny, rewrite input or inject context.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-040",
+    "antigravity-architecture-033",
+    "antigravity-architecture-034",
+    "codexagent-agent-runtime-and-models-016",
+    "codexagent-plugins-and-extensibility-038",
+    "cursor-harness-architecture-024"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-024",
+     "antigravity-agent-ux-and-gemini-040",
+     "codexagent-agent-runtime-and-models-016"
+    ],
+    "why": "Cursor (q5) wraps every tool call with generic and tool-specific pre/post hooks; Antigravity has a JSON contract with step injection; Codex supports command, MCP-tool and agent handlers."
+   },
+   "mechanism": "Hook registry {event, matcher, handler(command|http|prompt), timeout}; pre-hooks return allow|deny|ask plus optional rewritten input and additional context; post-hooks can append context; durable store with per-org admin rules.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-076",
+     "v-planned-decisions-055",
+     "v-chat-agents-ui-079"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:1-18",
+     "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:113",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:2"
+    ],
+    "gap": "The engine is real (allow/deny/ask, glob match) but rules live in an in-memory registry, are passed only on browser runs, and the Do loop passes an empty hook_context; no durable store, UI or input rewrite.",
+    "strengths": "Hook decisions compose with the capability gate."
+   },
+   "benefit": "Org admins can enforce policy (e.g. block sending mail outside the domain) without code changes.",
+   "approach": "Persist hook rules in capability-core per org/Space, pass hook_context into Do runs, add a settings UI; handlers limited to declarative rules plus HTTP webhooks (no shell in a web product).",
+   "effort": "M",
+   "dependencies": [
+    "capability-core store"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Hooks must never widen authority, only narrow it.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Engine exists; wiring is the gap.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-017",
+   "name": "Cache-stable prompt architecture and ephemeral context",
+   "description": "The system prompt stays byte-stable for a conversation; changing facts (time, environment, memory recall, reminders) are appended as sourced deltas or wire-only sidecars, so provider prefix caches keep hitting.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "web-manus"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-039",
+    "codexagent-agent-runtime-and-models-019",
+    "cursor-harness-architecture-122",
+    "deepseek-harness-architecture-018",
+    "deepseek-harness-architecture-125",
+    "hermes-architecture-and-surfaces-017",
+    "hermes-architecture-and-surfaces-018",
+    "hermes-learning-and-memory-016",
+    "web-manus-web-product-038"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-017",
+     "hermes-learning-and-memory-016",
+     "deepseek-harness-architecture-125",
+     "web-manus-web-product-038"
+    ],
+    "why": "Hermes (q5) makes prefix-cache stability an invariant governing all mid-conversation injection and replays wire-only context byte-identically; DeepSeek (q5) appends runtime facts only when they change; Manus published the KV-cache lessons."
+   },
+   "mechanism": "Order prompt as stable, context, volatile tiers; never rewrite earlier messages; append runtime-context snapshots as sourced messages only on change; attach per-turn recall as a wire-only sidecar stored alongside the turn so replays are byte-identical; place provider cache breakpoints at tier boundaries; measure cache-hit ratio per route.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:173-281"
+    ],
+    "gap": "Anthropic cache_control breakpoints exist in inference-core (SRC, grep). Baseline narrative: prompt-cache hits were never measured on any route and the OpenAI-route items are undeployed. No invariant governing mid-conversation injection was found.",
+    "strengths": "Cache-read tokens are displayed when present."
+   },
+   "benefit": "Lower cost and latency per turn; important for the Verevon Balance cost model.",
+   "approach": "Define a prompt-tier contract in mp-contracts, add a cache-hit metric per route, and move volatile injections (time, recall, skills) to an append-only tail.",
+   "effort": "M",
+   "dependencies": [
+    "inference-core usage reporting"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "ZDR routes may disallow provider caching; caching must respect ZDR propagation.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Direct cost lever, moderate effort, invisible to users.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-018",
+   "name": "Structured prompt assembly and run context seeding",
+   "description": "The prompt is assembled from named sections and structured context blocks (environment, rules, instruction files, attachments, history) with per-model gating and entry-point-aware variants, so every run starts with the right context.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "deepseek"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-093",
+    "cursor-ai-features-047",
+    "cursor-harness-architecture-121",
+    "cursor-harness-architecture-123",
+    "cursor-harness-architecture-124",
+    "cursor-harness-architecture-125",
+    "cursor-harness-architecture-138",
+    "deepseek-harness-architecture-019"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-121",
+     "cursor-harness-architecture-124",
+     "cursor-harness-architecture-123",
+     "deepseek-harness-architecture-019"
+    ],
+    "why": "Cursor (q5) builds the system prompt as a component tree with per-model gating and a typed RequestContext with hydration flags; DeepSeek loads a workspace instruction chain with a byte budget."
+   },
+   "mechanism": "Sections as typed components rendered to role messages; a typed request context {thread_history, persona, org/Space instructions, memory prefetch, attachments, environment} assembled server-side with completeness flags; per-turn XML-tagged blocks; entry-point variants (web, scheduled, channel).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-055"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1185-1200",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9135-9150"
+    ],
+    "gap": "Do-mode runs start with a fresh history: preamble plus goal (plus skills, plus approved plan). No prior thread turns, no persona, org or Space instructions and no memory prefetch (agent.rs:1185-1200, sse.rs:9135-9150). Plain chat does assemble context.",
+    "strengths": ""
+   },
+   "benefit": "Blocks the product vision: a Do run that ignores the conversation and the org's instructions feels broken to users immediately.",
+   "approach": "Reuse Session Core GetContextAssembly (already used by the context inspector) to seed Do runs with thread history, persona and org/Space instructions, under the same compaction budget; keep Space ACLs (never widen) and ZDR (no persisted seed on ZDR turns).",
+   "effort": "M",
+   "dependencies": [
+    "session-core GetContextAssembly",
+    "C17a tier 2 in Do loop"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Context bloat in a 4-round budget; must not leak Space content beyond the run's lease.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Highest-impact gap in this category; moderate effort using existing parts.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-019",
+   "name": "Host activity ledger and human-change awareness",
+   "description": "The host tells the agent about events it did not cause (rewinds, user edits, files changed by a person) as clearly framed, escaped non-instruction context.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-076",
+    "cursor-harness-architecture-127"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-076",
+     "cursor-harness-architecture-127"
+    ],
+    "why": "Claude (q5) drains an activity ledger into a tagged, escaped block framed as information, not instructions; Cursor tracks what the human changed since the last read."
+   },
+   "mechanism": "Per-thread ledger of host events {kind, at, summary}; drained at the next user turn into a <host-activity since=...> block with tag escaping and an explicit 'this is not an instruction' frame.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check whether Do/chat runs are told when a user edited an artifact or Space document between turns.",
+    "strengths": ""
+   },
+   "benefit": "Avoids the agent overwriting user edits to artifacts or Space files; also a prompt-injection defence pattern.",
+   "approach": "Application Plane change events projected into a ledger the gateway drains per turn.",
+   "effort": "M",
+   "dependencies": [
+    "Application Plane projections"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful hygiene; small user impact.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-020",
+   "name": "Context compaction core (prune, summarize, provider-native)",
+   "description": "When the window fills, old tool results are pruned without a model call, then the middle of the history is summarized (same model, auxiliary model or provider-native compaction), with a manual trigger.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "t3code",
+     "web-chatgpt"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-037",
+    "antigravity-architecture-044",
+    "codexagent-agent-runtime-and-models-017",
+    "codexagent-plugins-and-extensibility-081",
+    "cursor-ai-features-032",
+    "cursor-harness-architecture-007",
+    "cursor-harness-architecture-008",
+    "deepseek-harness-architecture-011",
+    "deepseek-harness-architecture-014",
+    "deepseek-harness-architecture-015",
+    "hermes-architecture-and-surfaces-012",
+    "hermes-architecture-and-surfaces-013",
+    "hermes-architecture-and-surfaces-015",
+    "hermes-architecture-and-surfaces-016",
+    "hermes-learning-and-memory-069",
+    "t3code-architecture-046",
+    "web-chatgpt-web-product-059"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-032",
+     "codexagent-agent-runtime-and-models-017",
+     "hermes-architecture-and-surfaces-013",
+     "deepseek-harness-architecture-014"
+    ],
+    "why": "Cursor (q5) combines self-summary that keeps the cache prefix, vendor-native compaction and background summarisation; Codex (q5) has a trigger taxonomy and server-side compaction v2; Hermes and DeepSeek prune tool output before any summary."
+   },
+   "mechanism": "Two-stage reduction: (1) model-free pruning of old tool results to head/marker/tail; (2) summarize the middle with protected head and tail, using provider-native compaction when available and the local summarizer as fallback; record usage separately; trigger proactively at a threshold and reactively on a provider overflow error.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-071",
+     "v-modelplane-066",
+     "v-modelplane-067",
+     "v-planned-decisions-052"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4331-4338",
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1-20",
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:129",
+     "apps/Model Plane/rust/services/inference-core/src/provider/overflow.rs:1-10",
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:950",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/compaction.rs:145",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/compaction_budget.rs"
+    ],
+    "gap": "Both loops compact; the Do loop has tier 1 only (no head summary). Native Anthropic clear_tool_uses and server compaction are wired, but local compaction always runs as well.",
+    "strengths": "Tiered compaction, provider-native editing, prompt-too-long recovery and protected pins are at parity with the best sources."
+   },
+   "benefit": "Already strong.",
+   "approach": "Add tier 2 (head summary) to the Do loop when Do runs gain thread history (C18b).",
+   "effort": "S",
+   "dependencies": [
+    "C18b"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "At parity.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 15,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-021",
+   "name": "Compaction robustness (transactions, breakers, deterministic fallback, background summarization)",
+   "description": "Compaction is a recorded transaction that either completes or leaves a detectable lock; failures arm a cooldown and fall back to deterministic truncation; summaries can be computed in the background and committed only if needed.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-harness-architecture-009",
+    "cursor-harness-architecture-010",
+    "deepseek-harness-architecture-012",
+    "hermes-architecture-and-surfaces-014",
+    "hermes-learning-and-memory-072"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-012",
+     "cursor-harness-architecture-009",
+     "hermes-learning-and-memory-072",
+     "cursor-harness-architecture-010"
+    ],
+    "why": "DeepSeek (q5) records compaction as a bracket transaction and rejects non-shrinking summaries; Cursor (q5) runs summarization in the background and persists or discards at turn end; Hermes adds an anti-thrash breaker."
+   },
+   "mechanism": "compaction/start record, summarize, revalidate that the span did not change, reject summaries that do not shrink, then append compaction/commit; on repeated failure arm a persisted cooldown ladder and fall back to deterministic max-min fair truncation with an honest marker; optionally start the summary early in the background.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-066"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1-20",
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:129",
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1251"
+    ],
+    "gap": "A failed summary degrades to truncation with an honest marker (test in compaction.rs). Not found: a recorded bracket transaction, an anti-thrash cooldown, background pre-computation.",
+    "strengths": "Honest-marker truncation fallback exists."
+   },
+   "benefit": "Prevents compaction loops and silent context loss on long Do runs.",
+   "approach": "Persist compaction start/commit rows in session-core and add a cooldown counter per thread.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Incremental hardening.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-022",
+   "name": "Compaction fidelity (framing, verbatim user messages, warm prefix, recall)",
+   "description": "Techniques that keep what matters after compaction: reference-only summary framing, verbatim user messages, cache-warm summarizer requests, skill markers, recall tools and progress notes before a window reset.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-018",
+    "deepseek-harness-architecture-013",
+    "deepseek-harness-architecture-116",
+    "hermes-learning-and-memory-070",
+    "hermes-learning-and-memory-071",
+    "hermes-learning-and-memory-074"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-learning-and-memory-070",
+     "hermes-learning-and-memory-071",
+     "deepseek-harness-architecture-013",
+     "codexagent-agent-runtime-and-models-018"
+    ],
+    "why": "Hermes (q5) frames the summary as reference-only with clauses learned from real failures and keeps user messages verbatim in lean mode; DeepSeek (q5) replays the conversation's own system prompt and tools so the summarizer call hits the cache."
+   },
+   "mechanism": "Summary prefix states it is background and that the latest user message wins; keep all user messages verbatim plus a mechanical anchor index; send the summarizer the same system prompt and tool declarations to reuse the cache; demote large skill bodies to markers listed in the summary; give the model a tool to re-read dropped turns.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-053",
+     "v-planned-decisions-054",
+     "v-chat-agents-ui-071"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3253",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3319",
+     "C:/dev/CoresSystem/apps/Model Plane/python/eval-lab-py/cases/compaction/13_early_fact_survives_head_summary.yaml",
+     "C:/dev/CoresSystem/.github/workflows/eval-lab.yml",
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4331-4338"
+    ],
+    "gap": "reattach_context/reattach_skill, protected pins and a compaction-recall eval harness are shipped. Not verified: reference-only framing text and verbatim retention of user messages.",
+    "strengths": "Need-driven reattachment plus a recall eval in CI is ahead of most sources, which have no recall measurement."
+   },
+   "benefit": "Keep.",
+   "approach": "Add Hermes-style reference-only framing to the head summary prompt and a recall case for it.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is equal or ahead.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-023",
+   "name": "Context-window transparency and manual compaction",
+   "description": "A visible context meter with token breakdown and truncation reasons, plus a /compact command that reports saved tokens.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "deepseek"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-038",
+    "claude-product-ux-086",
+    "deepseek-harness-architecture-017",
+    "deepseek-transparency-and-customization-157"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-086",
+     "antigravity-agent-ux-and-gemini-038",
+     "deepseek-transparency-and-customization-157"
+    ],
+    "why": "Claude (q4) shows a context ring with the auto-compact point and suggests compacting; Antigravity records truncation reasons per call; DeepSeek's /compact reports saved tokens."
+   },
+   "mechanism": "Per model call record {estimated_tokens, max_tokens, breakdown by source, truncation_reason}; UI ring with the auto-compact threshold; /compact runs a compaction outside a model turn and returns tokens saved.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7919"
+    ],
+    "gap": "Baseline narrative: a context inspector (GET /v1/threads/:id/context with per-segment token estimates) is shipped and cache-read tokens appear in Work telemetry; a /compact command exists in the capability-core catalogue but no evidence the composer uses it.",
+    "strengths": "Itemised context inspector is a DeepSeek-grade transparency feature."
+   },
+   "benefit": "Matches the 'maximum transparency' reference (DeepSeek).",
+   "approach": "Wire /compact in the composer to CompactNow and show a context ring from the inspector data.",
+   "effort": "S",
+   "dependencies": [
+    "slash commands in composer"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Mostly present; small UI wiring.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-024",
+   "name": "Plan mode with reviewable plan and approval gate",
+   "description": "The agent researches read-only, produces a structured, editable plan, and executes only after the user approves; some products enforce the read-only phase server-side.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "manus",
+     "t3code",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 9,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-029",
+    "antigravity-agent-ux-and-gemini-030",
+    "antigravity-architecture-045",
+    "claude-product-ux-128",
+    "codexagent-agent-runtime-and-models-004",
+    "codexagent-plugins-and-extensibility-082",
+    "cursor-ai-features-026",
+    "cursor-harness-architecture-018",
+    "deepseek-harness-architecture-028",
+    "deepseek-transparency-and-customization-113",
+    "manus-product-ux-119",
+    "t3code-ui-and-multimodel-031",
+    "web-manus-web-product-032",
+    "web-perplexity-web-product-054"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-004",
+     "antigravity-agent-ux-and-gemini-029",
+     "antigravity-agent-ux-and-gemini-030"
+    ],
+    "why": "Codex (q5) requires one decision-complete proposed_plan after a read-only interview; Antigravity (q5) adds task boundaries with PLANNING/EXECUTION/VERIFICATION modes and plans only when warranted."
+   },
+   "mechanism": "Mode flag on the run; in planning mode refuse every risky/effectful call at dispatch (not only in prompt text); the model calls plan.propose{steps[], assumptions, risks} once; the UI renders an editable plan card (edit/reorder/remove/add, comments); approval mints a scoped autonomy grant and the approved plan is injected into the execution run, which then continues automatically.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-064",
+     "v-modelplane-059",
+     "v-planned-decisions-049",
+     "v-planned-decisions-050"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2217-2542",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1873-1975",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6796-6806",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7138",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1804",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:10998",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1911"
+    ],
+    "gap": "Server-side enforcement and the editable plan card are shipped. Missing: approving does not automatically continue the run (no SPA turn consumes the grant and edited plan; B7 planned), and the grant store is in memory.",
+    "strengths": "Plan mode is enforced at dispatch regardless of posture, which is stronger than the prompt-only or advisory plan modes of Claude Code, DeepSeek and Cursor. Keep this."
+   },
+   "benefit": "Closing approve-then-continue makes Do mode feel like Manus or ChatGPT Work: one approval, then the agent runs.",
+   "approach": "On plan approval, session-core persists the grant durably (thread-scoped carrier) and the gateway starts the execution run with the edited plan; the SPA shows the run continuing in place.",
+   "effort": "M",
+   "dependencies": [
+    "durable grant carrier",
+    "C21 continuation"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "The grant scope must never exceed the approved plan's authority rung.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Highly visible gap in a feature that is otherwise ahead.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 11,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-025",
+   "name": "Progress checklist (todo) tool and recitation",
+   "description": "A lightweight model-maintained task list (pending/in_progress/completed) shown to the user and re-injected near the context tail so it survives compaction.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-005",
+    "cursor-harness-architecture-019",
+    "deepseek-transparency-and-customization-173",
+    "hermes-learning-and-memory-100"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-learning-and-memory-100",
+     "codexagent-agent-runtime-and-models-005"
+    ],
+    "why": "Hermes (q4) keeps a revisioned todo store and re-injects it after compression; Codex keeps update_plan separate from Plan Mode with at most one item in progress."
+   },
+   "mechanism": "Tool todo_write{items[{id,content,status}]} replaces the whole list (single owner); store with a monotonic revision; after compaction or every N rounds append the current list as an ephemeral tail block (Manus todo recitation) instead of editing the system prompt.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-067",
+     "v-modelplane-060",
+     "v-planned-decisions-068"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1008-1160",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1271-1400",
+     "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs:1-8",
+     "apps/Model Plane/proto/model_plane/v1/orchestration.proto:16-47",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:110"
+    ],
+    "gap": "A durable plans/todos store and the Work-panel todo view exist; model-managed recitation into the context tail is planned, not built.",
+    "strengths": "Todos are durable in session-core with tenant CAS."
+   },
+   "benefit": "Keeps long Do runs on track after compaction; cheap.",
+   "approach": "Add a tail recitation block in both loops fed from orchestration_store todos; keep the prefix byte-stable.",
+   "effort": "S",
+   "dependencies": [
+    "orchestration_store"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Must not break the prompt-cache prefix.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small effort, measurable reliability gain.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-026",
+   "name": "Blocking review requests with confidence and inline review comments",
+   "description": "The agent asks for review of named artifacts with a confidence score and an auto-proceed flag; comments left on artifact selections or diffs are attached to the next turn.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-031",
+    "antigravity-agent-ux-and-gemini-032"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-031",
+     "antigravity-agent-ux-and-gemini-032"
+    ],
+    "why": "Only source (q5, SRC): a typed notify_user step and ArtifactComment with approval status."
+   },
+   "mechanism": "Tool notify_user{artifact_refs[], blocking, confidence, justification, auto_proceed}; the UI lets the user comment on text selections in artifacts; comments are serialized as structured user-input parts {artifact_id, selection, comment, status approved|changes_requested} on the next turn.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check the Frontend Plane artifact/canvas for selection comments and whether they flow into the next turn (canvas highlight-to-edit I17 is listed as planned).",
+    "strengths": ""
+   },
+   "benefit": "Natural fit for Verevon artifacts (documents, decks): review by comment instead of retyping.",
+   "approach": "Frontend: selection comments on artifacts; gateway: attach them as typed parts; Model: an optional notify tool in Do mode.",
+   "effort": "M",
+   "dependencies": [
+    "artifact versions"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Unique to one source; good for document work but not blocking.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-027",
+   "name": "Agent modes and mode switching",
+   "description": "Named modes (ask, agent, plan, debug, autonomous) that the user or the model can switch between, with mode-specific prompts and nudges.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-033",
+    "cursor-ai-features-025",
+    "cursor-harness-architecture-023"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-025",
+     "antigravity-agent-ux-and-gemini-033"
+    ],
+    "why": "Cursor (q4) ships eight modes plus a mode-switch tool; Antigravity's autonomous mode removes questions and review gates."
+   },
+   "mechanism": "Mode enum on the turn; each mode selects a base prompt section and a tool allowlist; a switch_mode tool lets the model propose a change that the user confirms; a mode change injects a one-time nudge.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-063",
+     "v-planned-decisions-051"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3030-3052",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1145",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs:59",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs:164"
+    ],
+    "gap": "The Ask/Do toggle and an autonomy ladder are shipped; there is no model-proposed mode switch.",
+    "strengths": "An autonomy ladder (read_only < workspace_write < danger_full_access) checked per call is a cleaner model than many modes."
+   },
+   "benefit": "Minor.",
+   "approach": "Optionally let the model propose Ask to Do through a typed suggestion card.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Model-proposed escalation must stay user-confirmed.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Parity for Verevon's scope.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-028",
+   "name": "Per-turn run overrides and mid-task model switching",
+   "description": "Each turn can carry its own model, reasoning effort, approval policy and sandbox; the orchestrator model can change between follow-ups without restarting.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-runtime-architecture-007",
+    "codexagent-agent-runtime-and-models-001",
+    "web-manus-web-product-040",
+    "web-perplexity-web-product-050"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-001",
+     "claude-runtime-architecture-007",
+     "web-perplexity-web-product-050"
+    ],
+    "why": "Codex's typed 27-field TurnStartParams (q5) is the most complete override envelope."
+   },
+   "mechanism": "Typed TurnStart{model, effort, approval_policy, sandbox_level, collaboration_mode, ...} validated server-side and clamped per surface and plan; thread-level defaults with per-turn overrides persisted on the run record.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record in this category. Check model-gateway normalize.rs and the composer for per-turn model/effort fields and whether Do runs accept a mid-thread model change.",
+    "strengths": ""
+   },
+   "benefit": "Lets users move a hard step to a stronger model without losing context.",
+   "approach": "Extend the invoke request contract with typed per-turn overrides, clamped by Control-plane entitlements.",
+   "effort": "S",
+   "dependencies": [
+    "Control plane entitlements"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Entitlement bypass if not clamped server-side.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Probably partly present; low urgency.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-029",
+   "name": "Structured clarifying questions and human-in-the-loop requests",
+   "description": "The agent pauses to ask a typed question (single/multi choice or free text), may continue independent work while waiting, and answers arrive durably even after the turn paused.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "manus",
+     "web-manus"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-131",
+    "codexagent-agent-runtime-and-models-026",
+    "cursor-ai-features-046",
+    "cursor-harness-architecture-022",
+    "deepseek-harness-architecture-032",
+    "manus-product-ux-127",
+    "web-manus-web-product-033"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-127",
+     "codexagent-agent-runtime-and-models-026",
+     "cursor-harness-architecture-022"
+    ],
+    "why": "Manus (q5) routes all human requests as typed socket messages; Codex supports sync and async request_user_input; Cursor delivers late answers durably into the paused run."
+   },
+   "mechanism": "Tool ask_user{questions[{id, prompt, kind single|multi|text, options[]}], blocking, timeout_s}; the run records waiting_on_user_input; the UI renders a question card; the answer is stored and injected as a typed user-input part, resuming the run; on timeout the model is released to continue independent work.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "grep (no hit for ask_user|request_user_input|ask_question): apps/Model Plane/rust/services/{model-gateway,execution-core}/src"
+    ],
+    "gap": "No clarify/ask-user tool found in model-gateway or execution-core (SRC grep for ask_user, request_user_input, ask_question: none). Only approval pauses exist (HITL approval cards).",
+    "strengths": "The approval pause machinery (durable CreateApproval, awaiting_approval event) can be reused."
+   },
+   "benefit": "Users notice immediately when an agent guesses instead of asking; table-stakes in Manus, Codex, Cursor and ChatGPT Work.",
+   "approach": "Add an ask_user tool to both loops that reuses the approval pause path (durable request row, SSE awaiting_input event, decide endpoint) and the C21 continuation to resume.",
+   "effort": "M",
+   "dependencies": [
+    "C21 continuation"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Overuse; limit to Do mode or ambiguous goals via prompt rules.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Common across sources, absent in Verevon, reuses existing pause plumbing.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-030",
+   "name": "Action approvals and permission policy",
+   "description": "Effectful actions require confirmation according to a policy; approval cards carry typed input; unattended sessions get reduced tools; forged approval cards are rejected.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-149",
+    "claude-runtime-architecture-008",
+    "web-manus-web-product-034"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-008",
+     "web-manus-web-product-034",
+     "claude-extensibility-and-safety-149"
+    ],
+    "why": "Claude (q5) decides permissions in the host, rejects forged card-named tools and denies with clear messages in unattended runs; Manus attaches typed input schemas to confirmations."
+   },
+   "mechanism": "Host-side permission callback per call: deny tool names that imitate internal cards, apply surface gates, then policy allow|ask|deny; unattended runs start without tools that need a person; confirmation cards carry a schema for editable inputs.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-065",
+     "v-modelplane-061",
+     "v-planned-decisions-051",
+     "v-planned-decisions-040"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1940",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:64-112",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4558",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs:59",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs:164",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4116"
+    ],
+    "gap": "Approvals, capability gate with signed evidence, autonomy ladder and purpose-lock allowlist are shipped. Not found: editable typed inputs on approval cards and 'don't ask again' rules (open per CHD 13.3).",
+    "strengths": "Every dispatch calls capability-core EvaluatePolicy; Allow needs Ed25519-signed evidence; unknown tools fail closed. This is ahead of all reference sources."
+   },
+   "benefit": "Keep.",
+   "approach": "Add editable 'don't ask again' rules scoped per Space with audit.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Rules must not widen owner-plane ACLs.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon leads here.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-031",
+   "name": "Automated reviewer and safety monitor for agent actions",
+   "description": "A separate reviewer model approves eligible actions instead of asking the user every time, and a server-side monitor can pause runs that seem to misread instructions. (Supported only by DOC/INF records.)",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "web-chatgpt-web-product-055",
+    "web-chatgpt-web-product-061"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-055",
+     "web-chatgpt-web-product-061"
+    ],
+    "why": "Only source (DOC only, q4/q3); internals undocumented."
+   },
+   "mechanism": "Policy marks some ask-class actions as auto-reviewable; a reviewer model evaluates the action against the goal and constraints; approve, escalate to user, or block; monitor runs on the trajectory and can pause.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No reviewer or monitor model found in the baseline; approvals are human-only or policy Allow with signed evidence.",
+    "strengths": ""
+   },
+   "benefit": "Reduces approval fatigue on long Do runs without widening authority.",
+   "approach": "Reviewer may only downgrade Ask to Allow for capabilities an admin marks reviewable, and must never override Deny; record the review in the audit trail.",
+   "effort": "M",
+   "dependencies": [
+    "capability-core policy",
+    "audit outbox"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Model-approved effects; must be audited and scoped; DOC-only evidence.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Interesting but evidence is DOC-only and it touches the authority model.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-032",
+   "name": "Persistent goals with auto-continuation",
+   "description": "The user sets an objective (with optional success criteria and token budget); the agent keeps working across turns until a judge or audit decides it is complete, blocked or out of budget.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "web-chatgpt"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-044",
+    "codexagent-agent-runtime-and-models-006",
+    "codexagent-agent-runtime-and-models-007",
+    "codexagent-plugins-and-extensibility-080",
+    "cursor-ai-features-030",
+    "cursor-harness-architecture-020",
+    "deepseek-harness-architecture-027",
+    "deepseek-harness-architecture-030",
+    "deepseek-transparency-and-customization-112",
+    "hermes-architecture-and-surfaces-032",
+    "hermes-learning-and-memory-092",
+    "hermes-learning-and-memory-093",
+    "web-chatgpt-web-product-047",
+    "web-chatgpt-web-product-056"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-006",
+     "hermes-learning-and-memory-092",
+     "antigravity-agent-ux-and-gemini-044",
+     "deepseek-transparency-and-customization-112"
+    ],
+    "why": "Codex (q5) persists ThreadGoal with token budget and an audited completion; Hermes uses an auxiliary judge with quality gates; DeepSeek shows a goal bar with compare-and-set edits."
+   },
+   "mechanism": "Goal{objective, success_criteria, token_budget, used, status active|completed|blocked|cancelled}; when the run goes idle a continuation driver re-prompts with goal state; a cheap judge model checks completion against criteria with evidence; stop on budget or blocker and notify.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:24"
+    ],
+    "gap": "No goal primitive found (SRC grep for goal state/thread goal: none; 'goal' only names the run's bound task). Long autonomous work is also bounded by the 300 s delegated bearer (OD8) and 4 default rounds.",
+    "strengths": "Agent Run Console already has a goal launcher UI that could host it."
+   },
+   "benefit": "Core to the Manus/ChatGPT Work vision of outcome agents that work for a long time.",
+   "approach": "Goal record in session-core; continuation driver as a Temporal workflow (orchestrator-core) that starts budgeted Do runs until the judge (verevon-balance) passes; requires a renewable delegated credential.",
+   "effort": "L",
+   "dependencies": [
+    "C21",
+    "OD8 renewable bearer",
+    "C18b"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Runaway cost; must re-check authority each continuation (Control reauthorizer).",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Present in 6 sources and central to long-running agent work.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-033",
+   "name": "Subagent delegation and lifecycle",
+   "description": "The main agent spawns child agents with isolated context, waits for or resumes them, and reads their results, with durable lineage.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 7,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-034",
+    "codexagent-agent-runtime-and-models-008",
+    "codexagent-agent-runtime-and-models-009",
+    "codexagent-plugins-and-extensibility-078",
+    "cursor-ai-features-028",
+    "cursor-harness-architecture-012",
+    "cursor-harness-architecture-014",
+    "deepseek-harness-architecture-020",
+    "deepseek-harness-architecture-124",
+    "hermes-architecture-and-surfaces-022",
+    "hermes-architecture-and-surfaces-023",
+    "hermes-architecture-and-surfaces-024",
+    "hermes-architecture-and-surfaces-039",
+    "web-chatgpt-web-product-058",
+    "web-claudeai-web-product-035"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-008",
+     "cursor-harness-architecture-012",
+     "hermes-architecture-and-surfaces-023"
+    ],
+    "why": "Codex multi-agent v2 (q5) has task-path addressing and wait/resume/interrupt; Cursor's Task tool (q5) supports custom and background subagents; Hermes records async delegations durably with honest unknown outcomes."
+   },
+   "mechanism": "Tool subagent.task{goal, role, model?, tools?} creates a child run with a fresh LoopContext, parent_run_id and task path; the child budget is drawn atomically from the parent; the conclusion is persisted on the child run; the parent reads it with read_subagent_result; a background variant returns a handle and the parent is woken on completion instead of polling.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-057",
+     "v-modelplane-058",
+     "v-planned-decisions-045",
+     "v-planned-decisions-046",
+     "v-chat-agents-ui-068"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:29",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/subagent_results.rs:1-10",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:818",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:29",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:63",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4262",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:160",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741-744",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1041"
+    ],
+    "gap": "Synchronous delegation within a turn is shipped with durable lineage and cold-resume read-back. Weaker: depth 1, no background/async children (FIFO inbox not adopted by decision), and lineage is shown only in the plan panel.",
+    "strengths": "Durable child runs, consent-gated read-back, cold resume and an org-overridable child ceiling. Keep the fresh-context contract."
+   },
+   "benefit": "Parity for research fan-out; async children would enable long parallel work.",
+   "approach": "Keep synchronous delegation; revisit async children only together with goals (C34).",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Async children multiply cost and authority surface.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is at parity on the core mechanic.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 11,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-034",
+   "name": "Delegation governance: authorization, depth, concurrency and model policy",
+   "description": "Rules for when the model may delegate, depth and concurrency caps, per-subagent model policy and tool denial for leaf agents.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "cursor",
+     "deepseek"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-036",
+    "codexagent-agent-runtime-and-models-010",
+    "codexagent-agent-runtime-and-models-013",
+    "cursor-harness-architecture-141",
+    "deepseek-harness-architecture-022"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-010",
+     "cursor-harness-architecture-141",
+     "deepseek-harness-architecture-022"
+    ],
+    "why": "Codex (q5) forbids delegation unless explicitly asked; Cursor governs subagent models by policy; DeepSeek persists depth across cold resume."
+   },
+   "mechanism": "Server-side caps {max_depth, max_children_total, max_concurrent} resolved per org; leaf agents get a denied tool set (no further delegation, no risky effects); model policy inherit|forced|blocked; a prompt rule that depth or thoroughness alone is not a reason to delegate.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-045",
+     "v-modelplane-057"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:29",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:63",
+     "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:29"
+    ],
+    "gap": "Depth 1, a child ceiling of 8/100 with org override and the leaf restriction on risky calls are shipped. No per-subagent model policy found in the baseline.",
+    "strengths": "The leaf restriction and atomic shared budget match the best sources."
+   },
+   "benefit": "Already strong.",
+   "approach": "Add an optional per-role model policy when custom roles land (C07c).",
+   "effort": "S",
+   "dependencies": [
+    "C07c"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "At or above parity.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-035",
+   "name": "Custom agent roles and definitions",
+   "description": "Users or plugins define named agents (description, prompt, tools, model, permission mode) in config files that the main agent can delegate to.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-011",
+    "cursor-harness-architecture-013"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-013",
+     "codexagent-agent-runtime-and-models-011"
+    ],
+    "why": "Cursor's .cursor/agents markdown files carry tools, model and permission mode; Codex validates roles and rejects duplicates."
+   },
+   "mechanism": "Agent definition record {name, description, instructions, tool_allowlist, model_policy, autonomy_cap} stored per Space/org with ownership; exposed to the delegation tool as selectable roles; the capability gate still applies per call.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-075",
+     "v-chat-agents-ui-077",
+     "v-chat-agents-ui-076"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/preset-agents.ts:11-85",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx:5",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/ChiefCoreRoutingPage.tsx:5",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentsPage.tsx:47-134",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/DesignPreviewBadge.tsx:1"
+    ],
+    "gap": "Preset agents exist but have empty action sets; agent installations are read-only; blueprint roles are design previews.",
+    "strengths": ""
+   },
+   "benefit": "Turns the Agents page into something users configure; needed for the agent-pages vision.",
+   "approach": "Store role definitions in the Model Plane (capability-core registry), bind tool allowlists to capability ids, and let subagent.task accept a role id.",
+   "effort": "M",
+   "dependencies": [
+    "owner adapters for preset actions",
+    "capability registry"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "A role must never grant more than the owner-plane ACL (Space access never widens).",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Agent pages are in product scope and are currently stubs.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-036",
+   "name": "Structured subagent and run results",
+   "description": "Callers supply a JSON schema and the child or run reports its final answer through a reserved terminal tool or a post-run extraction step.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "web-manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-023",
+    "web-manus-web-product-041"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-023",
+     "web-manus-web-product-041"
+    ],
+    "why": "DeepSeek (q4, SRC) registers a child-scoped structured_output tool with a guard so the run cannot reopen; Manus extracts against a strict schema subset."
+   },
+   "mechanism": "Optional output_schema on subagent.task; register a structured_output tool whose arguments are validated against the schema; calling it concludes the child; the parent receives typed {status, summary, evidence, next_steps, blocker}.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [
+     "v-planned-decisions-066"
+    ],
+    "evidence": [],
+    "gap": "The typed handoff report is deferred by decision until code must branch on outcomes.",
+    "strengths": ""
+   },
+   "benefit": "Needed once orchestration (C11/C12) branches on child outcomes.",
+   "approach": "Build together with C11; reuse mp-contracts tool_arguments validation.",
+   "effort": "S",
+   "dependencies": [
+    "C11"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Deferred by decision with a clear trigger.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-037",
+   "name": "Cache-preserving fork subagent",
+   "description": "A child inherits the parent's completed turns and model so its copied history hits the provider prompt cache.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "deepseek-harness-architecture-021"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-021"
+    ],
+    "why": "Only source (q5, SRC)."
+   },
+   "mechanism": "Seed the child with a balanced completed-turn prefix of the parent and the same provider/model/tools so the prefix is cache-identical; mark inherited turns; close with reason 'forked'.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-047"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1798"
+    ],
+    "gap": "Rejected by decision 2026-08-24 (fresh-context contract). Note: the ledger says DeepSeek rejected it, while the DeepSeek record shows an in-process fork tool; check which is current.",
+    "strengths": "Fresh-context isolation is a deliberate safety property."
+   },
+   "benefit": "Lower cost for many small forks, but it conflicts with Verevon's isolation contract.",
+   "approach": "Do not build.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Leaks parent context into children with different authority.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Contradicts an owner decision; the benefit is cost only.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-038",
+   "name": "Inter-agent messaging (mailbox, message board, cross-session envelopes)",
+   "description": "Agents and sessions send prioritised messages to each other with delivery timing, escaped sender envelopes and permission-parity guards.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-035",
+    "claude-extensibility-and-safety-091",
+    "claude-extensibility-and-safety-126",
+    "codexagent-agent-runtime-and-models-012",
+    "codexagent-plugins-and-extensibility-079"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-extensibility-and-safety-091",
+     "claude-extensibility-and-safety-126",
+     "antigravity-agent-ux-and-gemini-035"
+    ],
+    "why": "Claude (q5) adds permission-class parity and escaped envelopes so a less privileged session cannot steer a more privileged one; Antigravity has priority and delivery strategy."
+   },
+   "mechanism": "Message{sender, recipient, priority, delivery NEXT_INVOCATION|WHEN_IDLE, content}; the receiver gets a wrapped, escaped envelope marked as non-instruction data; hold or refuse when the sender's autonomy is higher than the receiver's policy allows.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-065"
+    ],
+    "evidence": [],
+    "gap": "Not adopted by decision: delegation is synchronous within a turn.",
+    "strengths": ""
+   },
+   "benefit": "Only needed with async/background agents.",
+   "approach": "Revisit with C34/C11; if built, adopt Claude's permission-parity guard.",
+   "effort": "M",
+   "dependencies": [
+    "C11"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Prompt injection between agents; authority laundering.",
+   "tier": "skip",
+   "significance": 2,
+   "rationale": "Out of scope until async multi-agent exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-039",
+   "name": "Agent-driven session and task management",
+   "description": "The model can list, search, create, message, stop and archive the user's other sessions or tasks, with a fan-out cap on agent-started sessions.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "manus",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-extensibility-and-safety-124",
+    "claude-product-ux-085",
+    "manus-computer-control-architecture-066",
+    "manus-product-ux-053",
+    "web-perplexity-web-product-051"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-085",
+     "claude-extensibility-and-safety-124"
+    ],
+    "why": "Claude (q5) exposes cross-session tools with one approval card and a per-user-message fan-out budget."
+   },
+   "mechanism": "Tools list_threads/search_threads/send_to_thread/stop_run scoped to the caller's own threads; starts are counted against a budget since the last user message, and an approval is required beyond it.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check whether any model tool can read or start other threads (server-side search is absent).",
+    "strengths": ""
+   },
+   "benefit": "Enables 'tidy my chats' and agent-started follow-up tasks.",
+   "approach": "Later: expose thread tools through the Model Plane with tenant scoping and a fan-out cap.",
+   "effort": "M",
+   "dependencies": [
+    "server-side thread search"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cross-thread data mixing; must respect Space ACLs.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful but not core.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-040",
+   "name": "Multi-agent orchestration patterns (coordinator, teams, swarms, project mode)",
+   "description": "A coordinator agent that only plans and delegates to parallel workers, with phase gates, shared progress files and synthesis.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "web-perplexity"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-045",
+    "antigravity-agent-ux-and-gemini-046",
+    "antigravity-architecture-037",
+    "claude-product-ux-088",
+    "cursor-ai-features-027",
+    "cursor-ai-features-029",
+    "cursor-ai-features-124",
+    "cursor-harness-architecture-016",
+    "cursor-harness-architecture-126",
+    "deepseek-harness-architecture-031",
+    "hermes-architecture-and-surfaces-031",
+    "web-perplexity-web-product-047"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-124",
+     "cursor-harness-architecture-126",
+     "antigravity-architecture-037",
+     "web-perplexity-web-product-047"
+    ],
+    "why": "Cursor Project mode (q4, SRC) is a non-editing orchestrator with phase gates and a single-writer progress file; Antigravity has pipelines and swarms; Perplexity Computer is the closest web benchmark."
+   },
+   "mechanism": "Coordinator run with no effect tools; it writes a plan, spawns a worker per item (bounded concurrency), collects structured results, runs a verifier pass, then synthesizes; progress lives in one single-writer record; a fresh successor coordinator per milestone avoids context rot.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [
+     "v-modelplane-079",
+     "v-planned-decisions-063",
+     "v-modelplane-074"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:1-20",
+     "apps/Model Plane/proto/model_plane/v1/gateway.proto:83-91",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core",
+     "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:98-160",
+     "apps/Model Plane/go/services/orchestrator-core/cmd/main.go:146-175"
+    ],
+    "gap": "Team/coordinator mode is an in-memory gRPC stub; Temporal WideResearch/DeepTask workflows exist, but chat and Do do not use them.",
+    "strengths": "Temporal-backed durable workflows exist and could host this."
+   },
+   "benefit": "Matches Perplexity Computer and Manus Wide Research for research-heavy tasks.",
+   "approach": "Run coordinator mode as a Temporal workflow in orchestrator-core that reuses subagent.task for workers; expose it as a Do-mode option.",
+   "effort": "L",
+   "dependencies": [
+    "C07d",
+    "durable grants"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cost blow-up; needs fan-out confirmation (C12).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "A strong differentiator, but it depends on structured results and cost controls.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 2,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t3-04-041",
+   "name": "Model-authored orchestration workflows",
+   "description": "The model writes a deterministic script that fans work out to subagents, with a confirmation card for large fan-outs and a phase view of the run.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "manus",
+     "t3code"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-029",
+    "manus-product-ux-045",
+    "manus-product-ux-128",
+    "t3code-ui-and-multimodel-109"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-045",
+     "manus-product-ux-128",
+     "t3code-ui-and-multimodel-109"
+    ],
+    "why": "The Manus Workflow Composer (q5, DOC) is deterministic and replayable and powers Wide Research; Manus asks for confirmation above about 20 agent calls."
+   },
+   "mechanism": "The model emits a script for a sandboxed, deterministic runtime (no I/O, no clock/random) that calls agent()/parallel(); the runtime estimates agent calls and requires user confirmation above a threshold; phases render as a rail in the UI.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-063",
+     "v-modelplane-074"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core",
+     "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:98-160",
+     "apps/Model Plane/go/services/orchestrator-core/cmd/main.go:146-175"
+    ],
+    "gap": "Temporal workflows exist but are not the production path; whether model-authored fan-out is wanted at all is an open decision.",
+    "strengths": ""
+   },
+   "benefit": "Powerful for wide research but overlaps C11.",
+   "approach": "Decide C11 first; if adopted, compile the script to a Temporal workflow behind a cost-estimate card.",
+   "effort": "L",
+   "dependencies": [
+    "C11",
+    "cost reservation"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Determinism and cost; open owner decision.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Open decision; C11 covers most of the value.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-042",
+   "name": "Code mode / programmatic tool calling",
+   "description": "The model writes a script (JS or Python) that calls tools as functions inside a sandbox, collapsing multi-step tool chains into one step with resource budgets.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "hermes",
+     "manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-014",
+    "hermes-architecture-and-surfaces-020",
+    "manus-computer-control-architecture-013",
+    "manus-computer-control-architecture-036"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-014",
+     "manus-computer-control-architecture-013",
+     "hermes-architecture-and-surfaces-020"
+    ],
+    "why": "Codex (q5) runs model JS in a fresh V8 isolate with tools as async functions; Manus (q5) adds per-cell budgets and resumable state."
+   },
+   "mechanism": "exec(source) runs in an isolate with no filesystem or network; tools are injected as async functions that go back through the normal capability gate; per-cell limits {native calls, output bytes, timeout, heap}; a state object persists across cells.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [
+     "v-planned-decisions-067"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:43"
+    ],
+    "gap": "Not built (BKL #11); code_interpreter exists but cannot call Verevon tools.",
+    "strengths": ""
+   },
+   "benefit": "Fewer rounds and tokens for data-heavy Do tasks; fits inside the 4-round default.",
+   "approach": "Add a tool bridge in sandbox-manager so code_interpreter can call capability-gated tools through execution-core; every call still passes EvaluatePolicy.",
+   "effort": "L",
+   "dependencies": [
+    "sandbox tool bridge",
+    "capability gate"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Gate bypass if the bridge is not routed through execution-core.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "High leverage for agent efficiency; already planned.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-043",
+   "name": "Best-of-N and multi-model synthesis",
+   "description": "Run one prompt as several parallel attempts (different models or seeds), compare, then pick a winner or merge the answers.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-047",
+    "antigravity-architecture-038",
+    "cursor-ai-features-097",
+    "cursor-harness-architecture-034",
+    "hermes-architecture-and-surfaces-033"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-047",
+     "cursor-ai-features-097",
+     "hermes-architecture-and-surfaces-033"
+    ],
+    "why": "Antigravity Battle Mode (q5) forks into isolated clones with elimination and a winner; Cursor synthesizes one answer from per-model subagents."
+   },
+   "mechanism": "Fan out N child runs with different models; collect the results; either the user picks a winner or a synthesis step merges them; show the cost before start.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; the baseline narrative notes no model comparison in chat. Check for any multi-model compare path.",
+    "strengths": ""
+   },
+   "benefit": "Answer quality for hard questions; multi-model is a stated goal (T3 Code reference).",
+   "approach": "Reuse subagent fan-out with one model per child and a synthesis prompt.",
+   "effort": "M",
+   "dependencies": [
+    "C07a"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cost multiplication.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "A differentiator, but cost-heavy.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-044",
+   "name": "Background commands and jobs with await and notifications",
+   "description": "Long-running commands move to the background; the agent awaits them or is notified on completion or on matching output.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-036",
+    "antigravity-architecture-040",
+    "cursor-harness-architecture-017",
+    "deepseek-harness-architecture-025",
+    "hermes-architecture-and-surfaces-021"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-017",
+     "deepseek-harness-architecture-025",
+     "hermes-architecture-and-surfaces-021"
+    ],
+    "why": "Cursor (q5) moves commands to the background after a timeout and supports output-pattern notifications; DeepSeek scopes jobs to the starting agent with a wake budget."
+   },
+   "mechanism": "process_start returns a handle after block_until_ms; a registry keeps a rolling buffer; await(handle, timeout) and notify_on_output{pattern, debounce} wake the agent with a completion notice; jobs are owned by the starting run and cancelled with it.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-071",
+     "v-modelplane-072"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/process_tools.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-8",
+     "apps/Model Plane/go/services/capability-core/cmd/main.go:298-376",
+     "apps/Model Plane/go/services/capability-core/internal/watch/watch.go"
+    ],
+    "gap": "process_* tools exist for Space-scoped runs (lease with space:processes); there is no notify-on-output wake of the agent, and they are not available outside Spaces.",
+    "strengths": "bwrap isolation and lease-gated access."
+   },
+   "benefit": "Needed for long data jobs in Do mode.",
+   "approach": "Add await and output-pattern watches through the S4.3 Watch primitive's process adapter.",
+   "effort": "M",
+   "dependencies": [
+    "Watch sweeper reauthorizer"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Runaway processes; quotas.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Partly there; it mostly matters for coding-style tasks.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-045",
+   "name": "Background work and subagent fleet panel",
+   "description": "A UI panel or banner that lists running and finished subagents, background jobs and workflows for the current task, with per-item output and stop controls.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek",
+     "manus",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-084",
+    "deepseek-transparency-and-customization-115",
+    "manus-product-ux-046",
+    "t3code-architecture-047",
+    "t3code-ui-and-multimodel-042",
+    "t3code-ui-and-multimodel-099"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-042",
+     "t3code-ui-and-multimodel-099",
+     "claude-product-ux-084",
+     "manus-product-ux-046"
+    ],
+    "why": "T3 Code (q4, SRC) turns provider task events into a 'Kicked off N subagents' row and a lifecycle banner with Stop; Claude adds a task backlog; Manus has per-job stop."
+   },
+   "mechanism": "Map run/child-run/process events to task.* rows {id, kind, title, status, started_at, output_ref}; render a collapsible fleet panel and a banner above the composer ('3 agents working', Stop all); confirm before stopping work that cannot be resumed.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-068",
+     "v-chat-agents-ui-074",
+     "v-chat-agents-ui-078"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741-744",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1041",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:168-330",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:784-840",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:1-30",
+     "apps/Frontend Plane/verevonv3/src/app/App.tsx:216"
+    ],
+    "gap": "The Work panel and Agent Run Console show the timeline, but subagent lineage is fetched only for the plan panel and the fleet console calls /v1/fleets with no gateway route (stub).",
+    "strengths": "Work panel answers 'what is happening / does Verevon need you' with live telemetry."
+   },
+   "benefit": "Users can see and stop parallel work; needed once C11 lands.",
+   "approach": "Frontend: a fleet section in the Work panel fed by child-run events already in the run event stream; add the gateway route for fleets.",
+   "effort": "M",
+   "dependencies": [
+    "C07a lineage events"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap visibility win on top of shipped events.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-046",
+   "name": "Scheduled agent runs (cron/RRULE) with result delivery",
+   "description": "Recurring or one-time tasks run as full agent runs (tools, skills, model choice) on a schedule, locally or in the cloud, with run history and results delivered to an inbox, notification or channel.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "codexagent",
+     "cursor",
+     "deepseek",
+     "hermes",
+     "manus",
+     "web-chatgpt",
+     "web-claudeai",
+     "web-manus"
+    ],
+    "n": 10,
+    "of": 12,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-043",
+    "antigravity-architecture-042",
+    "claude-product-ux-081",
+    "claude-runtime-architecture-018",
+    "codexagent-agent-runtime-and-models-024",
+    "codexagent-plugins-and-extensibility-074",
+    "codexagent-plugins-and-extensibility-076",
+    "cursor-ai-features-135",
+    "cursor-harness-architecture-033",
+    "deepseek-harness-architecture-026",
+    "deepseek-transparency-and-customization-114",
+    "hermes-architecture-and-surfaces-029",
+    "hermes-architecture-and-surfaces-030",
+    "hermes-learning-and-memory-084",
+    "hermes-learning-and-memory-088",
+    "manus-product-ux-049",
+    "web-chatgpt-web-product-050",
+    "web-claudeai-web-product-038",
+    "web-manus-web-product-036"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-learning-and-memory-084",
+     "hermes-learning-and-memory-088",
+     "claude-product-ux-081",
+     "manus-product-ux-049"
+    ],
+    "why": "Hermes (q5) runs cron jobs as full agent runs with scripts, skills, context chaining, multi-platform delivery and an at-most-once ledger; Claude (q5) adds GitHub-event and API triggers; Manus (q5) has a rich schedule model with expiry and run target."
+   },
+   "mechanism": "Schedule{rrule|cron, tz, prompt, model, skills, autonomy_cap, run_target new_thread|same_thread, expiry}; sweeper claims slots at-most-once with catch-up windows; each slot starts a normal budgeted Do run; result summary lands in an inbox with read state and a notification; incidents and quota holds recorded.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-070",
+     "v-modelplane-073",
+     "v-planned-decisions-056"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx:56",
+     "apps/Frontend Plane/verevonv3/src/shared/api/schedule-from-chat.ts:21-65",
+     "apps/Model Plane/go/services/capability-core/cmd/main.go:316-326",
+     "apps/Model Plane/go/services/capability-core/cmd/main.go:383-400",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/grpc.rs:522",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/cron"
+    ],
+    "gap": "A cron sweeper and Temporal ScheduledRunSupervision exist, but each scheduled step is one no-tool 1,024-token call on verevon-balance, owner ruling 2026-09-28 makes scheduled runs draft-only, and no result delivery ('Se resultater') is wired.",
+    "strengths": "Durable Temporal supervision already exists."
+   },
+   "benefit": "Users expect 'every Monday, summarise my inbox' to actually use tools; present in 10 of 12 sources.",
+   "approach": "Make ExecuteScheduledStep start a governed Do run with a pre-approved autonomy cap set at schedule time (draft-only effects allowed by the owner ruling), deliver results via notification-core and an inbox view.",
+   "effort": "L",
+   "dependencies": [
+    "C18b",
+    "C21",
+    "owner ruling on scheduled effects"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Unattended effects; must stay draft-only until the owner revisits; authority re-checked per run.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Table-stakes capability shipped only as a stub.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 13,
+    "DOC": 6,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-047",
+   "name": "Event- and webhook-triggered automations",
+   "description": "Agents start on external events (new email, Slack message, calendar event, GitHub PR, CI, webhook) with filters (sometimes LLM-evaluated), revisions and execution history; agents can also subscribe to events and go idle until they fire.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "deepseek",
+     "manus",
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "cursor-ai-features-040",
+    "cursor-ai-features-125",
+    "cursor-harness-architecture-032",
+    "deepseek-harness-architecture-034",
+    "manus-product-ux-050",
+    "web-chatgpt-web-product-051",
+    "web-manus-web-product-037"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-040",
+     "manus-product-ux-050",
+     "cursor-ai-features-125"
+    ],
+    "why": "Cursor (q5, SRC) has a 42-method automations service with event triggers, LLM filtering and deploy specs; Manus (q5, DOC) has a trigger catalog with revisions, dry runs and execution history; Cursor agents can subscribe to timers/PRs instead of polling."
+   },
+   "mechanism": "Trigger{source provider+event, filter (structured + optional LLM predicate), prompt template, run_target, revision}; provider webhooks normalized by the integration layer into events; dedupe and rate-limit; each match starts a budgeted run; execution log with dry-run.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/go/services/capability-core/internal/watch"
+    ],
+    "gap": "No event-trigger record in the baseline. The S4.3 Watch primitive (cursor-bearing, authority re-checked at disclosure) is partial and only has a process-output adapter; bridge-core has a webhook channel adapter that is not a trigger system.",
+    "strengths": "Watch primitive re-checks authority at disclosure time, which is the right safety shape."
+   },
+   "benefit": "Event-driven agents (reply drafts on new mail, ticket triage) are where Manus, ChatGPT Tasks and Perplexity are heading.",
+   "approach": "Ingestion Plane (integration-corev2) emits normalized provider events to NATS; capability-core trigger records subscribe and start Do runs; Model Plane never polls providers directly.",
+   "effort": "L",
+   "dependencies": [
+    "integration-corev2 webhooks",
+    "C35a",
+    "C21"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cross-plane: provider events belong to Ingestion; event floods; prompt injection from inbound mail must be treated as data.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Strong user value but depends on scheduled runs working first.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-048",
+   "name": "Automation run state and wake gates",
+   "description": "Each automation keeps a small notepad or memory file across runs, can skip the model entirely when a cheap source has not changed, and stays silent when there is nothing to report.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "hermes",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-075",
+    "hermes-learning-and-memory-085",
+    "hermes-learning-and-memory-086",
+    "hermes-learning-and-memory-087",
+    "web-perplexity-web-product-048"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-learning-and-memory-085",
+     "hermes-learning-and-memory-086",
+     "hermes-learning-and-memory-087",
+     "codexagent-plugins-and-extensibility-075"
+    ],
+    "why": "Hermes (q5) hashes a monitor source and only wakes the agent on change, supports a wake gate and a silent sentinel, and keeps a per-job notepad; Codex requires a one-line inbox summary per run."
+   },
+   "mechanism": "Per-schedule state {notepad kv, last_source_hash, cursor}; pre-run probe (URL/script/provider query) whose SHA-256 is compared with the last triggering hash; unchanged means a no-op run with no model call; the agent can end with a silent sentinel; the notepad is injected into the prompt and updated by a tool.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; scheduled runs are a single no-tool call without state.",
+    "strengths": ""
+   },
+   "benefit": "Monitoring automations become cheap and non-spammy (Verevon Balance cost model).",
+   "approach": "Add notepad and probe fields to capability-core schedules; probes executed via Ingestion (Quarry) or integration-corev2, never by the model directly.",
+   "effort": "M",
+   "dependencies": [
+    "C35a"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Probe execution must respect plane ownership (Quarry executes).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap multiplier on C35a.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-049",
+   "name": "Automation authoring and sharing UX",
+   "description": "Automations are authored from typed blueprints rendered as form, slash command and agent prompt; run history rows offer 'ask AI why it failed'; task definitions can be shared or run under a team account.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes",
+     "manus",
+     "web-chatgpt"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-172",
+    "hermes-learning-and-memory-090",
+    "manus-product-ux-052",
+    "web-chatgpt-web-product-052",
+    "web-chatgpt-web-product-053"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-172",
+     "hermes-learning-and-memory-090",
+     "manus-product-ux-052",
+     "web-chatgpt-web-product-052"
+    ],
+    "why": "Hermes (q4) defines one slot schema that renders everywhere; Manus offers AI triage of failed or dropped runs; ChatGPT shares task definitions as independent copies."
+   },
+   "mechanism": "Blueprint{key, schedule_template, prompt_template, slots[time|enum|text|weekdays]}; fill validates slots and produces a schedule; failed runs get an 'explain' action that starts a read-only run over the run log; share exports the definition, not credentials.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-070"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx:56",
+     "apps/Frontend Plane/verevonv3/src/shared/api/schedule-from-chat.ts:21-65"
+    ],
+    "gap": "'Schedule this' dialog and /schedule exist; no blueprints, failure triage or sharing.",
+    "strengths": ""
+   },
+   "benefit": "Lowers the barrier to automations for non-technical users.",
+   "approach": "Frontend blueprints backed by capability-core schedule specs; triage reuses a read-only Ask run.",
+   "effort": "M",
+   "dependencies": [
+    "C35a"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Shared definitions must not carry the author's grants.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Valuable after C35a works.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-050",
+   "name": "Consent-first proactive suggestions",
+   "description": "The agent proposes ready-to-run automations, next tasks or configuration changes as cards the user accepts or dismisses, with deduplication and caps.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "hermes",
+     "web-manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-077",
+    "hermes-learning-and-memory-089",
+    "web-manus-web-product-091"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-learning-and-memory-089",
+     "codexagent-plugins-and-extensibility-077",
+     "web-manus-web-product-091"
+    ],
+    "why": "Hermes (q4) stores suggestions with a dedup latch, a pending cap of 5 and one-tap accept; Codex generates ambient suggestions from projects and apps."
+   },
+   "mechanism": "Suggestion{source, spec, dedup_key, status pending|accepted|dismissed}; generated post-turn or from usage; accept calls the normal create path under user authority.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record.",
+    "strengths": ""
+   },
+   "benefit": "Helps users discover automations; supports the 'learns its user' reference (Hermes).",
+   "approach": "After C35a: post-turn suggestion pass writing pending suggestions to session-core; Frontend cards.",
+   "effort": "M",
+   "dependencies": [
+    "C35a"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Annoyance; must be capped and dismissable.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Depends on automations.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-051",
+   "name": "Persistent named personal agents",
+   "description": "Long-lived agents with their own identity (name, avatar, instructions, memory, skills, sometimes email, phone or a cloud computer) that keep working between conversations and can join group chats with humans and other agents.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "hermes",
+     "manus",
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 5,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-074",
+    "hermes-architecture-and-surfaces-161",
+    "manus-product-ux-054",
+    "manus-product-ux-055",
+    "web-chatgpt-web-product-049",
+    "web-manus-web-product-042"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-054",
+     "codexagent-agent-runtime-and-models-074",
+     "hermes-architecture-and-surfaces-161",
+     "web-chatgpt-web-product-049"
+    ],
+    "why": "Manus (q4, SRC) ships named agents with their own email, phone, computer and skills; Codex's hidden 'aeon' assistant and ChatGPT Dots show OpenAI moving the same way; Hermes builds bots from profiles."
+   },
+   "mechanism": "Agent{id, owner, persona, instructions, memory scope, skills, channels[], autonomy_cap}; a permanent main thread per agent; inbound messages from channels start runs on that thread; schedules and goals attach to the agent.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [
+     "v-chat-agents-ui-076",
+     "v-chat-agents-ui-077"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentsPage.tsx:47-134",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/DesignPreviewBadge.tsx:1",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx:5",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/ChiefCoreRoutingPage.tsx:5"
+    ],
+    "gap": "Agents overview has role blueprints labelled as design previews; agent installations are read-only reads of Space agent installations; no persistent agent identity with its own thread or channels.",
+    "strengths": "Space agent installations give a server-side anchor to build on."
+   },
+   "benefit": "Defines what the Agents page is; strong differentiation against plain chat.",
+   "approach": "Model a persistent agent as a Space agent installation plus a main thread in session-core, with memory scoped to the agent; channels later via the Channel Plane.",
+   "effort": "XL",
+   "dependencies": [
+    "C07c",
+    "C34",
+    "C35a",
+    "memory scopes"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Identity and ACL: an agent must act with the owner's delegated, never widened, authority.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Direction of the market and of Verevon's agent pages; large effort.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-052",
+   "name": "Workspace agent builder and deployment surfaces",
+   "description": "Business users build an agent from a prompt or template, preview it, version it, pick model and connectors, and deploy it to Slack, schedules or an API trigger with an activity log.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-078",
+    "web-chatgpt-web-product-054"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-054",
+     "codexagent-agent-runtime-and-models-078"
+    ],
+    "why": "ChatGPT Workspace Agents (q4, DOC) with versions, schedules, Slack and API trigger; the Codex bundle shows the Slack and activity-log implementation (SRC)."
+   },
+   "mechanism": "Builder UI producing a versioned agent spec {instructions, model, connectors with per-action ask policy, triggers}; preview runs in a sandbox thread; publish creates a deployment with an activity log of runs.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [
+     "v-chat-agents-ui-076",
+     "v-chat-agents-ui-074"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentsPage.tsx:47-134",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/DesignPreviewBadge.tsx:1",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:168-330",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:784-840"
+    ],
+    "gap": "Workflow builder and Chatbot studio are design previews; the Agent Run Console can launch goals but there is no saved, versioned agent spec.",
+    "strengths": "Agent Run Console (timeline, approvals, proof bundle) is a solid run view to reuse."
+   },
+   "benefit": "Turns Verevon agent pages into a product for teams.",
+   "approach": "Versioned agent specs in capability-core; builder in Frontend; deployments reuse schedules (C35a) and triggers (C35c).",
+   "effort": "L",
+   "dependencies": [
+    "C07c",
+    "C35a"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Connector write actions must default to always-ask.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Agent pages are in scope; reuse existing console.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-053",
+   "name": "Agent entry points beyond the app (email, Slack, Teams, issue trackers)",
+   "description": "Users start or continue agent tasks by emailing an agent address, mentioning it in Slack/Teams, or from issue trackers; replies come back in-thread.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "manus",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "cursor-ai-features-039",
+    "manus-product-ux-060",
+    "web-claudeai-web-product-041",
+    "web-perplexity-web-product-052",
+    "web-perplexity-web-product-053"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-052",
+     "web-perplexity-web-product-053",
+     "manus-product-ux-060",
+     "cursor-ai-features-039"
+    ],
+    "why": "Perplexity (q4, DOC) runs Computer from forwarded email with the sender's permissions and binds Slack channels to projects; Manus (SRC) creates tasks by email with allowlists."
+   },
+   "mechanism": "Inbound adapter per channel normalizes messages to {sender identity, thread ref, content, attachments}; sender mapped to a Verevon user and checked against an allowlist; a run starts with origin=channel; output delivered by the platform tool, not as chat text.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go:1-20"
+    ],
+    "gap": "Baseline narrative: bridge-core has a session registry, webhook channel adapter and delivery worker; the Channel Plane is docs-only/future.",
+    "strengths": ""
+   },
+   "benefit": "Meets users where they work; differentiator for business users.",
+   "approach": "Wait for the Channel Plane; keep Model Plane runs origin-aware (C46) so channels can plug in later.",
+   "effort": "L",
+   "dependencies": [
+    "Channel Plane",
+    "Control plane identity mapping"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Inbound content is untrusted data (prompt injection); identity spoofing on email.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Channel Plane is explicitly future; prepare, do not build now.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-054",
+   "name": "Server-side runs that continue after the client closes, with parallel tasks",
+   "description": "Tasks run on the provider's servers, keep going when the page or laptop is closed, and several can run in parallel with per-plan concurrency limits.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "web-claudeai",
+     "web-manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-114",
+    "web-claudeai-web-product-036",
+    "web-claudeai-web-product-037",
+    "web-manus-web-product-044"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-036",
+     "web-manus-web-product-044"
+    ],
+    "why": "Claude web (q5, DOC) keeps sessions running with idle VM snapshots; Manus gives each task its own VM with plan-based concurrency."
+   },
+   "mechanism": "Runs are owned by the server; the client only subscribes; resume via event ids; concurrency limit per plan enforced at admission.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-066",
+     "v-chat-agents-ui-069",
+     "v-modelplane-069"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:169-273",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:196",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/RunNotifyButton.tsx:1-20",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3685",
+     "apps/Model Plane/rust/services/session-core/src/terminalization.rs:1-8",
+     "apps/Model Plane/rust/services/session-core/src/main.rs:190-195"
+    ],
+    "gap": "Durable runs with replay and 'notify me when done' are shipped. Not verified: per-plan concurrency limits at admission.",
+    "strengths": "Verevon is a web product: runs are server-side by construction, with durable replay and background-run notifications."
+   },
+   "benefit": "Keep.",
+   "approach": "Add plan-based concurrency limits via Control-plane entitlements if missing.",
+   "effort": "S",
+   "dependencies": [
+    "Control plane entitlements"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "At parity.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-055",
+   "name": "Cloud coding environments as code (repo VMs, PR delivery, self-hosted workers)",
+   "description": "Coding agents run in cloud VMs built from a repository environment spec, deliver pull requests, and can run on self-hosted worker pools.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "web-chatgpt"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-025",
+    "cursor-ai-features-037",
+    "cursor-ai-features-038",
+    "cursor-ai-features-043",
+    "cursor-harness-architecture-030",
+    "web-chatgpt-web-product-062"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-037",
+     "cursor-ai-features-038",
+     "cursor-ai-features-043"
+    ],
+    "why": "Cursor (q5) has pods, snapshots, environment-as-code and a self-hosted worker daemon."
+   },
+   "mechanism": "environment.json/Dockerfile per repo; setup agent; pod snapshots; worker daemon claims jobs from a pool; delivery as PR.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable as such: Verevon is not an IDE. Sandboxes exist (sandbox-manager, bwrap, Space leases) for code execution.",
+    "strengths": ""
+   },
+   "benefit": "Low for Verevon's chat/agent pages.",
+   "approach": "Skip; keep sandbox-manager for code execution and documents.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Scope creep into IDE territory.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Out of product scope (Verevon is not an IDE).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-056",
+   "name": "Cross-device continuation of a live task",
+   "description": "A task started on one device can be monitored, answered and redirected from another (phone, web), with push notifications when input is needed.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt",
+     "web-claudeai"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-019",
+    "web-chatgpt-web-product-048",
+    "web-claudeai-web-product-039",
+    "web-claudeai-web-product-040",
+    "web-claudeai-web-product-043"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-039",
+     "claude-runtime-architecture-019",
+     "web-chatgpt-web-product-048"
+    ],
+    "why": "Claude (q4, DOC) lets users answer questions and redirect from mobile with push; Claude Desktop Dispatch (SRC) applies unattended-turn policy to phone-started sessions."
+   },
+   "mechanism": "Server-owned runs plus resumable streams; notifications on awaiting_input/approval; any device can submit decisions or queued input against the run id.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-066",
+     "v-chat-agents-ui-069"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:169-273",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:196",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/RunNotifyButton.tsx:1-20",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3685"
+    ],
+    "gap": "Server-side runs, stream resume and notifications exist; push to a mobile device and answering approvals from notifications were not verified.",
+    "strengths": "Web-first architecture gives this nearly for free."
+   },
+   "benefit": "Keep; add push when a mobile surface exists.",
+   "approach": "Route awaiting_approval/awaiting_input to notification-core with deep links.",
+   "effort": "S",
+   "dependencies": [
+    "notification-core"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Inherent to the architecture.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-057",
+   "name": "Local machine bridge (remote control, SSH, keep-awake, local-to-cloud teleport)",
+   "description": "Desktop apps expose local folders or SSH hosts so sessions started elsewhere run on the user's machine, survive disconnects, keep the machine awake, and can be teleported to the cloud.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor",
+     "manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-082",
+    "claude-product-ux-083",
+    "claude-runtime-architecture-012",
+    "claude-runtime-architecture-013",
+    "claude-runtime-architecture-014",
+    "claude-runtime-architecture-017",
+    "claude-runtime-architecture-023",
+    "claude-runtime-architecture-139",
+    "cursor-ai-features-042",
+    "manus-product-ux-061"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-083",
+     "claude-runtime-architecture-012",
+     "claude-product-ux-082"
+    ],
+    "why": "Claude Desktop (q5, SRC) serves trusted folders as remote environments, keeps SSH sessions alive across disconnects with sequence replay, and moves local sessions to the cloud."
+   },
+   "mechanism": "Local helper registers folders as environments; a remote helper daemon runs the engine and buffers events by sequence; on reconnect replay from the last sequence; keep-awake claims while runs are active.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable today: Verevon is a web app without a desktop agent.",
+    "strengths": ""
+   },
+   "benefit": "Only if Verevon ships a desktop companion for computer use (Manus My Computer style).",
+   "approach": "Skip for now; revisit with the computer-use category.",
+   "effort": "XL",
+   "dependencies": [
+    "desktop companion"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Large security surface on user machines.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Outside the web product's scope.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-058",
+   "name": "Workspace and file checkpoints with revert",
+   "description": "Before each turn the files the agent may change are snapshotted (often in a shadow git store); the user can revert to any message, undo the revert, and deliverables keep versions.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "hermes",
+     "manus",
+     "t3code"
+    ],
+    "n": 6,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-041",
+    "claude-runtime-architecture-020",
+    "cursor-ai-features-036",
+    "hermes-architecture-and-surfaces-026",
+    "manus-product-ux-059",
+    "t3code-architecture-043",
+    "t3code-ui-and-multimodel-081"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-architecture-043",
+     "claude-runtime-architecture-020",
+     "hermes-architecture-and-surfaces-026"
+    ],
+    "why": "T3 Code (q4, SRC) snapshots the tree into hidden git refs via a temporary index and coordinates revert across files, provider and refs; Claude adds undo-rewind and fork."
+   },
+   "mechanism": "Per turn: snapshot touched files into a content-addressed store; record checkpoint{turn_id, refs}; revert restores files and truncates the conversation consistently; effectful provider writes are marked non-rewindable.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-072"
+    ],
+    "evidence": [],
+    "gap": "No user-facing checkpoint or rewind (I11 planned); artifacts have versions by re-emitting ids; recommended scope OD19: conversation plus artifact versions, effectful turns non-rewindable.",
+    "strengths": "Artifact versions already exist; 'effectful turns are immutable' is a sound rule."
+   },
+   "benefit": "Undo for agent edits to artifacts and Space documents.",
+   "approach": "Implement OD19: checkpoint artifact versions and Space file revisions per turn (Data Plane owns documents; Model Plane records references only).",
+   "effort": "M",
+   "dependencies": [
+    "Data Plane document revisions",
+    "C40b"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cross-plane: the Model Plane must not write Data Plane stores directly.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Valuable, but documents live in another plane and C40b gives most of the user value.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-059",
+   "name": "Conversation rewind, fork and side chats",
+   "description": "A chat can be rolled back N turns, reverted, forked at a turn boundary, or branched into a throwaway side conversation that returns to the parent.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "hermes"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-022",
+    "codexagent-agent-runtime-and-models-023",
+    "codexagent-agent-runtime-and-models-090",
+    "cursor-harness-architecture-025",
+    "hermes-architecture-and-surfaces-162"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-022",
+     "cursor-harness-architecture-025",
+     "hermes-architecture-and-surfaces-162"
+    ],
+    "why": "Codex (q5) has rollback, revert, fork lineage and undo; Cursor (q5) stores conversation state as content-addressed blobs so any checkpoint is resumable."
+   },
+   "mechanism": "Thread history as immutable turns with parent pointers; fork creates a new thread referencing turns up to a boundary (copy-on-write); rewind moves the head pointer; side chat is a child thread whose result can be inserted back.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-072"
+    ],
+    "evidence": [],
+    "gap": "No server branch model (sessions.proto has no branch fields; parent_message_id = 21 unused); only a client-side 'Fortsett i ny chat' and client-only edit siblings that vanish on reload.",
+    "strengths": ""
+   },
+   "benefit": "Table-stakes chat feature (ChatGPT, Claude); users notice when edits lose history.",
+   "approach": "Add parent_message_id and branch head to session-core threads; fork/rewind RPCs; effectful turns non-rewindable.",
+   "effort": "M",
+   "dependencies": [
+    "session-core migrations"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "ZDR threads cannot be forked server-side.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Visible chat gap; moderate effort.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-060",
+   "name": "Agent status machine, turn attribution and origins",
+   "description": "Each thread or task exposes a small status set (idle, active, waiting on approval, waiting on input, error) with elapsed-work indicators, and records who started each turn and from which surface.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "manus",
+     "web-manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "claude-runtime-architecture-010",
+    "codexagent-agent-runtime-and-models-085",
+    "manus-product-ux-047",
+    "web-manus-web-product-035"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-085",
+     "manus-product-ux-047",
+     "claude-runtime-architecture-010"
+    ],
+    "why": "Codex (q4) reports thread status with waiting-on-approval/input and turn attribution by source; Manus shows 'Working for {duration}'."
+   },
+   "mechanism": "ThreadStatus{not_loaded|idle|active{waiting_on_approval, waiting_on_input}|error}; turn{kind, origin web|schedule|channel|subagent|api, started_by}; UI badges and elapsed timers.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-066",
+     "v-chat-agents-ui-074"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:169-273",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:196",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:168-330",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:784-840"
+    ],
+    "gap": "Work panel answers whether Verevon needs you and threads carry an origin filter; a unified status enum and turn attribution by origin were not verified.",
+    "strengths": "Work panel lifecycle and live telemetry."
+   },
+   "benefit": "Needed once scheduled, triggered and channel runs exist (C35a/C35c/C37).",
+   "approach": "Add origin and started_by to run records in session-core; expose status on thread lists.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Small, enabling.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-061",
+   "name": "Next-prompt suggestions",
+   "description": "After a turn the product suggests the user's likely next prompt or follow-up questions.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-048"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-048"
+    ],
+    "why": "Only source in this category (q3, SRC)."
+   },
+   "mechanism": "Post-answer cheap inference produces short follow-up lines emitted as a typed event.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8120"
+    ],
+    "gap": "Baseline narrative: follow-up suggestions are shipped (follow_ups event).",
+    "strengths": "Shipped and sanitised."
+   },
+   "benefit": "Keep.",
+   "approach": "None.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 1,
+   "rationale": "At parity.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-062",
+   "name": "Outcome verification before delivery",
+   "description": "The agent follows an operating contract to plan testing, verify outcomes (for example test a generated app in a browser) and stop at sufficient evidence before declaring success.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "manus",
+     "web-manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-098",
+    "manus-computer-control-architecture-014",
+    "web-manus-web-product-103"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-014",
+     "cursor-ai-features-098",
+     "web-manus-web-product-103"
+    ],
+    "why": "Manus (q4, SRC) ships an observe-plan-batch-verify playbook; Cursor's cloud-agent contract requires test planning and evidence."
+   },
+   "mechanism": "Written operating contract in the prompt plus a verification step: after effects, run checks and attach evidence to the final message.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-063",
+     "v-planned-decisions-069"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/postcondition.rs:1-10",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/post_mutation.rs:1-8",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/postcondition.rs:1"
+    ],
+    "gap": "Deterministic postcondition verifiers and a Verified Outcome/Proof Bundle are shipped; no type-check feedback for run_code and no automatic re-fetch for Visma.",
+    "strengths": "Deterministic read-back verification of provider writes is stronger than prompt-only playbooks. Keep."
+   },
+   "benefit": "Keep.",
+   "approach": "Extend verifiers to more providers.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is ahead.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-063",
+   "name": "UI actions and scripts compiled into agent turns",
+   "description": "Buttons in the UI (commit, create automation, investigate a run) produce templated, machine-readable agent turns; a scripted prelude can run tool calls before the first model call.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "hermes",
+     "manus"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-harness-architecture-015",
+    "hermes-architecture-and-surfaces-036",
+    "manus-product-ux-051"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-015",
+     "manus-product-ux-051",
+     "hermes-architecture-and-surfaces-036"
+    ],
+    "why": "Cursor (q4) maps simulated-message reasons to templates; Manus automation screens send the agent structured requests."
+   },
+   "mechanism": "Action registry maps a UI action to a template {reason, parameters}; the gateway renders a structured user turn; optional prelude executes deterministic tool calls and feeds results to the model.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check src/shared/actions (typed actions shared by UI and agents) for templated-turn generation.",
+    "strengths": ""
+   },
+   "benefit": "One code path for UI and agent actions; aligns with Verevon's typed action API goal.",
+   "approach": "Add a templated-turn renderer in the gateway keyed by action ids.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Convenience.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-064",
+   "name": "Multi-agent write isolation",
+   "description": "Parallel agents get their own worktrees or a cross-agent file-state registry, and a pre-final barrier checks whether shared state changed underneath an agent.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "hermes"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-harness-architecture-140",
+    "hermes-architecture-and-surfaces-025"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-025",
+     "cursor-harness-architecture-140"
+    ],
+    "why": "Hermes (q4) offers opt-in worktrees and a process-wide registry against overwrites; Cursor injects a conflict barrier before finishing."
+   },
+   "mechanism": "Per-child worktree or a registry of file versions read/written per agent; refuse writes based on stale reads; barrier before final answer.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-048"
+    ],
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1821"
+    ],
+    "gap": "Replaced by decision with a per-run child ceiling; children do not write shared files in parallel.",
+    "strengths": ""
+   },
+   "benefit": "Low under synchronous delegation.",
+   "approach": "Skip; revisit if async children write Space files.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "None now.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Not a gap by decision.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-065",
+   "name": "Atomic run bootstrap saga",
+   "description": "The first message of a new thread runs one server-side transaction (create thread, prepare workspace, run setup, start turn) that rolls back on failure.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "deepseek-harness-architecture-033",
+    "t3code-architecture-045",
+    "t3code-ui-and-multimodel-035"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-architecture-045",
+     "deepseek-harness-architecture-033"
+    ],
+    "why": "T3 Code (q4) runs a bootstrap program with rollback; DeepSeek awaits agent creation as one rollback-capable transaction."
+   },
+   "mechanism": "Saga with compensations: create thread -> prepare workspace -> start turn; on failure undo previous steps and return one error.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check the gateway's prepared-run path for partial-failure cleanup.",
+    "strengths": ""
+   },
+   "benefit": "Low.",
+   "approach": "Verify; add compensations if threads leak on failed starts.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Implementation hygiene.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-066",
+   "name": "Post-turn background learning passes",
+   "description": "After a turn is delivered, a background fork reviews the conversation and writes memory or skills; an idle-time curator archives stale skills; foreground turns always pre-empt the review.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-027",
+    "hermes-architecture-and-surfaces-028",
+    "hermes-learning-and-memory-061"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-027",
+     "hermes-architecture-and-surfaces-028",
+     "hermes-learning-and-memory-061"
+    ],
+    "why": "Only source (Hermes, q4): review fork shares the cached prefix, runs under a tool whitelist, and is cancelled by any new user turn."
+   },
+   "mechanism": "On turn delivery enqueue a review job with a snapshot; run it with memory/skill tools only; cancel on new foreground activity (ABA-safe run token); an idle curator ranks skills by usage and archives, never deletes.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-074"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:98-160",
+     "apps/Model Plane/go/services/orchestrator-core/cmd/main.go:146-175"
+    ],
+    "gap": "MemoryConsolidation, SkillPromotion and FeedbackPromotion Temporal workflows exist but are started only by capability-core's task executor; no post-turn review fork wired to chat (see memory category).",
+    "strengths": "Durable workflows for promotion already exist."
+   },
+   "benefit": "Supports the Hermes reference goal (learns and tailors itself to its user).",
+   "approach": "Trigger SkillPromotion/MemoryConsolidation after non-ZDR turns via NATS events; enforce a tool whitelist and pre-emption.",
+   "effort": "M",
+   "dependencies": [
+    "memory category decisions"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "ZDR: never run on ZDR turns; skill poisoning from untrusted content.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Key to the Hermes-style learning goal; overlaps the memory category.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-067",
+   "name": "Emergency stop and maintenance fence",
+   "description": "An operator or admin can pause all new agent work (cron, dispatch, new turns) without killing in-flight work, and safe restarts wait for idleness.",
+   "prevalence": {
+    "sourcesWith": [
+     "hermes",
+     "manus"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "hermes-architecture-and-surfaces-034",
+    "manus-computer-control-architecture-068"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-034",
+     "manus-computer-control-architecture-068"
+    ],
+    "why": "Hermes (q4) pauses new work install-wide through a fail-safe sentinel; Manus reports idleness and fences maintenance."
+   },
+   "mechanism": "Global or org-level pause flag checked at admission for runs, schedules and triggers; activity status {active turns, in-flight actions}; maintenance begins when idle.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-070"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20",
+     "apps/Model Plane/rust/services/model-gateway/src/drain.rs:103"
+    ],
+    "gap": "Graceful drain on redeploy is shipped; no org-level or global pause of new agent work was found.",
+    "strengths": "Drain with /readyz 503 and in-flight completion."
+   },
+   "benefit": "Enterprise admins and incident response can stop agents fast.",
+   "approach": "Control-plane org flag 'agents paused' checked by capability-core admission and the gateway.",
+   "effort": "S",
+   "dependencies": [
+    "Control plane org settings"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Cheap safety valve.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-068",
+   "name": "Thread lifecycle housekeeping (settle, snooze, utility-model titles, deletion cascade)",
+   "description": "Threads are settled or snoozed manually or automatically, a cheap utility model writes titles and summaries, and deleting a thread cascades to its sessions and terminals.",
+   "prevalence": {
+    "sourcesWith": [
+     "t3code"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "t3code-architecture-093",
+    "t3code-ui-and-multimodel-022",
+    "t3code-ui-and-multimodel-059"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-022",
+     "t3code-ui-and-multimodel-059",
+     "t3code-architecture-093"
+    ],
+    "why": "Only source (T3 Code, q5 settle/snooze with client/server invariants)."
+   },
+   "mechanism": "effectiveSettled computed from activity blockers, overrides and inactivity; utility model per provider for titles; deletion reactor stops sessions.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8033"
+    ],
+    "gap": "Baseline narrative: auto titles, archive and durable delete are shipped; no settle/snooze.",
+    "strengths": "Durable erase contract on delete."
+   },
+   "benefit": "Low.",
+   "approach": "Optional snooze for background runs later.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Low value for chat users.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-069",
+   "name": "Warm session caching and idle reaping",
+   "description": "Agent processes or VMs stay warm for a grace period between turns and are reaped when idle, without killing active turns or background work.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "hermes",
+     "t3code"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-021",
+    "hermes-architecture-and-surfaces-040",
+    "t3code-architecture-034"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-architecture-034",
+     "claude-runtime-architecture-021",
+     "hermes-architecture-and-surfaces-040"
+    ],
+    "why": "T3 Code (q4) reaps idle provider sessions only when no turn or background work is live; Hermes evicts warm agents by RSS."
+   },
+   "mechanism": "Track last_seen per session; sweep periodically; skip sessions with active turns or background liveness; evict LRU under memory pressure.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check sandbox-manager idle policies; Verevon's loop is stateless per request, so this mainly matters for sandboxes.",
+    "strengths": ""
+   },
+   "benefit": "Low.",
+   "approach": "Skip unless sandbox start latency becomes a problem.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Low.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Implementation concern of local-process harnesses.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-070",
+   "name": "Deterministic replay corpus and fault-injecting mock model",
+   "description": "Recorded sessions replay through the real runtime without an API key, a scriptable mock model injects stalls, malformed chunks and rate limits, and CI enforces coverage and performance budgets.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-044",
+    "deepseek-harness-architecture-111",
+    "deepseek-harness-architecture-112",
+    "deepseek-harness-architecture-113",
+    "deepseek-harness-architecture-114"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-111",
+     "deepseek-harness-architecture-112",
+     "deepseek-harness-architecture-113"
+    ],
+    "why": "DeepSeek (q5, SRC) replays recorded parent and subagent sessions through shipped profiles and has a seeded fault-injection mock server."
+   },
+   "mechanism": "Record model transcripts as fixtures; replay server returns them in call order; override sidecar injects failures; tests assert on the persisted world state, not mocks.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-077"
+    ],
+    "evidence": [
+     "apps/Model Plane/python/eval-lab-py/cases/baseline/07_hitl_pause.yaml",
+     "apps/Model Plane/rust/crates/mp-slo/src/lib.rs:1-8"
+    ],
+    "gap": "eval-lab-py has 14 offline YAML cases and an SLO harness; no keyless replay corpus or fault-injecting mock model was found in the baseline.",
+    "strengths": "Offline eval cases cover HITL, org isolation, ZDR and compaction."
+   },
+   "benefit": "Safer changes to the two loops (which were deliberately not unified).",
+   "approach": "Add a recorded-transcript replay backend to inference-core for tests plus a fault-injection mode.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Fixtures must contain no customer data.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Engineering leverage; invisible to users.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-071",
+   "name": "Live A/B harnesses and eval hooks in the production loop",
+   "description": "Behaviour changes are validated by running real agents from two pinned versions over graded tasks; the production loop carries eval overrides and trajectory export.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "deepseek",
+     "hermes"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-035",
+    "cursor-harness-architecture-028",
+    "deepseek-harness-architecture-115",
+    "hermes-architecture-and-surfaces-037",
+    "hermes-architecture-and-surfaces-038"
+   ],
+   "bestInClass": {
+    "source": "hermes",
+    "recordIds": [
+     "hermes-architecture-and-surfaces-038",
+     "cursor-harness-architecture-028",
+     "hermes-architecture-and-surfaces-037"
+    ],
+    "why": "Hermes (q5) runs isolated two-arm A/B evaluations of tool-visibility and prompt changes; Cursor keeps eval overrides in the production runtime."
+   },
+   "mechanism": "For each (arm, model, task, rep) run the agent hermetically and grade; compare arms; production runtime accepts eval overrides (temperature, token limits) and writes trajectories.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [
+     "v-modelplane-078",
+     "v-chat-agents-ui-081"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/trajectory.rs:1-10",
+     "apps/Model Plane/rust/services/model-gateway/src/trajectory.rs:159",
+     "apps/Frontend Plane/verevonv3/src/features/quality/components/OpsQualityPage.tsx:1-40",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/eval.rs:39"
+    ],
+    "gap": "Trajectory recording is an in-memory ring buffer (not durable); ops quality page shows basic success rate and drift.",
+    "strengths": ""
+   },
+   "benefit": "Evidence-based harness changes.",
+   "approach": "Persist trajectories (non-ZDR only) and add an A/B runner to eval-lab-py.",
+   "effort": "M",
+   "dependencies": [
+    "C43a"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "ZDR: never record ZDR turns.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful engineering practice; not user-facing.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t3-04-072",
+   "name": "Engine/host separation and pluggable execution location",
+   "description": "The agent loop is a separate engine driven over a protocol, and where tools execute (local machine, VM, SSH host, cloud) is chosen per session or per task by need.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-137",
+    "claude-runtime-architecture-006",
+    "claude-runtime-architecture-009",
+    "claude-runtime-architecture-024",
+    "cursor-ai-features-024"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-runtime-architecture-006",
+     "claude-runtime-architecture-024",
+     "cursor-ai-features-024"
+    ],
+    "why": "Claude (q5) uses a custom spawn function so one engine runs locally, in a VM or over SSH; Cursor runs the loop server-side and executes tools on the client or a cloud VM."
+   },
+   "mechanism": "Engine speaks a typed protocol; a spawn/transport seam selects the executor; routing picks the location from task needs (local folders, browser, connectors only).",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. INF: Verevon already separates the loop (execution-core) from execution (sandbox-manager, Quarry for browser), which is the web-product form of this pattern.",
+    "strengths": "Model proposes browser actions and Quarry executes them; sandboxes are leased."
+   },
+   "benefit": "Already structurally present.",
+   "approach": "Skip as a feature; keep the plane separation.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "None.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Architecture already matches the web-product form.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-073",
+   "name": "External agent engines as backends",
+   "description": "Other agent products (Claude Code, Codex, Cursor agent, OpenCode, ACP agents) are driven as engines or one-shot subagents behind one provider facade with a canonical event taxonomy.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek",
+     "t3code"
+    ],
+    "n": 3,
+    "of": 12,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-runtime-architecture-005",
+    "deepseek-harness-architecture-024",
+    "t3code-architecture-033",
+    "t3code-architecture-035",
+    "t3code-architecture-037",
+    "t3code-architecture-038",
+    "t3code-architecture-039"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-architecture-033",
+     "claude-runtime-architecture-005",
+     "deepseek-harness-architecture-024"
+    ],
+    "why": "T3 Code (q5) routes threads to adapters for five protocols and normalizes their events while keeping raw payloads; DeepSeek can delegate to Claude Code, Codex or ACP agents."
+   },
+   "mechanism": "Adapter per engine (SDK stdio, app-server JSON-RPC, ACP, HTTP); a facade binds each thread to an adapter with a resume cursor; all events mapped to a canonical taxonomy with the native payload preserved.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; Verevon's multi-model support is through inference-core providers, not external agent engines.",
+    "strengths": ""
+   },
+   "benefit": "Could offer 'run this with Codex/Claude Code' in sandboxes, but duplicates Verevon's own governed loop.",
+   "approach": "Skip; prefer native multi-model through inference-core so the capability gate always applies.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "External engines bypass the capability gate and ZDR guarantees.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Conflicts with the governed-loop authority model.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-074",
+   "name": "Domain workflow modes for code (debug mode, PR babysit, autonomous PR agent)",
+   "description": "Built-in workflows that drive code-specific loops: hypothesis-driven debugging with instrumentation, keeping a PR merge-ready, and an autonomous PR reviewer that auto-applies fixes.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-041",
+    "cursor-harness-architecture-021",
+    "cursor-harness-architecture-031"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-021",
+     "cursor-harness-architecture-031",
+     "cursor-ai-features-041"
+    ],
+    "why": "Only source (Cursor)."
+   },
+   "mechanism": "Mode-specific prompts and tools (instrument, reproduce, compare logs; watch CI and review comments).",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable: Verevon is not an IDE.",
+    "strengths": ""
+   },
+   "benefit": "Low.",
+   "approach": "Skip.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Scope creep.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "IDE-specific.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-075",
+   "name": "Response comparison for preference data",
+   "description": "A second model's answer is generated in the background or shown side by side so the user can state a preference, feeding training data.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-049",
+    "cursor-harness-architecture-027"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-027",
+     "cursor-ai-features-049"
+    ],
+    "why": "Only source (q4, SRC); runs only when privacy mode allows training."
+   },
+   "mechanism": "After a turn optionally generate an alternate response under a privacy gate and time limit; show both; record preference.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; Verevon records implicit dissatisfaction from regenerate/edit (v-chat-agents-ui-080) instead.",
+    "strengths": "Implicit dissatisfaction signals already capture feedback without extra cost."
+   },
+   "benefit": "Low; conflicts with ZDR defaults and doubles cost.",
+   "approach": "Skip.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Privacy and ZDR.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Training-data feature, not a user need.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-076",
+   "name": "Headless agent API/SDK and lifecycle webhooks",
+   "description": "Developers start and stream agent sessions programmatically, register client tools, and receive lifecycle webhooks.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "codexagent",
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 4,
+    "of": 12,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-architecture-043",
+    "antigravity-architecture-049",
+    "codexagent-agent-runtime-and-models-028",
+    "web-chatgpt-web-product-060",
+    "web-manus-web-product-043"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-060",
+     "antigravity-architecture-043",
+     "codexagent-agent-runtime-and-models-028"
+    ],
+    "why": "The OpenAI Agents API (q4, DOC) hosts the full harness with a selectable environment; Codex lets hosts register dynamic tools at thread start."
+   },
+   "mechanism": "Public API: POST /sessions{environment, tools[]}, POST /sessions/:id/messages, an SSE stream, and webhooks task.created/stopped/deleted carrying structured_output; same runtime as the web app.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check the gateway for a public, token-authenticated runs API and webhooks.",
+    "strengths": ""
+   },
+   "benefit": "B2B integrations; not needed for the chat/agent pages.",
+   "approach": "Defer; later expose the existing /v1/runs through Control-plane API keys.",
+   "effort": "L",
+   "dependencies": [
+    "Control plane API keys"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Abuse; billing.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Not on the chat/agent page critical path.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-04-077",
+   "name": "Record and replay a demonstrated workflow as a skill",
+   "description": "The user performs a workflow once with computer use and it is turned into a reusable skill. (Supported only by DOC/INF records.)",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt"
+    ],
+    "n": 1,
+    "of": 12,
+    "cls": "unique"
+   },
+   "members": [
+    "web-chatgpt-web-product-057"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-057"
+    ],
+    "why": "Only source (DOC only)."
+   },
+   "mechanism": "Record UI interactions, convert to a SKILL.md-style procedure, replay through computer use.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; requires desktop computer use, which Verevon does not have.",
+    "strengths": ""
+   },
+   "benefit": "Low until computer use exists.",
+   "approach": "Skip; revisit with computer use (browser procedures in Quarry could be a web variant).",
+   "effort": "L",
+   "dependencies": [
+    "computer use"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Recording sensitive screens.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Prerequisite missing; DOC-only.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  }
+ ]
+}

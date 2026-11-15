@@ -1,0 +1,2143 @@
+{
+ "category": "Apps & extensibility",
+ "excluded": [
+  {
+   "id": "grokbot-agent-runtime-139",
+   "reason": "Inventory of Grok Bot's internal client-to-backend Connect RPC services; an implementation map, not a user- or developer-facing extensibility capability (its product-relevant parts are covered by the per-feature records)."
+  },
+  {
+   "id": "teams-shell-and-native-115",
+   "reason": "Xbox Game Bar widget package update hook (INF, q2): Windows-gaming-overlay trivia with no product relevance for Verevon."
+  },
+  {
+   "id": "teams-shell-and-native-133",
+   "reason": "Shell recognition of first-party Copilot web origins for hosting and recording-risk classification: internal hosting trivia, not an extensibility capability."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t1-06-001",
+   "name": "Public developer API, SDKs and rate-limit contract",
+   "description": "A documented, token-authenticated API (plus SDKs) that exposes what the client can do: post messages, manage rooms/members, install apps, with published rate-limit tiers and Retry-After.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "slack",
+     "buzz"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "teams-product-surface-078",
+    "teams-product-surface-077",
+    "buzz-product-070",
+    "slack-product-surface-074"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-078",
+     "teams-product-surface-077"
+    ],
+    "why": "Graph is the broadest API-parity surface (teams, channels, chats, messages, tabs, installed apps, calls) and the same API backs first-party clients; SDKs in 3 languages plus a low-code tier (q5, DOC). Slack contributes the clearest rate-limit contract (slack-product-surface-074)."
+   },
+   "mechanism": "One resource-oriented HTTP API over the same domain handlers the UI uses; OAuth2 app/user tokens with scopes; per-app-per-tenant token buckets in tiers (about 1/20/50/100 per minute) and per-channel post pacing of about 1 msg/s; 429 with Retry-After; SDKs are thin typed clients generated from an OpenAPI/proto description. Buzz adds a signed-request HTTP bridge so scripts need no WebSocket (buzz-product-070).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-054",
+     "v-space-ui-055",
+     "v-space-backend-063",
+     "v-space-backend-106"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1991-2134",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs:476-505",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:58-61",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:736"
+    ],
+    "gap": "Typed internal action registry (14 spaces.* actions, zod schemas) and an AG-UI stream exist, but Space routes sit behind a same-origin BFF session layer; no published external API description, no third-party/app tokens with scopes, no rate-limit tiers and no SDK were found in baseline records (verify: search gateway for API-key/PAT auth and an OpenAPI export).",
+    "strengths": "Registry/dispatcher parity drift guard and AG-UI (an open agent-UI protocol) are good foundations for a public surface."
+   },
+   "benefit": "Lets customers, CI and partner agents automate Spaces without screen-scraping; one typed contract also feeds the agent self-API (C-t1-06-002) and future Channel Plane adapters.",
+   "approach": "Frontend Plane gateway: publish an OpenAPI document generated from the action registry; add org-issued, scoped, revocable API tokens minted by Control Plane (scope = action ids + optional Space allowlist, never wider than the issuing user's ACL); per-token token-bucket limits with Retry-After; generate TS and Rust clients. All writes keep flowing through the existing action dispatcher so audit and authority checks are identical.",
+   "effort": "L",
+   "dependencies": [
+    "Control Plane token issuance and revocation",
+    "action registry as single source of truth",
+    "audit receipts for token-originated actions"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Token leakage widening access; API drift from UI; ZDR content leaving via API must still honour privacy tier.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Not visible to most end users at launch, but required before any ecosystem (bots, webhooks, external surfaces) can exist.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-002",
+   "name": "Agent self-API and agent-first CLI (agents can do what humans can)",
+   "description": "Every platform action is callable by the agent itself through a discoverable catalogue or JSON CLI, with run-bound capability tokens so the agent acts with the delegating person's authority.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-086",
+    "buzz-product-071",
+    "qm-product-049",
+    "qm-product-050"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-049",
+     "qm-product-050"
+    ],
+    "why": "qm exposes a discoverable /v1/apis catalogue with guidance text and eligibility predicates, and signs capability tokens bound to session, run attempt and execution (48 h default), rechecking authority on each call; admin work reuses the same handlers (q4). Buzz's CLI (buzz-product-071, q4) is the best ergonomic shape for shell-driven agents."
+   },
+   "mechanism": "Catalogue of API families, each with natural-language guidance and an eligibility predicate (role, feature flag); the runtime mints a signed token per durable run (claims: org, principal, session, run attempt, expiry; deflate-compressed when large) presented as x-agent-capability; handlers re-verify the principal's authority per call. Buzz mirrors every action as JSON-in/JSON-out CLI subcommands over signed events.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-055",
+     "v-space-backend-054",
+     "v-space-ui-054"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:1-60",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1991-2145",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4885-4925"
+    ],
+    "gap": "14 spaces.* actions exist but none is model-eligible (the allowlist covers only tickets/inbox); the Space action catalogue endpoint is human-only and has no UI consumer; no run-bound capability token for agent-originated Space actions.",
+    "strengths": "Typed registry with risk level and owner plane per action is already the right catalogue shape."
+   },
+   "benefit": "Core to agents that work like a human: room agents could create threads, schedule follow-ups, invite members or pin results within delegated authority, without bespoke tools per action.",
+   "approach": "Model Plane consumes the Frontend action registry as a tool catalogue (staged disclosure like mcp_catalog); Control Plane mints run-bound capability grants (principal, Space, run id, action allowlist, expiry); the gateway dispatcher accepts them and re-checks the delegating human's ACL so Space access never widens the owner ACL; risky actions route to the existing in-room approval card.",
+   "effort": "M",
+   "dependencies": [
+    "model-eligibility allowlist extension",
+    "Control capability-grant decision",
+    "approval continuation (resume after approve)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Prompt injection driving membership/role changes; destructive actions must stay approval-gated and audited.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Cheap relative to value because the registry exists; it directly blocks the human-agent parity goal.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-003",
+   "name": "Event subscriptions and app connectivity (Events API, Socket Mode)",
+   "description": "Apps subscribe to conversation events and receive signed HTTP deliveries with retries, or open an outbound WebSocket when behind a firewall. [Reference support is DOC/INF only.]",
+   "prevalence": {
+    "sourcesWith": [
+     "slack"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "slack-product-surface-066",
+    "slack-product-surface-067"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-product-surface-066",
+     "slack-product-surface-067"
+    ],
+    "why": "Only Slack documents a complete contract: 3 s ack, retries at 0/1/5 min with retry headers, delivery ceilings, auto-disable at more than 95% failure, and Socket Mode with per-envelope acks (q4, DOC only)."
+   },
+   "mechanism": "Event envelope {type, team_id, api_app_id, event, event_id, event_time, authorizations}; signed with a per-app signing secret (HMAC over timestamp+body); at-least-once with event_id dedup; optional delayed hourly retries for 24 h; Socket Mode replaces HTTP with an app-initiated WebSocket where every envelope_id must be acked.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-060"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:257-276"
+    ],
+    "gap": "No app subscriptions or outbound event delivery for Spaces. Transactional outboxes with leases/retry exist in Application Plane and could be the source.",
+    "strengths": ""
+   },
+   "benefit": "Prerequisite for third-party bots and external automation reacting to Space activity.",
+   "approach": "Application Plane: publish Space events from the existing transactional outboxes to a per-app subscription table; deliver signed HTTP POSTs with retry/backoff/dead-letter (reuse the Model Plane bridge-core delivery-store pattern), plus an optional outbound-WebSocket mode; filter payloads by privacy tier so ZDR content is never emitted.",
+   "effort": "L",
+   "dependencies": [
+    "C-t1-06-001 public API and app tokens",
+    "durable delivery ledger (S4.4)"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Data exfiltration through subscriptions; must respect per-Space audience and ZDR.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Only valuable once an app ecosystem exists; Verevon's native agents cover most reactive use first.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-004",
+   "name": "Third-party bots as conversation participants",
+   "description": "Non-agent bots built with an SDK join personal, group and channel conversations, send proactive messages and can be blocked by users or admins.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "buzz"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "teams-product-surface-072",
+    "buzz-product-077"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-072"
+    ],
+    "why": "Teams bots have explicit scopes (personal/group/channel), activity handlers, proactive messaging and per-user/admin blocking with reasons (q4, DOC); buzz only ships an example bot over its SDK (q2)."
+   },
+   "mechanism": "Bot registration yields an app identity; the platform sends Activity objects (message, conversationUpdate, invoke) to the bot endpoint; the bot replies via a conversation-scoped REST call; proactive messages use a stored conversation reference; blocking is a per-user/per-tenant flag checked before delivery.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-060"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:257-276"
+    ],
+    "gap": "No third-party bot identities in Spaces; only Verevon-native agents can be bound.",
+    "strengths": "Native agents are first-class room members with roster confirmation, roles and binding policy, which covers most bot use cases already."
+   },
+   "benefit": "Lets customers bring existing deterministic bots (alerts, ticket bots) into rooms.",
+   "approach": "Model as an 'external agent binding' kind in Application Plane with Control roster confirmation, using C-t1-06-001 tokens and C-t1-06-003 events; reuse binding policy (trigger modes, approval mode).",
+   "effort": "L",
+   "dependencies": [
+    "C-t1-06-001",
+    "C-t1-06-003"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Spam and identity spoofing; needs blocking and admin controls.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Verevon's native agents already fill this role; external bots are an adoption convenience later.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-005",
+   "name": "Publish an agent into external chat platforms (Slack / Teams app per agent)",
+   "description": "An agent created in the product can be installed into Slack or Microsoft Teams as its own app with name/avatar, answer DMs and mentions there, with admin-approval and install-state handling.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "grokbot-agent-product-078",
+    "grokbot-agent-product-079",
+    "grokbot-agent-runtime-107",
+    "grokbot-agent-product-128",
+    "qm-product-052"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-078",
+     "grokbot-agent-product-079"
+    ],
+    "why": "Grok Bot programmatically creates a Slack app per bot and walks connect, admin approval, reinstall, move and removal with typed install outcomes; Teams per-tenant install with admin-declined and update-pending states (q5/q4, SRC from shipped proto). qm's one-paste manifest with the Agents pin (qm-product-052) is the simpler single-app alternative."
+   },
+   "mechanism": "Per-bot Slack app via the app manifest API (scopes for mentions, DMs, files, reactions, interactivity); OAuth install with outcome enum INSTALLED|PENDING_ADMIN_APPROVAL|WORKSPACE_REQUIRED|INSUFFICIENT_SCOPES|INSTALL_CONFLICT|RATELIMITED; inbound events routed to the bot runtime, replies posted as the bot identity; Teams uses a per-tenant app package with team-scoped install. Outbound channels are modelled as typed addresses (email, Slack, Teams, SMS) (grokbot-agent-product-128).",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [
+     "v-space-backend-058",
+     "v-space-backend-059",
+     "v-space-ui-058"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:644-664",
+     "apps/Application Plane/convex-core/convex/spaceAgents.ts:319-385",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1040-1062"
+    ],
+    "gap": "Delivery-target field exists on bindings (stub, internal mutation only) and agent cards display targets; no adapter and no install flow; the Slack/Teams mirror is planned (S5.1 ADR adopted, S5.3 blocked behind S4.4 and S4.3) and Channel Plane is docs-only.",
+    "strengths": ""
+   },
+   "benefit": "Meets users where they already chat and makes Verevon agents usable in mixed estates; strong adoption lever for Teams-heavy companies.",
+   "approach": "Stand up Channel Plane as a real service only after S4.4 durable delivery: one adapter per platform, per-agent app identity, an install-state machine modelled on Grok Bot's outcome enum; external messages enter as untrusted input under the installing user's authority; ZDR Spaces must block external delivery because content leaves the boundary.",
+   "effort": "XL",
+   "dependencies": [
+    "S4.4 durable delivery ledger",
+    "S4.3 watches",
+    "Channel Plane service",
+    "C-t1-06-001 tokens"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "ZDR/privacy-tier violations when content leaves; platform review and admin approval friction; identity mapping between external users and Verevon principals.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "High value but large and blocked by delivery infrastructure; sequence after in-room priorities.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-006",
+   "name": "Per-agent email identity (inbox, send, search)",
+   "description": "Each agent can own an email address; incoming mail wakes the agent via a routine; the agent can read, search and send (with approval).",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-product-082",
+    "grokbot-agent-runtime-108",
+    "grokbot-agent-product-138"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-082",
+     "grokbot-agent-runtime-108"
+    ],
+    "why": "Dedicated domain per bot, mail only wakes the bot through a user routine, sending is approval-gated, admins get sending windows, suppression lists and stats (q4, SRC)."
+   },
+   "mechanism": "Claim an address (availability check) on a product-owned domain; inbound MX -> parser -> stored thread -> routine trigger; outbound via provider with suppression list and rate windows; a user-level setting selects the Google/Microsoft provider for user-delegated mail (grokbot-agent-product-138).",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [
+     "v-space-backend-062"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs:1-30",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs:135"
+    ],
+    "gap": "Mail-to-task verifies, rate-limits and dedups, then always returns 503 mail_task_pipeline_not_configured; no per-agent address and no send. integration-corev2 has mailtask/emailsync packages (spot-check this pass, wiring unverified).",
+    "strengths": "Verification/rate-limit/dedup front half exists."
+   },
+   "benefit": "Gives Grok-style personal agents a human-like identity and an async intake channel.",
+   "approach": "Ingestion Plane owns inbound mail (integration-corev2 mailtask) and emits a wake envelope (untrusted payload) to Model Plane execution-core as an unattended turn under the owner's authority; outbound send is an integration action proposed by the Model and approved in the room.",
+   "effort": "L",
+   "dependencies": [
+    "execution-core unattended turn",
+    "C-t1-06-023 inbound trigger envelope",
+    "approval continuation"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Spam/phishing into agents (prompt injection), deliverability, ZDR for mail bodies.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Half-built already; finishing the pipeline is moderate effort and supports the personal-agent vision.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-007",
+   "name": "App model, manifest and app store with admin approval",
+   "description": "Apps declare capabilities in a manifest (bot, tab, message extension, meeting, personal app, agent, MCP tools); users browse a catalogue with permissions, pricing, ratings and certification; admins approve installs; apps can be started in a chosen chat or channel.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "slack"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "teams-product-surface-069",
+    "teams-product-surface-070",
+    "slack-product-surface-065",
+    "buzz-product-079",
+    "teams-product-surface-080"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-069",
+     "teams-product-surface-070"
+    ],
+    "why": "Teams explains each declared capability in plain language at install time, including that channel agents will ask permission to use an app's MCP tools, and the store shows pricing models, certification, install stats and an AI/agent label (q5/q4, REA). Slack's 2,600+ app marketplace (slack-product-surface-065, DOC) is larger but less directly observed."
+   },
+   "mechanism": "App package = manifest JSON (id, version, capabilities[], permissions[], validDomains, bots, staticTabs, composeExtensions, MCP tools) + icons; tenant catalogue with admin allow/deny and per-user install; the install dialog renders capability and permission strings; contextless start lets the user pick the destination conversation (teams-product-surface-080).",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-060",
+     "v-space-ui-059"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:257-276",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-110"
+    ],
+    "gap": "No app directory, manifest or install flow for Spaces; org-level plugin manifests exist in Settings (see C-t1-06-016).",
+    "strengths": ""
+   },
+   "benefit": "Long-term ecosystem lever; short-term, a curated catalogue of skills, plugins and MCP servers gives most of the value.",
+   "approach": "Do not build a Teams-style third-party store first. Extend the org plugin registry into a curated catalogue (skills, plugins, MCP servers, agent templates) with admin approval and plain-language capability/permission text; add third-party listings only after C-t1-06-001/003 exist.",
+   "effort": "XL",
+   "dependencies": [
+    "C-t1-06-016 plugin bundles",
+    "C-t1-06-008 scoped consent",
+    "C-t1-06-001"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Supply-chain risk of third-party code; review burden.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Incumbent table stakes for human chat but not where an AI-first product wins early; buzz and qm also lack it (buzz-product-079 is an INF absence record).",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 3,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t1-06-008",
+   "name": "Scoped, resource-specific consent for apps, tools and tokens",
+   "description": "Apps and tokens request permissions in plain sentences scoped to an exact container (this chat, this team, this user) or to a channel allowlist with expiry and revocation.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-071",
+    "buzz-product-080"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-071"
+    ],
+    "why": "Teams RSC has about 106 permission strings with _Chat/_Group/_User suffixes, consent per container and a clear ask-IT failure (q5, REA). Buzz has a scoped token table that the relay does not enforce (buzz-product-080, q1, INF)."
+   },
+   "mechanism": "Permission = (resource type, action, container scope); consent stored per (app, container) by an owner of that container; tokens issued at install carry only the consented container ids; the API layer intersects token scope with the caller's ACL.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-057",
+     "v-space-ui-079",
+     "v-space-backend-082",
+     "v-space-backend-068"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:743-937",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:667-674",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4500-4573"
+    ],
+    "gap": "Owner agent-action grants exist but only tickets.create is correlated; per-conversation grants are a stub; Space credential grants/broker are planned (S3.4); no consent UI for app or MCP tool permissions per Space.",
+    "strengths": "Binding policy (trigger modes, approval mode, allowed tools) is enforced at invocation and grants are correlated to receipts in Activity: an authority model stricter than RSC."
+   },
+   "benefit": "Makes it safe to let agents use MCP tools and connectors inside a Space ('this agent may create Jira issues in this room'), which is exactly the authority model Verevon promises.",
+   "approach": "Control Plane: generalise owner-grant decisions to (principal or agent, action or tool id, Space ref, expiry); Frontend shows Teams-style plain-language consent cards in the room; Model Plane checks the grant at tool-call time; never widen the owner-plane ACL.",
+   "effort": "M",
+   "dependencies": [
+    "S3.4 credential broker",
+    "C-t1-06-020 Space MCP cockpit"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Consent fatigue; grant sprawl without expiry.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Extends a Verevon strength (authority model) to tools; needed before MCP/connectors are opened per room.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t1-06-009",
+   "name": "Structured interactive message UI (cards / blocks)",
+   "description": "Apps and agents post messages built from typed blocks (sections, buttons, menus, inputs, charts) that render natively and send typed actions back.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "slack"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "common"
+   },
+   "members": [
+    "slack-product-surface-069",
+    "teams-product-surface-073"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-product-surface-069"
+    ],
+    "why": "Block Kit is the most mature documented schema (50 blocks per message, 100 per modal, builder tool, accessible top-level text, usable on agent streams) (q5, DOC); Teams Adaptive Cards add charts, dynamic search and file consent (teams-product-surface-073, q4, REA)."
+   },
+   "mechanism": "JSON block schema validated server-side; the renderer maps block types to native components; interactive elements carry action_id and value; clicks POST an interaction payload to the owning app/agent, which may update the message in place; a plain-text fallback field is required for accessibility and notifications.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-012",
+     "v-space-ui-006",
+     "v-space-ui-071",
+     "v-space-ui-070",
+     "v-space-ui-086"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:329-336",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:23-118"
+    ],
+    "gap": "Agent output renders Markdown/code/charts and there is a built-in approval card, but no general typed card schema agents can emit with actions; tool-call/plan cards and chat artifacts are absent inside rooms.",
+    "strengths": "The approval card with owner-only decide and reconcile-on-error is better specified than most card actions."
+   },
+   "benefit": "Lets agents present choices, summaries and status as compact actionable UI instead of long prose; reduces noise in multi-human rooms.",
+   "approach": "Define a small Verevon card schema (aligned with AG-UI generative-UI events) in Frontend Plane; Model Plane emits it as a typed tool result; actions route back as typed run signals through the gateway with authority checks; start with buttons, select, fields, chart and link.",
+   "effort": "M",
+   "dependencies": [
+    "AG-UI stream",
+    "run signal / continuation API"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Card actions as an injection path; needs server-side validation and per-action authority.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Visible quality jump for agent messages at moderate cost.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-010",
+   "name": "Agent-requested forms and secret capture outside chat",
+   "description": "An agent shows a structured form (choices, multi-step, custom answer, secure fields) and receives typed answers; secrets go through a one-time form straight to a vault and never appear in the transcript.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "grokbot-agent-product-084",
+    "grokbot-agent-runtime-105",
+    "qm-product-053"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-053",
+     "grokbot-agent-product-084"
+    ],
+    "why": "qm's secret drop mints a one-time URL (7-day TTL) whose submission goes to the person's keychain with an optional grant to the conversation (q4); Grok Bot has the richest in-chat widget UX (step counts, custom answer, dismiss, escalate) (q4)."
+   },
+   "mechanism": "Agent tool request_input{fields[], secure, multi_step} -> pending widget entry in the thread; the client renders it; Respond/Submit/Dismiss RPCs resume the run with a typed message. Secret drop: mint/peek/redeem with take-on-redeem; records carry owner, service, fields, audience scope and grant mode; the value is written to the encrypted keychain and the transcript only records that a secret was provided.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-059",
+     "v-space-backend-082"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-110"
+    ],
+    "gap": "No forms in Spaces; Space credential grants/broker are planned only; agents can only ask in prose.",
+    "strengths": ""
+   },
+   "benefit": "Structured input makes multi-human rooms usable (clear who answered what); keeping secrets out of chat is mandatory for ZDR and for agents that sign into services for the user.",
+   "approach": "Model Plane tool request_input with a pause/resume contract (reuse approval continuation); Frontend renders it as a card (C-t1-06-009); secret fields post directly to a Control Plane credential broker and return an opaque handle; only the handle enters the run.",
+   "effort": "M",
+   "dependencies": [
+    "approval continuation",
+    "S3.4 credential broker",
+    "C-t1-06-009 card schema"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Phishing-style forms from injected prompts; must show agent identity and destination clearly.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Unblocks safe credential use by agents and structured multi-party interaction at moderate effort.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-011",
+   "name": "MCP apps (interactive UI returned by MCP servers)",
+   "description": "MCP servers return small apps that render in the chat and call tools back under the same permission model.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-runtime-104"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-104"
+    ],
+    "why": "Only Grok Bot renders MCP app resources and routes app tool calls through the person-class permission path (q3, SRC, feature-gated)."
+   },
+   "mechanism": "Read an MCP UI resource from the server; the host renders it in a sandboxed frame; the app's tool calls go through a host bridge and the normal approval/permission checks.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check model-gateway mcp_http.rs / mcp_jsonrpc.rs for MCP UI resource handling and the Frontend for a sandboxed MCP app renderer.",
+    "strengths": ""
+   },
+   "benefit": "Lets third-party tools bring their own UI without a Verevon app store.",
+   "approach": "After C-t1-06-009: render MCP UI resources in a sandboxed iframe with a postMessage bridge that forwards tool calls only through the Model Gateway authority path.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-06-009",
+    "C-t1-06-020"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Sandbox escape, clickjacking, data exfiltration from the frame.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Emerging standard; worth tracking but not core.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-012",
+   "name": "Per-user agent home / review surface",
+   "description": "Each app/agent has a private per-user space (Home, Messages, About) used to review running or blocked work with pause, resume, stop and retry. [Reference support is DOC/INF only.]",
+   "prevalence": {
+    "sourcesWith": [
+     "slack"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "slack-product-surface-070"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-product-surface-070"
+    ],
+    "why": "Slack App Home is the documented agent review surface (q4, DOC only)."
+   },
+   "mechanism": "Per-(app, user) Home view rendered from blocks published by the app, a DM tab and an About tab; agents push status views and accept control actions.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-050",
+     "v-space-ui-074",
+     "v-space-ui-098",
+     "v-space-ui-061"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1253-1324",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:106-169"
+    ],
+    "gap": "Work tab, pulse rail, Activity and agent cards (pause/resume/remove) cover review, but there is no per-agent personal home and no cancel/steer/retry of a run (S4.5 planned).",
+    "strengths": "Activity grammar with consequence ordering and a needs-attention lens is richer than an app-authored Home tab."
+   },
+   "benefit": "One place to supervise one's agents across rooms.",
+   "approach": "Fold into the S4.5 unified Work cockpit: a per-agent view filtered to the viewer's delegations with cancel/steer/retry, instead of app-authored homes.",
+   "effort": "M",
+   "dependencies": [
+    "S4.5 Work cockpit",
+    "run cancel/steer APIs"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Duplicate surfaces with the Work tab.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Mostly covered by the planned Work cockpit; only the per-agent lens is new.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-013",
+   "name": "Platform slash commands and app command registry",
+   "description": "Typing / lists built-in commands (mute, goto, schedule, presence, search) and app-contributed commands with autosuggest; app commands reply privately or to the channel.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "slack",
+     "buzz"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "slack-product-surface-068",
+    "teams-product-surface-075",
+    "buzz-product-075"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-075",
+     "slack-product-surface-068"
+    ],
+    "why": "Teams has the richest built-in command set with recents and filter suggestions (q4, REA); Slack defines the app contract (trigger_id, response_url, ephemeral vs in-channel) (q4, DOC). Buzz only passes text through to agents (q2)."
+   },
+   "mechanism": "Command registry {name, description, args schema, owner (platform|app), visibility}; composer autosuggest merges built-ins, app commands and recents; invocation posts {command, text, trigger_id, response_url}; the handler returns an ephemeral or in-channel response.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-053",
+     "v-space-backend-055"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:213-267",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:777-800"
+    ],
+    "gap": "/ opens a skill picker only; there are no platform commands (invite, mute, schedule, pin, summarise, pause agent) and no app command contract.",
+    "strengths": "Shared keyboard picker infrastructure with @ already exists."
+   },
+   "benefit": "Fast keyboard control of rooms and agents; maps naturally onto the typed action registry.",
+   "approach": "Frontend Plane: add a second picker section populated from spaces.* actions in the registry (each already has a schema); execute through the same dispatcher; render ephemeral responses locally.",
+   "effort": "S",
+   "dependencies": [
+    "action registry"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Name collisions between skills and commands; namespace them.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Low effort, visible, reuses the registry.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-014",
+   "name": "Skills invoked from a / picker in the composer",
+   "description": "Typing / in the composer opens a picker of the person's visible skills and attaches the chosen skill to the turn.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-architecture-104",
+    "qm-product-051"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-104",
+     "qm-product-051"
+    ],
+    "why": "qm's web composer inserts the skill name and the agent resolves it through its skill tool (q3); it is the only reference with this exact pattern."
+   },
+   "mechanism": "Composer trigger on '/' -> list visibleFor(person) skills -> insert token; the runtime resolves the skill by id/name on the server.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-backend-055",
+     "v-space-ui-053"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:213-267",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:314-331",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:413-417"
+    ],
+    "gap": "",
+    "strengths": "Verevon is ahead of qm: lazily loaded catalogue, keyboard picker shared with @, org/personal scope badges on chips, sent as structured skill_ids resolved server-side in Model Gateway rather than as inserted text. Keep the structured skill_ids contract and the scope badges."
+   },
+   "benefit": "",
+   "approach": "Keep; extend the same picker for platform commands (C-t1-06-013).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Already equal or better than the only reference implementation.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-015",
+   "name": "Governed skills: scopes, review lifecycle, git skill packs",
+   "description": "Skills are SKILL.md packages owned by a scope (personal, room, team, org), moving through draft, reviewed, published and archived, with signed manifests, review gates on edits and import from pinned git repos.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "qm-product-039",
+    "qm-product-040",
+    "qm-product-041",
+    "grokbot-agent-runtime-109"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-039",
+     "qm-product-040",
+     "qm-product-041"
+    ],
+    "why": "qm has the full lifecycle (create/update/review/publish/archive/restore/promote/move), HMAC-signed manifests, lazy materialisation only for speakers who can see the skill, review invalidated by any edit, and git skill packs at a pinned ref with visible ineligibility reasons (q4; the git-pack record is DOC). Grok Bot adds discovery of SKILL.md folders from the user's other agent tools (grokbot-agent-runtime-109)."
+   },
+   "mechanism": "SkillStore with state machine draft->reviewed->published->archived; manifest signature verified on resolve; visibleFor(principal, scope) filters; supporting files written to a per-conversation directory on read and removed when the speaker loses visibility; git importer normalises frontmatter dialects and records exclusion reasons.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-053",
+     "v-space-backend-055"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:314-331",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx"
+    ],
+    "gap": "Skills exist with org/personal scope (badges) and a Settings section, but there is no Space-scoped skill, no review/publish lifecycle and no git pack import in baseline evidence; governed Space skills are planned (S3.5).",
+    "strengths": "Server-side skill resolution in Model Gateway."
+   },
+   "benefit": "Lets a team curate room-specific know-how (a 'how we do incident review' skill) safely, which is how agents get better in a shared room.",
+   "approach": "Model Plane skill store adds scope=space and a review state machine; Control Plane decides who may publish to a scope (editor+ for Space); signed manifests; optional git pack importer in Ingestion Plane.",
+   "effort": "M",
+   "dependencies": [
+    "S3.5 governed Space skills",
+    "Space role model"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Skill-borne prompt injection; review gate must cover the exact body.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Clear differentiator for AI-first rooms and already on the plan.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-016",
+   "name": "Plugin bundles and ecosystem-compatible manifests",
+   "description": "A plugin bundles commands, agents/personas, skills, rules, hooks and MCP servers in one manifest; marketplaces can be read from Cursor-style or Claude-style manifest files so existing ecosystem plugins are reusable.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "buzz"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-architecture-088",
+    "grokbot-agent-runtime-119"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-119"
+    ],
+    "why": "Grok Bot reads both .cursor-plugin and .claude-plugin marketplace manifests, pins git sources to a 40-hex sha, declares a variables JSON-schema (writeOnly for secrets) and per-client minimum versions (q4, SRC). Buzz persona packs are the simpler variant (buzz-architecture-088, q3)."
+   },
+   "mechanism": "marketplace.json -> entries {name, source (path | github owner/repo@sha | git url | git-subdir), version, components {commands, agents, skills, rules, hooks, mcpServers}, variables schema, minClientVersions}; install resolves source, validates schema, substitutes ${PLUGIN_ROOT} placeholders and registers each component with its subsystem.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-057"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx"
+    ],
+    "gap": "Spot-check this pass (SRC): Settings has an org-wide plugin-pack section where admins register a JSON manifest that can contribute tools, skills and hooks, inactive until an admin activates it. Missing: Space-level enablement (S3.6 cockpit), ecosystem manifest compatibility, git-pinned sources and variables schema.",
+    "strengths": "Admin-activated, inactive-by-default plugin rollout is a safe default; keep it."
+   },
+   "benefit": "Reuse of the Claude/Cursor plugin ecosystem gives Verevon agents many capabilities for little effort.",
+   "approach": "Model Plane plugin registry accepts .claude-plugin/.cursor-plugin marketplace manifests with sha pinning; components fan out to skill store, MCP registry and hook runner; Space cockpit lets managers enable an org-activated plugin per room (never more than org allows).",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-06-020 Space MCP cockpit",
+    "C-t1-06-015 governed skills"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Supply chain (hooks run code); require sha pins and admin activation.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Leverages existing ecosystems; builds on an existing org registry.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-017",
+   "name": "Operator deployment layer for agent-computer tools",
+   "description": "Operators ship tools and skills for the agent sandbox as a versioned directory (tool descriptors, binaries, SKILL.md) that a CLI validates, plans and deploys onto every sandbox backend.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-architecture-099",
+    "qm-product-055"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-099",
+     "qm-product-055"
+    ],
+    "why": "qm versions the layer by content hash, converges it onto every sandbox on provision and declares egress, auth checks and approval rules per tool (q4; the CLI record is DOC)."
+   },
+   "mechanism": "tool.json {label, advertise, hints, auth.check/reauth, egress, approvals, install.binary/files}; PUT /v1/deployment-layer stores the bundle with a canonical SHA-256; sandboxes boot a stock image and sync the layer; removed skills are archived; CLI check/plan/up/doctor/rollback.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check Model Plane sandbox-manager and execution-core (sandbox_lease.rs) for an operator-managed tool layer or image digest pinning.",
+    "strengths": ""
+   },
+   "benefit": "Lets an enterprise standardise what tools its agents' computers have, with egress declared per tool.",
+   "approach": "Model Plane sandbox-manager: content-addressed tool layer synced on lease; egress declarations enforced by the sandbox network policy.",
+   "effort": "M",
+   "dependencies": [
+    "durable Space sandbox (S3.2)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Binary supply chain; egress bypass.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Operator-facing; useful for enterprise but not user-visible.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-018",
+   "name": "Shareable, versioned agent templates",
+   "description": "A user publishes an agent as a template (public or team) with a share link; recipients import it; versions can be activated; an export policy governs what a template may contain; running agents can be exported as snapshots.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "buzz"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "grokbot-agent-product-080",
+    "grokbot-agent-runtime-106",
+    "buzz-product-074"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-product-080",
+     "grokbot-agent-runtime-106"
+    ],
+    "why": "Grok Bot has template CRUD with visibility (PUBLIC|TEAM), active version switching, export policy, chat-link import and creator attribution (q4, SRC). Buzz persona packs/snapshots (buzz-product-074, q2) are a file-based variant."
+   },
+   "mechanism": "Template {share_id, active_version, visibility, owner_type, blob_object_key}; export policy strips secrets/memory/connections; import creates a new agent from the active version; versions are immutable blobs.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-062",
+     "v-space-ui-037",
+     "v-space-backend-070"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43-54",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:20-132"
+    ],
+    "gap": "Agent creation offers three hard-coded templates (Meeting Scribe, Status Agent, Knowledge Helper); no user-published templates, versions, share links or export policy; personal per-user agents are absent.",
+    "strengths": "One-step room agent creation with templates already exists."
+   },
+   "benefit": "Spreads good agents across teams and rooms; fits Grok-style personal agents being copied by colleagues.",
+   "approach": "Application Plane agent definitions gain immutable versions and a template record; Control Plane governs visibility (org/team) and export policy (never copy credentials, memory or grants); import re-runs roster confirmation.",
+   "effort": "M",
+   "dependencies": [
+    "personal agents (v-space-backend-070)",
+    "agent definition versioning"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Leaking instructions or connector references via templates.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Moderate effort, visible, compounds agent adoption.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-019",
+   "name": "Bring-your-own agent runtime (ACP harnesses)",
+   "description": "Choose which agent runtime powers each agent (Claude Code, Codex, goose, Cursor and more, or a custom ACP command), with install/login probes and readiness.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-product-073"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-073"
+    ],
+    "why": "Buzz has a single Rust catalogue of 14 known ACP harnesses with install/auth probes and capability descriptors projected to the UI (q4, SRC)."
+   },
+   "mechanism": "KnownAcpRuntime catalogue {command, env keys, install probe, auth probe, capabilities}; custom harness JSON; skills symlinked into each harness's skill directory; model/effort fields rendered from descriptors.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record; INF: Verevon runs agents in its own Model Plane, so BYO local harnesses are likely absent. Check Model Plane runtime registries for external-agent (ACP/A2A) bindings.",
+    "strengths": ""
+   },
+   "benefit": "Limited: user-machine harnesses bypass Model Plane authority, cost metering and ZDR guarantees.",
+   "approach": "Skip local harness hosting. If needed later, accept external agents only as A2A/ACP remote participants bound through Control Plane with the same binding policy.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Breaks ZDR, audit and authority model.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Conflicts with the architecture rule that the Model Plane owns reasoning and with ZDR propagation.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-020",
+   "name": "MCP server registry with shared or per-user credentials",
+   "description": "Users/admins register MCP servers (URL or command), with OAuth, per-tool allowlists and a choice of one shared credential or the initiating person's own token; servers can be marked read-only.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "buzz",
+     "qm"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "grokbot-agent-product-081",
+    "grokbot-agent-runtime-118",
+    "qm-architecture-100",
+    "qm-product-047",
+    "buzz-product-072"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-100",
+     "qm-product-047"
+    ],
+    "why": "qm's credentialScope (shared vs per-user from the encrypted keychain) is chosen by the runtime, never by tool arguments, and servers can be read-only (q3). Grok Bot has the richest config schema and per-tool permissions (grokbot-agent-product-081, grokbot-agent-runtime-118, q4/q3)."
+   },
+   "mechanism": "Server record {name, url|command, oauth client creds, toolAllowlist, TLS bundle, cwd/env file, credentialScope shared|per_user, readOnly}; at call time the runtime resolves the credential from the initiating principal's keychain (per_user) or the server secret (shared); tools are exposed to the model filtered by allowlist and binding policy.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-061",
+     "v-space-ui-057"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:330-343",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/McpServersSection.tsx"
+    ],
+    "gap": "Model Gateway registers/lists/deletes/shares MCP servers with OAuth 2.1 + dynamic client registration and an auto-detecting connect route (spot-check), and Settings shows Private/Shared/Org scope; but nothing is Space-scoped (no per-room enablement, no per-room tool allowlist, no per-user vs shared credential choice visible in baseline). Space MCP cockpit is planned (S3.6).",
+    "strengths": "Single auto-detecting connect entry point (no transport/auth choice asked) and OAuth 2.1 with DCR are ahead of qm's admin-only HTTP registration."
+   },
+   "benefit": "Room agents need room-appropriate tools; per-user credentials keep 'Space access never widens owner ACL' true when an agent acts for whoever asked.",
+   "approach": "Model Plane: add space_ref enablement and per-binding tool allowlist to the capability-core MCP rows; credentialScope per server resolved at call time from the requesting principal; Frontend Space cockpit (S3.6) to enable org-approved servers per room; consent via C-t1-06-008.",
+   "effort": "M",
+   "dependencies": [
+    "S3.6 cockpit",
+    "C-t1-06-008 scoped consent",
+    "S3.4 credential broker"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Shared credentials letting any room member act as the credential owner.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Present in all agent-centric references; Verevon has the backend, so Space scoping is the missing step.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-021",
+   "name": "MCP execution runtime: venues, discovery cache, health, OAuth relay, call contract",
+   "description": "Reliable MCP tool use: URL servers called from the backend and stdio servers on the agent computer; cached discovery with background refresh; reconnect/backoff and health probes; bounded long calls; OAuth even when providers only allow loopback redirects; argument repair and typed failures with recovery hints.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "grokbot-agent-runtime-087",
+    "grokbot-agent-runtime-088",
+    "grokbot-agent-runtime-089",
+    "grokbot-agent-runtime-116",
+    "grokbot-agent-runtime-117"
+   ],
+   "bestInClass": {
+    "source": "grokbot",
+    "recordIds": [
+     "grokbot-agent-runtime-088",
+     "grokbot-agent-runtime-117",
+     "grokbot-agent-runtime-116",
+     "grokbot-agent-runtime-087"
+    ],
+    "why": "Grok Bot is the only reference with a complete policy: fast and periodic reconnect, 10 s health probes, 2 min idle / 60 min total tool-call timeouts, 24 h stale-while-revalidate discovery, explicit not-installed status, argument repair against cached schema, file hand-over by path+sha256, typed McpError {needs_auth, retry_after_ms, recovery {fresh_input_schema, available_tools}}, and a plain-language STATUS file for the agent (q5/q4, SRC)."
+   },
+   "mechanism": "MCP manager routes by config (url -> backend executor; command -> box executor, config pushed only on change); discovery cached 24 h with background refresh and 120 s deadline; per-server reconnect policy; result union success|error|rejected|permission_denied|tool_not_found|server_not_found; per-server authenticate tool offered when auth is needed; OAuth via loopback listeners on fixed ports, custom scheme or relay, then code forwarded to the box.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-061"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/argument_repair.rs:1-15",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:61-62",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:330-343"
+    ],
+    "gap": "Spot-check this pass (SRC): Model Gateway validates arguments against the tool schema before the call and returns field problems plus schema (argument_repair.rs), caches tenant MCP discovery with a 6 s discovery and 10 s HTTP timeout, and supports OAuth 2.1 with server-side callback. Not found: reconnect/backoff and health probing, long-call idle/total budgets (a 10 s HTTP timeout is short for long tools), typed recovery hints (needs_auth, retry_after) surfaced to the model, per-message MCP config, sandbox-resident stdio servers (grokbot-agent-runtime-089).",
+    "strengths": "Pre-flight argument validation with staged disclosure (mcp_catalog) is equal to Grok Bot's repair and cheaper; server-side OAuth avoids the loopback problem entirely."
+   },
+   "benefit": "Agents in a room fail visibly and recover instead of silently stalling; users notice broken tools immediately.",
+   "approach": "Model Plane model-gateway: per-server health state machine with backoff, separate idle and total timeouts per tool, typed error union with recovery hints returned to the model, room-visible 'needs sign-in' card that links to the OAuth flow; stdio servers run only inside the Space sandbox (S3.2).",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-06-020",
+    "S3.2 Space sandbox lease"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Retry storms against third-party servers; respect Retry-After.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Reliability work that compounds every MCP integration; partially done.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-022",
+   "name": "Connected apps via OAuth consent links (managed connectors)",
+   "description": "People connect third-party apps (and source-control hosts) through OAuth consent links that can be minted in one surface and redeemed in a browser, bound to the right person, with a large managed connector catalogue.",
+   "prevalence": {
+    "sourcesWith": [
+     "grokbot",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "qm-architecture-101",
+    "qm-product-046",
+    "grokbot-agent-product-083"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-101",
+     "qm-product-046"
+    ],
+    "why": "qm binds execution to the canonical principal, verifies account owner, active status and tool version before every call, never retries an uncertain execution, verifies callback identity so a forwarded link cannot bind the wrong person, and excludes arguments from audit (q4). Grok Bot adds repository connections and cloud-agent cards in chat (grokbot-agent-product-083)."
+   },
+   "mechanism": "Consent link {principal, toolkit, return URL, expiry} stored durably; callback completes auth only for the signed-in principal derived identity; per-call checks (owner, status, version); a running-turn lease is required for agent calls; managed toolkit catalogue (Composio) adds breadth.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-ui-057",
+     "v-space-backend-082"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go",
+     "apps/Ingestion Plane/integration-corev2/internal/oauth/service.go",
+     "apps/Ingestion Plane/integration-corev2/internal/actions/service.go"
+    ],
+    "gap": "Spot-check this pass (SRC): integration-corev2 has an org-level OAuth provider catalogue (Microsoft, Slack, Google, Notion, GitHub, Shopify, Stripe, LinkedIn and more) with PKCE/delegated OAuth and read actions (calendar, drive, mail). Missing for Spaces: per-room connector cockpit, consent links mintable from a room for a specific person, per-call owner/status verification evidence, and Space credential grants (S3.4 planned).",
+    "strengths": "Provider actions live in Ingestion Plane with egress and ZDR packages, matching the rule that the Model proposes and Ingestion executes."
+   },
+   "benefit": "Agents in rooms can act on the team's real systems with each person's own authority.",
+   "approach": "Ingestion Plane integration-corev2 issues person-bound consent links (callback verifies the signed-in principal); Control Plane grant ties a connection to a Space binding; Model proposes provider actions and integration-corev2 executes after authority check.",
+   "effort": "M",
+   "dependencies": [
+    "S3.4 credential broker",
+    "C-t1-06-008"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Wrong-person binding via forwarded links; over-broad OAuth scopes.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Core infrastructure exists; Space exposure is the gap.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-023",
+   "name": "Inbound (and outbound) webhooks that wake agents",
+   "description": "A secret webhook endpoint owned by a person or room verifies provider signatures, dedups deliveries, wraps the payload as untrusted data and wakes an agent turn; workflows can also call external URLs with SSRF protection.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz",
+     "qm"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "buzz-product-069",
+    "qm-architecture-102",
+    "qm-product-042"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-042",
+     "qm-architecture-102"
+    ],
+    "why": "qm verifies github/slack/stripe/linear/HMAC signatures with constant-time compare, supports provider handshakes, derives delivery ids for dedup, filters events by JSON path before waking, caps payload at 16,000 chars in a wake envelope and runs the owner's task with the owner's authority (q4/q3). Buzz adds outbound calls with SSRF protection (buzz-product-069)."
+   },
+   "mechanism": "WebhookReceiver.deliver(id, headers, rawBody) -> verifier {verify, deliveryId, handshake} -> 202/200/401/404; payload parsed (JSON or form), filtered ([{path:'action', in:['opened']}]), wrapped as untrusted content and dispatched like a cron fire under the endpoint owner's authority; secret shown once at creation; event log per webhook.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-060",
+     "v-space-ui-059"
+    ],
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:257-276",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-110"
+    ],
+    "gap": "No Space webhooks; only a legacy non-Space Convex webhooks table. Spot-check: Model Plane bridge-core has an outbound webhook channel adapter with durable retrying delivery (apps/Model Plane/go/services/bridge-core/internal/channel/webhook.go), not wired to Spaces per baseline.",
+    "strengths": ""
+   },
+   "benefit": "Turns room agents from chat-only into event-driven coworkers (a GitHub PR, a Stripe dispute or a monitoring alert wakes the room's agent).",
+   "approach": "Ingestion Plane receives and verifies (provider verifiers, dedup, size cap), emits a wake envelope to Model Plane capability-core triggers (same path as schedules) bound to space_ref and owner; Control fire-decision per delivery; results post into the room; ZDR rooms keep payloads out of retention.",
+   "effort": "M",
+   "dependencies": [
+    "schedule fire-decision path (v-space-backend-056)",
+    "approval continuation"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Injection through payloads; webhook secret leakage; flood control.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Common across agent-centric references and Teams Workflows; reuses the existing schedule trigger path.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-024",
+   "name": "Workflow automation (builder, triggers, steps, run trace)",
+   "description": "No-code or YAML workflows triggered by messages, reactions, schedules, joins or webhooks run ordered steps (post, react, call webhook, forms, branches, custom steps) with run history; AI can draft a workflow from plain language.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "slack",
+     "buzz"
+    ],
+    "n": 3,
+    "of": 5,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "buzz-architecture-087",
+    "buzz-product-066",
+    "buzz-product-067",
+    "buzz-product-068",
+    "slack-product-surface-071",
+    "slack-product-surface-072",
+    "slack-product-surface-073",
+    "teams-product-surface-076"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-product-surface-071",
+     "slack-product-surface-072",
+     "slack-product-surface-073"
+    ],
+    "why": "Slack Workflow Builder has the broadest trigger/step set, run history, AI-drafted workflows and a summarise-channel step, plus custom steps via SDK/CLI (q4, DOC). Buzz's YAML engine with step traces is the best open implementation (buzz-product-066/067, q3, SRC) but its approval step fails the run (buzz-product-068, q1)."
+   },
+   "mechanism": "Definition (YAML/JSON) with tagged triggers and actions; conditions evaluated in a sandboxed expression engine with a timeout; single-pass templating; bounded concurrency (semaphore); cron loop with claims; executions tagged so they do not re-trigger themselves; every step traced.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-056",
+     "v-space-ui-056"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:426-596",
+     "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:886-1000",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:171-189"
+    ],
+    "gap": "Only schedules exist; creation lives in Settings and the Work tab is read-only; no message/reaction/join triggers, no step builder, no run trace in the room.",
+    "strengths": "Control schedule-create decision bound to a template digest plus a separate fire decision per tick is stronger governance than any reference."
+   },
+   "benefit": "Rooms can automate routine coordination; agent-native workflows (describe -> agent drafts -> human approves) fit Verevon's AI-first stance.",
+   "approach": "Do not clone a no-code builder first. Let room agents draft automations as capability-core triggers (schedule, webhook, room event) with a reviewed natural-language playbook; show run traces in the Work tab; keep Control decisions per create and per fire.",
+   "effort": "L",
+   "dependencies": [
+    "C-t1-06-023",
+    "C-t1-06-025",
+    "approval continuation"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Do not expose approval steps until suspend/persist/resume is one tested path (mirror of the buzz gap).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Table stakes for Slack/Teams users; Verevon can leapfrog with agent-drafted automations.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-025",
+   "name": "Scheduled and event-armed agent work (crons with destinations, loops, watches)",
+   "description": "Agents run on calendar/interval/one-shot schedules with delivery to a conversation, DM or channel; durable loops keep a ledger of work items across fires with ship gates; watches on background processes wake the conversation.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-043",
+    "qm-product-044",
+    "qm-product-045"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-043",
+     "qm-product-044",
+     "qm-product-045"
+    ],
+    "why": "qm crons support timezone, sub-day intervals, one-shot, re-evaluated task vs verbatim text, destinations, fire log, shift-change notes, runAs modes and shared-scope editing; Loops add a playbook, ledger, ship gates and a governor; watches turn process output into new turns (q4/q3/q4)."
+   },
+   "mechanism": "Cron tool create/list/get/runs/patch/delete/run/disable/note/retarget/share; deterministic fire keys and slot claims via a job queue; fires shown as running immediately. Loop {playbook, successChecks, shipActions[{action, gate}], caps, governor}: shadow run before arming; governor quarantines on consecutive failures. Watch: execute background:true -> process id -> pattern-matched output or exit wakes the conversation.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-056",
+     "v-space-ui-056",
+     "v-space-backend-048",
+     "v-space-backend-075",
+     "v-space-ui-074",
+     "v-space-backend-047"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:426-596",
+     "apps/Model Plane/go/services/capability-core/internal/watch/routes.go:15-33",
+     "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go"
+    ],
+    "gap": "Space schedules exist with Control decisions but cannot be created from the room; watches exist in capability-core but are not exposed (S4.3); background processes are listed but do not wake the room; no loops/ledger/governor; no delivery destinations beyond the room (S4.4).",
+    "strengths": "Background process registry and run watchers are shipped; per-fire Control decision."
+   },
+   "benefit": "Agents that follow up on their own are what makes them feel like coworkers rather than chatbots.",
+   "approach": "Expose schedule create/edit in the Work tab via spaces.* actions (agent-callable through C-t1-06-002); finish S4.3 watches so process output and external events wake the room; add a loop record later with a human ship gate.",
+   "effort": "M",
+   "dependencies": [
+    "S4.3 watches",
+    "S4.4 delivery",
+    "C-t1-06-002"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Runaway costs; needs caps and a governor.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Backend largely exists; surfacing it in the room is high value.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-026",
+   "name": "Client-executed tools",
+   "description": "A turn can declare tools that the calling client executes and returns (for example a DOM snapshot of the user's open tab), so a trusted client offers capabilities the server cannot reach.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-048"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-048"
+    ],
+    "why": "qm passes ClientToolDeclaration per turn and resumes with a client_result run signal carrying callId and result (q3, SRC); the motivating ui-state skill was reverted."
+   },
+   "mechanism": "Per-turn tool declarations from the client; when the model calls one, the run pauses and emits a client-call event; the client executes and posts a client_result signal {callId, result}; the orchestrator resumes.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-space-backend-063"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:32",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:393-403"
+    ],
+    "gap": "Spot-check this pass (SRC): the AG-UI stream accepts up to 32 caller-declared tools and normalises them; whether the client result path resumes a Space run was not verified, and no Space UI uses client tools.",
+    "strengths": "AG-UI is the standard protocol for frontend tools, so the contract is aligned with the ecosystem."
+   },
+   "benefit": "Lets the room UI expose safe local capabilities (selection, current view, file picker) to agents without server access.",
+   "approach": "Verify the AG-UI tool-result round-trip in the gateway; allow only a small allowlisted set of client tools in Spaces, results treated as untrusted user input.",
+   "effort": "S",
+   "dependencies": [
+    "AG-UI stream"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Clients spoofing tool results; treat as untrusted.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful plumbing; low user visibility.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-027",
+   "name": "Message extensions, message actions and link unfurling",
+   "description": "Apps contribute search and compose actions from the message box, act on an existing message, and unfurl pasted links into expandable previews.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-074"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-074"
+    ],
+    "why": "Teams has message extensions, message actions and input extensions with expandable previews (q4, REA)."
+   },
+   "mechanism": "Compose extension = app-provided search command returning cards to insert; message action = context-menu entry posting the message to the app; link unfurling = domain registration -> on paste the app returns a card preview, shown expandable.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-backend-015",
+     "v-space-ui-009"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+    ],
+    "gap": "No attachments or link previews in the room composer; no message actions beyond Reply/Pin; no app-contributed compose actions.",
+    "strengths": ""
+   },
+   "benefit": "Link previews are basic chat hygiene; 'ask the agent about this message' as a message action is a natural agent affordance.",
+   "approach": "First-party link unfurl via Ingestion Plane Quarry fetch (respecting egress and ZDR), rendered as a card; add message actions that hand a message to a room agent with a chosen skill; third-party extensions only after C-t1-06-007.",
+   "effort": "M",
+   "dependencies": [
+    "C-t1-06-009 cards",
+    "Quarry fetch"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "SSRF via unfurl; privacy of previewed URLs.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Visible quality gap; first-party scope keeps it cheap.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-028",
+   "name": "Pinned tabs and apps in conversations",
+   "description": "Any chat, channel or meeting can pin tabs (files, wiki, lists, website link, whiteboard, forms, planner) at the top; a link tab can be added by URL.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-081"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-product-surface-081"
+    ],
+    "why": "Teams supports first- and third-party tabs per conversation with access-denied states and personal tabs (q4, REA)."
+   },
+   "mechanism": "Tab = (app id, content URL, entity id, scope) stored on the conversation; rendered in an iframe with SSO token exchange; access is checked per viewer.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-059",
+     "v-space-ui-110"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-110"
+    ],
+    "gap": "The cockpit has six fixed tabs (Chat, Work, Knowledge, Activity, Agent, Members); no custom or pinned tabs.",
+    "strengths": "The fixed Work/Knowledge/Activity tabs already cover the most used Teams tab types for an agent room."
+   },
+   "benefit": "Lets a room pin its key document, dashboard or board.",
+   "approach": "Allow pinning Knowledge documents and safe link tabs as extra cockpit tabs (Frontend Plane), with view-only resource grants (shipped) controlling access.",
+   "effort": "S",
+   "dependencies": [
+    "document sharing grants (v-space-backend-083)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Embedding arbitrary sites (clickjacking); restrict to internal resources first.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Nice affordance; fixed tabs cover most needs.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-029",
+   "name": "OS share target and deep-link protocol handlers",
+   "description": "The desktop app registers URI schemes (msteams, tel, sip, callto), appears in the OS share sheet for files/text/images, accepts shares from the web with account-mismatch checks, and registers OS AI actions.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-product-surface-079",
+    "teams-shell-and-native-112",
+    "teams-product-surface-163",
+    "teams-shell-and-native-111"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-112",
+     "teams-product-surface-079",
+     "teams-product-surface-163"
+    ],
+    "why": "Teams is the only reference with share-target, protocol handlers and share-to-Teams with account-mismatch handling (q4/q3, SRC/REA); its Windows AI actions ship unavailable (teams-shell-and-native-111)."
+   },
+   "mechanism": "Package manifest registers protocols and a share target; shared files exposed to the web client through a virtual path; share-from-web flow carries a compose note and verifies the active account.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-109"
+    ],
+    "evidence": [],
+    "gap": "No native desktop shell (tray, protocol handler, share target).",
+    "strengths": ""
+   },
+   "benefit": "Quick capture into a room ('send this file to my agent') from anywhere.",
+   "approach": "Web-first: a PWA share target and verevon:// deep links into rooms/threads; native shell later if at all.",
+   "effort": "S",
+   "dependencies": [
+    "deep links (v-space-ui-043)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "PWA share target gives most of the value cheaply.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-030",
+   "name": "Office/Outlook and device integrations (presence COM, meeting add-in, devices API)",
+   "description": "Desktop integration with Office presence, Outlook meeting add-in and a local WebSocket API for hardware such as Stream Deck to read meeting state and send commands.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "teams-shell-and-native-108",
+    "teams-shell-and-native-109",
+    "teams-shell-and-native-110"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-108",
+     "teams-shell-and-native-109",
+     "teams-shell-and-native-110"
+    ],
+    "why": "Teams only (q4, SRC): IM provider registration with a presence COM server, Outlook add-in installer with coexistence modes, and a paired localhost devices API."
+   },
+   "mechanism": "Registry-based IM provider + COM automation type library; Outlook COM add-in; 127.0.0.1 WebSocket server with pairing tokens exposing meeting state and commands.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-036",
+     "v-space-backend-035"
+    ],
+    "evidence": [],
+    "gap": "No calls/meetings and no native shell, so these integrations have no anchor.",
+    "strengths": ""
+   },
+   "benefit": "Low for Verevon today.",
+   "approach": "Skip; revisit only if meetings are built.",
+   "effort": "L",
+   "dependencies": [
+    "calls/meetings"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Windows-specific maintenance.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Tied to meetings and Windows desktop, neither in Verevon's scope.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-031",
+   "name": "Web-to-native shell extension APIs (menus, context menus, dynamic modules)",
+   "description": "The web client adds items to native menus and context menus, loads native modules at runtime and negotiates host capabilities, and the shell governs embedded platform apps.",
+   "prevalence": {
+    "sourcesWith": [
+     "teams",
+     "slack"
+    ],
+    "n": 2,
+    "of": 5,
+    "cls": "differentiator"
+   },
+   "members": [
+    "slack-product-surface-075",
+    "slack-shell-and-native-106",
+    "slack-shell-and-native-107",
+    "teams-shell-and-native-113",
+    "teams-shell-and-native-114"
+   ],
+   "bestInClass": {
+    "source": "teams",
+    "recordIds": [
+     "teams-shell-and-native-113",
+     "teams-shell-and-native-114"
+    ],
+    "why": "Teams' module loader and host-capability negotiation let one web build run across Windows, Mac, VDI and Rooms (q5, SRC); Slack's menu/context-menu registration is the cleaner small API (slack-shell-and-native-106/107, q4)."
+   },
+   "mechanism": "Bridge RPC: hasModule/loadModule/unloadModule with status events; getCapabilities/onCapabilitiesUpdated; menu items registered with position and badge; context-menu items scoped by URL pattern.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-109"
+    ],
+    "evidence": [],
+    "gap": "No native shell.",
+    "strengths": ""
+   },
+   "benefit": "Only relevant if Verevon ships a desktop shell.",
+   "approach": "Skip; if a shell is built, adopt capability negotiation from day one.",
+   "effort": "L",
+   "dependencies": [
+    "native shell"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Verevon is web-first; no shell exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-032",
+   "name": "Vendor-native CRM surfaces inside channels",
+   "description": "CRM records and sales home rendered natively inside chat channels, combined with conversation data by the assistant. [Reference support is DOC/INF only.]",
+   "prevalence": {
+    "sourcesWith": [
+     "slack"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "slack-product-surface-076"
+   ],
+   "bestInClass": {
+    "source": "slack",
+    "recordIds": [
+     "slack-product-surface-076"
+    ],
+    "why": "Slack's Salesforce-native channels (q4, DOC only)."
+   },
+   "mechanism": "Channel linked to a CRM record; record fields rendered as a header/tab; the assistant joins CRM and message data.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. INF: Verevon has no CRM vendor; equivalent would be Knowledge tab plus integration-corev2 providers (check whether a room can bind to an external record).",
+    "strengths": ""
+   },
+   "benefit": "Low; vendor-specific.",
+   "approach": "Skip the vendor-native angle; generalise as 'bind a room to an external record' later via integration-corev2.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Vendor bundling, not a transferable capability.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-033",
+   "name": "Custom emoji (including agent-added)",
+   "description": "Workspaces have custom emoji; in qm the agent can upload a custom Slack emoji on the person's behalf and use it.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-product-145"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-product-145"
+    ],
+    "why": "Only qm (q2, SRC)."
+   },
+   "mechanism": "Upload PNG/GIF to the workspace emoji store with the user's own session, then reference it in reactions.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-space-ui-059"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-110"
+    ],
+    "gap": "No custom emoji (and no emoji in the composer).",
+    "strengths": ""
+   },
+   "benefit": "Culture feature; minor.",
+   "approach": "Defer until reactions/emoji exist in rooms.",
+   "effort": "S",
+   "dependencies": [
+    "reactions"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Using a person's web session is a credential-handling risk; do not copy that mechanism.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Low value; the qm mechanism uses the person's web session, which conflicts with Verevon's credential rules.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-034",
+   "name": "Preview / experimental feature gating",
+   "description": "Unfinished areas sit behind opt-in experimental toggles and an internal-only overlay.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-product-076"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-076"
+    ],
+    "why": "Only reference record (q3, SRC)."
+   },
+   "mechanism": "Per-user feature flags with an experimental settings page and an internal overlay for staff-only features.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check verevonv3 for a feature-flag/preview mechanism (the room already distinguishes 'not published' states).",
+    "strengths": ""
+   },
+   "benefit": "Ship incomplete Space features to design partners safely.",
+   "approach": "Control Plane org/user feature flags read by the gateway; show a Preview badge.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Control Plane",
+   "risks": "Flag sprawl.",
+   "tier": "nice-to-have",
+   "significance": 1,
+   "rationale": "Process enabler, not a user feature.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-035",
+   "name": "In-app product feedback",
+   "description": "Users send feedback with attachments from settings; operators read it in an admin console.",
+   "prevalence": {
+    "sourcesWith": [
+     "buzz"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "buzz-product-078"
+   ],
+   "bestInClass": {
+    "source": "buzz",
+    "recordIds": [
+     "buzz-product-078"
+    ],
+    "why": "Only reference record (q3, SRC)."
+   },
+   "mechanism": "Feedback form -> stored record with attachments -> admin SPA list.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. Check verevonv3 settings for a feedback form.",
+    "strengths": ""
+   },
+   "benefit": "Faster product learning with design partners.",
+   "approach": "Simple form posting to a Support Plane ticket.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Support Plane",
+   "risks": "Attachments may carry ZDR content.",
+   "tier": "nice-to-have",
+   "significance": 1,
+   "rationale": "Cheap, low impact.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-036",
+   "name": "Surface plugins isolated from core (signed-HTTP boundary)",
+   "description": "Each surface (web UI, admin, portal, auth broker, Slack) is a separate package that talks to core only over signed HTTP through a shared chassis; importing core is forbidden.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-architecture-103",
+    "qm-product-054"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-103",
+     "qm-product-054"
+    ],
+    "why": "qm enforces it in AGENTS.md and with a shared chassis package holding the sanctioned plumbing (signer, client, router, claims, failure copy) (q4/q3)."
+   },
+   "mechanism": "Shared chassis exports a request signer and typed core client; surfaces are separate deployables; core verifies signatures; lint/agent rules forbid deep imports.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-space-backend-106"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:736"
+    ],
+    "gap": "",
+    "strengths": "Verevon's plane architecture (no cross-plane DB access, Frontend gateway as BFF, Model proposes / Quarry executes) is an equal or stronger version of this boundary. Keep it, and make future Channel Plane adapters follow the same rule (no direct DB, signed calls only)."
+   },
+   "benefit": "",
+   "approach": "Keep; apply to Channel Plane when built.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Architectural parity already exists.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t1-06-037",
+   "name": "Custom model providers and authenticated model gateway",
+   "description": "An org adds custom model providers or routes all calls through a gateway (for example LiteLLM); models are discovered from authenticated metadata, namespaced and refreshed every five minutes.",
+   "prevalence": {
+    "sourcesWith": [
+     "qm"
+    ],
+    "n": 1,
+    "of": 5,
+    "cls": "unique"
+   },
+   "members": [
+    "qm-architecture-105"
+   ],
+   "bestInClass": {
+    "source": "qm",
+    "recordIds": [
+     "qm-architecture-105"
+    ],
+    "why": "Only reference record (q3, SRC)."
+   },
+   "mechanism": "Provider record {protocol, base URL, credentials}; discovery from the gateway's model list endpoint; namespacing; periodic refresh with fail-safe keep-last-good.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record in this category. Related: per-message model picker with privacy-tier resolver (v-space-ui baseline). Check Model Plane provider registry for org-added custom providers.",
+    "strengths": ""
+   },
+   "benefit": "Enterprise BYO-model and data-residency control.",
+   "approach": "Model Plane provider registry with org-scoped custom providers, privacy tier declared per provider so ZDR routing stays correct.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Privacy-tier misdeclaration breaking ZDR.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Enterprise ask, not Space-specific.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

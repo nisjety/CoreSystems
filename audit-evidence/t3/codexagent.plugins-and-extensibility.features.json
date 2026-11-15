@@ -1,0 +1,2347 @@
+[
+ {
+  "id": "codexagent-plugins-and-extensibility-001",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin bundle format (.codex-plugin/plugin.json)",
+  "what": "A plugin is a folder with a JSON manifest that declares identity, marketing metadata, a skills directory, an MCP server file and inline hooks. The app shows it in a plugin store with name, descriptions, icons, brand colour, screenshots and default prompts.",
+  "how": "Manifest fields observed across nine bundled plugins: name, version, description, author, homepage, repository, license, keywords, skills (directory), mcpServers (path to .mcp.json), hooks (inline object with a nested hooks map), and an interface block (displayName, shortDescription, longDescription, developerName, category, capabilities [Interactive|Read|Write], websiteURL, privacyPolicyURL, termsOfServiceURL, defaultPrompt[], brandColor, composerIcon, logo, logoDark, screenshots[]). Optional assets/ folder. Plugins without an interface block (codex-app-tools, unified-computer-use) are infrastructure-only and not store-facing.",
+  "evidence": [
+   "PLUG:browser/.codex-plugin/plugin.json",
+   "PLUG:code-review/.codex-plugin/plugin.json",
+   "PLUG:deep-research/.codex-plugin/plugin.json",
+   "PLUG:codex-app-tools/.codex-plugin/plugin.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's plugin_packages table is inert; a manifest with a typed interface block plus declared capabilities (Read/Write/Interactive) is a ready template for the manifest schema Verevon's roadmap calls Agent Plugins packaging (section 23.12).",
+  "notes": "Evidence key: PLUG = resources/plugins/openai-bundled/plugins under the install root C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app; EXE-STR:L = line number in scratchpad/tmp/cxpe/codex_exe.strings.txt (printable strings of resources/codex.exe); BUILD:file@N = character offset in extract/codex/.vite/build/file; I18N = scratchpad/tmp/cxib/i18n_all.txt (English renderer catalogue from the sibling audit); RES = install resources dir."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-002",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin = bundle of skills, apps, MCP servers, hooks, templates and scheduled tasks",
+  "what": "One installable unit can contribute several kinds of capability at once, and the store card shows which kinds it has. The runtime tells the model which capabilities a selected plugin brings.",
+  "how": "App-server PluginSummary/PluginDetail carry hasSkills, hasMcps, hasApps, hasHooks, appsNeedingAuth, appTemplates, scheduledTasks, onboardingSkill, installPolicy, authPolicy, availability and eligiblePlanTypes. Sources are a tagged enum: local, git (refName, sparse paths), npm (package, registry) and remote (remotePluginId). Rust crate core-plugins (loader, manager, store, marketplace, remote, discoverable, recommended_plugin_install) implements it.",
+  "evidence": [
+   "EXE-STR:L1289331",
+   "EXE-STR:L1298491",
+   "EXE-STR:L1311204"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon should model a plugin as a multi-capability package (skills + MCP + hooks + scheduled templates) rather than a single manifest blob, so the Model Plane can resolve each part through its existing capability registry.",
+  "notes": "Field list read from concatenated string literals; exact JSON shapes were not read."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-003",
+  "category": "Tools, plugins & extensibility",
+  "name": "Open \"Agent Plugins\" manifest compatibility and cross-vendor plugin roots",
+  "what": "Codex can load plugin folders authored for other agent products. Skill discovery treats .codex-plugin, .claude-plugin and .cursor-plugin manifests as namespace roots, and a root plugin.json with an agent-plugins.org schema is accepted.",
+  "how": "Rust core-plugins/agent_plugin_manifest.rs validates a root plugin.json whose $schema is https://agent-plugins.org/schemas/1.0.0/plugin.schema.json: lowercase name (letters, digits, dots, hyphens), repository, license, keywords, author {name,url,email}, and a namespaced extensions object (com.openai). Unknown fields are ignored with a log line. agent_plugin_mcp_overlay.rs maps Agent Plugins MCP servers (stdio, streamable HTTP, SSE) into Codex MCP config. skills/loader/discovery.rs probes .codex-plugin/plugin.json, .claude-plugin/plugin.json and .cursor-plugin/plugin.json to derive the plugin namespace of a skill.",
+  "evidence": [
+   "EXE-STR:L1311204",
+   "EXE-STR:L1311219",
+   "EXE-STR:L1335996",
+   "EXE-STR:L1319026"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's roadmap already lists Agent Plugins packaging; this confirms the standard is real, shipped in a major client, and that accepting Claude/Cursor plugin layouts is a cheap interoperability win.",
+  "notes": "Quality 4 because validation is strict but the standard itself is young."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-004",
+  "category": "Tools, plugins & extensibility",
+  "name": "Marketplace manifest and multi-source plugin registry",
+  "what": "A marketplace is a catalogue of plugins that can live in a local folder, a Git repo, a URL or npm. Users add more marketplaces, see per-plugin install policy, and can upgrade them in place.",
+  "how": "Bundled file resources/plugins/openai-bundled/.agents/plugins/marketplace.json: name, interface.displayName, plugins[] each with name, source {source:local,path}, policy {installation:AVAILABLE, authentication:ON_INSTALL}, category (Developer Tools, Engineering, Productivity, Education & Research, Research). Runtime parser RawMarketplaceManifest supports plugin source objects Url, Npm, GitSubdir and Local. App-server methods marketplace/add, marketplace/upgrade, plugin/list, plugin/read, plugin/install, plugin/uninstall, plugin/installed, plugin/search.",
+  "evidence": [
+   "RES:plugins/openai-bundled/.agents/plugins/marketplace.json",
+   "EXE-STR:L1311580",
+   "EXE-STR:L1287875"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon needs a registry source abstraction (git/url/npm/local) with signed-catalogue semantics; Codex shows the minimal viable shape.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-005",
+  "category": "Tools, plugins & extensibility",
+  "name": "Marketplace source restrictions and reserved namespaces",
+  "what": "An admin can lock the app to an allow-list of marketplace sources; plugins from unlisted marketplaces cannot be installed. OpenAI-owned marketplace names cannot be claimed by third parties.",
+  "how": "marketplace_policy.rs validates configured marketplaces (source_type local|git, source, ref, sparse_paths, last_updated, last_revision). Error strings: \"must be added to config before plugins can be installed while marketplace source restrictions are enabled\", allowed-source entries with host_pattern/path/url, \"local path must be absolute\". Reserved names: openai-curated, openai-api-curated, openai-bundled, openai-bundled-alpha, openai-primary-runtime (\"is reserved and cannot be added from this source\"). Marketplace manifest name must match the managed marketplace name.",
+  "evidence": [
+   "EXE-STR:L1311040",
+   "EXE-STR:L1311055",
+   "EXE-STR:L1286128"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Directly relevant to Verevon's enterprise posture (Control Plane owns orgs): an org-level allow-list of plugin sources plus reserved first-party namespaces is the right governance primitive.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-006",
+  "category": "Tools, plugins & extensibility",
+  "name": "Atomic marketplace upgrade with backup and rollback",
+  "what": "Marketplaces can be upgraded individually or all at once; a failed upgrade restores the previous version instead of leaving a half-installed catalogue.",
+  "how": "core-plugins/marketplace_upgrade/activation.rs: clone into a staging directory (marketplace-upgrade-*), validate the manifest name against the configured marketplace, move the previous root into a marketplace-backup directory, activate, write .codex-marketplace-install.json (source_type, ref_name, sparse_paths, revision), and restore the backup on failure. Detects configuration changes while an upgrade is in flight and refreshes the installed plugin cache afterwards. UI toasts: upgradeSuccess, upgradeAllSuccess, upgradeAllError.",
+  "evidence": [
+   "EXE-STR:L1311380",
+   "EXE-STR:L1311397",
+   "I18N:plugins.marketplace.upgradeAllSuccess"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "If Verevon ships plugin catalogues, copy the stage-validate-swap-with-backup pattern and the in-flight change detection.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-007",
+  "category": "Tools, plugins & extensibility",
+  "name": "npm and Git sourced plugins with safe materialization",
+  "what": "A plugin can be published as an npm package or a Git subdirectory and installed without running its install scripts.",
+  "how": "core-plugins/npm_source.rs runs npm pack with --ignore-scripts and --pack-destination, requires exactly one archive, enforces a byte cap, checks package.json name equals the requested package, and extracts into plugins/.marketplace-plugin-source-staging. Git sources use a trusted repository root inside CODEX_HOME with git -c safe.bareRepository=explicit and a scrubbed GIT_* environment (GIT_DIR, GIT_WORK_TREE, GIT_CONFIG*, etc. cleared); a trusted root that escapes the Codex home is rejected.",
+  "evidence": [
+   "EXE-STR:L1311579",
+   "EXE-STR:L1311581",
+   "EXE-STR:L1311571"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Good model for a hardened plugin fetch path (no lifecycle scripts, name pinning, size cap, repo-root containment) that Verevon's supply-chain checks for skills (roadmap section 24) can reuse.",
+  "notes": "Line L1311490 is an approximate pointer to the surrounding git-env block; npm lines are exact."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-008",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin install cache layout and remote install marker",
+  "what": "Installed plugins are cached per marketplace, plugin and version. Remote (account-hosted) plugins leave a marker file so the cache can be reconciled with the server.",
+  "how": "$CODEX_HOME/plugins/cache/<marketplace>/<plugin>/<version>/ with exactly one version directory per plugin; remote installs write .codex-remote-plugin-install.json containing remote_plugin_id. Cache entries that are stale or invalid are removed during remote_installed_plugin_sync.rs. Skill discovery (cloud-skills container) also scans plugins/cache. Template picker server walks the same layout to find artifact-template-* skills and rejects plugin dirs whose manifest name differs from the directory name.",
+  "evidence": [
+   "RES:artifact-template-picker/server.mjs:266",
+   "RES:artifact-template-picker/server.mjs:761",
+   "EXE-STR:L1286112",
+   "BUILD:skills-8U-G2giZ.js@600"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon can adopt a content-addressed per-version cache with a server-reconciled marker instead of mutable in-place plugin rows.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-009",
+  "category": "Tools, plugins & extensibility",
+  "name": "Account-hosted remote plugin catalogue, sharing and workspace publishing",
+  "what": "Besides local marketplaces, plugins can be listed, searched, installed and shared through the ChatGPT backend with global, user and workspace scopes; workspace members can share plugins with each other.",
+  "how": "core-plugins/remote.rs calls /ps/plugins/list, /ps/plugins/search, /ps/plugins/installed (includeDownloadUrls), /ps/plugins/suggested/codex and /ps/plugins/workspace/shared with pageToken pagination. Scopes GLOBAL, USER, WORKSPACE; listing kinds created-by-me-remote, workspace-directory, workspace-shared-with-me, workspace-shared-with-me-private, workspace-shared-with-me-unlisted. Remote bundles are downloaded and checked against sha256 (remote_bundle.rs). PluginDetail has creatorAccountUserId, sharePrincipals (principalType, principalId), canPublishToWorkspace, shareUrl, discoverability. Methods plugin/share/updateTargets, plugin/share/checkout, plugin/reconcile. A marketplace named openai-curated-remote feeds tool suggestions.",
+  "evidence": [
+   "EXE-STR:L1286094",
+   "EXE-STR:L1292016",
+   "EXE-STR:L1292037",
+   "EXE-STR:L1298491"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's org/Space model maps naturally onto workspace-shared plugins; the principal-based share list and unlisted/private/directory visibility tiers are worth copying.",
+  "notes": "Behaviour inferred from endpoint literals and struct field names; HTTP schemas not read."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-010",
+  "category": "Tools, plugins & extensibility",
+  "name": "Per-plugin installation and authentication policy",
+  "what": "Each plugin entry declares whether it is installable, whether install must show an interstitial, and when authentication happens. Plans can restrict eligibility and admins can disable a plugin.",
+  "how": "marketplace.json policy {installation: AVAILABLE, authentication: ON_INSTALL}. App-server fields installPolicy, installPolicySource, mustShowInstallationInterstitial, authPolicy, availability, eligiblePlanTypes, disabledReason; requirements enumerate plugin state AVAILABLE / ENABLED / DISABLED_BY_ADMIN. Plan types seen: free, go, plus, pro, prolite, promax, team, business, enterprise, edu variants.",
+  "evidence": [
+   "RES:plugins/openai-bundled/.agents/plugins/marketplace.json",
+   "EXE-STR:L1289317",
+   "EXE-STR:L1289331",
+   "EXE-STR:L1300165"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon can gate plugin availability by org plan and require an explicit consent interstitial before the first OAuth/connect step.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-011",
+  "category": "Tools, plugins & extensibility",
+  "name": "Signed plugin archives with per-file integrity manifests",
+  "what": "Bundled plugins ship as signed archives alongside the unpacked tree, so the app can verify that a plugin is the exact release artifact.",
+  "how": "resources/plugin-signatures/openai-bundled/<plugin>/ contains plugin.tar.gz, plugin.signature.json {algorithm RSA_PKCS1_SHA256, key_id, sha256, signature(base64)} and public-key.der; the tarball contains integrity.json {schema_version 1, hash_algorithm sha256, files[{path, sha256}]}. receipt.json lists every plugin with archive_bytes and sha256 plus environment production, purpose CODEX_DESKTOP_BUNDLED_PLUGIN_SIGNING, CI run_id and source_sha. Verified here: deep-research tarball lists plugin.json, assets, integrity.json and skill files; signature file structure read.",
+  "evidence": [
+   "RES:plugin-signatures/openai-bundled/receipt.json",
+   "RES:plugin-signatures/openai-bundled/deep-research/plugin.signature.json",
+   "RES:plugin-signatures/openai-bundled/deep-research/plugin.tar.gz"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's roadmap wants signed candidate artifacts and skill supply-chain checks; the sha256 file list + detached RSA signature + build receipt is a compact, adoptable scheme.",
+  "notes": "No code that verifies the signature was found in the JS bundles or by string search of codex.exe, so enforcement and the verifying component are unknown (maybe the MSIX updater or native Rust code). Treat as signing artifact present, enforcement unconfirmed. Quality 3 for that reason."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-012",
+  "category": "Tools, plugins & extensibility",
+  "name": "Bundled first-party plugin set (nine plugins) and auto-install with opt-out",
+  "what": "The app ships browser, chrome, computer-use, unified-computer-use, code-review, codex-app-tools, deep-research, latex and visualize plugins. Browser and computer-use are installed automatically unless the user opted out.",
+  "how": "The bundled marketplace is copied to $CODEX_HOME/.tmp/bundled-marketplaces/openai-bundled; install state tracked via config plugins.<name>@openai-bundled; bundledPluginOptOutKeys maps browser-use and computer-use to GlobalStateKey *_BUNDLED_PLUGIN_AUTO_INSTALL_DISABLED. Chrome plugin variant depends on build flavor (Dev/InternalAlpha/Nightly/Agent/Prod/PublicBeta) via CODEX_USE_INTERNAL_CHROME_PLUGIN. Forced reload via CODEX_ELECTRON_BUNDLED_PLUGINS_FORCE_RELOAD.",
+  "evidence": [
+   "BUILD:main-BklS_2Y2.js@101227",
+   "BUILD:main-BklS_2Y2.js@102037",
+   "PLUG:code-review/server.mjs:26414",
+   "RES:plugins/openai-bundled/.agents/plugins/marketplace.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A Verevon \"first-party plugin\" tier (browser, research, docs) distributed as ordinary plugins with an opt-out switch keeps the core small and uses the same loader as third parties.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-013",
+  "category": "Tools, plugins & extensibility",
+  "name": "Host patches plugin MCP config at runtime",
+  "what": "The desktop app rewrites a bundled plugin's .mcp.json and passes config overrides so a plugin's MCP server is enabled only when its prerequisites (Node REPL, browser backend, WSL runtime) exist.",
+  "how": "main-process function reads .mcp.json of the installed cua_repl plugin, sets enabled, omit_tools_from ([code_mode] or [code_mode, deferred]), env_vars, env (CUA_REPL_ENABLED_SURFACES, node paths) and command/args, then atomically writes via tmp file + rename. For codex-app-tools it builds overrides such as plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true when the app-server supports pluginMcpConfigOverrides, otherwise per-server mcp_servers.codex_app.* keys; on WSL it wraps the command with wslpath and WSLENV. Missing prerequisites log reasons missing-pipe, missing-plugin, missing-definition, missing-core-node, missing-windows-runtime.",
+  "evidence": [
+   "BUILD:main-BklS_2Y2.js@101227",
+   "BUILD:main-BklS_2Y2.js@182799",
+   "BUILD:main-BklS_2Y2.js@185441"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Shows the cost of config-as-plugin-state: Verevon should keep plugin enablement and environment binding in the registry, not in files rewritten at launch.",
+  "notes": "This runtime mutation of shipped plugin files is a design smell (plugin directory is not immutable) but the atomic tmp+rename mitigates corruption."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-014",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin capabilities are summarised into the model prompt",
+  "what": "When a plugin is available (or explicitly selected with @), the model is told what skills, apps and MCP servers it provides and that plugin skills are name-prefixed. The summary is trimmed to fit context.",
+  "how": "core/src/context renders \"Capabilities from the <plugin> plugin\" with bullets: tool_search first for the request that explicitly selected the plugin; skills prefixed with the plugin name; apps available in this session; MCP servers available in this session; \"Additional plugin capabilities omitted to fit the context limit\". Composer sends UserInput::Mention and UserInput::Skill variants; renderer keys pluginMention, skillMention.",
+  "evidence": [
+   "EXE-STR:L1303806",
+   "EXE-STR:L1298625"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon injects up to 3 skills by keyword; a per-plugin capability digest plus explicit @-mention semantics (\"search its tools before falling back\") would make plugin use predictable.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-015",
+  "category": "Tools, plugins & extensibility",
+  "name": "Model-initiated plugin and connector install suggestion",
+  "what": "If the user explicitly asks for a plugin that is not active and tool search found nothing, the model can ask the user to install it; the user accepts, declines or cancels in an inline card.",
+  "how": "Two tools: list_available_plugins_to_install and request_plugin_install {tool_type connector|plugin, action_type install, tool_id, suggest_reason}. Hard rules in the tool description: only for an exact match to an explicit user request, only after tool search is exhausted, plugin must be in <recommended_plugins>, never in parallel with other tools, root thread only (\"can only be used by the root thread\"), not available in the TUI. Outcomes accept/decline/cancel; a decline persists a disabled tool suggestion; after install the codex_apps tool cache is refreshed. Server composer endpoints /task_suggestions/dismiss and /composer/items/interactions record interactions.",
+  "evidence": [
+   "EXE-STR:L1305563",
+   "EXE-STR:L1305578",
+   "BUILD:src-BJv5Mk7n.js@84601"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A governed \"install on demand\" tool is the safe alternative to letting a model enable arbitrary capabilities; Verevon's capability-before-dispatch rule can host the same consent flow.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-016",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin-shipped scheduled-task templates",
+  "what": "A plugin can offer ready-made recurring tasks (for example a daily brief) that a user turns into an automation.",
+  "how": "protocol plugin-scheduled-tasks.ts: template file {name, prompt, schedule} with schedule union hourly {intervalHours, days?}, daily {time}, weekdays {time}, weekly {days[MO..SU], time}; automations carry plugin_template_id. PluginDetail exposes scheduledTasks and appTemplates.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:31853",
+   "PLUG:code-review/server.mjs:28547",
+   "EXE-STR:L1289331"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Lets Verevon plugins ship routines; combine with a stronger scheduled-run executor (current Verevon runs are single no-tool calls).",
+  "notes": "Where the template file lives inside a plugin was not found."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-017",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin MCP overlay hardening",
+  "what": "Plugin-declared MCP servers are loaded defensively: a plugin cannot point its MCP config outside its own folder, and stdio servers get a private data directory.",
+  "how": "agent_plugin_mcp_overlay.rs: MCP config must be a regular file; resolved path must stay inside the plugin root (\"resolves outside the plugin root; disabling MCP\"); stdio servers get a .plugin-data directory (creation failure disables stdio servers); duplicate server names are skipped, manifest object overriding file definitions is logged (\"plugin manifest MCP object overwrote an earlier server definition\").",
+  "evidence": [
+   "EXE-STR:L1286083",
+   "EXE-STR:L1286112"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Apply the same containment checks (path realpath inside plugin root, per-plugin data dir) before Verevon enables any plugin-provided MCP endpoint.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-018",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin hook declaration and script attribution",
+  "what": "Plugins can declare lifecycle hooks, and scripts that a plugin runs are attributed to it for metrics.",
+  "how": "Hooks are read from plugin.json (inline hooks object, shown as plugin.json#hooks[...]) or hooks/hooks.json. script_attribution.rs tags shell/PowerShell runs with plugin identity and a CODEX_PLUGIN_METRICS_OUTPUT sidecar (plugin_metrics_sidecar.rs); telemetry event codex_plugin_measurement_event. Bundled plugins use hook type mcp_tool to call node_repl.turn_ended or cua_repl.turn_ended on Interrupt, SubagentStop and Stop with templated input (hook_event_name, session_id or agent_id, turn_id).",
+  "evidence": [
+   "PLUG:browser/.codex-plugin/plugin.json",
+   "PLUG:unified-computer-use/.codex-plugin/plugin.json",
+   "EXE-STR:L1311068",
+   "EXE-STR:L1306290",
+   "EXE-STR:L1295037"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Per-plugin usage attribution is exactly what Verevon needs for capability ranking and cost attribution in the registry.",
+  "notes": "Attribution mechanism read from strings only; precise event fields unknown."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-019",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin store, install and enablement UX",
+  "what": "A Skills and Apps hub lists installed and recommended apps, MCP servers, plugins, skills and marketplaces with search; plugins can be enabled, disabled, uninstalled and configured per remote host.",
+  "how": "Renderer routes /plugins, /plugins/:pluginId, /plugins/:pluginId/app/:toolName, /skills, /skills/manage, /settings/plugins-settings, /settings/mcp-settings and per-host /settings/plugins-settings/hosts/:hostId/plugins/:pluginId (verified in app-initial bundle). Strings: My Apps, My MCPs, My Skills, Recommended, Marketplaces; toasts for enable, disable, uninstall, install error, OAuth timeout, \"Plugin changed, but skills couldn't refresh. Reload skills before starting a new chat\". sendRequest invalidates MCP status cache after plugin/install or plugin/uninstall.",
+  "evidence": [
+   "I18N:skills.appsPage.section.installedApps",
+   "I18N:plugins.card.enableSuccess",
+   "I18N:plugins.skillCatalog.reloadError",
+   "BUILD:src-BJv5Mk7n.js@1002725"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no plugin install surface; the five-tab hub with per-host settings is a practical IA to copy.",
+  "notes": "Routes verified by string match in app-initial-b8e1c8014bb4.js."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-020",
+  "category": "Tools, plugins & extensibility",
+  "name": "Composer mentions for skills, plugins and apps",
+  "what": "Typing $ or @ in the composer lists skills, plugins and apps with their source (Built-in, Admin installed, Project, Local file, From plugin) and inserts a typed mention.",
+  "how": "composer.skillMentionList strings: adminSource, builtInSource, localFileSource, pluginSource (\"Plugin: {pluginId} - {path}\"), projectSource, fromPlugin, loading, noResults; UserInput::Skill and UserInput::Mention items in turn/start; fuzzyFileSearch for file mentions.",
+  "evidence": [
+   "I18N:composer.skillMentionList.adminSource",
+   "I18N:composer.skillMentionList.pluginSource",
+   "EXE-STR:L1298625"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's composer has /file /image /search /research /schedule only; add typed skill/app mentions with provenance labels.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-021",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skill package format (SKILL.md + agents/openai.yaml)",
+  "what": "A skill is a folder with a Markdown entry file whose YAML front matter names and describes it; an optional YAML sidecar gives UI metadata and invocation policy. Scripts, references, assets and tests sit beside it.",
+  "how": "Front matter schema: name (non-empty), description, optional metadata.short-description. Sidecar agents/openai.yaml (or SKILL.json fallback): interface {display_name, short_description, icon_small, icon_large, brand_color, default_prompt}, policy {allow_implicit_invocation, products}, dependencies (tool and OAuth entries). Metadata files are capped at 1 MiB. Optional directories scripts/, references/, assets/, tests/. Bundled examples: deep-research (references/*.md), visualize (scripts, widgets, examples), latex (scripts + Python tests), hatch-pet (17 Python scripts, 4 tests, references).",
+  "evidence": [
+   "BUILD:skills-8U-G2giZ.js@0",
+   "EXE-STR:L1289178",
+   "PLUG:deep-research/skills/deep-research/agents/openai.yaml",
+   "EXE-STR:L1309858"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon skills have trigger keywords and file patterns but no package layout; adopt a folder package with progressive disclosure and a UI/policy sidecar so skills can ship scripts and references.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-022",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skill discovery roots, limits and concurrency",
+  "what": "Skills are found in the open project, the user's agents folder, the Codex home and the plugin cache; the scan is bounded so a huge repo cannot stall startup.",
+  "how": "Hosted skill reader runs a bash pipeline inside the execution container: for roots \"$1\" (project cwd), $HOME/.agents/skills, ${CODEX_HOME:-$HOME/.codex}/skills and ${CODEX_HOME:-$HOME/.codex}/plugins/cache it runs ripgrep --files --hidden --glob SKILL.md excluding .git and node_modules, caps at 512 results (head -z -n 512), parses 8 files concurrently, 10 s timeout, errors collected per path (\"Unable to read skill metadata\"). Skill scope is repo when inside the cwd else user. Rust loader adds a traversal limit (\"skills scan reached its traversal limit\"), project_root_markers for the project root, and a skills.agents source.",
+  "evidence": [
+   "BUILD:skills-8U-G2giZ.js@0",
+   "EXE-STR:L1335996"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Same bounded-scan design suits Verevon Space workspaces: scan roots, hard caps and per-path error reporting.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-023",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skill authority and locator model (host, cloud, executor, custom)",
+  "what": "The same skill catalogue can mix skills on the user's disk, skills in the cloud account, skills inside a remote execution environment and skills from custom providers, each addressed by a typed locator.",
+  "how": "codex-skills-extension models skill provenance as authority (host, cloud, executor) and locators file, executor package, cloud package and custom resource. Model tools skills.list (cursor pagination, per-authority) and skills.read (package + optional skill:// resource id; root aliases resolved from a \"Skill roots\" section; executor-backed skills expose skill_root to locate bundled scripts). Cloud skills have their own catalogue cache and fingerprint (\"cloud skill cache changed during read\" aborts the read); executor skills require filesystem access bound to an environment.",
+  "evidence": [
+   "EXE-STR:L1335806",
+   "EXE-STR:L1335850",
+   "EXE-STR:L1335886"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon sandboxes (Space-scoped) and learned skills (session-core) are different authorities; a typed locator plus read-by-resource tool would unify them and give skills access to bundled scripts inside a sandbox.",
+  "notes": "Read from embedded tool descriptions and error strings; no schemas."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-024",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skill catalogue context budget with truncation signalling",
+  "what": "The model sees a bounded skill list; when many skills exist, descriptions are shortened and, past a threshold, removed, and the model is told how many were omitted and that explicit mentions still work.",
+  "how": "render.rs/render_observability.rs: SkillMetadataBudget, messages \"Exceeded skills context budget. All skill descriptions were removed...\", \"additional N omitted from this bounded skills list\", \"truncated skill metadata to fit skills context budget\"; metrics codex.thread.skills.enabled_total, kept_total, truncated, description_truncated_chars; world-state updates inject \"## Host skills update\", \"## Cloud skills update\" and \"## Skills update\" diffs when availability changes (\"No host skills are currently available\", \"Host skills are available but omitted ... because the skills context budget was exceeded\"). Catalog budget is split between host and cloud (CatalogBudgetAllocation totalBudget, cloudLimit).",
+  "evidence": [
+   "EXE-STR:L1335815",
+   "EXE-STR:L1335877",
+   "EXE-STR:L1336057",
+   "EXE-STR:L1335818"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon injects up to 3 skills by character budget with reattach_skill; emitting explicit \"update\" messages and omission counts would make skill availability auditable to the model and the user.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-025",
+  "category": "Tools, plugins & extensibility",
+  "name": "Dynamic skill selection (retrieval over the skill catalogue) in shadow mode",
+  "what": "Instead of listing every skill, Codex is testing retrieval that picks the few relevant skills per turn. Experiments run in shadow mode and only measure how much the list could shrink.",
+  "how": "skills/dynamic_skill_selector (character_ngram.rs, multi_query_lexical.rs, rrf_lexical_char.rs) and shadow_selection_experiment/mod.rs. Method ids found: lru_v1, fielded_bm25_v1, character_ngram_v1, lru_plus_lexical_v1, rrf_lexical_char_v1 (reciprocal-rank fusion), weighted_lexical_v1, multi_query_lexical_v1, routing_card_exact_v1, character_routing_card_v1, lru_plus_character_routing_v1, lru_plus_lexical_character_routing_v1, task_context_fusion_v1. Query script classes none|other|cjk|ascii_latin|mixed; telemetry codex.skills.shadow_selection.{duration_ms,catalog_entries,selected_entries,query_terms,reduction_bps,rank}. A stop-word list is embedded.",
+  "evidence": [
+   "EXE-STR:L1335807",
+   "EXE-STR:L1335967",
+   "EXE-STR:L1335975",
+   "EXE-STR:L1335978"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon matches skills by trigger keywords; the fusion of lexical, character n-gram and recency methods, evaluated in shadow before enabling, is a low-risk upgrade path with built-in measurement.",
+  "notes": "Experiment only; not evidence that any method is enabled in production. Quality 3 for that reason."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-026",
+  "category": "Tools, plugins & extensibility",
+  "name": "Implicit vs explicit skill invocation policy",
+  "what": "Skills are auto-selectable by default; a skill can opt out so it only runs when the user types $name. Skills can also be limited to products.",
+  "how": "agents/openai.yaml policy.allow_implicit_invocation (bundled deep-research sets true; skill-creator documents false for explicit-only skills) and policy.products (CHATGPT, CODEX, ATLAS enum strings). Explicit mention telemetry distinguishes invoke_type explicit, implicit, unattributed and unknown.",
+  "evidence": [
+   "PLUG:deep-research/skills/deep-research/agents/openai.yaml",
+   "EXE-STR:L1289178",
+   "EXE-STR:L1334443",
+   "EXE-STR:L1335891"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon needs the same switch to keep high-risk or costly skills (browser, research fan-out) from being injected automatically.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-027",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skill telemetry and attribution (codex.skill.injected)",
+  "what": "Each time a skill is put in front of the model, an event records which skill, whether the user named it, which plugin it came from and which model and effort ran it.",
+  "how": "Metric/event codex.skill.injected with fields status, skill, invoke_type (explicit|implicit|unattributed|unknown), plugin_id, model_slug, reasoning_effort. Also codex.skills.shadow_selection.* for the retrieval experiment and codex.thread.skills.* budget counters.",
+  "evidence": [
+   "EXE-STR:L1335891",
+   "EXE-STR:L1335877"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Feeds Verevon's existing skill scorecard/quarantine idea with a ready event schema keyed by invoke type and model.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-028",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skill approvals as a distinct approval category",
+  "what": "Running a skill's scripts or reading its resources can require its own approval, separate from shell commands and MCP calls.",
+  "how": "GranularApprovalConfig fields: sandbox_approval, skill_approval, request_permissions, mcp_elicitations (approval_policy value \"granular\" next to untrusted, on-request, never). Also fragment <resource_access> in skill read prompts.",
+  "evidence": [
+   "EXE-STR:L1287252",
+   "EXE-STR:L1286168",
+   "EXE-STR:L1336049"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's capability policy could treat skill execution as its own governed capability class rather than folding it into code_interpreter.",
+  "notes": "Behaviour of skill_approval inferred from the field name; not traced."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-029",
+  "category": "Tools, plugins & extensibility",
+  "name": "Embedded system skills installed into CODEX_HOME/skills/.system",
+  "what": "Codex ships core skills inside the binary and installs them at startup: image generation, Codex self-documentation, review agent, skill creator, skill installer, Word documents, presentations, spreadsheets and PDF.",
+  "how": "Front-matter blocks embedded in codex.exe: imagegen, openai-docs (\"Use for Codex models/pricing, scheduled tasks, skills, settings, setup, troubleshooting, customization, automations, and self-knowledge\"), review-agent (read-only defect-first review for delegated reviews), skill-creator, skill-installer, documents/presentations/spreadsheets/pdf. Startup logs \"failed to install system skills\"; \"skills cache cleared (N entries)\".",
+  "evidence": [
+   "EXE-STR:L1333478",
+   "EXE-STR:L1334399",
+   "EXE-STR:L1334445",
+   "EXE-STR:L1335307",
+   "EXE-STR:L1335875"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A self-knowledge skill (openai-docs) that answers questions about the product's own settings and automations is a cheap, effective support feature for Verevon.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-030",
+  "category": "Tools, plugins & extensibility",
+  "name": "skill-installer: curated list and GitHub installs",
+  "what": "The agent can install skills for the user from a curated catalogue or from any GitHub repo path (including private repos) into the skills folder.",
+  "how": "System skill skill-installer: \"Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo path\"; resources/skills/skills/.curated holds hatch-pet and onboard-new-user; app-server skills/tree/main reference to a GitHub skills tree and skills/public.",
+  "evidence": [
+   "EXE-STR:L1335307",
+   "RES:skills/skills/.curated/hatch-pet/SKILL.md",
+   "RES:skills/skills/.curated/onboard-new-user/SKILL.md"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Install-from-Git for skills implies a trust model Verevon must define first (signing, scorecard) before allowing agent-driven installs.",
+  "notes": "Installer script internals not read."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-031",
+  "category": "Tools, plugins & extensibility",
+  "name": "skill-creator doctrine: progressive disclosure and minimal skills",
+  "what": "Codex ships guidance that teaches the agent to write lean skills: three-stage disclosure, scripts only when deterministic, no README clutter, explicit-only skills only on request.",
+  "how": "System skill text: disclose in stages (name+description, SKILL.md body, references/scripts/assets); keep description discriminating; use scripts/ for repeated logic, references/ for conditional detail, assets/ for output files; naming lowercase-hyphen under 64 chars; init_skill.py <name> --path ... --resources scripts,references,assets and generate_openai_yaml.py --interface key=value; \"Approval to complete a task does not expand its scope or execution permissions.\"",
+  "evidence": [
+   "EXE-STR:L1334445",
+   "EXE-STR:L1334500"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's learned-skill review (sessionreview) should adopt these authoring rules as its rubric so auto-learned skills stay short, scoped and non-permissive.",
+  "notes": "The scope-limiting rule is notable: skills must not imply permission for extra external actions."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-032",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skills that depend on other skills with a hard failure contract",
+  "what": "A skill can require a companion skill and must stop rather than degrade silently if it is missing.",
+  "how": "deep-research SKILL.md: use $documents to build and verify the DOCX; if unavailable ask the user to enable the Documents plugin and stop, preserving notes; never substitute Markdown/PDF/chat; \"Never describe a file as visually verified unless the rendered pages were actually inspected.\" hatch-pet delegates all image generation to $imagegen and forbids direct Image API calls.",
+  "evidence": [
+   "PLUG:deep-research/skills/deep-research/SKILL.md",
+   "RES:skills/skills/.curated/hatch-pet/SKILL.md"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Declare skill-to-skill dependencies and failure contracts in the manifest so Verevon workflows fail loudly instead of returning off-spec output.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-033",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skills carry scripts, tests and QA artifacts (skills as software)",
+  "what": "Complex skills ship deterministic Python helpers with unit tests and validation reports, not just prose.",
+  "how": "latex plugin: compile_latex.py, detect_tectonic.py, detect_texlive.py, install_texlive.py, latex_doctor.py plus tests (test_compile_latex_strategy.py, test_detect_tectonic.py, test_install_texlive_profile.py). hatch-pet: 17 scripts (assemble_extended_atlas, validate_atlas, make_contact_sheet, measure_direction_continuity, validate_direction_blind_verdicts...) and 4 tests covering chroma decontamination, direction acceptance policy and blind consensus.",
+  "evidence": [
+   "PLUG:latex/tests/test_compile_latex_strategy.py",
+   "RES:skills/skills/.curated/hatch-pet/tests/test_direction_acceptance_policy.py"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Supports Verevon's \"skills as versioned packages with scorecards\" direction: tests inside the package are the strongest quality signal.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-034",
+  "category": "Tools, plugins & extensibility",
+  "name": "Skill enablement config and change notifications",
+  "what": "Users can switch individual skills on or off by path or name, and clients are told when the skill set changes.",
+  "how": "App-server skills/list (with extraRoots and cwds), skills/config/write (exactly one of path or name), notification skills/changed; skills.shadow_selection and skills.selected_skill_instructions config entries; the desktop invalidates the skill list after plugin changes.",
+  "evidence": [
+   "EXE-STR:L1291572",
+   "EXE-STR:L1336047",
+   "PLUG:code-review/server.mjs:31363"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon can expose enable/disable per skill per user/org with a push notification when the registry changes.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-035",
+  "category": "Tools, plugins & extensibility",
+  "name": "Code mode: model writes JavaScript that orchestrates tools in a V8 isolate",
+  "what": "Instead of one tool call per round trip, the model can submit a short JavaScript program that calls many tools, aggregates results and returns compact text or images.",
+  "how": "Tool exec takes raw JS (optional first-line pragma // @exec: {\"yield_time_ms\":..., \"max_output_tokens\":...}); runs in a fresh V8 isolate as an async module with no Node, no filesystem, no network, no console; nested tools are on a global tools object (for example await tools.exec_command(...), MCP tools as tools.mcp__server__tool); helpers text(), image(), audio(), generatedImage(), store()/load() for cross-call state, notify(), setTimeout/clearTimeout, ALL_TOOLS, yield_control(), exit(). tool_search is callable from JS. A separate process codex-code-mode-host (V8) speaks a versioned protocol (HostHello, SessionReady, ExecutionStarted, CellClosed, DelegateRequest::InvokeTool and ::Notify) with an optional in-process fallback (disable_in_process_fallback). Plugin .mcp.json can hide tools from code mode via omit_tools_from.",
+  "evidence": [
+   "EXE-STR:L1302462",
+   "EXE-STR:L1302456",
+   "EXE-STR:L1302488",
+   "RES:codex-code-mode-host.exe",
+   "PLUG:unified-computer-use/.mcp.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's roadmap lists MCP code mode (section 23.4) as greenfield; Codex shows a concrete contract: isolate without I/O, tools as async functions, persisted store/load, yield control and token-capped output.",
+  "notes": "Largest single capability gap for Verevon among extensibility features."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-036",
+  "category": "Tools, plugins & extensibility",
+  "name": "Deferred tool loading with BM25 tool_search",
+  "what": "Large tool catalogues are not listed up front; the model searches them on demand and the matching tools become callable.",
+  "how": "Tool tool_search (also exposed in code mode as tools.tool_search({query, limit: 8})) returns BM25-ranked matches with callable names and TypeScript declarations. MCP server config key omit_tools_from [\"deferred\"] excludes a server's tools from the eager list; ToolRegistryConfig has error_on_tool_collisions, excluded tool namespaces, direct_only tools, tool input schema max bytes, and turn_metadata_includes_tool_info. Desktop flags deferCodexAppTools and deferCuaTools switch bundled servers between eager and deferred. tools.cache_write/publish/fetch_uncached metrics for the apps tool cache.",
+  "evidence": [
+   "EXE-STR:L1302488",
+   "PLUG:codex-app-tools/.mcp.json",
+   "PLUG:unified-computer-use/.mcp.json",
+   "EXE-STR:L1291742"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's gateway collapses MCP above 40 tools to mcp_catalog + mcp_call; BM25 search that returns callable declarations is the more capable pattern and works with code mode.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-037",
+  "category": "Tools, plugins & extensibility",
+  "name": "Persistent JavaScript REPL exposed as an MCP server (node_repl / cua_repl)",
+  "what": "Browser and computer-use plugins drive their runtimes through a long-lived JavaScript session where state persists across calls and a turn-end hook cleans up.",
+  "how": "MCP servers node_repl (browser, chrome, computer-use) and cua_repl (unified-computer-use) expose tools js, js_reset and turn_ended; cua_repl .mcp.json: enabled_tools [js, js_reset, turn_ended], omit_tools_from [code_mode, deferred], startup_timeout_sec 120, js output_token_limit 25000. Desktop injects the node_repl server into thread config at thread/start. Bundled cua_node (node 24.21.0-cua.1) hosts @oai/sky.",
+  "evidence": [
+   "PLUG:unified-computer-use/.mcp.json",
+   "BUILD:main-BklS_2Y2.js@96567",
+   "RES:cua_node/manifest.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A persistent session with a turn-ended hook is how Verevon's sandbox/browser grants could keep state per run and release it on interrupt.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-038",
+  "category": "Agent runtime",
+  "name": "Lifecycle hook engine with three handler kinds",
+  "what": "Users, admins and plugins can run commands, MCP tools, prompts or agents at fixed points in a session; hooks can inject context, rewrite tool input and veto actions.",
+  "how": "hooks crate: events PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart (source startup|resume|clear|compact|fork), SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop, Interrupt. Handler config is an internally tagged enum command {command, commandWindows, timeout, async, statusMessage, additionalContextLimit}, mcp_tool {server, tool, input, timeout}, prompt and agent (the last two parse but may be unsupported). Each event takes matcher groups (a matcher field per group). Hook stdin JSON includes session_id, transcript_path, hook_event_name, permission_mode, agent_transcript_path, stop_hook_active, agent_id, agent_type, last_assistant_message, tool_input; large outputs spill to files (output_spill.rs); a PreToolUse result may return updatedInput (error if the rewritten input lacks the string field command). Legacy notify = external program.",
+  "evidence": [
+   "EXE-STR:L1302670",
+   "EXE-STR:L1303872",
+   "EXE-STR:L1309169",
+   "EXE-STR:L1292418"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's hook engine is real but gateway-memory only and absent in Do mode; Codex shows the complete event set, hook sources by config layer, and the input rewrite contract to target.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-039",
+  "category": "Safety, permissions & governance",
+  "name": "Hook trust model (trusted hash) and config-layer sources",
+  "what": "Hooks come from system, user, project, plugin, MDM and cloud layers; project and plugin hooks are untrusted until the user approves, and changed hooks fall back to untrusted.",
+  "how": "hooks/list returns entries with eventName, matcher, timeoutSecs, statusMessage, additionalContextLimit, sourcePath, pluginId, displayOrder, isManaged, currentHash and trustStatus in {managed, untrusted, trusted, modified}; HookStateToml stores trusted_hash. ConfigLayerSource kinds: system, user, project, mdm, sessionFlags, plugin, cloudRequirements, cloudManagedConfig, legacyManagedConfigFile, legacyManagedConfigMdm. Requirements key allowManagedHooksOnly lets admins forbid all non-managed hooks. UI: Settings > Hooks page.",
+  "evidence": [
+   "EXE-STR:L1289297",
+   "EXE-STR:L1292418",
+   "EXE-STR:L1295037",
+   "EXE-STR:L1289317",
+   "I18N:settings.nav.hooks-settings"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Hash-pinned hook trust plus an admin \"managed hooks only\" switch is directly usable for Verevon's org-owned hook registry and fixes the \"hooks only on browser runs\" weakness with a governed source.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-040",
+  "category": "Tools, plugins & extensibility",
+  "name": "Slash command catalogue (terminal client) with descriptions",
+  "what": "The terminal client exposes about fifty slash commands for model, permissions, memory, skills, plugins, hooks, goals, side conversations, worktrees and diagnostics.",
+  "how": "Descriptions embedded in codex.exe (command names for some entries are inferred from their descriptions), e.g. /model (model and reasoning effort), /permissions, /keymap, /vim, /setup-default-sandbox, /experimental, /auto-review-denials (approve one retry of a recent auto-review denial), /memories, /skills, /import (import setup, this project and recent chats from Claude Code), /hooks, /review, /rename, /archive, /delete, /resume, /fork, /worktree, /app (continue in the Desktop app), /init (create AGENTS.md), /compact, /recap, /plan, /voice, /goal, /agent, /side (ephemeral fork), /copy, /export, /raw, /tui, /diff, /mention, /status, /daemon, /warnings, /cd, /pwd, /usage, /debug-config (config layers and requirement sources), /title, /statusline, /theme, /pets, /mcp (list tools; verbose or login <name>), /apps, /plugins, /logout, /quit, /feedback, /rollout, /ps, /stop, /clear, /test-approval, /subagents.",
+  "evidence": [
+   "EXE-STR:L1339869",
+   "EXE-STR:L1343141"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has /models and /compact in capability-core and five composer commands; this list is a prioritised backlog (especially /goal, /side, /import, /debug-config, /memories).",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-041",
+  "category": "UI/UX & product design",
+  "name": "Desktop composer slash menu and command palette",
+  "what": "The desktop app has a searchable slash command dialog and a command palette with thread, panel and navigation actions.",
+  "how": "Strings composer.slashCommands.dialogTitle/Description/inputPlaceholder/noResults, composer.feedbackSlashCommand, codex.command.* (newThread, searchChats, toggleSidebar, toggleTerminal, toggleReviewPanel, temporaryChat, importExternalAgent, theme, gitReview...), settings page for keyboard shortcuts; command keymap protocol codex-command-keymap.ts.",
+  "evidence": [
+   "I18N:composer.slashCommands.dialogTitle",
+   "I18N:codex.command.importExternalAgent.loading",
+   "PLUG:code-review/server.mjs:26783"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no command palette (grep confirmed in its UI baseline); the command keymap protocol module is a small, well-scoped design to mirror.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-042",
+  "category": "Tools, plugins & extensibility",
+  "name": "External agent config import (Claude Code, Cursor and similar)",
+  "what": "On first run or from settings, Codex scans for another coding agent's setup and offers to import instructions, settings, skills, plugins, MCP servers, subagents, hooks, commands, memory and recent chats.",
+  "how": "ExternalAgentConfigMigrationItemType: AGENTS_MD, CONFIG, SKILLS, PLUGINS, MCP_SERVER_CONFIG, SUBAGENTS, HOOKS, COMMANDS, MEMORY, SESSIONS. RPC externalAgentConfig/detect, /import, /import/recordHistory; notifications externalAgentConfig/import/progress and /completed; SQLite external_agent_config_imports (with provider_id); settings external-agent-import-sync-enabled and -item-types (keep imported content in sync). Rust crate external-agent-migration (detect/mod.rs, plugins.rs, service.rs, sessions/append.rs, memory_import.rs) with strings \"Migrate MCP servers from ...\", \"Migrate recent sessions from ...\", memory import \"not supported for the selected migration source\"; skills-cursor path. Plugins migration adds the external marketplace via marketplace/add. Onboarding shows hook counts per source.",
+  "evidence": [
+   "EXE-STR:L1289330",
+   "EXE-STR:L1292674",
+   "EXE-STR:L1292690",
+   "I18N:externalAgentConfig.itemType.hooks",
+   "I18N:settings.agent.importSettings.sectionTitle"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Importing a competitor's setup is an adoption lever; Verevon could import Claude/ChatGPT export data and skills the same way (Verevon UI baseline notes no importer exists).",
+  "notes": "Which external agents are supported beyond Claude Code (string hits for Cursor skills) is not fully enumerated."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-043",
+  "category": "Memory, learning & personalization",
+  "name": "Instruction files: AGENTS.md hierarchy, overrides and size limits",
+  "what": "Project instructions are read from AGENTS.md (with local override variants) up to a byte cap; /init creates one; imports migrate other agents' instruction files.",
+  "how": "Config defaults show project_doc_max_bytes = 32768 and project_doc_fallback_filenames = []; AGENTS.override.md recognised; ThreadStart returns instruction_sources; developer_instructions, additionalDeveloperInstructions (requirements) and compact_prompt are configurable; model_instructions_file in profiles.",
+  "evidence": [
+   "EXE-STR:L1285511",
+   "EXE-STR:L1288711",
+   "EXE-STR:L1285488"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon injects org/Space/persona instructions in chat but not Do mode; returning the list of instruction sources to the client is a transparency win worth copying.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-044",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP client built on the Rust MCP SDK (stdio and streamable HTTP)",
+  "what": "Codex connects to local (stdio) and remote (streamable HTTP) MCP servers and speaks several protocol revisions, including a newer draft, with request timeouts and task/sampling support.",
+  "how": "codex-rmcp-client and codex-mcp crates on top of rust-sdk (rmcp). Negotiated versions seen: 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25, and an InputRequiredResult path that \"requires negotiated protocol version 2026-07-28 or newer\". Methods in the handler tables: sampling/createMessage, prompts/get, resources/read, resources/subscribe/unsubscribe, tasks/get, tasks/update, tasks/cancel, logging/setLevel. Per-request timeout and \"maximum total timeout exceeded\" errors; pagination helper; resource client; connection_manager with startup, status, required, resources and tool_catalog modules; strings \"required MCP servers failed to initialize\" (session_init.required_mcp_wait). Plugins may declare Stdio, StreamableHttp and Sse servers (AgentPluginMcpServer). rmcp's streamable_http_server module is also linked, which suggests an MCP-server mode, but no entry point for it was found.",
+  "evidence": [
+   "EXE-STR:L1292736",
+   "EXE-STR:L1285663",
+   "EXE-STR:L1306817",
+   "EXE-STR:L1285463",
+   "EXE-STR:L1319026"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's gateway implements Streamable HTTP only (stdio quarantined) and plans the 2026-07-28 RC migration; Codex already negotiates that revision, so its tasks/sampling handling is a reference for the migration.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-045",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP OAuth with dynamic client registration, CIMD and issuer-change handling",
+  "what": "MCP servers that need sign-in work through browser OAuth; the client discovers metadata, registers itself or uses a portable client-id document, and drops tokens if the server's issuer changes.",
+  "how": "rmcp transport/auth.rs strings: \"Dynamic client registration not supported\", fallback to legacy OAuth endpoints derived from the base URL, authorization_response_iss_parameter_supported, \"authorization server issuer changed; clearing stored credentials bound to the previous issuer\", \"discarding tokens but keeping portable CIMD client ID\", WWW-Authenticate challenge scope handling, protected-resource metadata probe with discovery URL logging. App-server notification mcpServer/oauthLogin/completed; setting mcp_startup_authentication (prompt at startup); UI timeout \"Plugin installation timed out\" for OAuth during install; plugin appsNeedingAuth.",
+  "evidence": [
+   "EXE-STR:L1292749",
+   "EXE-STR:L1292755",
+   "EXE-STR:L1298462",
+   "PLUG:code-review/server.mjs:31363"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon implements RFC 9728/8414/7591; add CIMD client IDs and issuer-binding of stored credentials, which Codex treats as first-class.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-046",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP server configuration surface (per server and per tool)",
+  "what": "Each MCP server can be enabled or disabled, restricted to a tool allow-list, hidden from certain modes, given timeouts, an environment allow-list and per-tool approval modes.",
+  "how": "Fields seen in plugin .mcp.json and config.toml schema: command, args, cwd, enabled, env, env_vars (allow-list of inherited variables), startup_timeout_sec, tool_timeout_sec (code-review 120, codex-app-tools 3600), enabled_tools, disabled_tools, omit_tools_from [deferred, code_mode], default_tools_approval_mode, tools.<name>.approval_mode (approve|prompt), tools.<name>.output_token_limit, destructive_enabled, open_world_enabled (gates tools by MCP destructive/open-world annotations), required servers (startup fails the session), bearer_token_env (HTTP auth read from an environment variable). App-server methods mcpServer/reload, mcpServer/startupStatus/updated and mcpServer/event/stream support live status.",
+  "evidence": [
+   "PLUG:code-review/.mcp.json",
+   "PLUG:codex-app-tools/.mcp.json",
+   "PLUG:unified-computer-use/.mcp.json",
+   "EXE-STR:L1286053"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "The destructive/open-world gate and per-tool approval mode map cleanly onto Verevon's capability-binding requirement; use them to unblock the \"MCP tools denied\" gap with governed bindings.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-047",
+  "category": "Safety, permissions & governance",
+  "name": "Human-readable approval templates for connector tools",
+  "what": "Before a connector action runs, the approval card says in plain language what will happen, for example \"Allow GitHub to add a comment to a pull request?\" with labelled parameters.",
+  "how": "core/src/mcp_tool_approval_templates.rs embeds a JSON file schema_version 4 with 55 templates keyed by connector_id and tool_title; each has template (\"Allow {connector_name} to create a branch?\") and template_params [{name, label}] (Pull request, Repository, Comment...). Tool titles suggest GitHub-, Gmail-, Calendar-, Slack- and Drive-style tool sets (inferred; 19 templates for the largest connector id). Version mismatch is logged (expected_schema_version).",
+  "evidence": [
+   "EXE-STR:L1304554",
+   "EXE-STR:L1304555"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's HITL approvals should render action-specific sentences from a versioned template file per capability instead of raw tool names; this also supports Space-level policy review.",
+  "notes": "Connector ids are opaque; mapping to product names is not asserted."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-048",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP Apps: tool results render interactive UIs (ext-apps standard)",
+  "what": "MCP tools can return a UI resource that the chat shows as a sandboxed widget: the bundled Code Review plugin is a full pull-request workspace delivered this way.",
+  "how": "code-review/server.mjs bundles @modelcontextprotocol/ext-apps server helpers: registerAppTool copies _meta.ui.resourceUri to the legacy key openai/outputTemplate (and back); registerAppResource uses MIME text/html;profile=mcp-app; ui/open-link and ui/request-display-mode messages; display modes inline, fullscreen, pip; tool visibility \"model\" vs \"app\" (app-only tools hidden from the model); CSP declaration connectDomains/resourceDomains (empty means no network) and a per-view sandbox domain; host theme CSS variables; host context (locale, timeZone, userAgent, platform, container size). Plugin ships assets/pull-requests.html (776 KB), .css (1.4 MB) and .js (13.9 MB). Tool meta schema in protocol mcp-app-ui.ts accepts openai/outputTemplate, ui.resourceUri and ui/resourceUri. Resource tool descriptors also carry preferredModelDisplayMode inline|fullscreen.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:37260",
+   "PLUG:code-review/server.mjs:31543",
+   "PLUG:code-review/assets/pull-requests.html",
+   "EXE-STR:L1300165",
+   "REA:ev_4eb1f8d6d6c18c428fdb9468c0dbbf46c4533592280411440ed06583e6d92e54"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's artifacts are text/HTML; adopting MCP Apps would let any capability return a governed widget (with CSP and app-only tools) without bespoke frontend work.",
+  "notes": "REA analysis of the plugin directory ran (858 modules, partial graph, worker heap exhausted on server.mjs and pull-requests.js), but the facts above come from reading the unminified server.mjs."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-049",
+  "category": "Safety, permissions & governance",
+  "name": "MCP App sandbox host (isolated partition, port protocol, event telemetry)",
+  "what": "Widgets run in a locked-down guest frame; the host exposes a narrow set of calls and logs blocked navigation, downloads and failed attaches.",
+  "how": "protocol mcp-app-sandbox.ts: Electron session partition prefix codex-mcp-app-sandbox with a shared persistent partition; required frame ports navigate, notifyMcpAppsHostContext, notifyMcpAppsToolCancelled, notifyMcpAppsToolInput, notifyMcpAppsToolResult, requestMcpAppsResourceTeardown, runWidgetCode, setAdditionalGlobals, setSafeArea, setTheme, setWidgetData, setWidgetView; optional applyAutofillCandidate, getCurrentPath, notifyMcpAppsMcpNotification, prepareEnvironment, runUserCode, screenshot, stop. IPC mcp-app-sandbox-host-message and -guest-message; telemetry events mcp_app_sandbox.{attach_expired,attach_rejected,attach_unmatched,guest_attached,guest_load_failed,init_rejected,navigation_blocked,download_blocked,console_message,console_limit_reached}. mcp-app-attachment chunk persists attachments.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:31560",
+   "BUILD:main-BklS_2Y2.js@0",
+   "BUILD:mcp-app-attachment-DibnvJgR.js@0"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A host-controlled port list plus blocked-navigation/download telemetry is a concrete security checklist for rendering plugin UIs in Verevon's SolidJS shell.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-050",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP resource activity metadata (read, created, updated)",
+  "what": "Tool results can declare which external resources they read, created or updated so the UI can show clickable activity chips.",
+  "how": "protocol mcp-resource-activities.ts: _meta[\"openai/resourceActivities\"] {version:1, resources:[{id, url (http/https without credentials), title, mimeType, activities: read|created|updated}]}.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:31592"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Gives Verevon a standard way to surface Data Plane documents and provider actions touched by a tool call in the transcript, supporting its audit and citation UX.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-051",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP elicitation with OpenAI form extension and user verification",
+  "what": "MCP servers can ask the user structured questions (forms, file pickers with options, image pickers) during a tool call and can request step-up verification.",
+  "how": "Initialize capability mcpServerOpenaiFormElicitation; extension openai/elicitation form with property x-openai-input {type:file, options:[{uri,name,title,icons}], userOptions.accept}; legacy method openai/form with type openai/imagePicker; requests carry _meta.autoResolutionMs (30 000 in the template picker). codex-mcp elicitation.rs and user_verification_elicitation.rs; app-server serverRequest mcpServer/elicitation/request answered with accept/decline/cancel; second-level save prompt (\"Save this reference as a reusable template?\").",
+  "evidence": [
+   "RES:artifact-template-picker/server.mjs:92",
+   "RES:artifact-template-picker/server.mjs:602",
+   "RES:artifact-template-picker/server.mjs:977",
+   "EXE-STR:L1296258",
+   "EXE-STR:L1319355"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Elicitation is the right transport for Verevon HITL prompts raised by plugins; auto-resolution timers and decline/cancel distinctions are worth mirroring.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-052",
+  "category": "Tools, plugins & extensibility",
+  "name": "Dynamic (client-registered) tools per thread",
+  "what": "The host app can register tools with the agent at thread start, optionally grouped in namespaces and loaded lazily; calls come back to the host to execute.",
+  "how": "ThreadStartParams.dynamicTools[] = DynamicToolSpec {function: name, description, inputSchema, deferLoading} or {namespace, tools[]}; persisted in SQLite thread_dynamic_tools (thread_id, position, name, description, input_schema). Server request DynamicToolCallRequest (arguments, startedAtMs) answered with contentItems inputText|inputImage|inputAudio + success. The desktop's own tool bridge (codex-app-tools) is the main consumer of this mechanism.",
+  "evidence": [
+   "EXE-STR:L1287239",
+   "EXE-STR:L1336629",
+   "PLUG:codex-app-tools/server.mjs:24762"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Matches Verevon's client-supplied tools (merged as untrusted in Do mode) and adds persistence per thread, namespaces and deferral, which Verevon lacks.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-053",
+  "category": "Tools, plugins & extensibility",
+  "name": "codex-app-tools: desktop app exposed to the agent as an MCP server over a named pipe",
+  "what": "The agent can manage the app itself: find, create and update chats, organise projects and the sidebar, schedule automations, manage worktrees and open panels, with approval prompts on consequential tools.",
+  "how": "Plugin codex-app-tools (version 0.1.6, disabled by default and enabled by the host) runs server.mjs via a Node launcher with a six-step Node discovery chain (CODEX_MCP_NODE_PATH, CODEX_BROWSER_USE_NODE_PATH, cua_node, CODEX_CLI_PATH sibling, primary runtime cache, LOCALAPPDATA runtimes). The server forwards tools/list and tools/call over a named pipe (CODEX_APP_TOOLS_PIPE_PATH) using 4-byte little-endian length-prefixed JSON-RPC 2.0 frames (8 MiB cap) with tools/cancel on abort; request metadata keys openai/threadId, openai/toolCallId, openai/turnId or x-codex-turn-metadata; callerSource codex or chatgpt; hostId for local vs remote. .mcp.json: default_tools_approval_mode approve, approval_mode prompt for automation_update, create_thread, send_message_to_thread, fork_thread, handoff_thread, move_thread_to_project, omit_tools_from deferred, tool_timeout_sec 3600. Instructions string: \"Manage the Codex desktop app: find, create, and update chats; organize projects, sidebar, and pinned items; schedule automations; manage worktrees; open app panels; and locate bundled libraries for documents, spreadsheets, slides, and PDFs.\"",
+  "evidence": [
+   "PLUG:codex-app-tools/server.mjs:24776",
+   "PLUG:codex-app-tools/server.mjs:24827",
+   "PLUG:codex-app-tools/.mcp.json",
+   "PLUG:codex-app-tools/scripts/launch_codex_app_tools_mcp.cmd"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A governed \"control the product itself\" tool surface (threads, projects, schedules) is the missing bridge between Verevon's chat UI actions (168 action ids, 8 model-executable) and the model; reuse the approval split (read tools auto-approved, write tools prompt).",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-054",
+  "category": "Tools, plugins & extensibility",
+  "name": "Agent-editable application settings manifest",
+  "what": "The agent can read and change many app preferences itself (theme, fonts, follow-up behaviour, notification rules, detail level) because each setting declares agent access in a typed manifest.",
+  "how": "protocol/settings: 96 definitions created by defineConfigurationSetting (stored in config.toml), defineGlobalStateSetting and definePersistedAtomSetting; each has key, default, description, Zod schema and agentAccess hidden | read-only | read-write. toolVisibleSettingDefinitions = those not hidden; their JSON Schemas are exported to the agent (getToolVisibleSettingMetadata) with theme-id enums specialised per variant. Examples read-write: appearanceTheme, sansFontSize, followUpQueueMode, composerEnterBehavior, conversationDetailMode (STEPS_PROSE | STEPS_COMMANDS | STEPS_EXECUTION), notifications-turn-mode, reduced-motion-preference, show-context-window-usage; read-only: code-review-local-instructions, agent-usage-reset-enabled, mcp_startup_authentication; hidden: browser and Codex Micro internals.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:31081",
+   "PLUG:code-review/server.mjs:34382",
+   "PLUG:code-review/server.mjs:33978",
+   "PLUG:code-review/server.mjs:34284"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "\"Settings the assistant may change on request\" with a read/write/hidden classification is a cheap personalisation win for Verevon and fits its transparency goals; keep security-relevant settings read-only.",
+  "notes": "Count of 96 from a node script over server.mjs lines 33170-34375."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-055",
+  "category": "Tools, plugins & extensibility",
+  "name": "Connectors: ChatGPT apps surfaced to the agent through the codex_apps MCP server",
+  "what": "Account-level connectors (GitHub, Gmail, Drive, Slack and others) appear to the agent as tools; if the bridge is down the agent is told it is unavailable.",
+  "how": "A built-in MCP server named codex_apps carries connector tools; app-server app/list, app/list/updated notification, AppSummary/AppBranding (category, website, privacy policy, terms, isDiscoverableApp); codex-connectors crate (directory_cache.rs, connector_runtime/persistence.rs) and ext/connectors plugin_app.rs for plugin-declared apps (\"plugin app config is missing an app id\"); error \"codex_apps MCP server is unavailable\"; tool disk cache CodexAppsToolsDiskCache; plugin install triggers a codex_apps cache refresh and appsNeedingAuth check.",
+  "evidence": [
+   "EXE-STR:L1286600",
+   "EXE-STR:L1291675",
+   "EXE-STR:L1303358",
+   "EXE-STR:L1303450"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's integration-corev2 provider actions are the analogue; exposing them to the model through a single governed bridge with a disk/tool cache would unify chat and Do mode.",
+  "notes": "Cloud-side behaviour not observable."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-056",
+  "category": "Tools, plugins & extensibility",
+  "name": "Tool-call result annotations: truncation and source metadata",
+  "what": "Tool outputs carry markers when they were truncated and which sources produced them so clients can show what the model actually saw.",
+  "how": "ResponseItem fields tool_result_sources, tool_result_metadata, _codex_executed_tool_call_truncated {original_bytes, max_bytes, omitted_calls, original_name_bytes}; MCP output_token_limit per tool; hook output spill to files; code-mode max_output_tokens (default 10000).",
+  "evidence": [
+   "EXE-STR:L1297542",
+   "EXE-STR:L1302462",
+   "PLUG:unified-computer-use/.mcp.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's result handles (result_query) already solve large outputs; surfacing explicit truncation metadata in the transcript would improve trust.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-057",
+  "category": "Platform architecture",
+  "name": "App-server: JSON-RPC protocol between every client and the Rust agent runtime",
+  "what": "The desktop app, terminal UI, IDE clients and other front ends all talk to one Rust process (codex app-server) through a typed JSON-RPC API; the UI never embeds the agent loop.",
+  "how": "Method families (client requests): initialize with clientInfo and InitializeCapabilities {experimentalApi, optOutNotificationMethods, explicitGatewayOauth, requestAttestation, mcpServerOpenaiFormElicitation, extensions}; thread/{start,read,list,fork,resume,archive,unarchive,delete,search,compact/start,revert,rollback,queue/*,goal/*,attachment/*,metadata/update,settings/update,shellCommand,inject_items,approveGuardianDeniedAction}; turn/{start,steer,interrupt}; review/start; command/exec; fs/{readFile,writeFile,readDirectory,getMetadata,createDirectory,copy,remove,watch}; config/{read,value/write,batchWrite}; configRequirements/read; model/list; modelProvider/capabilities/read; collaborationMode/list; permissionProfile/list; experimentalFeature/list; account/*; plugin/*, marketplace/*, skills/*, hooks/list, app/list, mcpServer*; memory/{status,reset}; feedback/upload; project/*; environment/{add,info}; remoteControl/*; userVerification/*; realtime/*. ThreadStartParams has 27 fields including model, modelProvider, serviceTier, cwd, approvalPolicy, approvalsReviewer, sandbox, personality, dynamicTools, selectedCapabilityRoots, allowProviderModelFallback, historyMode, sessionStartSource. UserInput variants: Text, Image, LocalImage, Audio, LocalAudio, Skill, Mention. The Electron app warms a fixed set of discovery methods (app/list, config/read, hooks/list, model/list, plugin/list, skills/list...) with tracing.",
+  "evidence": [
+   "EXE-STR:L1296258",
+   "EXE-STR:L1298001",
+   "EXE-STR:L1298473",
+   "EXE-STR:L1298625",
+   "BUILD:src-BJv5Mk7n.js@1125082"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Integration Core already runs the official Codex app-server for BYO ChatGPT; this surface shows what a first-party Verevon \"session protocol\" (threads, turns, items, approvals) should expose so web, CLI and future clients share one runtime.",
+  "notes": "Method names from string literals; request/response schemas were not read except those bundled in server.mjs and the plugin protocol modules."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-058",
+  "category": "Platform architecture",
+  "name": "App-server notification catalogue with per-client opt-in and opt-out",
+  "what": "Clients subscribe only to the events they render: a web view opts in to streaming deltas and approvals, while legacy raw events can be opted out to save bandwidth.",
+  "how": "protocol/src/mcp.ts defines APP_SERVER_NOTIFICATION_OPT_IN: about 150 methods mapped to a boolean (handled in the webview or not). Examples true: thread/started, thread/name/updated, thread/queue/changed, thread/tokenUsage/updated, turn/started, hook/started, hook/completed, turn/completed, turn/diff/updated, turn/plan/updated, item/started, item/completed, item/agentMessage/delta, item/plan/delta, item/reasoning/summaryTextDelta, item/reasoning/textDelta, item/commandExecution/outputDelta, item/fileChange/patchUpdated, item/autoApprovalReview/started|completed, autoApprovalReview/strictReviewRequired, item/mcpToolCall/progress, mcpServer/startupStatus/updated, account/rateLimits/updated, app/list/updated, skills/changed, model/rerouted, model/verification, model/safetyBuffering/updated, guardianWarning, windowsSandbox/setupCompleted. Raw and legacy codex/event/* mirrors (about 70) default to false; collab_agent_* spawn, interaction, waiting, resume and close events are true. APP_SERVER_NOTIFICATION_METHODS_TO_OPT_OUT is computed from the false entries (except connection-internal fs/changed and process output).",
+  "evidence": [
+   "PLUG:code-review/server.mjs:31363"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's AG-UI/SSE stream could publish an explicit event catalogue with opt-in flags per client type (web, CLI, mobile) to keep payloads small and contracts testable.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-059",
+  "category": "Platform architecture",
+  "name": "App-server transports and connection auth (stdio, unix socket, WebSocket)",
+  "what": "The runtime can run as a child process over stdio, as a local daemon over a unix socket with WebSocket upgrade, or as a network service over WebSocket with token or signed-JWT auth.",
+  "how": "app-server-transport crate: transport/stdio.rs, unix_socket.rs (\"control socket acceptor\", websocket upgrade), remote_control controller/server_api (enrollment and server refresh checks server_id/environment_id), connection_auth.rs, daemon_shutdown.rs (CODEX_DAEMON_SHUTDOWN_FILE). CLI flags --listen and --ws-auth {capability-token | signed-bearer-token}; capability-token requires --ws-token-file or --ws-token-sha256 (hex SHA-256 of the token); signed-bearer-token requires --ws-shared-secret-file plus optional --ws-issuer, --ws-audience, --ws-max-clock-skew-seconds and validates exp/nbf/iss/aud JWT claims; non-loopback websocket without auth is refused (\"configure --ws-auth\"). app-server-daemon crate (\"Codex App Server Daemon\", daemon_auto_start feature, \"local daemon requires a Unix socket\"). In-process app-server client also exists (app-server-client).",
+  "evidence": [
+   "EXE-STR:L1286295",
+   "EXE-STR:L1287922",
+   "EXE-STR:L1345369",
+   "EXE-STR:L1345378",
+   "EXE-STR:L1286242"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The capability-token-by-hash and signed-JWT modes give a ready recipe for authenticating browser sandboxes or remote devices to Verevon runtimes without sharing raw secrets.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-060",
+  "category": "Platform architecture",
+  "name": "Schema-first SDK support, experimental gating and version negotiation",
+  "what": "Client libraries can be generated from the runtime's own types; unstable methods require an explicit opt-in capability; clients check server version before using newer features.",
+  "how": "CLI subcommands generate-ts, generate-json-schema and generate-internal-json-schema (and app-server-test-client). Methods flagged experimental fail with \"requires experimentalApi capability\"; ThreadStartParams includes mockExperimentalField and experimentalRawEvents for tests. protocol app-server-min-version.ts, app-server-version.ts and app-server-feature-support.ts; the desktop checks features such as pluginMcpConfigOverrides by comparing the connected app-server version (Ti(appServerVersion, \"pluginMcpConfigOverrides\")). Runtime user-agent strings show version 0.162.0-alpha.1 (digits after \"alpha.1\" are ambiguous in the concatenated literal).",
+  "evidence": [
+   "EXE-STR:L1298352",
+   "EXE-STR:L1286273",
+   "BUILD:main-BklS_2Y2.js@182799",
+   "PLUG:code-review/server.mjs:29007"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already publishes OpenAPI and a generated SDK; adding an explicit experimental capability gate and server-version feature checks would let the web app and CLI evolve independently.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-061",
+  "category": "Platform architecture",
+  "name": "Execution hosts: local, SSH, WSL and remote-control devices with environments",
+  "what": "A task can run on this PC, in WSL, over SSH or on another enrolled device; each has its own app-server connection, filesystem and skill/plugin settings.",
+  "how": "protocol host-config.ts: host kinds local, ssh, wsl, remote-control (isRemoteHostConfig). exec-server crate (environment.rs, resolved_capability.rs, capability_discovery(.cache).rs, rpc.rs, client.rs) provides executor-side filesystem, process and capability discovery; thread start takes selectedCapabilityRoots and environments; environment/add and environment/info; a model tool waits for an environment marked \"starting\"; executor-bound skills require an environment. Remote control: enrollments and device-key bindings in SQLite (remote_control_enrollments, device_key_bindings), pairing/start|status, enable/disable, client/list; settings keepRemoteControlAwakeWhilePluggedIn.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:29030",
+   "EXE-STR:L1285440",
+   "EXE-STR:L1297554",
+   "EXE-STR:L1336776",
+   "EXE-STR:L1336880"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Matches Verevon's sandbox-manager leases; the explicit \"environment\" abstraction (capability discovery per executor, tools bound to an environment id) is the missing seam the Verevon ledger defers until a second backend exists.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-062",
+  "category": "Platform architecture",
+  "name": "Thread follower: several windows or clients can drive one running thread",
+  "what": "A second window can attach to a running conversation, see the stream and answer approvals or questions; one client owns the history stream.",
+  "how": "Main process keeps thread-follower IPC requests (thread-follower-interrupt-turn, -set-queued-follow-ups-state, command/file/permission approval decisions, user input and MCP elicitation replies, -load-complete-history); a follower forwards via an IPC bridge to the owner client (sendThreadFollowerRequest with targetClientId and timeout); thread-stream-following-changed notifies. Used for detached windows and hotkey/popout windows.",
+  "evidence": [
+   "BUILD:src-BJv5Mk7n.js@1002725"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's multi-user chat presence and \"human browser takeover\" backlog items need exactly this owner/follower model for approvals.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-063",
+  "category": "Platform architecture",
+  "name": "Local persistence: SQLite state database plus rollout files",
+  "what": "Threads, turns, items, goals, queued messages, projects, sections, artifacts and per-thread dynamic tools are stored in a local SQLite database next to JSONL rollout files; inter-agent messages use a separate SQLite file.",
+  "how": "Tables found in migrations: threads (id, rollout_path, source, model_provider, cwd, title, sandbox_policy, approval_mode, tokens_used, archived, git_sha/branch/origin_url, cli_version, agent_path, history_mode, name, is_pinned, thread_section_id, section_position, project_id, recency_at_ms, originator), thread_turns, thread_items, thread_history_projection_state, thread_realtime_items, thread_goals, queued_items and queued_thread_revisions, thread_dynamic_tools, thread_spawn_edges (parent, child, status), thread_artifacts (typed, UNIQUE(thread_id, artifact_type, identity_key)), thread_sections, projects, project_roots, project_idempotency_keys, stage1_outputs and jobs (memories), remote_control_enrollments, device_key_bindings, external_agent_config_imports, rollout_migration_state. logs table dropped in favour of tracing. agent_message_board_1.sqlite holds channels/posts/subscriptions. A history_mode column versions the projection (legacy vs new). The desktop also uses better-sqlite3 for automations and inbox (separate schema).",
+  "evidence": [
+   "EXE-STR:L1336591",
+   "EXE-STR:L1336629",
+   "EXE-STR:L1336764",
+   "EXE-STR:L1337095",
+   "EXE-STR:L1337195",
+   "EXE-STR:L1306583"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon keeps session state in Session Core Postgres; the projection-state table plus explicit history_mode migration flag and typed thread_artifacts with identity-key uniqueness are good patterns for resumable, branchable conversations.",
+  "notes": "This is the local store; Verevon would map it to server tables, not copy SQLite."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-064",
+  "category": "Platform architecture",
+  "name": "Lease-based durable job table with watermarks",
+  "what": "Background work such as memory extraction and consolidation is queued in a table with leases, retries and watermarks so only one worker processes a job at a time and nothing is lost on crash.",
+  "how": "jobs(kind, job_key, status, worker_id, ownership_token, started_at, finished_at, lease_until, retry_at, retry_remaining, last_error, input_watermark, last_success_watermark); upsert increments input_watermark unless running; consolidation_progress and backfill_state tables; kinds include memory_consolidate_global. state/runtime/memories.rs marks threads memory_mode polluted when external context is mixed in.",
+  "evidence": [
+   "EXE-STR:L1336650",
+   "EXE-STR:L1303879",
+   "EXE-STR:L1315100"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon uses Temporal for durable work; this table shows a lighter local pattern for desktop/CLI surfaces and the watermark idea for incremental memory consolidation.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-065",
+  "category": "Platform architecture",
+  "name": "Rust \"extension\" architecture: runtime features as registered contributors",
+  "what": "Major runtime features are separate crates that plug into the core through a shared extension API rather than being hard-coded in the agent loop.",
+  "how": "ext crates observed by source path: skills, goal, guardian-v2, guardian-reviewer, mcp, memories, queue, image-generation, web-search, history-notes, git-attribution, connectors, agent-message-board, and extension-api (contributors.rs, registry.rs, state.rs with typed per-session extension data). Extensions contribute tools, prompt fragments, hooks and world-state updates; InitializeCapabilities also has an extensions field for client-side extension negotiation.",
+  "evidence": [
+   "EXE-STR:L1286155",
+   "EXE-STR:L1296209",
+   "EXE-STR:L1297375"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A contributor registry (tools, context fragments, lifecycle hooks) is the Rust-native way to realise Verevon's capability registry inside execution-core without growing agent.rs (13.5k lines).",
+  "notes": "Contributor interface details were not recoverable from strings; counts by path: skills 142, guardian-v2 38, goal 35, mcp 25, agent-message-board 25."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-066",
+  "category": "Platform architecture",
+  "name": "Rust workspace layout of the agent runtime (crate map)",
+  "what": "The runtime is a large workspace; crate boundaries show a reusable decomposition: core, app-server(+transport,+daemon,+client), tui, exec-server, core-plugins, skills, hooks, mcp clients, state, thread-store, memories, guardian, network-proxy, windows-sandbox, otel, model-provider.",
+  "how": "About 4,400 source-path literals; crate roots counted in strings: tui 289, core 212, app-server 83, exec-server 58, skills 35, core-plugins 31, thread-store 29, rmcp-client 28, state 26, codex-mcp 25, cli 23, network-proxy 21, hooks 18, guardian-v2 16, codex-api 16, app-server-transport 16, config 15, memories 14, code-mode 14, login 13, otel 12, windows-sandbox-rs 11, rollout 11, model-provider 10, matcher 10 (fuzzy matcher with exact, greedy and optimal scorers), external-agent-migration 9, shell-command 8, pty 8, apply-patch 6, goal 6, web-search 3, ollama 3. Toolchain rustc 1.95.0, tokio 1.52, sqlx-sqlite 0.9, axum 0.8, reqwest 0.12, tungstenite, h3.",
+  "evidence": [
+   "EXE-STR:L1286155",
+   "PLUG:code-review/server.mjs:26553"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Use as a reference decomposition for Verevon's Rust Model Plane crates (separate crates for hooks, skills, plugins, MCP client, state, guardian).",
+  "notes": "Counts are occurrences of source-path literals, not lines of code."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-067",
+  "category": "Platform architecture",
+  "name": "Managed runtime bundles (Node, Python and plugins) downloaded with checksums",
+  "what": "Heavy dependencies such as Node, Python and the documents/presentations plugins are delivered as a separately updated runtime bundle with per-platform manifests and release channels.",
+  "how": "protocol runtimes.ts: runtime install config {baseUrl (deprecated), latest, latest-alpha, versions{}}; release manifest {bundleFormatVersion, bundleVersion, runtimeRootDirectoryName, platforms{ digest sha256, format, path, size, providers[url], internalCdnUrl }}; primaryRuntimeManifest adds nodeVersion, pythonVersion, generatedDependencies, targetPlatform/Arch; CDN URLs must be on https://chatgpt.com/codex/app/updates/runtimes/. Installed at ~/.cache/codex-runtimes/codex-primary-runtime (dependencies/node, plugins) and registered as marketplace openai-primary-runtime from .tmp/bundled-marketplaces. cua_node (node 24.21.0-cua.1) ships inside the app.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:33074",
+   "EXE-STR:L1334293",
+   "EXE-STR:L1311058",
+   "RES:cua_node/manifest.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Keeping runtimes out of the main package with sha256-pinned manifests and update channels suits Verevon's sandbox images and plugin runtimes.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-068",
+  "category": "Platform architecture",
+  "name": "Plugin update channel with checksum pinning",
+  "what": "Plugin bundles can be downloaded from an app-owned CDN path with an expected sha256 and a version segment.",
+  "how": "protocol plugins.ts internalPluginsDownloadConfig {internalCdnUrl restricted to origin https://chatgpt.com and path /codex/app/updates/plugins/, sha256, url, version (single path segment, no dot-dot)}; same validators for plugin names (no path separators).",
+  "evidence": [
+   "PLUG:code-review/server.mjs:31831"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Path-segment and origin validation on download config is a small, copyable hardening step for any Verevon plugin fetcher.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-069",
+  "category": "Platform architecture",
+  "name": "Config stack with typed layers and batch-write API",
+  "what": "Settings come from layered sources (system, user, project, MDM, session flags, plugin, cloud) and clients edit them through a versioned batch API; a debug command shows which layer set each value.",
+  "how": "ConfigLayerSource kinds: PackagedDefaults, system, user, project (dotCodexFolder), mdm, sessionFlags, plugin, cloudRequirements, cloudManagedConfig, legacyManagedConfigFile, legacyManagedConfigMdm. config/read with includeLayers; config/batchWrite {edits[{keyPath, value, mergeStrategy replace|upsert}], expectedVersion, filePath, reloadUserConfig}; WriteStatus; configWarning and config-load-error reporting; /debug-config prints layers and requirement sources; ProjectConfig.trust_level records per-project trust and some operations refuse projects marked untrusted (\"remote project directory is inside an explicitly untrusted project\"); the exact effect on loading project config was not traced.",
+  "evidence": [
+   "EXE-STR:L1289299",
+   "EXE-STR:L1295037",
+   "EXE-STR:L1293476",
+   "BUILD:main-BklS_2Y2.js@178465",
+   "EXE-STR:L1339869"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's instruction hierarchy (platform > org > Space > agent > persona) could be exposed as the same kind of inspectable layer stack with a \"who set this\" view.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-070",
+  "category": "Safety, permissions & governance",
+  "name": "Enterprise requirements: admin-enforced allow-lists and signed cloud config bundle",
+  "what": "Admins can constrain which approval policies, sandbox modes, login methods, web-search modes, permission profiles, plugins and features users may use, via a local requirements file or a workspace-managed cloud bundle.",
+  "how": "ConfigRequirements fields: allowedLoginMethods, allowedApprovalPolicies, allowedApprovalsReviewers, allowedSandboxModes, allowedWindowsSandboxImplementations, allowedPermissionProfiles, defaultPermissions, allowedWebSearchModes, allowManagedHooksOnly, allowBrowserAndComputerUse, allowAppshots, allowRemoteControl, computerUse, browserUse, inAppBrowser, featureRequirements, enforceResidency, autoReview, models, modelCatalogJson, checkForUpdateOnStartup, allowLoginShell, plus plugin state DISABLED_BY_ADMIN. Windows enforced settings path %ProgramData%/OpenAI/Codex/requirements.toml (CODEX_HOME/managed_config.toml no longer supported on Windows). Cloud config bundle: fetched from the ChatGPT backend (workspace-managed policies), cached with a signature check (\"Cloud config bundle cache failed signature verification\"), bound to the auth identity, auth-recovery retries, invalid-bundle handling; a default approvals reviewer disallowed by requirements falls back to the required default.",
+  "evidence": [
+   "EXE-STR:L1289317",
+   "EXE-STR:L1285542",
+   "EXE-STR:L1300942",
+   "EXE-STR:L1290186",
+   "EXE-STR:L1286068"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "This is the target shape for Verevon's org governance: a typed requirements document (allow-lists + defaults + residency) delivered signed from Control Plane and enforced inside the runtime, not just in the UI.",
+  "notes": "Verevon's Control Plane already owns orgs; mapping requirements to ZDR/residency flags is direct."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-071",
+  "category": "Models & routing",
+  "name": "Provider registry with gateway OAuth, AWS auth and capability flags",
+  "what": "Beyond OpenAI models, users or admins can add model providers (any OpenAI-compatible endpoint, Azure, Bedrock, local Ollama/LM Studio) with their own auth and capabilities; an enterprise gateway can require browser sign-in first.",
+  "how": "ModelProviderInfo (21 fields): base_url, model_catalog_url, env_key, env_key_instructions, experimental_bearer_token, gateway_oauth {authorization_url, token_url, redirect_port, delivery,...}, aws, wire_api, capabilities, query_params, request_max_retries, stream_max_retries, stream_idle_timeout_ms, websocket_connect_timeout_ms, requires_openai_auth, supports_websockets, supports_standalone_web_search. modelProvider/capabilities/read, model_catalog_json in profiles, allowProviderModelFallback on thread start, model/rerouted notification. Desktop gateway-OAuth banner: \"Requests stay blocked until you're connected\". oss_provider ollama and lmstudio; aws-auth crate (Bedrock credential types apiKey/amazonBedrock).",
+  "evidence": [
+   "EXE-STR:L1286153",
+   "EXE-STR:L1286233",
+   "EXE-STR:L1285488",
+   "I18N:gatewayOAuth.banner.required"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon lacks Gemini, DeepSeek-native and explicit local providers; a declarative provider record (wire_api, capabilities, gateway auth, retry/idle timeouts) would let org admins add them without code.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-072",
+  "category": "Models & routing",
+  "name": "Purpose-specific model routing for system jobs",
+  "what": "Background tasks use their own configured models: automations, ephemeral one-off generation, ambient suggestions and a separate safety model for suggestions.",
+  "how": "protocol model-routing-config.ts: keys codex_automation_model_slug, codex_ephemeral_generation_model_slug, codex_ambient_suggestions_model_slug, codex_ambient_suggestions_safety_model_slug with defaults gpt-6.1-sol and gpt-6-luna (per the shipped config; catalogue availability unverified); invalid values fall back to defaults via catch. Also review_model, extract_model and consolidation_model (memories), guardian reasoning_effort, and per-automation model/reasoning_effort overrides.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:28520",
+   "EXE-STR:L1286050"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon routes by tier (balance etc.); explicit slots for system jobs (titles, suggestions, memory consolidation, safety classification) with remote-configurable slugs is a clean cost-control mechanism.",
+  "notes": "Model slugs are product-internal and may be placeholders."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-073",
+  "category": "Models & routing",
+  "name": "Reasoning effort ladder, enabled-effort list and service tiers",
+  "what": "Users pick reasoning effort from none to ultra (plus a persistent mode) and a speed tier; the set offered in the picker is admin/remotely configurable.",
+  "how": "reasoningEffortSchema: none, minimal, low, medium, high, xhigh, max, ultra, persistent; DEFAULT_ENABLED_REASONING_EFFORTS low, medium, high, xhigh, ultra, persistent; settings enabled-reasoning-efforts and show-ultra-in-model-picker-slider; plan_mode_reasoning_effort in profiles; default-service-tier setting; work preferences serviceTier standard|fast|ultrafast; multi-agent default_subagent_reasoning_effort and automation reasoning_effort (none..ultra).",
+  "evidence": [
+   "PLUG:code-review/server.mjs:33978",
+   "PLUG:code-review/server.mjs:34320",
+   "PLUG:code-review/server.mjs:28547"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no reasoning-effort control on the OpenAI/Azure route; add an effort ladder with an org-controlled enabled list and a separate plan-mode effort.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-074",
+  "category": "Agent runtime",
+  "name": "Automations: scheduled and recurring agent tasks stored as TOML with SQLite run history",
+  "what": "Users or the agent create recurring tasks with an RFC 5545 recurrence rule, a prompt, a model and effort, a target project or none, and a local-or-worktree execution environment.",
+  "how": "automation.toml under $CODEX_HOME/automations/<id>/ (version 1) validated by automationTomlSchema: id, kind cron|heartbeat, name, prompt, status ACTIVE|PAUSED|DELETED, rrule, execution_environment worktree|local, local_environment_config_path, model, reasoning_effort, plugin_template_id, target {project|projectless}, notification_policy failed_runs_only, auto_archive, cwds[], target_thread_id, timestamps. Recurrence validator (rrule library) allows only freq, interval, dtstart, tzid, byweekday, byminute, byhour, bysecond, count, until with per-frequency whitelists. SQLite tables automations and automation_runs (legacy migrations 0009-0021). Local runner gated by Statsig config in_app_local_automation (accessPolicy local-automations); automation_update tool in codex-app-tools requires approval.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:28547",
+   "BUILD:src-BJv5Mk7n.js@1055479",
+   "BUILD:src-BJv5Mk7n.js@94390"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's schedules are single no-tool calls; adopt the full-agent run model (project target, environment, model/effort, failed-runs-only notifications) and a restricted RRULE whitelist.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-075",
+  "category": "Agent runtime",
+  "name": "Automation run contract: per-automation memory file and mandatory inbox directive",
+  "what": "Every automation run keeps notes in a memory file and ends with a one-line structured summary that becomes the user's inbox entry.",
+  "how": "System prompt text injected for automation runs: read and update $CODEX_HOME/automations/<automation_id>/memory.md (created if missing; read first to avoid repeating work; write a concise summary and run time before finishing); the response MUST end with exactly one remark directive ::inbox-item{title=\"...\" summary=\"...\"} on its own line (no commas between args); title 4-8 words saying what the thread now is, summary 6-14 words with next step or blocker; absolute file links; add label codex-automation when an automation opens a PR; avoid asking the user for more input. The directive is parsed by the renderer (inbox-items-create).",
+  "evidence": [
+   "BUILD:main-BklS_2Y2.js@189315",
+   "BUILD:src-BJv5Mk7n.js@94390"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A strict machine-readable run footer plus a per-job memory file is a simple way to make Verevon scheduled runs produce findings/reports and avoid repeated work; fits the planned Findings/Routines pages.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-076",
+  "category": "Agent runtime",
+  "name": "Automation inbox, run threads and heartbeat automations",
+  "what": "Each automation run is a real conversation thread; results land in an Inbox with read state and archive reasons. A heartbeat automation wakes an existing thread on a schedule instead of starting new ones.",
+  "how": "automation_runs(thread_id PRIMARY KEY, automation_id, status, read_at, thread_title, source_cwd, inbox_title, inbox_summary, archived_user_message, archived_assistant_message, archived_reason, created_at, updated_at). Kinds cron (new thread per run, optional auto_archive) and heartbeat (target_thread_id). Inbox UI strings: scheduled task details, next run, run now (\"Could not start scheduled task\"), Active/Paused/Completed. Deterministic per-install jitter: sha256(salt:id:time) mod 601 minus 300 seconds using a persisted .run-jitter-salt file to avoid thundering-herd start times.",
+  "evidence": [
+   "BUILD:src-BJv5Mk7n.js@94390",
+   "BUILD:src-BJv5Mk7n.js@1071793",
+   "I18N:inbox.automations.runNowError"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The jitter salt and thread-per-run inbox model are cheap improvements for Verevon's cron sweeper and findings page; heartbeat targets fit long-running research threads.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-077",
+  "category": "Agent runtime",
+  "name": "Ambient suggestions generated into a file with accept/dismiss state",
+  "what": "The home page proposes next tasks derived from the user's projects and connected apps; suggestions are screened by a separate safety model and remember whether they were accepted or dismissed.",
+  "how": "protocol ambient-suggestions.ts: file {projectRoot, generatedAtMs, currentSuggestionIds, suggestions[{id, title, description, prompt, appIds[], pluginMention {id,label}, status pending|accepted|dismissed, createdAtMs, updatedAtMs}]}; domain enum currently science; settings ambient-suggestions-enabled; model slots ambientSuggestionsModel and ambientSuggestionsSafetyModel; rpc ambient-suggestions-service; composer predictions (thread/prediction/request) are separate.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:28456",
+   "PLUG:code-review/server.mjs:28520",
+   "PLUG:code-review/server.mjs:32828"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A proactive-suggestion pipeline with an explicit safety-model gate would give Verevon's home page a governed \"what next\" feature.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-078",
+  "category": "Agent runtime",
+  "name": "Multi-agent v2: spawn, message, wait, resume, close with depth and concurrency limits",
+  "what": "The model can start sub-agents (optionally forking recent turns), message them, wait for results and close them; limits and hints are configurable.",
+  "how": "Tools spawn_agent {task_name, fork_turns none|all (replaces fork_context), optional model overrides}, send_input, wait_agent, resume_agent, close_agent. Config features.multi_agent_v2: max_concurrent_threads_per_session, min/max/default_wait_timeout_ms, usage_hint_enabled and usage_hint_text/root_agent_usage_hint_text/subagent_usage_hint_text, subagent_developer_instructions, multi_agent_mode_hint_text, tool_namespace, hide_spawn_agent_metadata, expose_spawn_agent_model_overrides, wait_agent_enabled, disable_direct_message, message_board_in_memory / message_board_remote, non_code_mode_only. agents config: max_concurrent_threads_per_session, max_depth, default_subagent_model, default_subagent_reasoning_effort, job_max_runtime_seconds, interrupt_message. Parent-child graph in thread_spawn_edges; thread source kinds subAgent, subAgentReview, subAgentCompact, subAgentThreadSpawn, subAgentOther; header x-openai-subagent; hooks SubagentStart/Stop.",
+  "evidence": [
+   "EXE-STR:L1305558",
+   "EXE-STR:L1287198",
+   "EXE-STR:L1286128",
+   "EXE-STR:L1336764",
+   "PLUG:code-review/server.mjs:28970"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's subagents are depth 1 with isolated history; adding fork_turns, wait/resume and a visible spawn graph would deepen delegation without changing the loop separation rule.",
+  "notes": "Line L1305540 is the multi_agents_v2 handler region ."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-079",
+  "category": "Agent runtime",
+  "name": "Agent message board: channels, posts and subscriptions between agents",
+  "what": "Agents in a session can post to named channels and subscribe, giving sub-agents a shared, searchable place to coordinate instead of only parent-child calls.",
+  "how": "ext/agent-message-board: local SQLite agent_message_board_1.sqlite with tables channels(board,name,...), posts(seq, board, id, channel, root, author, timestamp, body_search, payload, request_id, request; UNIQUE(board,id), UNIQUE(board,request_id) for idempotent writes), subscriptions and subscription_opt_outs, deleted_boards; in-memory and remote variants (message_board_in_memory, message_board_remote); corrupt storage is backed up and recreated on thread deletion; BoardNotification client.",
+  "evidence": [
+   "EXE-STR:L1306583",
+   "EXE-STR:L1294322",
+   "EXE-STR:L1286752"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "A request_id-idempotent board is a simple coordination primitive for Verevon's team/coordinator mode (currently an in-memory stub).",
+  "notes": "Tool names for the board not recovered."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-080",
+  "category": "Agent runtime",
+  "name": "Thread goals with token budgets and automatic continuation",
+  "what": "A long-running objective can be set on a thread; the agent keeps working across idle periods until it completes, blocks or runs out of budget, and reports token usage on completion.",
+  "how": "ext/goal: tools to get, create and update a goal; status paused|complete|blocked (agent may mark blocked only after the same blocker repeats for 3 consecutive goal turns, with a fresh audit after resume; cannot resume or budget-limit itself); optional token budget (config max_goal_token_budget); accounting of tokens and elapsed seconds; steering and continuation skipped when no live thread or active turn; thread_goals and thread_goal_continuation_deferrals tables; notifications thread/goal/updated|cleared; /goal command; goals can only be created on explicit user or system request.",
+  "evidence": [
+   "EXE-STR:L1314432",
+   "EXE-STR:L1292352",
+   "EXE-STR:L1336537",
+   "EXE-STR:L1286126"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Budgeted, auditable \"keep going until done\" goals are the right frame for Verevon's deep tasks and could replace round-count limits with token/time budgets.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-081",
+  "category": "Agent runtime",
+  "name": "Context compaction controls and hooks",
+  "what": "Compaction is configurable (token limit, scope, post-turn threshold, custom prompt), observable (items, hooks, notification) and can run remotely on supporting providers.",
+  "how": "Config keys model_context_window, model_auto_compact_token_limit, model_auto_compact_token_limit_scope, model_post_turn_compact_threshold_percent, compact_prompt; ModelProviderCapabilities {remote_compaction, external_web_access}; hooks PreCompact and PostCompact; ResponseItem kinds compaction and context_compaction with compaction_trigger; thread/compact/start; thread source subAgentCompact; auto-compact fallback prompts and context-window reminders (reminder_threshold, reminder_message_template).",
+  "evidence": [
+   "EXE-STR:L1286128",
+   "EXE-STR:L1292413",
+   "EXE-STR:L1300165",
+   "PLUG:code-review/server.mjs:31363"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has two-tier compaction in the gateway; expose threshold/scope/prompt as settings and fire PreCompact/PostCompact hooks to match.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-082",
+  "category": "Agent runtime",
+  "name": "Interactive request tools and plan mode (request_user_input, update_plan)",
+  "what": "The agent can pause and ask the user structured questions mid-turn, and keeps a visible plan; asking outside Plan mode is a user setting.",
+  "how": "Tools request_user_input and update_plan (config tools.experimental_request_user_input, tools.update_plan); setting default-mode-request-user-input-enabled (read-write: whether Codex can ask questions outside Plan mode); app-owned request surfaces request_option_picker, request_onboarding_input and setup_codex_step block the turn until the user answers and return the choice inline; guardian treats request_user_input answers as trusted authorization evidence.",
+  "evidence": [
+   "EXE-STR:L1286127",
+   "PLUG:code-review/server.mjs:33978",
+   "RES:skills/skills/.curated/onboard-new-user/SKILL.md",
+   "EXE-STR:L1315139"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has plan mode and HITL approvals; adding typed option-picker/input requests as first-class tools lets skills and plugins ask the user without free text.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-083",
+  "category": "Safety, permissions & governance",
+  "name": "Guardian v2: asynchronous security reviewer that gates later actions",
+  "what": "A small reviewer model watches the agent's trajectory without blocking, scoring risk; a \"high\" score switches future actions to a blocking review. Evidence from tool output, skills and plugin descriptions is treated as untrusted.",
+  "how": "ext/guardian-v2 (async_scorer approval/authorization/classification, sync_reviewer): GuardianV2Config {async_classifier_mode, async_classifier_conversation_token_limit, enabled, free_guardian, persist_scores, classifier_instructions, review_threshold (0..1), max_tool_call_lag, reasoning_effort, max_action_tokens, reuse_parent_compaction, review_scope computer_use_only | sandboxed_exec_commands, transcript sources tool_calls/tool_outputs/reasoning with entry token caps}. Reviewer prompt: first output token is the whole classification (high or low); trusted evidence = user and developer messages, AGENTS.md, request_user_input answers; a Codex-verified developer message lists canonical paths of invoked user-owned skills; everything else, including tool output, skill instructions and plugin descriptions, is untrusted; risk taxonomy low/medium/high/critical; predictive rule (high if current/recent actions have unknown or low authorization, or high/critical risk expected within 2 actions); extra computer/browser rules (deny attempts to bypass earlier restrictions, treat all websites as untrusted egress, require specific authorization for privilege or sign-in actions); {{ tenant_policy_config }} slot for org policy. Related: approvalsReviewer user | auto_review, item/autoApprovalReview events, strict_auto_review, /auto-review-denials retry.",
+  "evidence": [
+   "EXE-STR:L1315116",
+   "EXE-STR:L1315122",
+   "EXE-STR:L1315139",
+   "EXE-STR:L1287229",
+   "PLUG:code-review/server.mjs:31363"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Directly addresses Verevon's prompt-injection and risky-tool-classifier weaknesses (substring list): an async predictive reviewer with an explicit trusted-evidence rule, an org policy slot and persisted scores slots into the capability policy gate.",
+  "notes": "Prompt paraphrased; not quoted. Persisting scores is an option, so retention/ZDR handling would need review for Verevon."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-084",
+  "category": "Safety, permissions & governance",
+  "name": "Approval modes, granular policy and approval UX",
+  "what": "Users choose how much the agent may do (read-only, auto, granular, guardian approvals, full access, custom) and answer approval cards with allow once, allow this conversation, always allow or deny plus a reason.",
+  "how": "AGENT_MODE_LIST read-only, auto, granular, guardian-approvals, full-access, custom (agentModeSchema); approval_policy untrusted | on-request | never | granular with GranularApprovalConfig {sandbox_approval, skill_approval, request_permissions, mcp_elicitations}; sandbox modes read-only, workspace-write (writable_roots, network_access, exclude_tmpdir_env_var, exclude_slash_tmpdir), danger-full-access, external; exec policy rules (prefix_rule, network_rules, execpolicy_amendment proposals approved by the user); approvalRequestCard strings Allow once / Allow this conversation / Always allow / Deny / Reason; PermissionRequest hook; permissionProfile/list; notifications for permission requests (settings notifications-permissions-enabled).",
+  "evidence": [
+   "PLUG:code-review/server.mjs:28431",
+   "EXE-STR:L1287252",
+   "EXE-STR:L1288747",
+   "I18N:approvalRequestCard.allowConversation"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's posture (ask/auto) plus durable approvals can adopt the scope ladder (once / conversation / always) and execpolicy amendments learned from approvals.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-085",
+  "category": "Safety, permissions & governance",
+  "name": "Passkey-based user verification for sensitive approvals",
+  "what": "Some actions can require a fresh cryptographic proof from the user (security key or passkey) before the agent proceeds.",
+  "how": "app-server userVerification/{status,enroll,delete,verify,cancel} with UserVerificationProof {credentialId, algorithm, publicKey, signature}; Rust user_verification_auth.rs; TUI user_verification.rs; main process local WebAuthn USB bridge for security keys ( relying-party and origin validation, https only, no legacy AppID); MCP user_verification_elicitation; messages \"User verification timed out / is not available in this build or account\".",
+  "evidence": [
+   "EXE-STR:L1291265",
+   "EXE-STR:L1285737",
+   "EXE-STR:L1319355",
+   "BUILD:main-BklS_2Y2.js@2980989"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Step-up verification before irreversible or financial tool calls would complement Verevon's signed decision evidence for high-impact capabilities.",
+  "notes": "Scope of which approvals require verification is not established; only the mechanism."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-086",
+  "category": "Safety, permissions & governance",
+  "name": "Outbound network proxy with header injection and a credential broker (names)",
+  "what": "The agent's network traffic can be routed through a managed proxy that applies domain and socket policy and can inject or strip headers so secrets are not handed to the model.",
+  "how": "network-proxy crate (proxy.rs, runtime.rs: SOCKS5 and HTTP, loopback listeners, shared managed Windows route); NetworkProxyConfig fields proxy_url, enable_socks5, socks_url, enable_socks5_udp, allow_upstream_proxy, dangerously_allow_non_loopback_proxy, dangerously_allow_all_unix_sockets, domains, unix_sockets, allow_local_binding, credential_broker, credentials; PermissionProfile strip_request_headers and inject_request_headers; env CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE; \"credential brokerage does not yet support shell_zsh_fork\".",
+  "evidence": [
+   "EXE-STR:L1294882",
+   "EXE-STR:L1289154",
+   "EXE-STR:L1286156",
+   "EXE-STR:L1306577"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Consistent with Verevon's rule that the Model Plane never sees tokens: a broker that injects credentials at egress is the in-sandbox analogue; evaluate for sandbox-manager.",
+  "notes": "Purpose of credential_broker inferred from field names and the env var; behaviour not traced."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-087",
+  "category": "Memory, learning & personalization",
+  "name": "Memory pipeline: extract, consolidate, cite and import",
+  "what": "Codex can learn from past sessions: it extracts raw memories per thread, consolidates them globally with a model, cites memories in answers and lets users reset or import them.",
+  "how": "config.memories (14 keys, 12 recovered by name): generate_memories, use_memories, dedicated_tools, max_raw_memories_for_consolidation, max_unused_days, max_rollout_age_days, max_rollouts_per_startup, min_rollout_idle_hours, min_rate_limit_remaining_percent, extract_model, consolidation_model, disable_on_external_context. SQLite stage1_outputs(thread_id, raw_memory, rollout_summary, generated_at) and jobs; memory_mode column with a polluted state; memories/write crate (workspace.rs diffs, phase2_workspace_diff.md, symlink refusal); memories_extensions folder for plugin-contributed inputs; app-server memory/status and memory/reset; MemoryCitationEntry {path, lineStart, lineEnd, note}; /memories command; import from Claude Code memory (memory_import.rs).",
+  "evidence": [
+   "EXE-STR:L1286050",
+   "EXE-STR:L1292375",
+   "EXE-STR:L1336641",
+   "EXE-STR:L1289294",
+   "EXE-STR:L1292674"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Rate-limit-aware background consolidation with a rollout age and idle gate is a pragmatic design for Verevon's MemoryConsolidation workflow; the polluted flag prevents mixing external context into learned memory.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-088",
+  "category": "Transparency, observability & control",
+  "name": "Usage, credit and rate-limit transparency",
+  "what": "The UI shows remaining allowance across windows, estimated cost per request and lets users spend reset credits; plans and spend controls are reflected.",
+  "how": "Account rateLimits (primary/secondary windows, usedPercent, windowDurationMins, resetsAt), rateLimitsByLimitId, rateLimitResetCredits (consume), spendControlReached, workspace credit depletion reasons, thread token usage notifications, and per-request estimates estimatedUsageCreditsMicros and estimatedUsageUsdMicros grouped by model, reasoningEffort and speed with token counts (input, cached input, output, reasoning); profile stats (lifetime tokens, peak daily tokens, streaks, longest running turn); settings show-context-window-usage; /usage and /status commands.",
+  "evidence": [
+   "EXE-STR:L1289328",
+   "EXE-STR:L1295179",
+   "I18N:composer.mode.rateLimit.heading"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's roadmap lists a live credit meter and cost reservation; per-request micro-dollar estimates by model/effort/speed are a ready schema.",
+  "notes": "Cost estimate fields read from struct field names; computation not traced."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-089",
+  "category": "Multimodal & creation",
+  "name": "Artifact templates as skills (artifact-template-* with a JSON manifest)",
+  "what": "Users and plugins can publish reusable document, slide and spreadsheet styles; the agent picks one and follows its skill to produce the artifact in that style.",
+  "how": "A template is a skill folder named artifact-template-<slug> (name must match the directory and the regex ^artifact-template-[a-z0-9][a-z0-9._-]*$). Required files: SKILL.md (front matter name, description starting \"Create a document|presentation|spreadsheet|Google Doc|Google Slides presentation|Google Sheet using the ...\"), artifact-template.json {schemaVersion 1, kind document|presentation|spreadsheet|google-docs|google-slides|google-sheets, reference \"assets/reference.<docx|pptx|xlsx|png>\", optional preview, sourceUrl (canonical docs.google.com .../d/<id>/edit for Google kinds)}, agents/openai.yaml with display_name and icon_large (PNG preview). Template sources: personal skills in $CODEX_HOME/skills/remote-skills/skill-<id>, plugin skills under plugins/cache/<marketplace>/<plugin>/<version>/skills, and plugin-resource templates addressed as skill://<pluginId>/<skillName> with a pluginReleaseSkillId.",
+  "evidence": [
+   "RES:artifact-template-picker/server.mjs:7",
+   "RES:artifact-template-picker/server.mjs:266",
+   "RES:artifact-template-picker/server.mjs:835",
+   "RES:artifact-template-picker/server.mjs:935"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's Data Plane documents and Office exports could use the same \"template = skill + reference file + preview\" convention, including org-shared and team templates.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-090",
+  "category": "Multimodal & creation",
+  "name": "Template picker MCP server and \"choose a style\" elicitation",
+  "what": "Before creating a document, deck or sheet the agent shows up to ten relevant template thumbnails and lets the user choose one or upload their own reference; an uploaded reference can be saved as a reusable template.",
+  "how": "Stdio MCP server openai_artifact_template_picker v1.0.0 with tools list_artifact_templates {artifactKind, request, pluginTemplates} and choose_artifact_template {artifactKind, templates[], request, includeAllTemplates}; the model ranks listed templates by relevance and passes the top ten; picker enforces unique identities and returns status selected|uploaded|declined|cancelled|unavailable|unsupported (when the client lacks the form extension). Uses elicitation: openai/elicitation/create form (x-openai-input file with options and icons, accept .docx/.pptx/.xlsx) or legacy openai/form imagePicker, _meta.autoResolutionMs 30000, then a second prompt \"Save this reference as a reusable template?\" with a validated name (max 64 chars, no <>/control characters). Work mode (--work) requires listing first and merges plugin templates supplied by the host.",
+  "evidence": [
+   "RES:artifact-template-picker/server.mjs:92",
+   "RES:artifact-template-picker/server.mjs:602",
+   "RES:artifact-template-picker/server.mjs:699",
+   "RES:artifact-template-picker/server.mjs:977",
+   "I18N:home.artifactTemplates.useTemplate.prompt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A visual style chooser driven by elicitation is a good UX for Verevon's report/slide generation, and \"save my reference as a template\" turns one-off uploads into reusable org assets.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-091",
+  "category": "Safety, permissions & governance",
+  "name": "Defensive file handling in the template picker",
+  "what": "Because templates come from plugins and user folders, the picker treats every path and image as hostile.",
+  "how": "readTrustedText resolves realpath and requires containment inside the template root, regular file and size at most 64 KiB; template directory basename must equal the skill name and sit under a skills folder; plugin manifest name must equal the owner; preview must be a PNG (signature and IHDR checked), under 8 MiB with width/height at most 8192 and pixel caps (16 M each, 32 M total); total preview bytes capped at 32 MiB; Google templates must have a canonical docs.google.com URL; at most 100 templates, 10 offered; invalid template silently skipped. Tests in server.test.mjs.",
+  "evidence": [
+   "RES:artifact-template-picker/server.mjs:951",
+   "RES:artifact-template-picker/server.mjs:15",
+   "RES:artifact-template-picker/server.test.mjs"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Copy the realpath-containment, size and magic-byte checks for any Verevon plugin asset loader (icons, previews, widgets).",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-092",
+  "category": "Multimodal & creation",
+  "name": "Template gallery, sharing and Sites templates",
+  "what": "The home screen shows documents, presentations, spreadsheets and sites templates with view, edit, share, uninstall and delete actions, and a guided prompt to create a new template from a reference file.",
+  "how": "Strings home.artifactTemplates (documents, presentations, spreadsheets, sites sections; create-template prompts that explain templates then ask for a reference upload and interview the user), tortilla.details (Description, Instructions, Use template, Edit, Share, Uninstall, Delete), artifactTemplate.resultCard (Open, Use template, Save template, \"Help me customize a personal copy of {template}\"). Kinds include Google Docs/Slides/Sheets and Site templates.",
+  "evidence": [
+   "I18N:home.artifactTemplates.createDocument.prompt",
+   "I18N:tortilla.details.actions.share",
+   "I18N:artifactTemplate.resultCard.useSitePrompt"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has no template library; a gallery with per-template instructions, share and uninstall maps to Space-scoped assets.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-093",
+  "category": "Multimodal & creation",
+  "name": "Sites artifacts with database-change approval",
+  "what": "The agent can build small web apps (\"Sites\") with a backing database; any data mutation shows a diff-style approval (table, field, old value to new value) before it is applied.",
+  "how": "Strings appgen.sitesDatabaseMutationApproval.* (Review this data change, Add this row, Delete this row, Current row, New row, Change details {oldValue} to {newValue}) and appgenPublicationTerms.modal; template prompt \"Create a Site using this {template} about...\". Publishing a Site requires accepting terms.",
+  "evidence": [
+   "I18N:appgen.sitesDatabaseMutationApproval.reviewDataChange",
+   "I18N:appgen.sitesDatabaseMutationApproval.changeValue",
+   "I18N:artifactTemplate.resultCard.useSitePrompt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Row-level before/after approvals are a good pattern for Verevon's governed provider writes (shipments, tickets) beyond a yes/no prompt.",
+  "notes": "Only UI strings were found; the Sites runtime and publishing backend are not in this package."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-094",
+  "category": "Chat experience",
+  "name": "Comment-on-anything input items (artifact, PDF, browser, diff)",
+  "what": "Users can leave comments on a document, PDF page, browser page element or diff line, and the comment becomes structured input for the next agent turn.",
+  "how": "protocol input-item modules artifact-comment-input-item.ts, artifact-annotation-comment-input-item.ts, pdf-comment-input-item.ts, browser-comment-input-item.ts, comment-input-item.ts; settings browser-annotation-screenshots-mode; renderer keys artifact_comment, diff_comments; artifact viewer actions Comments, Format & style, Present, Share, Download; thread_artifacts table stores typed artifacts per thread.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:29069",
+   "PLUG:code-review/server.mjs:29078",
+   "PLUG:code-review/server.mjs:31822",
+   "I18N:artifactViewer.comments",
+   "EXE-STR:L1337095"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's canvas selection edits (backlog #21) could use typed comment items instead of free text, so any surface can feed the model.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-095",
+  "category": "Chat experience",
+  "name": "Visualize skill: in-conversation interactive HTML with a strict output contract",
+  "what": "The assistant can show interactive charts, maps, diagrams, simulations, 3D models and UI mockups inline; only HTML fragments are allowed, loaded libraries come from a CDN allow-list and the visual follows the app theme.",
+  "how": "Skill visualize (v1.0.49): write <title>.html as a fragment (no doctype/html/head/body), under 1 MB, unique root id, no fetch/XHR/WebSocket; reference it in the final reply with a line visualize{\"path\":\"<abs>\",\"mode\":\"wide\"}; CSP allows cdnjs.cloudflare.com, esm.sh, cdn.jsdelivr.net, unpkg.com, fonts.googleapis.com, fonts.gstatic.com, fonts.bunny.net; theme tokens (--background, --foreground, --card, --primary, --muted, --border ... plus semantic colours) and light-dark() guidance; design system classes, tabs, tooltips via data-tooltip, Lucide icons via data-lucide only; decision rules (use Markdown table or Mermaid when sufficient; do not use for new project files); scripts/render.py wraps a fragment into standalone HTML or serves a preview in a sandboxed iframe; state persistence and follow-up API described in the next record. Includes widgets/calendar.md, tweak.md and examples/calendar.html.",
+  "evidence": [
+   "PLUG:visualize/skills/visualize/SKILL.md",
+   "PLUG:visualize/skills/visualize/scripts/render.py",
+   "PLUG:visualize/.codex-plugin/plugin.json"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's artifacts and chat widgets need exactly this contract (fragment-only, CDN allow-list, theme variables, size cap, host-side sandbox); it is a practical spec for a SolidJS-hosted generative-UI surface.",
+  "notes": "The skill instructs silent work and forbids narrating the mechanism to the user, which is a UX choice rather than a technical requirement."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-096",
+  "category": "Chat experience",
+  "name": "Widget state and follow-up bridge (window.openai)",
+  "what": "Inline visuals can remember user selections across reloads and can ask the assistant to dig deeper on a selected data point, with a confirmation dialog.",
+  "how": "Host-provided API: window.openai.widgetState read on render; event openai:set_globals delivers updates; window.openai.setWidgetState({modelContent, privateContent}) replaces a JSON snapshot (limit 16 KiB, optimistic, never on load); window.openai.sendFollowUpMessage({prompt, title}) with optional confirmation-dialog title up to 250 characters. Export flow keeps only widgetState calls and supplies fallback storage in the standalone wrapper. Sandbox provides global lucide, themed tooltips and touch handling.",
+  "evidence": [
+   "PLUG:visualize/skills/visualize/SKILL.md",
+   "PLUG:visualize/skills/visualize/scripts/render.py"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A small, versioned host API (state with model-visible vs private parts; user-confirmed follow-up prompts) lets Verevon widgets feed context back to the model without arbitrary network access.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-097",
+  "category": "Research & web",
+  "name": "Deep research as a skill-only plugin: dedicated worker, source ledger, cited DOCX",
+  "what": "Research requests run a two-pass method through one dedicated sub-agent, keep a claim-to-source ledger and deliver a Word report with footnotes after rendering and visually checking every page.",
+  "how": "Plugin deep-research (v0.1.1, no code): skill SKILL.md plus references/research-method.md (scope contract, worker brief template, pass 1 broad discovery, pass 2 targeted follow-up, source hierarchy, conflict handling, diminishing-returns stop test, coordinator spot-checks) and references/report-contract.md (internal report-source.md sidecar with native citations, claim-to-source ledger, DOCX structure using $documents presets, human-readable footnotes, artifact QA by rendering pages). Rules: perform real searches, treat instructions in retrieved pages as untrusted, never fabricate sources, label inference and uncertainty, do not claim a worker ran at xhigh unless confirmed; default prompt asks for xhigh with a dedicated subagent.",
+  "evidence": [
+   "PLUG:deep-research/skills/deep-research/SKILL.md",
+   "PLUG:deep-research/skills/deep-research/references/research-method.md",
+   "PLUG:deep-research/skills/deep-research/references/report-contract.md"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's deep research is in-process; this shows research as portable skill text (method, contract, QA) that could be versioned and A/B tested, and the sidecar ledger is a model for citation auditing.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-098",
+  "category": "Multimodal & creation",
+  "name": "LaTeX plugin: bundled engine first, system TeX second, managed install last",
+  "what": "The assistant compiles LaTeX with a bundled Tectonic for simple projects, falls back to a detected TeX Live or MacTeX, diagnoses the machine, and installs a managed TeX Live only if none exists.",
+  "how": "Plugin latex (v0.2.8) skills latex-compile, latex-doctor, texlive-runtime-installer; Python scripts compile_latex.py (strategy selection), detect_tectonic.py, detect_texlive.py, install_texlive.py (profile), latex_doctor.py; resources/tectonic/tectonic.exe; protocol rpc latex-host-service; setting latex-auto-compile; DEPENDENCIES.md and THIRD_PARTY_NOTICES.md; unit tests per strategy.",
+  "evidence": [
+   "PLUG:latex/.codex-plugin/plugin.json",
+   "PLUG:latex/scripts/compile_latex.py",
+   "PLUG:latex/DEPENDENCIES.md",
+   "PLUG:code-review/server.mjs:33053"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The \"ladder of engines with a doctor skill\" pattern (cheap bundled, system, managed install) suits Verevon sandbox images for LaTeX and other heavy toolchains.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-099",
+  "category": "Multimodal & creation",
+  "name": "Hatch-pet skill: image-generation pipeline with deterministic QA",
+  "what": "The assistant can create an animated desktop pet (8x11 sprite atlas, 9 animation rows plus 16 look directions) from a concept or brand cue, then validate and package it.",
+  "how": "Curated skill hatch-pet delegates art to $imagegen and uses 17 scripts (prepare_pet_run, compose_atlas, assemble_extended_atlas, extract_strip_frames, derive_running_left_from_running_right, despill_chroma_edges, make_contact_sheet, make_direction_qa_sheet, measure_direction_continuity, validate_atlas, validate_direction_blind_verdicts, combine_direction_blind_verdicts) plus references (animation-rows, codex-pet-contract, qa-rubric) and 4 unit tests; blind direction QA by separate verdicts; package spriteVersionNumber 2; app settings selected-avatar-id, pet-visibility, avatar-overlay-mascot-width-px; renderer avatar_manifest {pet_id, snapshot}.",
+  "evidence": [
+   "RES:skills/skills/.curated/hatch-pet/SKILL.md",
+   "RES:skills/skills/.curated/hatch-pet/references/qa-rubric.md",
+   "PLUG:code-review/server.mjs:34150"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Low direct relevance, but the blind-verdict QA and deterministic assembly show how to make generative-asset skills verifiable; useful if Verevon adds brand/avatar generation.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-100",
+  "category": "UI/UX & product design",
+  "name": "First-run onboarding as a plan-driven skill with native request surfaces",
+  "what": "A setup skill guides role selection, first-task choice and creation of a first artifact, using the app's own pickers instead of chat text and a fixed four-step progress plan.",
+  "how": "Curated skill onboard-new-user (name setup-codex): update_plan with exactly four labelled steps (Start Codex setup, Personalize Codex, Choose a first task, Get something done); surfaces by priority: setup_codex_step {role|task|complete} (blocks, returns selection inline, action dismiss stops the flow, skip uses defaults), request_option_picker, request_onboarding_input, connector/plugin connect modals; rules: never narrate setup mechanics, prefer choice questions before locator questions, every question must change the artifact or lock an assumption. Renderer: electron.onboarding.welcomeV2 flows, external agent import tooltip, sidebar onboarding checklist with role-specific \"review latest plans\" prompts.",
+  "evidence": [
+   "RES:skills/skills/.curated/onboard-new-user/SKILL.md",
+   "I18N:electron.onboarding.welcomeV2.externalAgentImport.tooltip.hooks",
+   "I18N:sidebarOnboardingChecklist.reviewLatestPlans.legal.prompt"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Onboarding expressed as a skill using typed UI requests lets Verevon ship and iterate role-based activation without frontend releases.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-101",
+  "category": "Coding capability",
+  "name": "Code Review as an MCP App: PR workspace, private reviews and chat-bound reviews",
+  "what": "A bundled plugin turns the chat into a pull-request cockpit (list, diff, checks, comments, merge) and can run a private AI review of a PR without cloning it, returning ranked findings.",
+  "how": "Plugin code-review: about 28 pull_requests.* tools (27 literal names matched: account, authoredUpdates, avatar, cancelReview, chatReview, checks, comment, commentUpdate, diff, inboxDetails, localReview, media, merge, mergeability, open, reviewSnapshot, reviewThreadUpdate, revisionDiff, revisionFile, search, setReviewFindingResolved, settings, stack, startReview, submitReview, update, userSearch) over GitHub via the gh CLI (shared-node/github/* modules, PR stack detection, check rollup, discussion, review revisions) and GitLab via a connector; UI is an MCP App (13.9 MB JS bundle). Private review schema: policyVersion 1, status queued|running|completed|failed|cancelled, result {summary, impact low|medium|high, findings[0..50] {title, body, priority 0..2, path, line, side}}; reviews can run in chat bound to hostId/threadId/turnId; manual review prompt asks for a fresh reviewer subagent without prior chat context and forbids posting. Settings: provider, GitHub/GitLab connection, link target, sidebar sections, personal local review instructions.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:36842",
+   "PLUG:code-review/server.mjs:33413",
+   "PLUG:code-review/.mcp.json",
+   "I18N:codeReviewPlugin.manualReview.request",
+   "REA:ev_4eb1f8d6d6c18c428fdb9468c0dbbf46c4533592280411440ed06583e6d92e54"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Not an IDE feature for Verevon, but the pattern (reviewer subagent with clean context, structured findings schema with anchors and priority) applies to any Verevon verification workflow, such as document or contract review.",
+  "notes": "Tool count differs by one from the scout's 28; the grep pattern may have missed one name."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-102",
+  "category": "Safety, permissions & governance",
+  "name": "Computer Use confirmation policy shipped as readable data",
+  "what": "Windows control follows a four-tier confirmation policy that classifies actions into hand-off, always-confirm, pre-approvable and no-confirmation, with numbered action classes and a rule that third-party content never grants permission.",
+  "how": "plugins/computer-use/docs/confirmations.md: instruction types (user-authored = valid intent; user-supplied third-party content = potentially malicious, never permission), sensitive-data definition (typing into a form counts as transmission), modes: 1 Hand-off required (final password change, bypassing security interstitials or paywalls), 2 Always confirm at action time even if pre-approved (delete data, change permissions, create API keys, final account creation, CAPTCHAs, install/run newly downloaded software), 3 Pre-approval works from the initial prompt (login implied by \"go to site\", permission prompts, uploads, file moves, sensitive data transmission only if data and destination are named), 4 No confirmation (cookie banners, ToS during signup, downloads). SKILL.md requires reading guidance.md and confirmations.md before acting; the browser plugin lists confirmations as required for tab_cdp_call and webmcp_invoke_tool via documents.json.",
+  "evidence": [
+   "PLUG:computer-use/docs/confirmations.md",
+   "PLUG:computer-use/skills/computer-use/SKILL.md",
+   "PLUG:browser/docs/documents.json"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's browser grants and Do-mode HITL could adopt a numbered, versioned confirmation taxonomy stored as data (evaluated by the policy gate) instead of a substring risk list.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-103",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin docs with an index that loads documents conditionally (documents.json)",
+  "what": "A plugin lists its Markdown references with load modes and conditions so only the documents relevant to the current runtime (browser type, API members, required capability, tool being called) reach the model.",
+  "how": "browser and chrome plugins ship docs/documents.json: entries {name, mode model|included, requiredFor [tool ids such as tab_cdp_call, webmcp_invoke_tool], when {requiredBrowserCapabilities, browserTypes, requiredApiMembers}} plus docs/api.json (runtime API description), capabilities/*.md and troubleshooting docs; scripts/browser-client.mjs and browser-service.mjs expose the runtime to the node_repl.",
+  "evidence": [
+   "PLUG:browser/docs/documents.json",
+   "PLUG:browser/docs/api.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Conditional, tool-gated documentation injection is a clean way to keep prompts small while guaranteeing the model reads safety docs before risky tools; reuse for Verevon browser grants.",
+  "notes": "The browser runtime itself belongs to the in-app browser audit; only the packaging pattern is recorded here."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-104",
+  "category": "Safety, permissions & governance",
+  "name": "Per-plugin legal and data-use disclosure fields",
+  "what": "Plugin cards carry privacy policy and terms links, and sensitive plugins state plainly that browser content and screenshots may be used for training subject to account controls.",
+  "how": "interface.privacyPolicyURL and termsOfServiceURL on every first-party plugin; Chrome and Computer Use longDescription disclose that browser data or screenshots may be used for training unless controlled in account settings and warn that logged-in pages may contain sensitive information; plugin authentication policy ON_INSTALL; Chrome says the model asks before interacting with new sites.",
+  "evidence": [
+   "PLUG:chrome/.codex-plugin/plugin.json",
+   "PLUG:computer-use/.codex-plugin/plugin.json"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "ZDR propagation: Verevon plugin manifests should declare data-retention behaviour and be blocked for ZDR users when they retain or train.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-105",
+  "category": "Computer & environment control",
+  "name": "Local environment files: setup, cleanup and named actions per repository",
+  "what": "A repository can describe how to prepare and clean a workspace (per-OS scripts) and add one-click actions, used by worktrees and automations.",
+  "how": "protocol local-environment.ts: localEnvironmentSchema {version, name, setup {script, darwin/linux/win32 overrides}, cleanup?, actions[{name, icon, command, platform?}]}; discovered as *.toml files in <repo>/.codex/environments; automations reference local_environment_config_path; worktree settings and archived worktree cleanup (worktree_archive_cleanup, remote-worktree).",
+  "evidence": [
+   "PLUG:code-review/server.mjs:31321",
+   "BUILD:src-BJv5Mk7n.js@1451498",
+   "PLUG:code-review/server.mjs:31243"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A declarative setup/cleanup contract per project is how Verevon sandboxes could be pre-provisioned for Space workspaces.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-106",
+  "category": "Tools, plugins & extensibility",
+  "name": "Hook runs and tool calls as visible transcript items",
+  "what": "Hooks, MCP calls, dynamic tool calls, sub-agent activity, command executions and file changes appear as typed items with status, so users can inspect what ran.",
+  "how": "HookRunSummary {event_name, handler_type, execution_mode, scope, source_path, display_order, status_message} with hook/started and hook/completed notifications; ThreadItem variants include agentMessage, reasoning, commandExecution, fileChange, mcpToolCall (progress notifications), dynamicToolCall, collabAgentToolCall, subAgentActivity, webSearch (search/open_page/find_in_page), imageGeneration (revised_prompt, saved_path), contextCompaction, plan, hookPrompt. Items carry tool_result_sources and truncation metadata.",
+  "evidence": [
+   "EXE-STR:L1287256",
+   "EXE-STR:L1299361",
+   "EXE-STR:L1300165",
+   "PLUG:code-review/server.mjs:31363"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's context inspector and proof bundles could consume a similar typed item stream, including hook runs with their source layer.",
+  "notes": "Variant names read from concatenated serde strings; the exact ThreadItem variant set was not enumerated."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-107",
+  "category": "Chat experience",
+  "name": "Side conversations as ephemeral forks with restricted capabilities",
+  "what": "A user can branch a quick side question off a running task; the side thread cannot retain worktree attachments or request tools and closes cleanly.",
+  "how": "/side (ephemeral fork) and temporary structured threads: strings \"Ephemeral side conversations cannot retain worktree attachments\", \"temporary structured threads cannot request tools or user interaction\", \"side conversation was closed\", failed-to-interrupt/unsubscribe handling; keymap toggle_side_conversation; thread/fork. Desktop also has \"temporary chat\".",
+  "evidence": [
+   "EXE-STR:L1286662",
+   "EXE-STR:L1286680",
+   "EXE-STR:L1293846",
+   "I18N:localConversation.sideChat"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A cheap side-question fork that cannot touch tools is a good fit for Verevon's context-blind Do mode problem: ask without polluting the main run.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-108",
+  "category": "Research & web",
+  "name": "Web search modes and location hints",
+  "what": "Web search can be disabled, cached or live, with optional country/region/city hints; some model providers do or do not support a standalone search endpoint.",
+  "how": "Config web_search modes disabled|cached|live (work preferences webSearch), WebSearchLocation {country, region, city, timezone?}, ThreadItem WebSearchItem with search, open_page and find_in_page actions, provider flag supports_standalone_web_search, codex-api endpoint alpha/search, requirement allowedWebSearchModes.",
+  "evidence": [
+   "EXE-STR:L1345352",
+   "EXE-STR:L1287229",
+   "PLUG:code-review/server.mjs:34320",
+   "EXE-STR:L1289317"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already routes web search; the cached/live distinction and an admin-restrictable mode list help ZDR and cost control.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-109",
+  "category": "Multimodal & creation",
+  "name": "Image generation as a system skill plus typed result items",
+  "what": "Images are produced through a built-in skill and tool; results carry the revised prompt, saved path and transparency flag, and usage limits are surfaced.",
+  "how": "System skill imagegen (\"Generate or edit raster images ... transparent-background cutouts\") prefers the built-in image_gen tool and only falls back to a CLI using gpt-image-2 (guidance section for the fallback); the skill says never to silently switch from gpt-image-2 to gpt-image-1.5 and to ask the user first. ThreadItem ImageGenerationItem {revisedPrompt, transparentBackground, savedPath, failure}; code mode helper generatedImage({image_url, output_hint}); renderer key image_generation_limit_reached; hatch-pet requires delegating all generation to $imagegen and asking before any fallback.",
+  "evidence": [
+   "EXE-STR:L1331369",
+   "EXE-STR:L1331383",
+   "EXE-STR:L1331572",
+   "EXE-STR:L1300165",
+   "EXE-STR:L1302462"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon has no image editing; implementing imagegen as a skill with a typed result item keeps it replaceable per provider.",
+  "notes": "Built-in-first with confirmed fallbacks is a notable safety-minded design; the built-in tool's wire details are not visible."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-110",
+  "category": "Models & routing",
+  "name": "Model reroute and verification notices",
+  "what": "When a request is served by a different model than selected, or needs verification, the client is told so the UI can explain it.",
+  "how": "Notifications model/rerouted, model/verification and model/safetyBuffering/updated (all opted-in for the webview); thread start flag allowProviderModelFallback; settings composer.modelPicker daybreak toggles with messages when a model is unavailable.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:31363",
+   "EXE-STR:L1298001",
+   "I18N:composer.modelPicker.daybreak.modelUnavailableOn"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's failover plan (backlog #25) should emit an explicit reroute event so users and audit see which model actually answered.",
+  "notes": "Reasons for reroute not established."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-111",
+  "category": "Platform architecture",
+  "name": "Feature gating through config features and remote evaluations",
+  "what": "Capabilities ship dark and are enabled by config feature flags, Statsig-evaluated gates or plan eligibility; the desktop adapts bundled plugins to those flags.",
+  "how": "config [features] with experimental feature list (experimentalFeature/list: stage, default enabled, under development, deprecated, retirement), featureRequirements (admin), desktop feature availability object (deferCodexAppTools, deferCuaTools, cuaPIP, remote hosted PiP), Statsig evaluations (in_app_local_automation), build flavors Dev, InternalAlpha, Nightly, Agent, Prod, PublicBeta, daybreak toggles; feature names such as multi_agent_v2, shell_zsh_fork, unified_exec, undo, transcript_v2, daemon_auto_start.",
+  "evidence": [
+   "EXE-STR:L1291570",
+   "EXE-STR:L1289329",
+   "BUILD:main-BklS_2Y2.js@102037"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "A typed feature-stage model (under development, default enabled, deprecated, retirement date) with admin overrides is a good basis for Verevon plane-level rollout switches.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-112",
+  "category": "Transparency, observability & control",
+  "name": "Telemetry stack: OpenTelemetry with prompt-logging switches, Sentry and Statsig",
+  "what": "Operators can export traces, logs and metrics to their own OTLP endpoint with TLS and choose whether user prompts and guardian assessments are logged.",
+  "how": "OtelConfigToml (10 fields): environment, exporter, trace_exporter, metrics_exporter, log_user_prompt, log_agent_responses, log_guardian_assessments, span_attributes, tls {ca-certificate, client-certificate, client-private-key}; trace propagation headers traceparent/tracestate, x-codex-installation-id, x-codex-window-id, x-codex-parent-thread-id, x-openai-subagent; metric names codex.* (skills, plugins loaded_cache hit/wait, mcp tools cache, exec_server); desktop Sentry (sample rate, dsc) and OTel trace sample rate setting.",
+  "evidence": [
+   "EXE-STR:L1286052",
+   "EXE-STR:L1286873",
+   "EXE-STR:L1335877"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's audit outbox could add an operator OTLP exporter with explicit prompt-logging opt-in aligned with ZDR.",
+  "notes": "Field list from concatenated strings; log_agent_responses inferred from adjacent literals."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-113",
+  "category": "Agent runtime",
+  "name": "Queued follow-ups, steering and interruption of a running turn",
+  "what": "While the agent works the user can queue follow-up messages, steer the current turn or interrupt it; queue behaviour is a setting.",
+  "how": "Methods turn/steer, turn/interrupt, thread/queue/{add,list,update,delete,reorder,start} with notification thread/queue/changed; tables queued_items and queued_thread_revisions; setting followUpQueueMode and composerEnterBehavior; error ActiveTurnNotSteerable; keymap edit_queued_message; hooks Interrupt.",
+  "evidence": [
+   "EXE-STR:L1298473",
+   "EXE-STR:L1336557",
+   "EXE-STR:L1297725",
+   "PLUG:code-review/server.mjs:32607"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's multi-turn Do mode has no steer/queue; adopt queue revisions and steer semantics so users can adjust a long run.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-114",
+  "category": "Agent runtime",
+  "name": "Cloud-hosted task threads and environments (aeon)",
+  "what": "Some conversations run in OpenAI's cloud with their own environment, avatar and reply chain, and can be handed off to or from the local app.",
+  "how": "Thread source aeon with environment ids; routes /cloud-environments/new, /cloud-aeons/primary, /ca/:conversationId; reply chain composer (\"Follow up\", text-only replies); avatar snapshots uploaded for cloud agents; cloud-tasks crate (lib.rs, app.rs) and \"codex cloud\" text; handoff_thread and move_to_local flows in codex-app-tools; tool send_async_message in orbit/aeon-tool-contracts.ts (\"concise question or update to send to the user\").",
+  "evidence": [
+   "PLUG:code-review/server.mjs:28959",
+   "EXE-STR:L1287427",
+   "I18N:aeon.replyChain.composerPlaceholder"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The async \"send a concise update to the user\" tool for background agents is a useful primitive for Verevon scheduled runs that currently have no delivery.",
+  "notes": "Cloud product behaviour is not observable locally; local/cloud handoff semantics inferred from tool names. Route strings /cloud-environments/new and avatar snapshots come from the scout inventory; cloud-environments route re-verified in app-initial bundle (7 hits)."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-115",
+  "category": "UI/UX & product design",
+  "name": "Codex Micro hardware keypad and pet overlay (differentiators)",
+  "what": "The app integrates a physical macro-pad (agent keys, lighting) and a floating pet/mini overlay that reacts to task activity.",
+  "how": "Settings codex-micro-agent-source, codex-micro-single-tap-agent-keys, codex-micro-layout, lighting brightness and auto-off; @worklouder device-kit packages and hid-topology-watcher.node; avatar overlay settings (pet size, visibility always-visible|on-demand), avatar-overlay activity stack and composition protocol modules; appshot hotkey capture.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:33500",
+   "PLUG:code-review/server.mjs:29086",
+   "PLUG:code-review/server.mjs:34150"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Low priority for Verevon; shows that agent state (waiting for approval, running) is exposed through ambient surfaces, which maps to notifications and mobile widgets.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-116",
+  "category": "Coding capability",
+  "name": "Review agent: explicit-only system skill with a strict finding standard",
+  "what": "Delegated code reviews run through a read-only skill that returns only findings the author would fix, ranked P0 to P3, and says \"No findings.\" rather than inventing issues.",
+  "how": "System skill review-agent (agents/openai.yaml allow_implicit_invocation: false): read applicable AGENTS.md, inspect the whole diff, resolve base-branch targets with git merge-base against the branch upstream, flag only discrete, actionable, change-introduced, demonstrable defects, one entry per issue formatted [P1] title - path:line with a short paragraph, then an overall assessment and test gaps; forbids modifying files, committing, pushing, posting comments or delegating. Related config review_model, RPC review/start, notifications entered/exited review mode, thread source subAgentReview, command /review.",
+  "evidence": [
+   "EXE-STR:L1334399",
+   "EXE-STR:L1334443",
+   "EXE-STR:L1339869"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A reviewer skill with an explicit-only flag, a \"do not invent findings\" rule and a fixed priority scale is a reusable template for Verevon verification subagents (contracts, documents, tool-call audits).",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-117",
+  "category": "Platform architecture",
+  "name": "Desktop process model: Electron main, sandboxed renderer, workers and a chunked message bridge",
+  "what": "The desktop shell is thin: the renderer talks to the main process through one message channel with chunking and acknowledgements, heavy work runs in workers, and the agent runs in a separate Rust process.",
+  "how": "IPC literals codex_desktop:message-for-view, message-from-view, chunked-message-ack, worker:*, connect-app-host in bootstrap; protocol chunked-message-protocol.ts and chunked-message-receiver.ts split large payloads; workers for git, computer-use (capture, skysight), open-in; vscode-capn-rpc-message.ts wraps Cap'n Web RPC messages (sessionId, connect/message) for editor extension bridges; separate processes: codex app-server, code-mode host, command runner, sandbox service, node_repl; IPC handlers check the sender with isTrustedIpcEvent/isTrustedIpcSender (the scout's REA run counted 15 sender-validation sites).",
+  "evidence": [
+   "BUILD:bootstrap-487kJHw_.js@0",
+   "PLUG:code-review/server.mjs:29989",
+   "PLUG:code-review/server.mjs:35306",
+   "PLUG:code-review/server.mjs:26536"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's web UI will not use Electron IPC, but the chunked-and-acknowledged message layer and worker split are relevant for large streamed payloads in the SolidJS gateway.",
+  "notes": "Channel literals counted in bootstrap bundle; REA's earlier scout analysis found 36 of 38 IPC operations use dynamic channel names."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-118",
+  "category": "Platform architecture",
+  "name": "Plugin servers are built from the same monorepo schemas (shared protocol package)",
+  "what": "First-party plugin servers reuse the app's Zod schemas and helper modules, so tool inputs, settings and host protocol cannot drift from the app.",
+  "how": "server.mjs files are single-file bundles with source-path comments: ../bundled-plugins/codex-app-tools/src/server.ts imports ../protocol/src/host-config.ts and dynamic-app-tools.ts; code-review bundles more than 280 modules from the app protocol, shared-node and git-worker packages plus ../../codex/codex-apps/protocol/src, shared-node/src/github, git-worker, @openai/pull-requests-bridge and @modelcontextprotocol/ext-apps; plugin.json versions track the app release (26.1007.21434) for desktop-coupled plugins and independent semver for content plugins (deep-research 0.1.1, latex 0.2.8, visualize 1.0.49).",
+  "evidence": [
+   "PLUG:codex-app-tools/server.mjs:24758",
+   "PLUG:code-review/server.mjs:26553",
+   "PLUG:code-review/server.mjs:36487"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's Rust/Go planes already share protobuf contracts; keeping plugin servers on the same generated contracts avoids drift in capability and approval schemas.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-119",
+  "category": "Safety, permissions & governance",
+  "name": "Plugin permission model is implicit: no per-plugin capability grants observed",
+  "what": "Plugins declare what they are (capabilities labels, MCP servers, hooks) but nothing in the manifest grants or limits OS or data access; safety comes from per-tool approvals, sandbox policy, environment allow-lists and admin requirements.",
+  "how": "plugin.json interface.capabilities is a display label set (Interactive, Read, Write); .mcp.json controls env_vars allow-list (for example code-review passes GH_TOKEN, GITHUB_TOKEN, CODEX_API_KEY, proxy variables), default_tools_approval_mode and per-tool approval_mode; hooks need trust; marketplace policy gates install/auth; admin requirements can disable plugins or restrict hooks; no field found for filesystem, network or data-scope grants per plugin. Plugin MCP servers launch as ordinary child processes (cmd.exe, node) of the app.",
+  "evidence": [
+   "PLUG:code-review/.mcp.json",
+   "PLUG:codex-app-tools/.mcp.json",
+   "PLUG:browser/.codex-plugin/plugin.json"
+  ],
+  "provenance": "INF",
+  "confidence": "medium",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon should do better: require plugin manifests to declare data scopes and capability classes that the capability-policy gate enforces, instead of relying on approval prompts.",
+  "notes": "Inference from the absence of such fields in nine manifests and the config schema; cloud-side plugin review is not visible. Quality 2 reflects the weak isolation, not the packaging."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-120",
+  "category": "Memory, learning & personalization",
+  "name": "Personality and profile presets",
+  "what": "Users can pick a conversational personality and save named profiles that bundle model, effort, approval, sandbox and provider choices.",
+  "how": "ConfigProfile fields model, service_tier, model_provider, approval_policy, approvals_reviewer, sandbox_mode, model_reasoning_effort, plan_mode_reasoning_effort, model_reasoning_summary, model_verbosity, model_catalog_json, personality, chatgpt_base_url, model_instructions_file; protocol personality.ts; setting UI under Personalization (profile pet, display options, avatar).",
+  "evidence": [
+   "EXE-STR:L1285488",
+   "PLUG:code-review/server.mjs:31801",
+   "PLUG:code-review/server.mjs:34150"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's persona layer could be bundled with model and permission defaults as named profiles that orgs can lock.",
+  "notes": "Personality values beyond friendly were not enumerated."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-121",
+  "category": "Tools, plugins & extensibility",
+  "name": "Tool registry hygiene: collision errors, schema size caps and namespaces",
+  "what": "When many plugins and MCP servers contribute tools, the registry can refuse duplicate names, cap schema size and group tools in namespaces.",
+  "how": "ToolRegistryConfig: error_on_tool_collisions, excluded tool namespaces, direct_only tools (never deferred), tool_input_schema max bytes, turn_metadata_includes_tool_info; dynamic tools namespace spec; MCP tools exposed as normalised identifiers (mcp__server__tool); skills.read/list as tools skills.* namespace; tool_namespace in multi-agent config.",
+  "evidence": [
+   "EXE-STR:L1286752",
+   "EXE-STR:L1287198",
+   "EXE-STR:L1302456"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Needed once Verevon unblocks MCP: deterministic names, collision policy and schema budgets prevent one plugin from degrading tool selection.",
+  "notes": "Key names read from concatenated config strings."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-122",
+  "category": "Computer & environment control",
+  "name": "Unified computer-use plugin: one REPL, selectable browser and desktop surfaces",
+  "what": "A single JavaScript session can drive either the in-app browser, the desktop (via the sky package) or both; the host chooses which surfaces and browser backends are active.",
+  "how": "Host logic builds the cua_repl server definition: surfaces browser maps to @oai/browser-desktop/service and computer maps to @oai/sky/service (JSON in an environment variable), CUA_REPL_ENABLED_SURFACES lists them, browser backends are passed via env, command/args point to @oai/cua-repl/bin/cua-repl.mjs inside the primary runtime node_modules; enablement requires the Node REPL and at least one surface; plugin hook calls cua_repl.turn_ended on Interrupt, SubagentStop and Stop. Native Office apps show as \"Live workbook / presentation / document control\" in the Computer Use settings.",
+  "evidence": [
+   "BUILD:main-BklS_2Y2.js@101227",
+   "PLUG:unified-computer-use/.codex-plugin/plugin.json",
+   "I18N:computerUse.nativeApps.microsoftExcel.detail"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "One runtime with pluggable surfaces and a turn-ended cleanup hook is the clean way to give Verevon's agent browser plus desktop control through the same governed capability.",
+  "notes": "Browser internals belong to the in-app browser audit."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-123",
+  "category": "Computer & environment control",
+  "name": "Worktree tasks with local-to-worktree handoff and rollback",
+  "what": "A task can move its git state between the local checkout and an isolated worktree; failures are rolled back and explained step by step.",
+  "how": "protocol worktree.ts (worktree names: 1-64 chars, lowercase letters, digits and single hyphens, hex IDs and Windows device names reserved), host-worktree-settings, worktree-path-matching, thread attachment owners; UI flows moveToWorktree and moveToLocal with specific errors (branch checked out elsewhere, local tracked changes, source stash apply failed, rollback failed), thread handoff tool handoff_thread in codex-app-tools, archived worktree cleanup, CLI flags --worktree for new sessions and fork; app-server project and environment APIs; automations can run in worktree or local.",
+  "evidence": [
+   "PLUG:code-review/server.mjs:35385",
+   "PLUG:code-review/server.mjs:31243",
+   "I18N:localConversation.moveToLocal.error.rollbackFailed",
+   "EXE-STR:L1289531"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Space workspaces with promotion (Verevon's PromoteWorkspace overlay merge) have the same need for explicit handoff failure states and rollback.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-124",
+  "category": "Transparency, observability & control",
+  "name": "Feedback and performance-trace upload with explicit consent and correlation IDs",
+  "what": "Users can send feedback with logs or record a performance trace; the app states what will be uploaded, lets them keep it local, and issues a Feedback ID that survives failed uploads.",
+  "how": "/feedback command and feedback/upload RPC; dialog strings: Feedback ID, uploading, upload incomplete, upload not confirmed (warns against duplicates), disabled by configuration; trace recording flow: start details, note field, \"Send profile trace?\" warning that JS and native memory-allocation profiles may contain sensitive data, Keep local, Show local trace; debug RAM indicator by process type (main, helpers, App Server, rollout children).",
+  "evidence": [
+   "I18N:feedback.dialog.uploadUnconfirmedMessage",
+   "I18N:traceRecording.details.subtitle",
+   "I18N:debug.sidebarRamUsageIndicator.appServer",
+   "EXE-STR:L1297554"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's audit and support tooling can copy the consent wording, the idempotent Feedback ID and the \"not confirmed, may duplicate\" state.",
+  "notes": "Evidence is the renderer string catalogue; the feedback/upload RPC name comes from the codex.exe method list."
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-125",
+  "category": "Transparency, observability & control",
+  "name": "Diagnostics commands and config warnings",
+  "what": "Users can inspect effective configuration, retained warnings, process lists and session status from commands, and are shown config and deprecation warnings as notifications.",
+  "how": "Commands /status (session configuration and token usage), /debug-config (layers and requirement sources), /warnings (retained warnings and diagnostic details), /ps and /stop (background terminals), /rollout (print rollout file path), a codex doctor update-check module (cli/src/doctor/updates.rs), notifications configWarning, deprecationNotice, guardianWarning, windows/worldWritableWarning; thread/backgroundTerminals/list; config load errors surfaced with file context (config-load-error.ts).",
+  "evidence": [
+   "EXE-STR:L1339869",
+   "EXE-STR:L1286439",
+   "PLUG:code-review/server.mjs:31363",
+   "PLUG:code-review/server.mjs:30060"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "A /debug-config style \"why is this setting active\" view backed by the layer stack is a high-value transparency feature for Verevon's instruction hierarchy.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-126",
+  "category": "UI/UX & product design",
+  "name": "Customizable keymaps and terminal chrome (TUI)",
+  "what": "Every terminal action (chat, list, pager, agents, editor, global) can be remapped, and the status line, title, theme and pets are configurable.",
+  "how": "Config [tui] with keymap tables: TuiChatKeymap (toggle_voice, interrupt_turn, increase/decrease_reasoning_effort, previous/next_permission_mode, edit_queued_message, skip_question...), TuiListKeymap, TuiPagerKeymap, TuiAgentsKeymap (resume, search, new_task, new_worktree, fork, rename, stop, archive, delete), TuiEditorKeymap (17 editing actions), TuiGlobalKeymap (open_agents, open_transcript, toggle_fast_mode, toggle_raw_output, toggle_side_conversation, toggle_vim_mode...); options such as animations, show_tooltips, auto_recap, vim_mode_default, raw_output_mode, fullscreen_transcript, mouse_scroll_speed, terminal_title and status_line items; /keymap, /vim, /theme, /statusline, /title.",
+  "evidence": [
+   "EXE-STR:L1286129",
+   "EXE-STR:L1286137",
+   "EXE-STR:L1286139",
+   "EXE-STR:L1289690"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "If Verevon ships a CLI/TUI product shell (GOAL.md), this keymap schema and per-context action names are a ready spec; for the web UI the keymap protocol still applies to a shortcut sheet.",
+  "notes": ""
+ },
+ {
+  "id": "codexagent-plugins-and-extensibility-127",
+  "category": "Tools, plugins & extensibility",
+  "name": "Licensing split across shipped extensibility assets",
+  "what": "The curated skill pack carries an Apache-2.0 licence file, while every bundled plugin manifest is marked Proprietary and the Rust runtime links Apache/MIT crates.",
+  "how": "resources/skills/skills/.curated/hatch-pet/LICENSE.txt is the Apache License 2.0; plugin.json license field is \"Proprietary\" for browser, chrome, code-review, codex-app-tools, computer-use, deep-research and visualize; latex lists third-party notices and DEPENDENCIES.md; codex.exe embeds licence headers of Rust dependencies (Apache and MIT); resources/THIRD_PARTY_NOTICES.txt lists JavaScript dependencies only.",
+  "evidence": [
+   "RES:skills/skills/.curated/hatch-pet/LICENSE.txt",
+   "PLUG:code-review/.codex-plugin/plugin.json",
+   "PLUG:latex/THIRD_PARTY_NOTICES.md",
+   "EXE-STR:L1280171"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's licence gate (Apache vendorable, MIT portable, proprietary shapes only) applies: reuse designs and wire formats, but do not copy bundled plugin code, skill prose or the guardian prompt verbatim without a licence check.",
+  "notes": "Whether the open-source Codex CLI repository covers the app-server crates is outside this evidence (INF: it is public under Apache-2.0)."
+ }
+]

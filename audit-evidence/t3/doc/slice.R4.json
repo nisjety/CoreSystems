@@ -1,0 +1,1060 @@
+[
+ {
+  "finalId": "F-t3-060",
+  "title": "Scoped memory for Spaces, Projects and named agents with isolation",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 37,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Give agent_memory an explicit scope kind and id (user, space, project, agent), filter recall by the active scope plus allowed parents, and add a project isolation flag (nothing in from broader scopes, nothing out to them). Space memory applies only to Space turns authorised by a Control-signed Space decision and fails closed; later add an agent scope with a notes document per named agent and a Memory tab on the agents page.",
+  "whyItMatters": "Business users mix clients and projects, and scoped memory prevents cross-project leakage while honouring the rule that Space access never widens an owner-plane ACL. A per-agent memory keeps personal memory clean and fits the agents-that-work-for-you-over-time direction of the agent pages.",
+  "referenceBestPractice": {
+   "bestSource": "web-chatgpt (project isolation contract); cursor (agent home store)",
+   "others": [
+    "antigravity",
+    "claude",
+    "web-claudeai",
+    "web-perplexity",
+    "codexagent",
+    "web-manus"
+   ],
+   "prevalence": "Scoped memory: 5 of 12 (common). Named persistent agents: 4 of 12 (differentiator).",
+   "mechanism": "ChatGPT project-only memory defines the isolation contract: no outside memory comes in, nothing goes out, shared projects are always isolated and enterprise projects always contained; the project summary is regenerated from that project's chats only. Antigravity adds typed scopes with activation triggers and globs. Cursor gives an agent principal a small home store whose SELF.md is injected (tag-escaped) into each run and which the agent can edit, with a Memory tab listing files and source labels in Codex."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:212-232 (agent_memory.scope: run, thread, session, user, org, global; owner; review_state)",
+    "apps/Model Plane/rust/services/session-core/migrations/0011_identity_scoping.sql (unique on org, scope, owner, key)",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:486-494 (topic-derived user vs org scope; owner taken from the verified thread, never the caller)",
+    "apps/Model Plane/proto/model_plane/v1/execution.proto:76 (RunAgentRequest carries space_id)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/preset-agents.ts",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:273 (I21 Projects, deferred to Wave 6)"
+   ],
+   "gap": "There are no server-side Projects (so no project memory or isolation), no space or agent scope on memory rows, and no per-agent memory store or Memory tab. Whether Space-scoped memory exists today is not verified."
+  },
+  "approachOriginal": "session-core: add scope_kind and scope_id to agent_memory and mirror them as tags on the letta-bridge semantic tier; filter SearchMemory by the active scope plus allowed parents using a Control-signed scope decision, and make the project isolation flag block parent recall and block extraction out. Space memory is read or written only on Space turns. Build the project part together with server Projects (I21) and the ADR-0003 precedence decision; build the agent scope after R-t3-08-01 so agent runs actually read it. Frontend: a Memory tab on the agent detail page listing entries with source labels, editable by the agent owner.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-013",
+   "F-t3-001",
+   "F-t3-020"
+  ],
+  "planeOwner": "Model Plane (session-core); Frontend Plane for the agent Memory tab",
+  "risks": "Scope widening through Space membership must fail closed. Agent identity must never escalate authority. Agent memory under ZDR needs a decision.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 4,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:273 (I21 server-synced Projects with folder instructions, Wave 6); memory scoping itself is not in the plan"
+  },
+  "sourceClusters": [
+   "C-t3-08-003",
+   "C-t3-08-013"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-060",
+    "status": "partial",
+    "exactGap": "SRC: agent_memory (migration 0004) has a free-text scope column (run, thread, session, user, org, global; no CHECK) plus owner and is unique on (org, scope, owner, key) (0011), recall and extraction key off the verified thread's owner and org (dreaming.rs:1344-1400, memory_grpc.rs:440-520), and the semantic tier (letta-bridge) filters only by org, thread and a user tag with equality-only filters. There is no space, project or agent scope or scope_id, and no Space predicate in Dreaming's pending-message load (dreaming.rs:1263-1285), the per-turn memory prefetch (sse.rs:1655-1680) or the recall query, so Space-thread content can feed the author's personal user-scope memory and be recalled into later turns elsewhere (INF on impact; worth a test). Projects are client-only localStorage (chat-organization.ts) with server Projects deferred to Wave 6 (I21), and there is no per-agent memory store or Memory tab.",
+    "evidence": [
+     "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:210-232 (agent_memory columns; scope comment only, no CHECK)",
+     "apps/Model Plane/rust/services/session-core/migrations/0011_identity_scoping.sql:1-20 (unique on org, scope, owner, key)",
+     "apps/Model Plane/rust/services/session-core/migrations/0038_thread_source_scope.sql:1-4 (threads.source_scope workspace|conversation)",
+     "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:440-520 (index_memory: owner from verified thread, conversation-only blocks writes)",
+     "apps/Model Plane/rust/services/session-core/src/dreaming.rs:1263-1285 (pending messages across all threads, no Space or origin predicate)",
+     "apps/Model Plane/rust/services/session-core/src/dreaming.rs:1344-1400 (recall rows: session, org/global, user owned by thread user)",
+     "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs:1-60 (extraction writes user:llm: and thread:llm: slots)",
+     "apps/Model Plane/go/services/letta-bridge/internal/agentmemory/client.go:100-175 (namespace org, session, user tag; equality-only filters, no OR)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1655-1680 (memory prefetch skipped only for conversation_only, web-only scope, trivial prompts)",
+     "apps/Model Plane/proto/model_plane/v1/execution.proto:60-100 and :160-175 (RunAgentRequest carries space_id)",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:808-809 (save_memory and recall_memory tools map to memory capabilities)",
+     "apps/Model Plane/rust/services/session-core/src/memory_erasure.rs:1-40 (semantic-tier erasure on bulk paths and Space deletion)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:1-40 (projects stored client-side per org and user)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:268-276 (I21 server projects, Wave 6)"
+    ],
+    "reuse": [
+     "threads.source_scope='conversation' lock (blocks extraction, indexing and recall prefetch) as the model for a Space or project isolation flag",
+     "threads.origin and space_id consistency CHECK (migration 0034) to identify Space-origin threads",
+     "Control-signed Space decision plumbing already carried on Space runs (RunAgentRequest.space_id, scheduled-run decisions)",
+     "agent_memory lineage columns (0037) and stated/inferred provenance for the Memory tab",
+     "memory_erasure and the Space deletion reconciler for Space-scoped rows",
+     "preset-agents.ts and the agent detail page as the host of an agent Memory tab"
+    ],
+    "constraints": "Space scope must be authorised per turn by a Control-signed decision and fail closed; session-core must not decide Space membership itself. Space-scoped rows need Space-deletion and erasure coverage including semantic copies. The semantic tier supports only equality filters, so 'active scope plus allowed parents' must be composed in session-core Postgres or by multiple queries, not by a tag filter. External semantic indexing is suppressed for ZDR-waived runs. Agent memory must never carry authority or widen access, and the unique index must include scope_id.",
+    "approachAdjustment": "Reorder: (1) S fail-closed fix first: exclude Space-origin and agent_run threads from user-scope extraction and Space turns from user-scope recall until a Space scope exists, with a regression test; (2) M Space scope (scope='space' plus scope_id) read and written only on turns carrying a Control-signed Space decision, reusing the source_scope isolation pattern; (3) Project scope waits for server Projects (I21) and should be considered as a mapping onto Spaces rather than a new entity; (4) agent scope last, once agent runs read it (agent runs use the save_memory and recall_memory tools keyed to the user today).",
+    "effortRevised": "L",
+    "effortNote": "Unchanged overall; step 1 is S, step 2 is M, project and agent scopes carry the rest.",
+    "verdict": "reword",
+    "verdictReason": "Gap is real and the baseline 'Space memory not verified' is now resolved as absent, but the code shows an immediate fail-closed leak risk (Space threads feed and are recalled from personal memory) that should lead, and the semantic tier cannot express parent-scope filters.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-061",
+  "title": "Personalisation that tailors itself: a standing user profile in the cached prefix, tone presets, a personal onboarding step and trustworthy settings",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 38,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Synthesise one bounded, user-editable profile memory per user on a schedule from existing memories and inject it as a stable block in the cached prefix (per-turn recall stays after the breakpoint). Add professional tone presets resolved by the shared instruction resolver, review the default voice as a versioned prompt asset, let a narrow set of preferences be set by the assistant through typed actions, add a personal first-run step (name, role, language) and settings search with safe edits and an effective-privacy view.",
+  "whyItMatters": "Hermes's standing user model and Claude's onboarding-to-instructions flow are the clearest examples of an assistant that learns and tailors itself, which is part of the stated vision. Verevon's memory extraction and provenance are already strong; what is missing is a stable profile and user-facing tone controls.",
+  "referenceBestPractice": {
+   "bestSource": "hermes (frozen bounded snapshot; Honcho profile layer, DOC only) ; web-chatgpt (presets and sliders); claude (self-configuring preferences) ; Claude desktop (onboarding writes name, role and topics into instructions, then offers starter tasks) plus DeepSeek (one-step-at-a-time onboarding ledger with durable completion; staged typed settings with override markers, reset to default and stale-revision refusal) plus T3 Code (about 40 indexed settings with anchored scroll and pulse highlight)",
+   "others": [
+    "web-chatgpt",
+    "claude",
+    "codexagent",
+    "hermes",
+    "web-manus",
+    "Cursor (job role to first actions via validated remote config)",
+    "Antigravity",
+    "Codex agent",
+    "Manus",
+    "ChatGPT web (Privacy Center, DOC only)",
+    "Claude.ai web"
+   ],
+   "prevalence": "R-t3-08-08: User model: 2 of 12 (differentiator). Frozen snapshot: 1 of 12. Onboarding and context defaults: 2 of 12. | R-t3-08-09: Personality presets: 5 of 12 (common). Default identity spec: 1 of 12. Self-configuring preferences: 1 of 12 (unique). | R-t3-12-10: Onboarding: 10 of 12 (table-stakes); settings IA: 5 of 12 (common); privacy hub: 1 of 12 (ChatGPT, DOC only).",
+   "mechanism": "Hermes loads curated memory (about 2,200 characters) and user profile (about 1,375 characters) at session start into a cached block with a fullness meter, writes go to storage and the tool result only so the prefix cache is not invalidated, and the block is rebuilt at compaction or a new session. ChatGPT offers seven base styles plus characteristic sliders applied immediately to all chats; An ordered onboarding ledger {id, order, owner, version} mounts one step with complete() or skip(), stored per user and versioned;"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md:87 (mental-model profile is top-5 item 4, not started)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5191 (per-turn semantic recall; the memory block changes every turn)",
+    "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:173-361 (cache breakpoints exist)",
+    "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:137-143 (MemoryConsolidationWorkflow, maintenance policy, denies ZDR)",
+    "apps/Frontend Plane/verevonv3/src/features/onboarding/components/OnboardingPage.tsx and src/shared/actions/home-updates.ts (exist; whether onboarding seeds memory or persona is not verified)",
+    "No timezone symbol in apps/Model Plane/rust/services/model-gateway/src/sse.rs beyond chrono conversions (SRC grep), so timezone does not reach the prompt there",
+    "apps/Model Plane/rust/services/model-gateway/src/verbosity.rs:1-25 (operator-selectable concise, detailed, minimal directives)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6382 (platform_instructions as the first layer)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs:1-60 and src/shared/api/persona-client.ts:9-40 (persona, 1,500-char cap)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2376-2398 (settings.update_me, update_preferences, update_setting with owner plane, risk and approval metadata)"
+   ],
+   "gap": "R-t3-08-08: No standing profile exists, memory is not a stable cached segment, and it is unverified whether onboarding seeds memory or persona and whether timezone and locale are sent to the prompt. | R-t3-08-09: No user-facing tone presets or sliders or 'match my writing style' were found in the settings UI (unverified beyond the baseline); | R-t3-12-10: Onboarding is an organisation wizard (intro, organisation, website crawl, connect accounts, assembly, paywall);"
+  },
+  "approachOriginal": "Reuse MemoryConsolidationWorkflow on a Temporal schedule; profile respects pause/off; onboarding writes 'stated' memories with consent.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "F-t3-001",
+   "F-t3-020",
+   "F-t3-022"
+  ],
+  "planeOwner": "Model Plane (session-core memory, resolver) with Control Plane (settings) and Frontend Plane (onboarding, settings)",
+  "risks": "Profiles can encode wrong or sensitive inferences: user-editable, provenance-labelled, excluded from ZDR.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 25,
+   "DOC": 13,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-08-08: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md:87 (mental-model profile, top-5 item 4; Honcho rejected as a dependency)"
+  },
+  "sourceClusters": [
+   "C-t3-08-026",
+   "C-t3-08-030",
+   "C-t3-08-033",
+   "C-t3-08-011",
+   "C-t3-08-012",
+   "C-t3-08-035",
+   "C-t3-12-010",
+   "C-t3-12-012",
+   "C-t3-12-029"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-061",
+    "status": "partial",
+    "exactGap": "SRC: session-core's Dreaming loop (dreaming.rs:145, 300 s interval) already extracts LLM-inferred user-scope memories into user:llm:* slots tagged inferred, per-turn semantic recall is injected as a system block that changes every turn (sse.rs:1655-1680) and is not a stable cached segment (Anthropic caches one joined system string, anthropic.rs:284-306; the OpenAI-route StablePrefix reorder is off unless MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER is set), authored_instructions_message (sse.rs:6375) is the shared resolver for platform, org, Space, persona and agent layers, and users already have a free-text 1,500-character persona with a per-thread toggle, a per-turn concise/detailed verbosity setting, a memory list with delete, and typed settings.update_me/update_preferences/update_setting actions. Missing: a synthesised standing profile, professional tone presets or 'match my writing style', timezone and locale in the prompt (no timezone symbol in model-gateway beyond chrono conversions), a personal onboarding step (the wizard is organisation-only and feeds plan recommendation), and settings search.",
+    "evidence": [
+     "apps/Model Plane/rust/services/session-core/src/dreaming.rs:126-215 (interval loop, dream_once)",
+     "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs:1-140 (LLM extraction into user:llm: slots, inferred provenance, ZDR reasoning, MAX_EXISTING_SLOTS 40)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1655-1680 (per-turn memory block placed after leading system context)",
+     "apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs:1-80 (trivial-prompt gate)",
+     "apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs:1-120 (StablePrefix is OpenAI-route only and flag-gated; Anthropic joins system messages)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:284-306 (cache breakpoints on tools, one joined system string, last message; disabled under ZDR)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6375-6420 (authored_instructions_message layers)",
+     "apps/Model Plane/rust/services/model-gateway/src/verbosity.rs:1-40 (concise, detailed, minimal directives)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs:1-70 (persona layer, 1,500-char cap)",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PersonaSection.tsx:1-60 (free-text persona, no presets)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2535-2560 (tone option sent as verbosity)",
+     "apps/Frontend Plane/verevonv3/src/features/onboarding/components/OnboardingPage.tsx:330-430 (organisation signals only; feeds plan recommendation)",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2376-2398 (settings.update_me, update_preferences, update_setting: low risk, no approval)",
+     "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:137-143 (MemoryConsolidationWorkflow: maintenance policy, DeniesZDR)",
+     "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/memory_consolidation.go:1-60 (org-scoped input, consolidates episodic memory, not a per-user profile)",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx:80-110 (scheduled fires of any workflow except InteractiveRunSupervision are rejected)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md:87-92 and :228-236 (standing derived profile: missing, item 4, not started)"
+    ],
+    "reuse": [
+     "session-core Dreaming loop and dream_extractor (inferred vs stated provenance, confidence caps, user_memory_controls) as the home of a profile synthesis pass",
+     "authored_instructions_message resolver for tone presets (a preset becomes another layer or a persona template)",
+     "verbosity.rs directives and the composer tone control",
+     "typed settings actions in action-registry.ts for assistant-set preferences",
+     "Anthropic cache planner in anthropic.rs and PromptContext slots for a stable segment",
+     "MemorySection (list and delete) for profile review and edit"
+    ],
+    "constraints": "The profile is owner-scoped to the user and must respect user_memory_controls (extract_after) and Space authority: do not synthesise a personal profile from Space-origin threads (see F-t3-060). ZDR turns never reach messages, so Dreaming cannot see them, and prompt caching is disabled outright under ZDR, so the stable-segment design must be ZDR-aware; persona text itself fires on ZDR turns by precedent. MemoryConsolidationWorkflow cannot be the vehicle: it is org-scoped, registered DeniesZDR, and capability-core hard-rejects scheduled fires of any workflow type other than InteractiveRunSupervision. Profiles must stay user-editable and provenance-labelled.",
+    "approachAdjustment": "Build the profile writer as a second, slower pass in session-core's existing Dreaming loop (one bounded user-scope row per user, derived from accepted memories), not via the Temporal MemoryConsolidationWorkflow. For the cached prefix, split system content into a stable block (platform, org, persona, profile) and a per-turn dynamic block placed after the breakpoint, because today all system messages are joined into one string and per-turn memory in it defeats cross-turn cache hits. Slice into (1) profile writer plus stable segment (M), (2) tone presets plus timezone and locale via the resolver (S), (3) personal first-run step (S), (4) settings search and effective-privacy view (S, overlaps F-t3-068).",
+    "effortRevised": "L",
+    "effortNote": "M to L as a bundle: only the profile writer plus stable segment is M; presets, onboarding, settings search and effective privacy are separate small slices.",
+    "verdict": "reword",
+    "verdictReason": "Memory extraction, the instruction resolver, persona, a verbosity setting and typed settings actions already exist, so the item overstates the gap; its proposed vehicle (MemoryConsolidationWorkflow on a schedule) cannot work and the cache change needs a system-block split, not just a new block.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-062",
+  "title": "Enterprise compliance posture: retention windows and legal hold, data-use disclosure, regime tags, sharing policy, telemetry scrub, signed releases",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 39,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Add a Control Plane retention policy per org and surface with a legal-hold flag that a session-core sweeper obeys (dry-run and audited), propagating deletes to Data Plane indexes and derived memory, and finish Temporary chat once ZDR is attested. Show each provider's training and data-use posture in the model picker from capability-core provider metadata, generalise the ZDR feature-gate pattern into org regime tags in the Control-signed posture, design share links with an org-only default, an admin policy key and a ZDR refusal, scrub telemetry through a typed event registry at the OTel exporter, and build and sign a release artifact in CI with SHA-pinned actions and cargo-deny/govulncheck gates.",
+  "whyItMatters": "Enterprises require retention windows and legal hold before deploying chat broadly, and a signed reproducible release is a prerequisite for credible security claims to enterprise buyers. Most pieces reuse designs Verevon already has (ZDR gate matrix, erasure consumers, privacy-tier routing, hash-only security events).",
+  "referenceBestPractice": {
+   "bestSource": "Claude (policy-driven retention per surface with legal hold and a headless sweep; sticky HIPAA verdict gate; telemetry scrub framework); Cursor (purpose-by-classification privacy matrix); Hermes (SHA-pinned dependencies, release-age check)",
+   "others": [
+    "web-chatgpt",
+    "web-manus",
+    "web-perplexity",
+    "web-claudeai (org-only sharing)",
+    "deepseek",
+    "t3code",
+    "antigravity",
+    "manus"
+   ],
+   "prevalence": "retention 4 of 12, telemetry privacy 5 of 12, release integrity 5 of 12 (common); data-use controls 3 of 12 (differentiator); regime tags and sharing governance 1 of 12 each (unique)",
+   "mechanism": "Retention policy per org and surface, a sweep deleting inactive sessions past the window unless on hold, deletions propagating to search indexes and derived memory. Org taints from the server latch a restricted verdict and a gate throws a typed error for listed surfaces. Typed telemetry events with scrubbers per sink. Lockfiles with exact pins, CI actions by SHA, minimum release age, signed artifacts with rollback."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "Model Plane/rust/services/session-core/src/gdpr.rs:1-8",
+    "Model Plane/rust/services/session-core/src/space_deletion_reconciler.rs:1-8",
+    "Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:6-20",
+    "Model Plane/go/services/capability-core/migrations/0013_privacy_tier_columns.up.sql:21",
+    "Model Plane/rust/crates/mp-contracts/src/retention.rs:1-5",
+    "Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12",
+    "Model Plane/rust/crates/mp-contracts/src/dataplane_posture.rs:1-5",
+    "Model Plane/rust/services/model-gateway/src/security_events.rs:1-10",
+    "Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:709-770",
+    "Model Plane/scripts/release-artifact.sh"
+   ],
+   "gap": "GDPR org and user erasure and Space deletion reconciliation are shipped, and privacy tiers route by residency and contract with ZDR as a non-downgradable claim. Missing or unverified: org-configurable retention windows and legal hold for threads and runs; a user-visible per-provider training and data-use statement; regime tags beyond ZDR and residency; share links (not built, and Space access must never widen an owner-plane ACL); an audit of product analytics and frontend telemetry (only hash-only security events verified); and a signed release candidate with rollback (artifact v3 tooling exists but none has been built; dependency pinning not audited)."
+  },
+  "approachOriginal": "Control Plane: retention policy schema and legal-hold flag; session-core retention sweeper (extend gdpr.rs and the deletion reconciler) with dry-run, audit and propagation to Data Plane and memory consumers. capability-core provider metadata for the data-use label; regime tags added to the Control-signed org posture and checked with the zdr_features gate pattern. Share links designed in session-core (org-only default, admin policy key, ZDR refusal). Support Plane: typed telemetry event registry scrubbed at the OTel exporter; CI builds and signs the release artifact, pins Actions by SHA and adds dependency gates.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-005",
+   "F-t3-004"
+  ],
+  "planeOwner": "Control Plane (retention policy, regime tags); Model Plane (sweeper, provider metadata, share links); Support Plane (telemetry, release pipeline)",
+  "risks": "Accidental mass deletion: dry-run and audit. Do not claim signed releases before a signed candidate with rollback exists. Share links must never widen an owner-plane ACL. Several sub-workstreams are independent and can be sequenced separately, retention and legal hold first.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 30,
+   "DOC": 8,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Temporary chat is built but gated by ZDR attestation (Z-40); Model Plane/scripts/release-artifact.sh exists without a signed candidate; an external audit is listed as owner-only and planned"
+  },
+  "sourceClusters": [
+   "C-t3-11-045",
+   "C-t3-11-043",
+   "C-t3-11-050",
+   "C-t3-11-051",
+   "C-t3-11-046",
+   "C-t3-11-056"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-062",
+    "status": "partial",
+    "exactGap": "Shipped: org and user GDPR erasure fan-out (session-core gdpr.rs), Space deletion reconciliation, a Control-only Space-scoped legal hold with a hold_ref pointer (user-core spaces.go:410, deletion_authorization.go:25-31), a global env-driven audit and usage retention sweeper (audit-core main.go:93-172), privacy tiers by residency and ZDR contract shown as model badges (privacy-tier.ts), temporary chat via a ZDR body flag (gateway zdr.rs:43), and signed release-artifact v3 tooling with a rollback artifact (scripts/release-artifact.sh) that no CI workflow invokes. Missing: per-org retention windows and a sweeper for threads and runs (org-core Compliance.DataRetentionDays at types.go:66 is a vestigial unused field), an org or thread level legal hold, any training or data-use statement, regime tags beyond ZDR and residency, share links, a typed telemetry registry with scrub (mp-telemetry only wires OTLP), SHA-pinned actions (none of 107 uses lines are SHA-pinned; Model Plane CI has no audit step; govulncheck and cargo-audit run only in quarry-v2-ci.yml), and a CI-built signed candidate.",
+    "evidence": [
+     "apps/Model Plane/rust/services/session-core/src/gdpr.rs:1-30",
+     "apps/Model Plane/rust/services/session-core/src/space_deletion_reconciler.rs:1-40",
+     "apps/Model Plane/rust/services/session-core/migrations/0044_run_retention_receipt.sql:1-40",
+     "apps/Control Plane/user-core/internal/http/spaces.go:395-450",
+     "apps/Control Plane/user-core/internal/http/server.go:348-349",
+     "apps/Control Plane/user-core/internal/spaces/deletion_authorization.go:19-45",
+     "apps/Control Plane/org-core/internal/org/types.go:60-72",
+     "apps/Control Plane/audit-core/cmd/server/main.go:90-98,150-172",
+     "apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts:17,26",
+     "apps/Model Plane/rust/crates/mp-telemetry/src/lib.rs:1-30",
+     "apps/Model Plane/rust/services/model-gateway/src/security_events.rs:1-20",
+     "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-14",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs:30-70",
+     "apps/Frontend Plane/verevonv3/src/shared/api/privacy-tier.ts:1-60",
+     "apps/Model Plane/scripts/release-artifact.sh:1-60,84-160",
+     ".github/workflows/model-plane-rust-ci.yml:73-84,152-158",
+     ".github/workflows/quarry-v2-ci.yml:213-233"
+    ],
+    "reuse": [
+     "Control Space legal-hold shape (Control-only fence carrying an external hold_ref) generalised from Space scope to org or thread scope",
+     "session-core gdpr.rs erasure fan-out (verevon.gdpr.erasure.requested) and the Space deletion receipt plus reconciler pattern for propagating deletes to Data Plane and memory",
+     "audit-core runRetention loop as the sweeper template",
+     "Run retention_class receipt (zdr, persistent, zdr_waived) in session-core migration 0044 to skip ZDR rows and mark waived runs",
+     "privacy-tier.ts badges plus capability-core provider metadata for the data-use label",
+     "zdr_features.rs typed-refusal gate matrix as the template for regime tags",
+     "scripts/release-artifact.sh v3 build/verify/deploy with signed root and rollback artifact"
+    ],
+    "constraints": "Control owns the retention policy and legal hold (identity/orgs/audit); session-core sweeps only its own rows and must propagate to Data Plane indexes and Letta memory through events and receipts, never by cross-plane DB access (gdpr.rs itself notes cost-core is unreachable). A legal hold must outrank the sweeper but interacts with GDPR erasure (Space deletion already has a blocked_legal_hold status), so precedence needs a Control decision. ZDR runs persist no content, so a hold cannot apply to them and the sweeper has nothing to delete; return a typed refusal rather than silence. Share links are authority-bearing: Space access must never widen an owner-plane ACL, ZDR threads must be refused, and the grant belongs in Control rather than only in session-core.",
+    "approachAdjustment": "Place the share-link grant in Control (issue and verify, like Space read decisions) with session-core enforcing it, instead of designing it in session-core alone. Reuse the existing Space legal-hold contract rather than adding a new flag shape, and either wire or delete the unused org-core Compliance struct (DataRetentionDays, HIPAACompliant) so there is one retention field. Split the item into independent workstreams: retention window plus org/thread hold with dry-run and audit (L), data-use label (S), regime tags (M), share-link ADR then build (L), typed telemetry registry (M), and release pipeline (M: invoke release-artifact.sh from CI, pin actions by SHA, add cargo-audit/cargo-deny and govulncheck to the Model Plane workflows). Do not claim signed releases until a candidate with rollback has actually been built.",
+    "effortRevised": "XL",
+    "effortNote": "Six sub-workstreams across Control, Model Plane and Support Plane; sequence retention and hold first. Individually S to L.",
+    "verdict": "reword",
+    "verdictReason": "Several pieces already exist (Space legal hold, audit retention sweeper, privacy tiers, temporary chat, release-artifact tooling), so the item should be reworded to say exactly which parts are missing and split so retention/hold, share links and the release pipeline can ship independently.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-063",
+  "title": "Loop guard, durable org hooks and universal tool-output handles in both loops",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 40,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "(1) A LoopGuard in mp-contracts used by both loops: a rolling window of (tool, args hash, result class) with an escalating reminder at 3, 5 and 8 identical failing calls, a stop with a typed loop_detected end reason, a repetition detector for streamed text (code-fence aware) and bounded retry on empty or length-stopped responses. (2) Persist org and Space hook rules in capability-core and pass hook_context into Do runs, which today receive none; handlers stay declarative rules plus HTTP webhooks (no shell) and hooks may only narrow authority. (3) Generalise ToolResultHandle from MCP results to every built-in tool result above a token threshold (fetch_url, knowledge, provider actions), run-scoped and never stored on ZDR turns.",
+  "whyItMatters": "A stuck run that keeps repeating a failing call wastes tokens and is exactly what users describe as \"it keeps doing the same thing\". Hooks let org admins enforce policy (for example block mail outside the domain) without code changes, and result handles protect the context window in Do runs that read large documents. All three are small wiring jobs on existing primitives.",
+  "referenceBestPractice": {
+   "bestSource": "Hermes (side-effect-free loop controller for repeat, cycle and no-progress detection with stop gates) for the guard; Cursor (generic and tool-specific pre/post hooks) for hooks; DeepSeek (private spill files with opaque locators inside a shared token budget) for output handles",
+   "others": [
+    "Cursor (streamed-text repetition detection)",
+    "DeepSeek (reminders at 3, 5 and 8 repeats)",
+    "Antigravity (hook JSON contract with step injection)",
+    "Codex (command, MCP-tool and agent hook handlers)",
+    "Hermes (per-turn output budget)"
+   ],
+   "prevalence": "loop hygiene 3 of 12 (differentiator); hooks 3 of 12 (differentiator); output spill 3 of 12 (differentiator)",
+   "mechanism": "Guard: rolling window of (tool, args hash, result class); on N identical failing calls or no new information inject an escalating reminder, then stop with a loop reason. Hooks: registry {event, matcher, handler(command|http|prompt), timeout}; pre-hooks return allow|deny|ask plus optional rewritten input and context; durable store with per-org admin rules. Spill: if output exceeds max_inline_tokens store the full text as a run-scoped blob and return {preview_head, marker, preview_tail, handle, size}; a read tool fetches ranges; blobs expire with the run."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:214 (only a truncated final tool call in a length-stopped message is refused)",
+    "grep of apps/Model Plane/rust/services/*.rs for LoopGuard, loop_guard, no_progress, repeated_call: no matches",
+    "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:1-18 and 113 (hook engine with allow/deny/ask and glob match)",
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2003-2040 (HookRegistry is in-memory in the gateway) and apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:418-428 (hook_context sent only on browser runs via ExecuteStepRequest, apps/Model Plane/proto/model_plane/v1/execution.proto:285; RunAgentRequest has no hook field)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs:1-27 (handles and result_query exist for MCP results)"
+   ],
+   "gap": "No repetition, cycle or no-progress detection in either loop. The hook engine is real but its rules are in memory, are not passed to Do runs, have no UI or durable store and cannot rewrite input. Result handles exist only for large MCP results, not for built-in tools."
+  },
+  "approachOriginal": "Model Plane. Add LoopGuard to mp-contracts and call it from model-gateway tool_loop.rs and execution-core agent.rs, emitting a typed loop_detected terminal reason. Persist hook rules in capability-core per org and Space, add a hook_context field to RunAgentRequest, and add a settings UI. Generalise ToolResultHandle to every tool result above a threshold in both loops with a ZDR bypass (no handle persisted).",
+  "effortOriginal": "M",
+  "dependencies": [
+   "F-t3-032"
+  ],
+  "planeOwner": "Model Plane",
+  "risks": "False positives on legitimate polling (allow-list idempotent poll tools and require identical result class); hooks must never widen authority; ZDR turns must not persist handles; hook webhooks are an egress path and need allow-listing.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 18,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t3-04-010",
+   "C-t3-04-016",
+   "C-t3-04-014"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-063",
+    "status": "partial",
+    "exactGap": "Neither loop has repetition, cycle or no-progress detection: only exact duplicate read-only calls are suppressed (tool_loop.rs duplicate_call_signature; agent.rs knowledge_search retrieval_signature), there is no loop_detected end reason, and neither an empty nor a length-stopped model round is retried (an empty stream is detected and reported as inference_stream_error at sse.rs:3347-3385, only a truncated final tool call is refused, and transient tool failures are retried by retry.rs). The hook engine is real but rules live only in the gateway in-memory HookRegistry, are forwarded only on browser and code_interpreter steps, and the agent loop passes an empty hook_context (agent.rs:1923-1927) because RunAgentRequest has no hook field; a session-core hook_configs table exists but nothing reads it. ToolResultHandle already parks oversized built-in Verevon reads in the inline loop (verevon_read_outcome), but not fetch_url, web_search, knowledge_search or provider results; MCP calls are denied in the inline loop, so the premise that handles serve MCP results is stale, and execution-core has no handle store (8,000-character truncation only).",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:40-62 (12 default rounds, ceiling 32) and :2320-2345 (exact-repeat suppression) and :7185-7200 (same-round duplicates)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:270-279 (rounds, MAX_TOOL_CONTEXT_CHARS = 8000), :1815-1850 (duplicate knowledge_search suppressed), :3456-3473 (retrieval_signature)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1923-1927 (agent loop calls execute_step_with_subagent with \"\" as hook_context)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:1-60,195-215 (transient tool retry; truncated_tool_call_index refuses only a cut-off final call)",
+     "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:1-130 (HookDecision allow/deny/ask, first match wins, no input rewrite; doc anticipates a durable capability-core registry)",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:1988-2060 (HookRegistry is an in-memory DashMap; hook_context_json)",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:410-430 and apps/Model Plane/rust/services/model-gateway/src/tools.rs:200-215 (the only two sites that forward hook_context)",
+     "apps/Model Plane/proto/model_plane/v1/execution.proto:284-285 (hook_context only on ExecuteStepRequest; RunAgentRequest :76-136 has none)",
+     "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:162-185 (hook_configs table with approve/block/modify/log and priority; only gdpr.rs touches it)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:3347-3385 (empty assistant stream reported as an error, not retried) and apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:145-155,6892 (length-stop makes the last tool call truncated and refused)",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2188-2214 and :3805-3841 (handles park built-in Verevon reads; ZDR returns raw output)",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3676-3692 (mcp__ tools denied in the inline loop)"
+    ],
+    "reuse": [
+     "duplicate_call_signature (model-gateway) and retrieval_signature (execution-core), which already mirror each other and are the natural base for a shared LoopGuard in mp-contracts",
+     "retry.rs risky-call classifier (is_risky_call) so loop-guard reminders and retries never replay side effects",
+     "Hook engine (hook/mod.rs) and hook_context_json wire format unchanged; only the rule source and the RunAgentRequest plumbing are new",
+     "Unused session-core hook_configs schema (or a capability-core table) as the durable store instead of a third schema",
+     "ToolResultStore plus unwrap/apply_query for the handle generalisation, shared with the text-page kind of F-t3-054"
+    ],
+    "constraints": "Hooks may only narrow authority: Allow defers to the permission engine and first matching rule wins, so rule order must be validated so an early allow-all cannot mask a later deny; Space or org hook scope must never widen an owner-plane ACL. ZDR: handles are never created under ZDR (tool_loop.rs:3805-3815), so universal handles keep the inline-truncation fallback on ZDR turns and a durable hook store must not persist event content. Hook webhooks are an egress path and need allow-listing. The two loops are separate processes, so a handle store used by the Do loop needs its own process-local store or a shared crate; gateway handle memory is not durable (900 s TTL).",
+    "approachAdjustment": "Re-scope part 3: handles already cover built-in Verevon reads in the inline loop; the work is extending them to fetch_url, knowledge_search and provider results and adding a store to execution-core, not generalising from MCP. For part 2, pick one owner for durable rules (the existing session-core hook_configs table or a new capability-core table, since the hook engine doc names capability-core), add a REST and settings route (the frontend gateway has no hooks domain), add hook_context to RunAgentRequest and replace the \"\" at agent.rs:1927. Ship the LoopGuard (part 1) first and independently; it needs no schema or proto change.",
+    "effortRevised": "L",
+    "effortNote": "Raised from M because the three parts are independent workstreams: LoopGuard alone is S-M, durable hooks need a store, REST route, UI and a proto field, and universal handles need an execution-core store.",
+    "verdict": "reword",
+    "verdictReason": "The LoopGuard gap and the Do-run hook gap are real and absent, but the handle premise is outdated (handles already serve built-in reads and MCP is denied inline) and a dormant hook_configs table and the engine doc change the persistence approach. Reword and split.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-064",
+  "title": "Public, versioned Agent API with origin-tagged runs as the one entry for every surface (SPA, API keys, schedules, mail, later channels)",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 41,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Expose a versioned /v1/agent API on model-gateway (create run, stream, resume, cancel, answer an interaction) behind Control-issued API keys exchanged for audience-bound delegated bearers, generate an SDK from the same contract, and make every run carry an origin and parent id (chat, console, api, schedule, mail, channel, subagent). Route scheduled and mail-triggered runs through the same governed pipeline, and treat future Channel Plane adapters (Teams, Slack) and a thin CLI as clients of this API.",
+  "whyItMatters": "Enterprise customers and internal surfaces (Office add-ins, mail tasks, cron) can reuse the governed Do-mode pipeline instead of re-implementing it, and agents reachable from Teams or Slack raise daily use. Today Model Plane has one real front door, the SPA through the BFF, plus a hollow scheduled path.",
+  "referenceBestPractice": {
+   "bestSource": "Codex (one runtime, many thin surfaces); Manus (everything is a task with an id and URL)",
+   "others": [
+    "Antigravity (trajectories tagged by source)",
+    "Hermes Agent (messaging gateway with about 25 adapters)",
+    "T3 Code",
+    "DeepSeek harness"
+   ],
+   "prevalence": "C-001: 6 of 12 (table-stakes). C-037: 3 of 12 (differentiator). C-038: 1 of 12 (unique)",
+   "mechanism": "Codex: one Rust binary exposes exec, review, resume and fork by id, queue, sandbox, execpolicy and an app-server daemon, so each surface is a thin client of the same runtime. Manus: a task.* API where chats, API tasks, schedules and sub-tasks are all tasks with a task_url. Hermes: channel adapters are plugins that connect, normalise, authorise, resolve a canonical session key (agent:{ns}:{platform}:{chat_type}:{chat_id}), queue busy sessions and stream replies."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:136-351",
+    "apps/Model Plane/rust/services/session-core/migrations/0034_thread_origin.sql:1-12",
+    "apps/Model Plane/rust/services/session-core/migrations/0041_mail_task_thread_origin.sql",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs:497-525",
+    "apps/Control Plane/auth-core/src/auth/auth.ts:1112-1124",
+    "apps/Control Plane/auth-core/src/auth/model-plane-token.controller.ts:1-30",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/briefs.rs:36-40",
+    "apps/Model Plane/go/services/bridge-core",
+    "apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md"
+   ],
+   "gap": "SRC: the gateway already serves a rich /v1 surface (invoke, stream, resume, runs, orchestration, tasks, cron) but only the BFF consumes it; there is no public Agent API, SDK, CLI or OpenAI-compatible endpoint. Threads carry a stored origin and system runs are listed, but a scheduled step is a single no-tool 1,024-token call with a receipt and no result delivery, and the daily-brief route has no SPA caller. auth-core has an optional API-key plugin (API_KEY_ENABLED) and a model-plane token controller that mints audience-bound RS256 bearers, so key-to-bearer exchange is feasible. The Channel Plane is docs-only and bridge-core is scaffolding."
+  },
+  "approachOriginal": "(1) Versioned /v1/agent routes in model-gateway that wrap the existing managed-run start, events, resume, cancel, plan-approval and interaction answers, with an OpenAPI spec generated from the Rust types (shares tooling with R-t3-13-07) and a generated SDK. (2) API keys from auth-core exchanged at the edge for audience-bound delegated bearers; the API must never bypass the BFF's bearer minting, ZDR propagation or per-org rate limits. (3) Extend the thread and run origin enum (api, schedule, mail, channel, subagent) and parent run id; run ScheduledRunSupervision through the full governed Do-mode loop with an unattended identity and deliver results to the thread plus notification-core (agent-runtime item R-t3-04-05 owns the loop semantics). (4) Later: stand up the Channel Plane with a Teams then Slack adapter calling this API, with per-channel identity mapping through Control, and a thin CLI.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-002",
+   "F-t3-016",
+   "F-t3-067"
+  ],
+  "planeOwner": "Model Plane (model-gateway); Control Plane for keys; Channel Plane (not yet built) for adapters",
+  "risks": "Widening the edge enlarges attack surface; unattended runs need always-ask or pre-approved plans; channel identity linking and per-platform data residency; the Channel Plane does not exist yet.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 18,
+   "DOC": 6,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t3-13-001",
+   "C-t3-13-037",
+   "C-t3-13-038"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-064",
+    "status": "partial",
+    "exactGap": "SRC: model-gateway already serves the run lifecycle (invoke, stream, resume, cancel, queue, plan-approval, run events, runs list, cron) and an OpenAPI spec with generated TypeScript and Python SDKs exists, but only the BFF consumes it: the BFF authenticates by session cookie only, auth-core's API-key plugin (API_KEY_ENABLED, orpc verifyApiKey) has no consumer that exchanges a key for a model-gateway bearer, and there is no /v1/agent surface, CLI or OpenAI-compatible endpoint. Thread origin is a closed six-value CHECK list (chat, space, agent_run, support, system, mail_task; session-core grpc.rs THREAD_ORIGINS, migrations 0034/0041) with no api/schedule/channel/subagent value, the mail-task pipeline is wired to None in gateway config.rs:269 (every call answers 503), and a scheduled step is one no-tool 1,024-token inference (execution-core grpc.rs:498-531) with no result delivery.",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:132-236 (route table: invoke, stream, resume, cancel, queue, runs, plan-approval, events, browser, ai, proxies)",
+     "apps/Model Plane/api/openapi.yaml:91-130 (invoke spec; spec covers invoke, orchestration, ai, capabilities, tasks, cron, memory, skills)",
+     "apps/Model Plane/api/generate-sdk.sh:1-30 (openapi-generator TS and Python SDKs already scripted)",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:2252 (THREAD_ORIGINS, six values)",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:2289-2345 (authorize_user_owned_thread_origin, resolve_thread_origin)",
+     "apps/Model Plane/rust/services/session-core/migrations/0034_thread_origin.sql:1-50",
+     "apps/Model Plane/rust/services/session-core/migrations/0041_mail_task_thread_origin.sql:1-21",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:1380-1430 (run metadata source=scheduled_run bindings)",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:4582-4666 (start_scheduled_run, orchestrator-core only, Control decision verified)",
+     "apps/Model Plane/rust/services/execution-core/src/grpc.rs:498-531 (scheduled_inference_request: no tools, max_tokens 1024)",
+     "apps/Control Plane/auth-core/src/auth/auth.ts:1112-1160 (apiKey plugin, user-keys and org-keys, x-api-key header, rate limit)",
+     "apps/Control Plane/auth-core/src/auth/orpc-router.ts:2720-2780 (verifyApiKey procedure)",
+     "apps/Control Plane/auth-core/src/auth/model-plane-token.controller.ts:1-80 (session-cookie and service-credential issuance only; no API-key path)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/settings/api_keys.rs:1-80 (create/list keys via auth-core)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/middleware.rs:169-190 (cookie-only session validation)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:82 (inject_persona_instructions at the BFF)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:111",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:108",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6375-6420 (authored_instructions_message reads req.org_instructions / space / persona supplied by the BFF)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:95 (apply_org_zdr_posture, BFF one-way org ZDR raise)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs:269 (mail_task_pipeline: None)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs:1-60 and :405-415 (503 mail_task_pipeline_not_configured)",
+     "apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go:1-60 (Noop adapter registry)",
+     "apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md:1-12 (docs-only, no runtime)"
+    ],
+    "reuse": [
+     "model-gateway run routes in http_routes.rs (invoke/stream/resume/cancel/queue/plan-approval/events) as the facade target",
+     "api/openapi.yaml plus api/generate-sdk.sh (extend and regenerate instead of starting a second spec or SDK pipeline)",
+     "auth-core apiKey plugin configs (user-keys, org-keys), orpc verifyApiKey and the gateway settings api_keys routes plus settings.create_api_key action metadata",
+     "auth-core model-plane-token controller (audience-bound RS256 bearers; interactive retention/ZDR posture resolved at mint)",
+     "session-core PrepareUserOwnedThread and USER_OWNED_THREAD_CALLERS seam for unattended user-owned threads",
+     "StartScheduledRun / PrepareScheduledRunThread Control-decision machinery and runs.parent_run_id lineage plus runs.metadata.source",
+     "BFF normalization (normalized_model_body, apply_org_zdr_posture, inject_persona_instructions, audience token minting, rate_limit.rs)"
+    ],
+    "constraints": "Control Plane owns keys and identity; Model Plane must only ever see audience-bound delegated bearers that carry the retention (ZDR) posture minted by auth-core. SRC: org, Space and persona instruction layers and the org ZDR raise are applied by the BFF (chat/streams.rs:82, shared.rs:95) while model-gateway only reads what the request carries, so a client that calls model-gateway directly skips them. Unattended runs need a system or service owner under Control-signed decisions (the scheduled path already requires a Space decision) and always-ask or pre-approved plans; Space access must never widen an owner-plane ACL; channel adapters belong to the Channel Plane, which is docs-only; API-started browser runs still need broker grants (Model proposes, Quarry executes).",
+    "approachAdjustment": "Do not expose /v1/agent directly on model-gateway: host the versioned public surface at the Frontend Plane gateway (or a thin API edge that reuses its normalization and instruction injection) and authenticate API keys there through auth-core verifyApiKey and a delegated-bearer exchange, or first move instruction-layer resolution server-side. Drop 'generate an SDK' as a new step (SDKs are already generated from a hand-written spec) and instead cover the missing routes and generate the spec from route types. Record origin on the run (runs.metadata.source or a column) instead of widening the thread-origin CHECK for each surface; start with api and schedule, and defer channel and CLI until the Channel Plane exists. Split into (1) API-key edge plus facade, (2) governed unattended scheduled loop (owned by the agent-runtime items), (3) mail-task pipeline wiring, (4) channel adapters and CLI.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged at L for slices 1 to 3 together; channel adapters and CLI are excluded and blocked on a Channel Plane that does not exist. Scaffolding (SDK spec, API-key issuance, origin enum) lowers slice 1 but the BFF-governance placement question adds design work.",
+    "verdict": "reword",
+    "verdictReason": "The need is real, but the item misstates the starting point (an OpenAPI spec with generated SDKs and API-key issuance already exist) and places the public surface on model-gateway, which would bypass BFF-owned instruction layers and org ZDR raise; the scheduled and mail paths are hollow and should be named as separate prerequisites.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-065",
+  "title": "Declarative provider registry and bring-your-own connections",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 42,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Turn provider registration from environment configuration into data: a ProviderProfile (wire protocol, base and models URL, auth kind, compat switches, retry and timeout budgets, residency, privacy tier) stored by inference-core, added through a schema-generated admin form, with model discovery that proposes entries without mutating config until saved and an admin overlay (custom model ids, hide, reorder, unverified capability overrides). Then generalise the ChatGPT-subscription pattern into BYO connections held by Integration Core (API key, cloud role or helper command for Bedrock, Vertex, Azure Foundry, or a customer gateway), referenced by opaque connection id, with per-connection routing so a user or org can hold several connections of one provider.",
+  "whyItMatters": "Enterprise and sovereign customers can add their own gateway, on-prem endpoint or cloud tenancy without a Verevon release, and heavy users can bring their own keys. It also covers the local-model need in a form appropriate for a cloud product.",
+  "referenceBestPractice": {
+   "bestSource": "hermes (hermes-architecture-and-surfaces-091, 41 overridable provider profiles); claude desktop (claude-product-ux-107, claude-runtime-architecture-072 for BYO cloud accounts and helper credentials with TTL)",
+   "others": [
+    "deepseek (090, 093, 099, 100)",
+    "codexagent (037, tight 21-field provider record)",
+    "t3code (001, 032, 086 instances and catalogue curation)",
+    "cursor (096 team gateway)",
+    "antigravity",
+    "manus",
+    "web-chatgpt",
+    "web-claudeai"
+   ],
+   "prevalence": "registry 5 of 12 (common); BYO 6 of 12 (table-stakes); multi-instance 1 of 12; curation 2 of 12",
+   "mechanism": "A ProviderProfile dataclass per provider with api mode, auth type, base and models URLs and error classification, overridable by a user profile of the same name; BYO credentials come from key, cloud role or a helper script with TTL and silent refresh, with health probes on save, and platform and customer credentials never fall back to each other. [SRC]"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/inference-core/src/config.rs:209-214",
+    "apps/Model Plane/rust/services/inference-core/src/config.rs:286-326",
+    "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:1-60",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chatgpt-subscription-client.ts:1",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:40-41"
+   ],
+   "gap": "Providers come from environment configuration (INFERENCE_PROVIDER_ORDER plus fixed adapters). Only the user-owned ChatGPT subscription route exists as a connection; there is no admin-defined provider record, compat switches, discovery, add-provider UI, API-key BYOK, customer cloud account or customer gateway. Whether a user or org can hold several connections of one provider, and any per-org model visibility beyond the router-policy table, have no baseline record (unknown)."
+  },
+  "approachOriginal": "inference-core: provider-profile table with secrets referenced, never stored; discovery calls GET /models; profiles flow into the same fallback chain, privacy-tier gate and metered decorator. Customer-declared profiles default to the lowest privacy tier and no ZDR claim until attested. Integration Core: new credential kinds and short-lived token minting per call; Model Plane receives only an opaque connection id. cost-core: customer-billed flag. Frontend Plane: schema-annotated settings form. Phase 1 registry plus curation, phase 2 BYO.",
+  "effortOriginal": "XL",
+  "dependencies": [
+   "F-t3-042",
+   "ADR: model entitlement ownership"
+  ],
+  "planeOwner": "Model Plane (registry) with Integration Core (credentials)",
+  "risks": "Unverified endpoints can claim residency or ZDR they do not have; customer endpoints may log prompts; confusing which account paid (show the connection on the served-by line); wrong capability overrides cause failures (mark unverified and log).",
+  "significance": 3,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 16,
+   "DOC": 8,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t3-09-012",
+   "C-t3-09-013",
+   "C-t3-09-016",
+   "C-t3-09-035"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-065",
+    "status": "partial",
+    "exactGap": "SRC: provider registration is environment-only (inference-core config.rs from_env: INFERENCE_PROVIDER_ORDER plus fixed Anthropic, OpenAI-compatible base URL, Azure OpenAI, Azure Foundry Anthropic, Azure Cohere and ChatGPT-subscription adapters; ZDR attestation is an evidence-bound env block in provider/zdr.rs), and no Bedrock, Vertex, Gemini, Mistral or Ollama adapter exists. The only per-user connection is the ChatGPT-subscription route where Integration Core owns auth, inference-core receives an opaque subscription_connection_id, and a connection-level ZDR assessment runs at connect time; there is no provider-profile table, model discovery, compat switches, admin overlay, API-key BYOK or customer-gateway route. The only DB-backed precedent is the routing-policy JSONB singleton in session-core that inference-core polls (policy_client.rs).",
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/config.rs:1-120 (env-defined provider config fields)",
+     "apps/Model Plane/rust/services/inference-core/src/config.rs:200-335 (from_env: INFERENCE_PROVIDER_ORDER, Azure blocks, ZDR attestation resolution, deny-by-default residency opt-ins)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/zdr.rs:1-50 (evidence-bound ZDR attestation with effective and review-by dates)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:1-70 and :100-130 (opaque connection id; no token held)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/policy_client.rs:1-60 (routing policy read from session-core, fail-soft)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs:1-50 (RoutingPolicy schema, default equals compile-time values)",
+     "apps/Ingestion Plane/integration-corev2/internal/api/codex_subscription.go:30-140 (connection create with new conn_ id, applyConnectionZDR in the same transaction, audit events)",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7603-7642 (list_models passes through inference-core's catalogue with privacy tier and residency)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/router_policy.rs:1-40 (admin routing policy, mode to model table only)"
+    ],
+    "reuse": [
+     "Integration Core connection records and the opaque-connection-id pattern (codex_subscription.rs plus codex_subscription.go) for BYO credentials",
+     "Integration Core's applyConnectionZDR capability assessment at connect time",
+     "session-core routing-policy singleton and inference-core's poll client as the store and refresh pattern for an admin overlay",
+     "provider/zdr.rs evidence-bound attestation instead of a free-form zdr flag",
+     "served-by stamp and /v1/models descriptor (privacy_tier, residency) to show which connection served an answer",
+     "cost-core metering decorator and the intent-layer fallback chain"
+    ],
+    "constraints": "Model Plane must not store provider secrets: reference an opaque connection id held by Integration Core (existing pattern). A customer-declared provider must default to the lowest privacy tier with no ZDR or residency claim; ZDR today requires an attestation with resource id, approval reference, effective and review-by dates and a digest, and global residency opt-ins are deny-by-default flags, so an admin form must not be able to type 'zdr: true'. Customer-billed routes need cost-core attribution and the served-by line must name the connection. Entitlement ownership between Control and Model Plane is an open decision (ADR dependency).",
+    "approachAdjustment": "Phase it differently: (1) an admin overlay over the env-defined providers (hide, reorder, custom model ids), stored in session-core like the routing-policy singleton; (2) one new OpenAI-compatible customer-gateway profile with a secret reference and lowest privacy tier; (3) cloud-role BYO (Bedrock, Vertex, Foundry) last. Do not start with a generic registry that replaces env wiring: ZDR and residency attestation and provider-specific adapters (the Anthropic cache planner, Azure deployment names) cannot be expressed as compat switches. Schema-generated admin form is optional polish.",
+    "effortRevised": "XL",
+    "effortNote": "Unchanged for the full registry plus BYO; phase 1 overlay alone is M.",
+    "verdict": "reword",
+    "verdictReason": "The capability is genuinely absent beyond the single subscription connection, so it stays, but the approach should start from an overlay on existing providers and preserve evidence-bound ZDR and residency rather than introduce a generic registry.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-066",
+  "title": "UI quality gates: remove Norwegian-only controls and enforce i18n and design tokens in CI",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 43,
+  "wave": "W1",
+  "quickWin": false,
+  "summary": "Route the remaining Norwegian-only strings (approval buttons, plan rung labels, tool status words, trace copy) through i18n.tr, then add CI gates so they cannot come back: an ESLint rule against bare string literals in JSX under features/chat and features/agents, a dictionary-parity test, and a raw-colour ban outside tokens for new files. Write the per-surface state checklist (empty, loading, reconnecting, degraded, exhausted, error) into the design doc, and move toward namespace catalogs instead of inline tr(no, en) pairs so a third locale is feasible.",
+  "whyItMatters": "Language leaks in the most important controls (approvals) are visible to every English user and to screen readers. A fast-growing SolidJS UI with a roughly 16k-line global.css needs automated guards to stay consistent across chat, agents and Spaces, and the Nordic market makes a clean Norwegian, English and later Swedish or Danish setup a real differentiator.",
+  "referenceBestPractice": {
+   "bestSource": "DeepSeek (typed dictionaries, a gate against hard-coded copy, a parity test; semantic-token specs) plus Hermes Agent (layered locale packs, 34 KB DESIGN.md with a state checklist)",
+   "others": [
+    "Claude desktop (34k ICU strings in 11 locales)",
+    "T3 Code",
+    "Manus",
+    "ChatGPT web",
+    "Claude.ai web",
+    "Perplexity web"
+   ],
+   "prevalence": "i18n: 7 of 12 (table-stakes); design contract and token enforcement: 4 of 12 (common).",
+   "mechanism": "Message keys in typed catalogs per feature namespace with ICU plural/select; a CI script fails on string literals in JSX outside the i18n call; a parity test asserts every key exists in every locale; typed failure causes select localised guidance. Tokens in three layers (scale, semantic alias, component) with a lint gate rejecting raw colours and literal spacing in feature code, one primitives catalog, and motion tokens with reduced-motion fallbacks."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1917-1930",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2538-2542",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs:1-5",
+    "apps/Frontend Plane/verevonv3/eslint.config.js:93-105",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css:4630"
+   ],
+   "gap": "Norwegian and English are handled with inline i18n.tr(no, en) pairs, and several controls are Norwegian-only (the Godkjenn and Avvis approval buttons were verified as bare literals); there is no gate or parity test and only two locales. eslint.config.js (116 lines) has a no-restricted-syntax block (a fabricated-security-posture rule) but no raw-colour or JSX-string rule that I found; a single primitives catalog was not located. The design spec is marked stale against code."
+  },
+  "approachOriginal": "Frontend Plane: fix the leaks first. Then extend the existing no-restricted-syntax array in eslint.config.js (a second key would replace the existing A8 rule, per the comment in that file) with a JSX bare-literal selector scoped to features/chat and features/agents, add a Vitest parity test over the dictionaries, and add a stylelint or ESLint raw-colour rule for new files only (legacy global.css is too large for a big-bang gate). Add the state checklist and motion tokens to the design doc. Introduce namespace catalogs gradually, starting with approvals and tool status.",
+  "effortOriginal": "M",
+  "dependencies": [],
+  "planeOwner": "Frontend Plane",
+  "risks": "Gate noise on legacy CSS and inline pairs, so scope new rules to new or touched files. Inline tr(no, en) pairs make a third locale costly until migrated. Needs verification of the token-gate half (check for an existing primitives kit under src/shared/ui).",
+  "significance": 3,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 11,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t3-12-019",
+   "C-t3-12-014"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-066",
+    "status": "partial",
+    "exactGap": "Confirmed bare or single-language literals in the most important controls: Godkjenn and Avvis approval buttons (ChatMessages.tsx:1917,1924), plan approve button (2523), rung labels (2538-2542), Tenker (3672), Last ned (ChatArtifactPanel.tsx:397,581), Stopp svar (ChatPage.tsx:947), run receipt labels and effect names (ChatPanels.tsx:1285-1306) and English-only Pause fleet (FleetRunConsole.tsx:155), while roughly 984 other strings in chat and agents use i18n.tr. eslint.config.js has one no-restricted-syntax array (fabricated-posture plus web-speech selectors, lines 93-108) and no JSX-literal or raw-colour rule, and no stylelint exists. The dictionaries en.ts and no.ts are about 40 lines each and en.ts documents inline tr(no, en) as the preferred pattern, so a parity test and namespace catalogs would add little.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1900-1930,2523,2536-2542,3672",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:397,581",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:940-950",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1270-1310",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:150-158",
+     "apps/Frontend Plane/verevonv3/eslint.config.js:1-116",
+     "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1-28",
+     "apps/Frontend Plane/verevonv3/src/shared/i18n/en.ts:1-12",
+     "apps/Frontend Plane/verevonv3/package.json:7-21",
+     ".github/workflows/verevonv3-ci.yml:186-193",
+     "apps/Frontend Plane/verevonv3/apps/gateway/scripts/product-truth-contract.test.mjs:1-30",
+     "apps/Frontend Plane/verevonv3/src/styles/global.test.js:1-20",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/DESIGN.md"
+    ],
+    "reuse": [
+     "eslint.config.js no-restricted-syntax array and the existing pnpm verify step that CI already runs (verevonv3-ci.yml)",
+     "useI18n().tr(no, en) pairs already used about 984 times in chat and agents",
+     "The AgentRunConsole approve control, which already uses an i18n.tr pair, as the model for the fix",
+     "shared/ui primitives (Button, Badge, MetricCard) and shared/ui/verevon (20 files)",
+     "node:test contract-test pattern in apps/gateway/scripts/*.test.mjs for repo-level text gates"
+    ],
+    "constraints": "Frontend Plane only; no plane, ZDR or Space-authority conflict. The one engineering constraint is ESLint flat config: a second block that matches the same files and sets no-restricted-syntax replaces the first, as the comment at eslint.config.js:104-105 warns.",
+    "approachAdjustment": "Fix the roughly 15 to 20 leaking sites first. Then add JSXText and JSXAttribute (title, aria-label, placeholder, alt) literal selectors in a second config block scoped to features/chat and features/agents that re-spreads the existing A8 and web-speech selectors; extending the existing array would apply the rule to all of src. Drop the dictionary-parity test and the namespace-catalog migration: inline tr(no, en) is the documented convention and gives parity at each call site, and en.ts holds one feature. Scope the raw-colour rule to features/chat only (about 1 hex literal) or use a baseline, because features/agents has about 537 hex literals in Chatbot Studio Tailwind classes. apps/verevon-web/DESIGN.md is the marketing-site spec, so the state checklist needs its own document. global.css is about 49k lines with about 389 custom properties, not 16k.",
+    "effortRevised": "S",
+    "effortNote": "Lowered from M: leak fixes plus one or two lint selectors plus a short checklist doc; the parity test and catalog migration are dropped.",
+    "verdict": "reword",
+    "verdictReason": "The leaks are real and the lint gate is absent, but the parity test and namespace-catalog parts contradict the documented inline-pair convention and have little to check, and the raw-colour gate needs scoping; reword to a small leak-fix plus JSX-literal gate.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-067",
+  "title": "Contract and architecture guardrails in CI: generated SPA types from Rust, plane-boundary and logging gates, and a size ratchet",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 44,
+  "wave": "W1",
+  "quickWin": false,
+  "summary": "Generate TypeScript types for SSE payloads and BFF JSON from the Rust contracts (ts-rs or schemars into json-schema-to-ts, or from proto) with a CI diff failure, and add a test-mode payload validator in the SPA stream client that rejects unknown keys. Add syntax-aware fitness gates: no cross-plane DB access, no raw user content in logs, and a baselined file and function size ratchet whose enforcement level is read from the base branch.",
+  "whyItMatters": "It removes the recurring class of bug where the backend emits an event the SPA silently drops, and it turns the plane-ownership and ZDR rules, which are enforced today by review and by docs that go stale, into durable checks that still hold when AI agents write most of the code.",
+  "referenceBestPractice": {
+   "bestSource": "Hermes Agent (schema codegen); DeepSeek harness (AST fitness gates)",
+   "others": [
+    "T3 Code",
+    "Codex"
+   ],
+   "prevalence": "C-007: 4 of 12 (common). C-046: 3 of 12 (differentiator)",
+   "mechanism": "Hermes: one Pydantic model per method, server request and event; a generator renders TypeScript types and an OpenRPC document; extra keys are rejected and test isolation raises ContractViolation on a mismatched payload. DeepSeek: AST-based repository checks that cannot be dodged by renamed imports, with SHA-256 baselines for retiring legacy violations; Hermes reads the ratchet level from main so a PR cannot relax its own check."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    ".github/workflows/sse-taxonomy.yml",
+    ".github/workflows/contract-goldens.yml",
+    ".github/workflows/buf.yml",
+    ".github/workflows/secret-scan.yml",
+    ".github/workflows/model-plane-rust-ci.yml:92-119",
+    "scripts/lint-resource-taxonomy.sh",
+    "scripts/coresystem-conformance.sh",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+   ],
+   "gap": "SRC: CI guards SSE event-name taxonomy freshness, vendored contract goldens with sha256 pins, buf breaking changes, a resource-taxonomy lint and secret scanning. Not found: generated SPA payload types (chat-client.ts is hand-written; no ts-rs, specta, schemars or utoipa in the verevonv3 manifests), an automated check of the no-cross-plane-DB-access rule, a complexity ratchet (agent.rs is 13,521 lines, sse.rs 13,325 and http_routes.rs 11,681) or a stale-doc gate; the Model Plane CI job runs fmt, check and tests only."
+  },
+  "approachOriginal": "Types: derive schemars or ts-rs on the SSE event and BFF DTO structs in model-gateway and the verevonv3 gateway, emit committed .ts files under src/shared/api/generated, fail CI on diff, and add an assert-on-unknown-keys validator used in tests and dev builds of the SSE parser. Fitness: add a syn and go/ast based job that scans each service's DB URLs and migrations for foreign schemas, a lint gate that forbids logging prompt, message and tool-result fields (pairs with R-t3-13-09), a file and function size ratchet baselined by hash with the level read from the base branch, and a doc-freshness check tied to STALE_DOC_DELETION_REGISTER.md. This ratchet is also the answer to the oversized loop functions; do not add a contributor-registry abstraction for a single implementation (ledger.md:1358 rule).",
+  "effortOriginal": "L",
+  "dependencies": [],
+  "planeOwner": "Frontend Plane (types) and Support Plane (CI gates)",
+  "risks": "Codegen churn in a fast-moving SPA and the BFF reshaping layer must also be covered; false positives slow development, so baseline existing violations.",
+  "significance": 3,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 14,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t3-13-007",
+   "C-t3-13-046"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-067",
+    "status": "partial",
+    "exactGap": "The item treats these guarantees as enforced only by review, but event-name coverage between sse_events.rs and chat-client.ts is already a CI gate (sse-taxonomy.yml running gen-sse-event-taxonomy.py --check, with a step proving the check can fail), contract goldens are sha256-pinned, buf lint/breaking runs, the gateway runs clippy -D warnings, and the SPA has AST-level no-restricted-syntax rules plus a grep-based fabrication-guard job (SRC). What is missing is payload-field-level contract types (ChatEvent::payload() builds json! by hand at sse_events.rs:490 and chat-client.ts is hand-written; no ts-rs/schemars/utoipa/specta in any Cargo.toml or package.json under apps), any automated no-cross-plane-DB or no-raw-content-in-logs gate, any size ratchet (agent.rs 13,521, sse.rs 13,325, http_routes.rs 11,681 lines by wc -l) and any Model Plane clippy (deliberately omitted, 304 pedantic warnings). A stale-doc gate exists only for the SSE taxonomy doc.",
+    "evidence": [
+     ".github/workflows/sse-taxonomy.yml:3-14",
+     ".github/workflows/sse-taxonomy.yml:44-62",
+     "apps/Model Plane/scripts/gen-sse-event-taxonomy.py:9-50",
+     ".github/workflows/model-plane-rust-ci.yml:88-119",
+     ".github/workflows/model-plane-rust-ci.yml:171-184",
+     ".github/workflows/verevonv3-ci.yml:37-106",
+     ".github/workflows/verevonv3-ci.yml:137-138",
+     ".github/workflows/verevonv3-ci.yml:192-193",
+     ".github/workflows/buf.yml:20-23",
+     "apps/Model Plane/proto/buf.gen.yaml:26-43",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:490-500",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:1602-1640",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:495-505",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:678-690",
+     "apps/Frontend Plane/verevonv3/eslint.config.js:67-114",
+     "apps/Model Plane/rust/Cargo.toml:26-32",
+     "apps/Control Plane/auth-core/scripts/lint-ratchet.mjs:1-40",
+     "scripts/tests/ownership-docs-contract.test.mjs:1-40",
+     "scripts/tests/principal-registry-parity.test.sh:1-25",
+     "scripts/coresystem-cross-plane-preflight.sh:1-30",
+     "apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs:1-45",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1 (wc -l reports 13521 lines)"
+    ],
+    "reuse": [
+     "gen-sse-event-taxonomy.py --check plus the drift self-test step in sse-taxonomy.yml: extend from event names to payload keys instead of building a new generator",
+     "zdr-contract-sync.test.sh with --self-test and scripts/tests/*.test.mjs hermetic parity tests as the pattern for new fitness gates",
+     "ChatEvent::payload() match arms in sse_events.rs as the single source of field names",
+     "eslint no-restricted-syntax block in verevonv3/eslint.config.js for SPA-side syntactic rules",
+     "auth-core lint-ratchet.mjs with a reviewed baseline as the ratchet precedent",
+     "buf generate with protoc-gen-es for proto-backed contracts (currently pointed at the legacy verevon app, so re-point rather than add a tool)"
+    ],
+    "constraints": "Gates must stay hermetic (no live DB, no env values printed) like the existing scripts/tests. CI gates are repo-root .github/workflows and scripts/ owned by no plane, so naming Support Plane as owner is wrong (Support Plane is the RustDesk hbbs/hbbr backend per CLAUDE.md). The gateway reshapes BFF JSON, so SSE passthrough payloads and BFF DTOs are two separate contracts. The no-cross-plane-DB rule must be a static scan of compose DATABASE_URLs and migrations, not a runtime check.",
+    "approachAdjustment": "Split into three. (1) Payload keys: ChatEvent::payload() is hand-built json!, so a ts-rs/schemars derive does not apply; either extend gen-sse-event-taxonomy.py to extract per-event field lists from the payload() arms and compare with chat-client.ts reads, or first convert payloads to serde structs, and add the unknown-key validator only in tests. (2) Hermetic syntactic gates modelled on scripts/tests with a self-test proving they fail: cross-plane DB scan first, log-content rule second. (3) Size ratchet last, baselined by hash like auth-core lint-ratchet; reading the level from the base branch needs a fetch step the current workflows do not have. Also verify buf.yml: it passes the unquoted path \"apps/Model Plane/proto\" (contains a space) to buf, so the job may not be checking what it appears to check (INF).",
+    "effortRevised": "L",
+    "effortNote": "Unchanged as a bundle, but the first slice (payload-key check extending the existing SSE gate) is S to M because the name-level gate, the parser and the CI wiring already exist.",
+    "verdict": "reword",
+    "verdictReason": "Half of the stated benefit (backend event silently dropped by the SPA) is already guarded at event-name level; the item should say so, drop the derive approach that does not fit hand-built payloads, and fix the owner. The cross-plane DB, log and size gates are genuinely absent.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-068",
+  "title": "Policy and data-flow transparency: effective-policy origin view and declared egress catalogue",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 45,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Show the effective value of approval posture, ZDR, privacy tier, model routing and budgets for a Space or thread together with the layer that set it (org, workspace, Space, user, server default). Declare every outbound destination once per plane (destination, data classes, owning feature, ZDR behaviour, toggle) in an egress catalogue that drives the gateway CSP, a generated Trust Center 'what leaves the platform' table and a CI check that fails on undeclared hosts.",
+  "whyItMatters": "Verevon's privacy positioning rests on ZDR, residency and one-way-tightening policy, but users and admins cannot see why a setting has its value or exactly which providers receive which data. This makes the authority model auditable and cheap to explain to buyers.",
+  "referenceBestPractice": {
+   "bestSource": "claude",
+   "others": [
+    "deepseek (--dump-config shows each field's origin and which layers patched it, warns when a patch matches nothing; plugin inventory with live phase)",
+    "web-chatgpt (what goes to search and app partners)",
+    "antigravity",
+    "t3code",
+    "codexagent"
+   ],
+   "prevalence": "Data-flow and egress disclosure 4 of 12 (common); effective configuration provenance 3 of 12 (differentiator)",
+   "mechanism": "Claude uses one declarative catalogue listing each destination with its disabling policy toggle, the process that contacts it, the required CSP directive and redirects; it generates the CSP, firewall allow-lists, admin toggles and local 503 fallbacks. DeepSeek applies configuration layers cumulatively, snapshots after each and compares per field to attribute origin and patchedBy."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/profile.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:20-40",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-118",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx:175-300",
+    "apps/Frontend Plane/verevonv3/src/features/router-policy"
+   ],
+   "gap": "SRC: per-answer served-by provenance (provider, residency, strongest substantiated privacy tier), server-resolved one-way-tightening posture, a router-policy admin and a Trust Center with connected-app permissions, retention and workspace AI activity all exist. Missing: a view of effective policy values with their originating layer, a single declared egress catalogue per plane, a generated disclosure of what is sent to LLM providers, Quarry targets and integration providers, and any telemetry consent switch (SPA grep)."
+  },
+  "approachOriginal": "Model Plane profile resolver returns {field, value, origin, patched_by[]} for posture, ZDR, privacy tier, routing and budgets (hiding other tenants' and admin-only details from members); Frontend Settings gets an 'Effective policy' panel per Space and thread. Support Plane tooling: egress.yaml per plane generating gateway CSP and a Trust Center disclosure table, plus a CI check against outbound client hosts; Control Plane exposes the org toggles. Reuse the approval cause taxonomy (R-t3-10-01) for the 'why' wording.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "F-t3-006",
+   "F-t3-005"
+  ],
+  "planeOwner": "Model Plane (profile resolver) with Support Plane (egress catalogue tooling), Control Plane (org toggles) and Frontend Plane (Trust Center)",
+  "risks": "Catalogue drift unless CI enforces it; the view must not reveal other tenants' or admin-only policy details; a disclosure page is a public claim, so it must be generated from the catalogue and not hand-edited.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 2,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t3-10-020",
+   "C-t3-10-017"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-068",
+    "status": "partial",
+    "exactGap": "SRC: per-answer served-by provenance (SSE usage frame; session-only in the SPA), BFF and Model one-way ratchets for ZDR, privacy tier, approval posture and budgets, an admin router-policy read of the live routing policy, a context inspector whose segment kinds include policy, workspace and persona, and a Trust Center for connected apps and AI activity all exist. Missing: any view that shows an effective value with the layer that set it, any declared egress catalogue (the only CSP is nginx.conf:70 with connect-src 'self' https:, which governs the browser, not plane-to-provider traffic), and a generated 'what leaves the platform' disclosure or CI check for undeclared hosts.",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/profile.rs:1-110 (approval posture resolution: server floor from JWT scopes, client may only ratchet stricter)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:15-60 and :262-296 (ServedBy stamp on the usage frame)",
+     "apps/Model Plane/rust/services/model-gateway/src/budget.rs:300-315 (tests: caller may tighten own budget, org ceiling still applies)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-118 (normalized body, apply_org_zdr_posture one-way raise)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs:1-50 (org ZDR read from org-core, OR-ed with request)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/router_policy.rs:1-40 (GET returns inference-core effective routing policy)",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx:26-60 and :170-210 (connected-app transparency, workspace AI activity)",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:1316-1330 (ZDR tooltip and attestation check)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:286-298 (servedBy session-only)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:430-440 (processing note from servedBy)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:575-640 (context segment kinds incl. policy, workspace, persona)",
+     "apps/Frontend Plane/verevonv3/nginx.conf:66-71 (the SPA CSP lives at nginx; connect-src 'self' https:)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:150-157 (gateway sets only nosniff and referrer policy; CSP is at nginx)",
+     "apps/Control Plane/user-core/internal/spaces/repository.go:1210-1225 (Control-owned effect policy floor, fences Spaces on change)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/zdr.rs:1-50 (evidence-bound ZDR attestation)",
+     "apps/Support Plane/README.md:1-20 (Support Plane is the RustDesk relay stack, not build tooling)"
+    ],
+    "reuse": [
+     "ServedBy stamp and processing note for the per-answer 'who processed this' line",
+     "Context inspector segment kinds (policy, workspace, persona, agent) as the instruction-layer 'why'",
+     "router-policy GET as the routing leg of the effective-policy view",
+     "WorkspaceSettingsPage ZDR attestation check and TrustCenterSection as the host surfaces",
+     "provider/zdr.rs attestation fields (resource, approval ref, effective and review dates) for the disclosure",
+     "scripts/coresystem-conformance.sh and the cross-plane preflight as the home for a CI check"
+    ],
+    "constraints": "No cross-plane DB access: org ZDR lives in org-core (read by the BFF), Space effect policy in Control user-core, instruction layers in Convex via the BFF, routing in inference-core, budgets in model-gateway/cost-core, and the approval-posture floor comes from JWT scopes in model-gateway profile.rs, so no single Model Plane resolver can see every layer. Each owner plane must expose its own {value, origin} and the BFF aggregates. Members must not see admin-only or other-tenant policy; Space access never widens an owner-plane ACL. The egress catalogue is a public claim and must be generated and CI-checked, never hand-edited. Support Plane hosts the RustDesk relay and is not tooling.",
+    "approachAdjustment": "Put the aggregation at the Frontend Plane BFF (a read-only effective-policy route that asks each owner plane for its own resolved fields; Model Plane returns only approval posture and floor, privacy-tier floor, routing and budgets). Put the egress catalogue and its CI check in repo-level scripts next to coresystem-conformance.sh with per-plane declaration files, not in Support Plane. Treat browser CSP as a separate small tightening (nginx.conf connect-src is currently any https) generated from the browser-facing subset; server-side egress to LLM providers, Quarry targets and integrations is not controlled by CSP at all.",
+    "effortRevised": "L",
+    "effortNote": "M to L: needs read endpoints in three or four owner planes plus the catalogue, disclosure and CI check. Slice (a) effective-policy panel is M; slice (b) catalogue plus CI is M.",
+    "verdict": "reword",
+    "verdictReason": "Transparency pieces already exist for provenance and routing; the genuine gaps are the origin-layer view and the egress catalogue. The item places the resolver in Model Plane and the tooling in Support Plane, both wrong, and assumes CSP covers server egress.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t3-016",
+  "title": "Multi-replica-safe run control: shared cancel, queued-input, plan-mode and turn state, durable send receipts and an editable message queue",
+  "originalTier": "priority",
+  "finalTier": "recommended",
+  "rank": 16,
+  "wave": "W1",
+  "quickWin": false,
+  "summary": "Move process-local run control in model-gateway (cancel flags, queued input, plan-mode flags, team workers, the chat-turn map, hook and command registries) behind run-id-keyed shared state in Redis/Dragonfly with NATS fan-out, and make duplicate-send protection durable using session-core receipts. Turn on the Redis stream buffer in every environment. On top, add queue routes (list, reorder, cancel, promote), a queue dock and a split send button (interrupt, steer at the next boundary, or queue).",
+  "whyItMatters": "A model-gateway restart or a replica move currently loses in-flight cancels, queued messages and plan state; the stream buffer is in memory unless REDIS_URL is set. No reference is multi-tenant and multi-replica, so this is Verevon's own problem to solve, and it is a precondition for durable runs, ask_user and the attention stream.",
+  "referenceBestPractice": {
+   "bestSource": "T3 Code (serial command queue with idempotent receipts); DeepSeek harness documents the process-local limit ; Claude desktop (SRC) for stream recovery and the queue; Manus (SRC) for the split send button",
+   "others": [
+    "DeepSeek harness",
+    "Manus",
+    "Antigravity",
+    "claude.ai (DOC)",
+    "ChatGPT (DOC)",
+    "Manus web (DOC)"
+   ],
+   "prevalence": "R-t3-13-01: C-013: 3 of 12 (differentiator). C-057: 1 of 12 (unique; the one reference record documents the limitation rather than solving it and no reference is multi-tenant multi-replica, so the priority comes from Verevon's own code) | R-t3-01-07: 1 of 12 (resilient streaming, unique) and 5 of 12 (queue and steer, common)",
+   "mechanism": "T3: CommandEnvelope{id, aggregate, payload} goes through a serial queue; On stream loss the client resumes first, then polls the message at a slow rate until a terminal state, measuring opened_stream_lost, recovery_started, recovery_completed and perceived TTFT/TTLT."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:1-9",
+    "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:24-31",
+    "apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs:9-16",
+    "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:3-22",
+    "apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs:17-30",
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:1-5",
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2004",
+    "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:10-13",
+    "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20",
+    "apps/Model Plane/rust/services/model-gateway/src/managed_start_key.rs:1-8"
+   ],
+   "gap": "R-t3-13-01: SRC: the stream buffer has a Redis backend and resume works across replicas, and session-core already persists the managed-run start_key, a completion_key with a single-transaction completion receipt (0040) and a unique (org_id, idempotency_key) index on events (0002). | R-t3-01-07: The mechanism exists (monotonic frame ids, Last-Event-ID replay, a 10-minute buffer, durable-outcome reconciliation with backoff, mid-run input delivered at the tool-round boundary with pending, delivered and refused states) but stream_buffer only uses Redis when REDIS_URL is set (SRC, stream_buffer.rs:9-13;"
+  },
+  "approachOriginal": "Plan I2-I4 plus the in-code promotion notes (cancel_registry.rs, idempotency_registry.rs, coordinator.rs). One shared-state module with TTLs, idempotent operation ids, and a chaos test that kills a replica mid-turn.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Dragonfly/Redis in every deploy",
+   "NATS mp.v1 subjects"
+  ],
+  "planeOwner": "Model Plane (model-gateway, session-core) with Frontend Plane (queue dock)",
+  "risks": "Buffered frames hold content: ZDR turns stay memory-only. Ordering of queue operations across replicas needs idempotent ids. Redis becomes a hard dependency; define behaviour when it is down.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 24,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-13-01: In-code promotion notes (cancel_registry.rs:7-9, idempotency_registry.rs:14-16, coordinator.rs:22); CHAT_GAP_CLOSURE_PLAN_2026-10-01.md I2 (per-send idempotency key) and I4 (settle orphaned streams); I3 (graceful drain) already shipped | R-t3-01-07: Partly: plan I3 redeploy-safe turns with REDIS_URL on model-gateway (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:134) and I4 settle orphaned streams (:250); the visible queue UX is not in the plan"
+  },
+  "sourceClusters": [
+   "C-t3-13-057",
+   "C-t3-13-013",
+   "C-t3-01-002",
+   "C-t3-01-007"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-016",
+    "status": "partial",
+    "exactGap": "Cancel flags (cancel_registry.rs:7-8), queued input (queued_input.rs:28), the duplicate-send cache (idempotency_registry.rs:14), plan-mode and team-worker stores (coordinator.rs:17), the chat-turn map (chat_turn_registry.rs:22) and the MCP, hook and command registries (runtime_registries.rs:1) are all per-process memory with in-code promotion notes, and queue UX is enqueue-only plus a read-only strip. But the Redis stream buffer is already set in the shipped model-gateway compose block (docker-compose.yml:226-241), a 120 s graceful drain exists (drain.rs:1), and session-core already enforces a unique (org_id, idempotency_key) on events and a run completion_key. No list, reorder, cancel or promote queue routes and no split send button exist.",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:1-40",
+     "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:1-80 (in-memory, classify-at-boundary design, 3 messages and 2,000 chars)",
+     "apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs:1-40",
+     "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:1-30",
+     "apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs:1-40",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:1-30",
+     "apps/Model Plane/rust/services/model-gateway/src/state.rs:770-800 (Redis resume buffer selected by REDIS_URL)",
+     "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:1-30",
+     "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-30",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:135-150 (only /v1/invoke/:request_id/queue exists)",
+     "apps/Model Plane/deploy/docker-compose.yml:226-241 (REDIS_URL on model-gateway, I3 note; ZDR path does not buffer)",
+     "apps/Model Plane/rust/services/session-core/migrations/0002_events_and_ordinals.sql:35-36 and 0040_direct_run_completion_key.sql:17-19",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2095-2130 (read-only QueuedInputStrip: waiting, delivered, refused)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2185-2260 (deliverMidRun, deferredSends for run_ended)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (I3 drain and Redis, I4 settle orphaned streams; queue UX not in plan)"
+    ],
+    "reuse": [
+     "stream_buffer Redis backend and TTL pattern",
+     "NATS publisher already in AppState for a request_id-keyed cancel and enqueue subject",
+     "session-core events idempotency index and run completion_key for durable send receipts",
+     "drain.rs graceful shutdown and the approvals rehydrate path",
+     "SPA deferredSends and QueuedInputStrip"
+    ],
+    "constraints": "Queued mid-run input is deliberately classified by the model at the round boundary (the code says the caller cannot know), so a user-picked interrupt, steer or queue split button contradicts a documented design ruling and needs an explicit decision. Buffered frames and queued text hold content, so ZDR turns stay memory-only (compose notes the ZDR path does not buffer). The compose files read configure no model-gateway replicas, so multi-replica safety hardens a topology that is not deployed; Dragonfly runs cache-mode at 256 MB shared and can evict, and Redis becoming a hard dependency needs a down-behaviour rule. Ordering across replicas needs idempotent operation ids.",
+    "approachAdjustment": "Remove \"turn on the Redis stream buffer in every environment\" (already set in the compose block; only confirm it is deployed). Reword the problem: graceful redeploys are covered by drain, so the loss window is a crash, OOM or replica move. Scope shared state to cancel and enqueue routed through a request_id-keyed NATS subject, as the in-code notes propose, and reuse session-core idempotency for durable receipts rather than a new store. Drop the editable queue and split send button from this item unless the owner overrides the model-classifies design.",
+    "effortRevised": "M",
+    "effortNote": "Reduced from L: the Redis buffer, drain and durable receipts are already in place and the queue UX conflicts with the current design; the remaining shared cancel and queue state is M.",
+    "verdict": "demote",
+    "verdictReason": "Real but a scale-readiness hardening for a single-replica deployment with drain and Redis resume already shipped, and it is not a precondition for durable runs because approvals already persist in session-core; the queue UX part needs a design decision first.",
+    "confidence": "medium"
+   },
+   "reference": {
+    "finalId": "F-t3-016",
+    "verdict": "partial",
+    "checked": [
+     "scratchpad/tmp/t3/src/server/src/orchestration/Layers/OrchestrationEngine.ts:92-94,110-125,142,198-243 (in-memory Queue.unbounded + in-memory commandReadModel; durable receipts via commandReceiptRepository.getByCommandId inside sql.withTransaction)",
+     "C:/dev/deepseek-harness/packages/jobs/jobs/README.md:124-128 (contract is in-process)",
+     "C:/dev/deepseek-harness/packages/storage/storage-json/README.md:139-143 (no cross-process write locking)",
+     "C:/Program Files/WindowsApps/Claude_2.31226.1.0_x64__pzs8sxrjxfjjc/app/resources/ion-dist/assets/v1/cce741025-xVjWdrbY.js (pending-message recovery: poll attempts, slow poll after maxPollAttempts, exhausted/reply_unconfirmed)",
+     "C:/Program Files/WindowsApps/Claude_2.31226.1.0_x64__pzs8sxrjxfjjc/app/resources/ion-dist/assets/v1/shared-50-Bmc9oUMm.js (recovery_started/completed/slow_poll_started analytics schema)",
+     "scratchpad/extract/claude/.vite/build/index.chunk-EzXl5k4A.js (cancelQueuedMessage/reorderQueuedMessage/promoteQueuedMessage/sendSteeredNow)",
+     "scratchpad/extract/manus/frontend/out/_next/static/chunks/0sydbzkqidpbv.js (Send without interrupting / Add to queue / Interrupt and send)"
+    ],
+    "corrections": "T3 Code is the best source for idempotent command receipts, not for multi-replica safety. Its engine is a single-process, single-writer in-memory queue and read model; only the receipts and events are durable in SQL. No reference implements multi-replica run control: DeepSeek only documents that it is process-local, so C-057 is effectively 0 of 12 solving it. In Claude, stream recovery as observed is poll-based: fast polls, then a slow-poll phase after maxPollAttempts, then 'exhausted'. That recovery path is used for detached or pending replies. 'Resumes the stream first, then polls' was not observed, so drop 'resumes first' or mark it INF. Claude's queue operations are local desktop IPC (LocalSessions), not server-side state shared across replicas.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "Priority for multi-replica safety derives from Verevon's own code, not from any reference",
+     "ChatGPT and Manus web queue/steer are DOC-only",
+     "DeepSeek limitation evidence is repo README (internal DOC)"
+    ],
+    "confidence": "high"
+   }
+  }
+ }
+]

@@ -1,0 +1,743 @@
+{
+ "category": "In-app browser shell (user-facing)",
+ "items": [
+  {
+   "id": "R-t2-08-01",
+   "title": "Issue durable BrowserBroker grants and forward delegated bearers so the in-app browser opens in production",
+   "summary": "Build real BrowserBroker grant issuance in the Model Plane: when the gateway starts a user browser session it requests a persisted BrowserGrant (org and owner scoped, canonical host policy, TTL, ZDR flag) and sends the returned grant_id on POST /v1/agent/runs, with the delegated browser bearer forwarded to Quarry and to model-gateway (/v1/browser/runs, /v1/browser/suggest-action). Persist the broker store (in memory today) so a restart does not orphan live sessions, and replace the interim 'session:{id}' grant string used by ai-runs with child grants derived from the session grant. Quarry stays the validator and executor.",
+   "whyItMatters": "Production Quarry requires a grant (it refuses to boot without a validator and answers 403 'browser grant_id is required' on run start), but the gateway's session start sends none, so the user-facing browser, in-app AI runs and MCP browser.observe/act only work against dev-mode Quarry. Every other item in this category is gated on this one, so it is the first thing users and agents would hit.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (hardened page hosting, iab-028/029)",
+    "others": [
+     "Aside (Chromium fork, so the same pattern is inferred, INF)"
+    ],
+    "prevalence": "1 of 3 sources record it (Codex); treated as common because Aside is a Chromium fork (INF). For Verevon the matching mechanism is a trusted issuer deciding host authority, which is a prerequisite rather than a reference feature.",
+    "mechanism": "Codex's main process intercepts every guest attach (will-attach-webview): it forces partition, session and preload, deletes allowpopups, disablewebsecurity and nodeintegration, and pre-registers a route token so only known tabs can attach; the renderer cannot widen any of it. The Verevon analogue already exists on the Quarry side: host authority is broker-owned (Quarry overwrites a client's allowed_domains with the grant's canonical list at acquisition and revalidates every step). What is missing is the issuer."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-503 (session start posts max_steps/allowed_domains/max_runtime_s to /v1/agent/runs and carries no grant_id)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235,1258-1262 (interim 'session:{id}' grant_id; comment says durable BrowserGrant issuance is still unbuilt)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:182-200 (prod forces require_browser_grants; boot fails without a validator endpoint)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1377-1384 (403 'browser grant_id is required')",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1397-1412 (broker domains override client domains at acquisition)",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:669-690 (AI run starts its own lease with plan.config.grant_id)",
+     "v-browser-app baseline, known gap 1 (broker store in memory; not re-verified here)"
+    ],
+    "gap": "Engine and isolation are ahead of both references, but no code path mints a durable BrowserGrant, the gateway sends no grant or browser bearer, and the broker store is in memory only. Prod-mode Quarry therefore rejects the in-app session itself."
+   },
+   "approach": "Model Plane BrowserBroker (Go, grant.go): add a durable store (Postgres) and an issue endpoint for a user-session grant kind (org and owner scoped, ZDR flag, TTL, bounded canonical domain list). Gateway browser.rs create_session calls the issuer with the delegated browser-audience bearer, passes grant_id on /v1/agent/runs and forwards x-browser-authorization to Quarry and model-gateway. start_ai_run (browser.rs:1235) mints a child grant from the session grant instead of the 'session:{id}' string; sensitive actions keep single-use child grants. Add an integration test that runs the gateway against Quarry in prod mode. Quarry is unchanged except for tests; the Model proposes, Quarry validates and executes.",
+   "effort": "M",
+   "dependencies": [
+    "Model Plane BrowserBroker persistence",
+    "Gateway delegated bearer forwarding (browser audience)"
+   ],
+   "planeOwner": "Model Plane (BrowserBroker) with Frontend Plane gateway wiring",
+   "risks": "Grant scope creep: keep the canonical bounded host list (max 32) and single-use sensitive child grants. Restart semantics for in-flight sessions. Issuing grants for user sessions must not become a way around the model-initiated cross-domain HITL gate.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": false,
+    "where": "Acknowledged as unbuilt in a gateway code comment (browser.rs:1258-1262); docs/BROWSER_WORKSPACE_PLAN.md still says COMPLETE and is stale."
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t2-08-001"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t2-08-02",
+   "title": "Let users browse freely: a human-session policy plus an omnibox that routes free text to Verevon search",
+   "summary": "Add a human-browsing session mode distinct from agent runs: an idle-timeout lease (reset by user input and frame activity) instead of max_steps 12 and 120 s, and a broker-defined navigation policy that is not a single-host list, so omnibox entries and link clicks under takeover work. Agent-initiated cross-domain navigation keeps the existing cross_domain_navigation HITL gate, and Quarry's egress/SSRF policy stays on. Add hard reload and make reload retry a failed URL. Rewire browser-omnibox.ts so URL-like input navigates and free text opens Verevon search (Quarry /v1/search results, or Ask into chat), with suggestions from the gateway's existing search autocomplete and local web history.",
+   "whyItMatters": "A browser locked to its first host for 120 s is not a browser, and today free text in the address bar becomes a google.com URL that the domain lock then rejects. This is the largest day-one usability gap for people, and it is the part of 'a built-in browser users and AI both use' that users touch first.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (navigation commands iab-037; omnibox suggestion service iab-036)",
+    "others": [
+     "Aside (omnibox reuses the browser engine plus an AI mode with attached tabs, aside-browser-product-011)"
+    ],
+    "prevalence": "Navigation controls: 1 of 3 recorded (Codex), table-stakes because Aside is Chromium (INF). Omnibox suggestions: 2 of 3, common.",
+    "mechanism": "Commands navigateBack, navigateForward, reload and hardReload (ignore cache); the preload captures mouse buttons 3 and 4; reload from an error page retries the original URL. The suggestion service is token based: start(query) streams matches {contents, description, destinationURL, acceptToken, deleteToken}; accept(token) navigates and records; deleteMatch removes a history entry. For Verevon: a gateway suggest call that merges local history, search autocomplete and URL heuristics, and non-URL input goes to Verevon search rather than google.com."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-495 (every user session: allowed_domains = first host, max_steps 12, max_runtime_s 120)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446 (lease ttl defaults to max_runtime_s or 120 s)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:326-345,1397-1412 (in governed mode the broker's domain list overwrites client domains and must equal the live run's domains every step)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:59-77 (canonical_broker_domains rejects an empty or over-32 list, so there is no open-web grant today)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-omnibox.ts:14 (free text becomes a google.com search URL)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1146 (omnibox use); back/forward/reload ship, hard reload does not"
+    ],
+    "gap": "Back, forward and reload ship, but the user cannot leave the first host or browse past 120 s. Because Quarry's governed mode makes the broker the only source of host authority, the allowlist cannot be extended by the gateway or by Quarry alone; a broker-defined policy mode (or a versioned grant re-issue that Quarry validates) is needed. The omnibox has no suggestions and its search fallback cannot work."
+   },
+   "approach": "Ingestion Plane (Quarry): add a human session kind on /v1/agent/runs (or a dedicated session route) with an idle reaper, per-navigation timeline rows tagged source=user, and unchanged egress policy. Model Plane BrowserBroker: add a human-browse grant kind (open public web minus a broker/org denylist, audited, bounded) that Quarry validates in place of the exact domain-list equality; Quarry keeps rejecting agent-initiated cross-domain navigation without HITL approval, and Quarry-owned control mode decides whether an action is human or agent. Frontend gateway/omnibox: hard reload, error-page retry, suggest endpoint combining web-history.ts, the search domain autocomplete and URL heuristics; free text opens Quarry /v1/search results in the tab or sends to chat. Share the idle/absolute TTL machinery with R-t2-03-08 instead of building it twice.",
+   "effort": "L",
+   "dependencies": [
+    "R-t2-08-01",
+    "R-t2-03-08 (idle and absolute TTLs, shared)",
+    "Gateway search cache gets org/user key and ZDR gating before it feeds suggestions (baseline gap 9)"
+   ],
+   "planeOwner": "Ingestion Plane (Quarry) with Model Plane broker and Frontend Plane omnibox",
+   "risks": "SSRF and egress abuse (keep private-IP blocks and per-navigation audit), unbounded host growth, cost of long-lived Chromium leases (idle reaping), unforgeable user-versus-agent origin of a navigation. Under ZDR no history or suggestions are stored.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": false,
+    "where": "Recognised as a known gap in the v-browser-app baseline (gap 3); no dated plan found."
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t2-08-011",
+    "C-t2-08-009"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t2-08-03",
+   "title": "Co-browsing: the agent acts in the user's visible Quarry session, in its own agent-flagged tab",
+   "summary": "Let a Model Plane browser run attach to the Quarry session the user is looking at (same lease and profile) instead of acquiring its own hidden lease. The grant is bound to that session id, the agent works in a new agent-flagged tab that appears in the tab strip without stealing focus, and the user can reveal any agent tab and take it over using Quarry's existing control-mode arbitration. The Model proposes, Quarry executes or rejects.",
+   "whyItMatters": "This is the core of 'a browser users and AI both use'. Today the user and the agent work in two separate browsers that share only a profile id and a start URL, so the user cannot watch, redirect or take over the agent's actual page.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (iab-068, hidden agent tabs)",
+    "others": [
+     "Aside (per-tab agent-control indicator and take-over; shipped in Verevon as C-t2-08-017)"
+    ],
+    "prevalence": "1 of 3 sources (Codex); unique as a co-browsing model.",
+    "mechanism": "Each agent tab gets a hidden webview host (about:blank until the snapshot URL is known); open-browser-tab is sent with active:false; presentation state decides whether the hidden host stays mounted, and the tab strip shows it without focus change. For Verevon: the AI loop attaches to the user's visible Quarry run (same lease, own tab) and Quarry's control-mode arbitration decides who may act."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:669-690 (the durable run calls start_run for its own leased session; continuity is profile_id and start_url only)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235-1245 (ai-run body: grant_id 'session:{id}', profile_id, start_url)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:39,608 (read-only frame view with pause/resume)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1230 (takeover control in the Crawl composer browser)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:67-70 (control_mode is persisted by the browser owner so a restart cannot reset a takeover)"
+    ],
+    "gap": "The AI run drives a different, hidden Quarry lease. The chat panel can watch frames but cannot reveal or take over the agent's tabs in the user's browser, and there is no agent-tab marker in the tab strip."
+   },
+   "approach": "Model Plane: add an attach mode to execution-core browser_agent (attach_session_id instead of client.start_run at browser_agent.rs:669); BrowserBroker issues a run grant bound to that session id, not a free string. Quarry: tab ownership flag opened_by agent|user in the tab list and timeline, agent steps allowed only on agent-flagged tabs (or the active tab when control_mode is agent), existing 409-during-takeover rule kept. Frontend: agent badge on tabs, new agent tab opens without focus, Reveal and Take over buttons, shared timeline. Keep the plane rule that Quarry executes or rejects every proposed action.",
+   "effort": "L",
+   "dependencies": [
+    "R-t2-08-01",
+    "R-t2-08-02"
+   ],
+   "planeOwner": "Ingestion Plane (Quarry) with Model Plane browser_agent and Frontend Plane",
+   "risks": "Concurrency between human and agent inside one session; step and cost budgets versus the idle policy of item 02; grant binding to exactly one session; cross-domain navigation by the agent stays behind HITL.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": false,
+    "where": "Listed as a known gap (v-browser-app baseline gap 4); no plan found."
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t2-08-019"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t2-08-04",
+   "title": "Chat beside the browser: a dockable browser panel bound to the chat run",
+   "summary": "Promote BrowserChrome from the dashboard Crawl composer to a dockable panel inside the chat view (right, bottom, maximised, hidden), bound to the chat run's Quarry session, reusing frame streaming, takeover, approvals and the timeline drawer. Add a floating composer over the page and a 'new chat per tab or keep the chat' rule. The chat live-run panel becomes a compact mode of the same component instead of a separate read-only viewer.",
+   "whyItMatters": "Both reference browsers converge on chat and page side by side. It is where the user watches, takes over and talks to the agent about the visible page in one view; Verevon has the pieces (frames in chat runs, takeover, approvals) but not the surface.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (docked browser with floating composer, iab-033)",
+    "others": [
+     "Aside (per-tab side-panel agent: aside-agent-control-architecture-072, aside-browser-product-012/013)"
+    ],
+    "prevalence": "2 of 3 sources (Codex, Aside); table-stakes for a chat-plus-browser product.",
+    "mechanism": "Codex hosts the browser as right, bottom, detached or hidden, chosen by a command with a layout-stepping command, and a floating composer posts into the active chat. Aside calls sidePanel.setOptions per tabId with a sessionId, resolves the target session when a tab activates, offers a new-session|keep-session setting, and injects a 'you are a sidecar to this page' framing block on the first tab mention."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:39,608 (compact read-only frame view)",
+     "apps/Frontend Plane/verevonv3/src/app/App.tsx:172",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeScrapePreview.tsx:20",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:402"
+    ],
+    "gap": "The interactive browser lives only in the dashboard Crawl composer with no standalone route; the chat panel cannot steer the browser or ask about the visible page in the same view."
+   },
+   "approach": "Frontend Plane: extract BrowserChrome into a layout-agnostic panel component, add dock state (right, bottom, maximised, hidden) persisted per user, bind it to the chat run's Quarry session via the gateway browser domain, and add the new-chat-or-keep-chat rule. Page context reaches the Model Plane only through governed attachments (R-t2-08-05); no direct DOM access from the SPA.",
+   "effort": "M",
+   "dependencies": [
+    "R-t2-08-01",
+    "R-t2-08-03"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Layout complexity on small screens; frame bandwidth when docked next to streaming chat.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t2-08-008"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t2-08-05",
+   "title": "Page context to chat: Quarry hit-test, @tab mentions, selection and region attachments, frame context menu",
+   "summary": "Add a Quarry hit-test endpoint that turns a frame point or region into an element descriptor (AX ref, role, name, nearby text, bbox, crop, tab id, URL, snapshot generation). Build the SPA side: a select mode in BrowserChrome, region and image attachments, and an @tab mention token {sessionId, tabId, title, url, snapshotGeneration} that the gateway re-validates against Quarry fail-closed before use. Attachments are labelled 'from page' for the user before sending and enter the Model as BrowserScraped provenance (screened). A right-click menu over the frame (Ask, Explain, Summarize page, Send to Knowledge, Open in new tab) reuses the same hit-test.",
+   "whyItMatters": "Point at the thing and ask about it is the highest-leverage way for the user and the agent to share a browser, and the element descriptors map straight onto the AX refs that browser.act already uses. It also unblocks on-page annotation (R-t2-08-11).",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (@tab mention with fail-closed staleness check, iab-059)",
+    "others": [
+     "Aside (richest selection and region attachment payload, aside-browser-product-017; selection quick actions and context menu)",
+     "Codex context menu gating annotate items by page eligibility (iab-049)"
+    ],
+    "prevalence": "2 of 3 sources (Codex, Aside); common.",
+    "mechanism": "Mention token tab-v1 {browserId, tabId, title, url}; on use list the tabs and require an exact match or report 'unavailable'. Selection payload {text | region{elementSummary, previewImage, elements[{selector, tagName, role, text, alt, src, href}]}}, kept per tab and cleared on navigation. Codex also shows page-provided metadata or suggested prompts to the user, labelled, and the model only gets what the user submits. For Verevon: BrowserChrome select mode, the gateway asks Quarry to hit-test the frame point, Quarry returns an AX-ref descriptor plus crop, attached to chat with {sessionId, tabId, url, snapshot generation} and re-validated before any action."
+   },
+   "verevonToday": {
+    "status": "unknown",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3876 (global composer intentionally does not handle @ mentions)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:128 ('dom_select' and 'knowledge_ingest' advertised as default capabilities)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2578,2700 (capability list advertised by the gateway)"
+    ],
+    "gap": "No page-to-chat attachment, hit-test endpoint, @tab mention or frame context menu was found; absence is inferred from a light read, not proven."
+   },
+   "approach": "Ingestion Plane: hit-test and element-descriptor endpoint on the Quarry session API returning AX ref, role, name, nearby text, bbox and crop, tied to the snapshot generation. Frontend Plane: select mode, region/image attach, @tab mention in the chat composer, frame context menu, and a visible 'from page' label. Model Plane: treat attachments as BrowserScraped provenance and re-validate staleness (tab id, URL, generation) before acting; attachments are ephemeral under ZDR.",
+   "effort": "M",
+   "dependencies": [
+    "R-t2-08-04",
+    "R-t2-08-01"
+   ],
+   "planeOwner": "Frontend Plane with an Ingestion Plane endpoint",
+   "risks": "Prompt injection via page text (keep provenance screening and the user-visible label); ZDR means attachments must stay ephemeral; stale refs after navigation must fail closed.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t2-08-024",
+    "C-t2-08-025",
+    "C-t2-08-027"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 12,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "R-t2-08-06",
+   "title": "Approval loop for agent browser actions: keyboard-first card with redirect, persisted site rules and attention notifications",
+   "summary": "Extend the existing browser approval gate into a full loop. Model Plane owns the approval schema (risk level, display-friendly params, origin, page URL, persist session|always) and persisted per-user or per-org host rules stored as BrowserBroker policy, never widened through Spaces. The SPA renders a keyboard-first card in chat and in the browser panel (Allow with Mod+Enter, Deny with Esc, and a 'do this instead' text that is delivered to the planner as a redirect, plus 'do not ask again' for non-sensitive categories) and deep-links denials to the setting that caused them. Application Plane emits notifications for approval_requested, question and completed with a link into the run, and suppresses them while the session is visible.",
+   "whyItMatters": "The risk categories and the fail-closed deterministic check are already good; what users feel is a card that only approves or rejects, cannot be answered outside the browser panel, and repeats the same question. Background runs need a reliable way to pull the user back without noise, and 'always' rules cut approval fatigue without widening any ACL.",
+   "referenceBestPractice": {
+    "bestSource": "Codex (approval contract, automation-and-safety-064) for the schema; Aside (aside-agent-control-architecture-076) for the card UX; Aside (aside-agent-control-architecture-059, aside-browser-product-097) for visibility-aware notifications",
+    "others": [
+     "Codex notification routing back to the originating session"
+    ],
+    "prevalence": "Approval prompts: 2 of 3 sources, common. Attention notifications: 2 of 3, common.",
+    "mechanism": "Approval request = {kind, connector, tool, params_display[{name, display_name, value}], riskLevel low|high, persist ['session','always'], origin, page_url}. UI choices: Allow, Deny, free text that rejects with 'user asked to do X instead', and 'always' that writes a site rule; denials carry a deep link to the permission setting. Notifications: the UI reports {surfaceId, focused, visible, engaged, sessionId, sequence} on focus changes plus a heartbeat; the backend keeps per-user attention entries with 30 and 60 second TTLs and skips notifying for visible sessions, disabled settings and ephemeral sessions; blocking asks use requireInteraction and open the session on click."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:159-164 (risk labels: login, checkout, posting_form, destructive, cross_domain_navigation, persistent_cookie_use)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:322,2049 (BrowserApprovalCard approve/reject via the orchestration approvals API)",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:220-240 (require_approval reuses the durable Approval record, not a parallel system)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/notifications-client.ts:7,23,57-62 (event_type and per-channel preferences exist)",
+     "Light grep of apps/Application Plane found no browser approval or run event types (INF)"
+    ],
+    "gap": "Missing: session/always persistence tied to broker host rules, redirect-with-instruction, keyboard shortcuts, display-friendly params, resolving an approval outside the browser panel, settings deep links, and browser-run notification events with visibility suppression. Also unreachable end to end until grants are issued (R-t2-08-01)."
+   },
+   "approach": "Model Plane: extend the approval record and the planner reply path with params_display, persist and redirect_text; persist 'always' as BrowserBroker policy rules keyed by (user or org, host, category) and keep upload/download/dialog single-use. Frontend Plane: shared approval card used in chat and the browser panel, keyboard shortcuts, settings deep links, and a visibility heartbeat. Application Plane: browser event types on the existing notifications API with cta_href to the run; ZDR or ephemeral sessions send title-only bodies.",
+   "effort": "L",
+   "dependencies": [
+    "R-t2-08-01",
+    "R-t2-08-07"
+   ],
+   "planeOwner": "Model Plane (schema and rules) with Frontend Plane and Application Plane",
+   "risks": "Over-broad 'always' rules (keep sensitive categories single-use); notification bodies must not leak page content under ZDR; the notification half is unverified.",
+   "tier": "recommended",
+   "significance": 4,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t2-08-022",
+    "C-t2-08-023"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 12,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "R-t2-08-07",
+   "title": "Browser permission policy: per-site agent rules, org policy and a Browser settings hub",
+   "summary": "Create one place where users and admins see and revoke what the agent may do on which sites. Model Plane BrowserBroker gets a policy store with per-origin rules (approval mode, downloads, uploads, cross-domain navigation) in user and org layers. Control Plane owns an org browser policy (site allow and deny lists, persistent approvals allowed or not, recording allowed, ZDR default, profile scopes) that the broker reads when it issues grants, fail-closed and audited. The SPA gets a Settings > Browser section with the rule matrix, managed items labelled, and ZDR and retention shown read-only.",
+   "whyItMatters": "Persistent approvals (item 06) need a visible, revocable home, and enterprise buyers expect admins to constrain agent browsing. Authority already lives server-side in the broker, and the browser is remote, so there is no device-sync problem to solve.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (settings hub with agent-permission matrix, iab-071; synced and admin-managed policy, iab-056/057)",
+    "others": [
+     "Aside (settings hub as web pages covering AI, agents, MCP and privacy)"
+    ],
+    "prevalence": "Settings hub: 2 of 3 sources, table-stakes. Admin-managed synced policy: 1 of 3 (Codex), unique.",
+    "mechanism": "Settings routes under /settings/browser-use/*; an agent-permission matrix lists per-origin rules (approval modes, downloads, uploads, CDP, site tools). Local config tables are projected to a server settings endpoint with revisions and conflicts surfaced; enterprise requirement keys (for example external profile import disabled, global persistent approvals disallowed) are enforced by asserting functions before any write, and managed items are labelled."
+   },
+   "verevonToday": {
+    "status": "absent",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/settings/components (no browser section; the only matches are unrelated MCP, account and workspace pages)",
+     "apps/Control Plane (light grep: no browser_policy, allowed_sites or blocked_sites symbols)",
+     "Broker grants are per grant with host allowlists, not user-editable rules (v-browser-app baseline)"
+    ],
+    "gap": "No Browser settings section, no per-site agent-permission matrix, no org-level browser policy. Both are inferred from light greps of the settings feature and the Control Plane, so treat the status as likely, not proven."
+   },
+   "approach": "Control Plane: org browser policy resource with versioned writes and audit; Model Plane BrowserBroker: rule store plus policy evaluation at grant issue time (fail-closed); Frontend Plane: Settings > Browser backed by gateway endpoints that proxy the broker; managed rows labelled and locked. Rules never widen an owner-plane ACL through Spaces.",
+   "effort": "L",
+   "dependencies": [
+    "R-t2-08-01"
+   ],
+   "planeOwner": "Control Plane (org policy), Model Plane (BrowserBroker rules), Frontend Plane (settings)",
+   "risks": "Policy evaluation must be fail-closed and audited; rules must not widen owner ACLs via Spaces; ZDR default has to propagate to grants.",
+   "tier": "recommended",
+   "significance": 4,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t2-08-041",
+    "C-t2-08-042"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "R-t2-08-08",
+   "title": "Capture-time secret redaction of page snapshots and screenshots in Quarry",
+   "summary": "Add a deterministic redaction pass inside Quarry's snapshot and observation builder, before anything is persisted or returned to the Model Plane. Drop values of password and tel inputs and of sensitive autocomplete tokens, scrub fields whose label looks secret (cvv, otp, pin, ssn), and replace secret-shaped values (JWT, AWS access keys, API keys, Slack tokens, private key blocks, numeric OTPs, Luhn-valid 13 to 19 digit card numbers) with [redacted]. Mask those fields in screenshots using their bounding boxes before they are stored or sent to vision.",
+   "whyItMatters": "AX snapshots and screenshots go to Model Plane inference and into evidence storage. Redacting at the executor protects ZDR and non-ZDR tenants alike and limits prompt leakage, particularly with human takeover logins now happening inside the same sessions the agent observes.",
+   "referenceBestPractice": {
+    "bestSource": "Aside (secret redaction at capture, aside-browser-product-041)",
+    "others": [],
+    "prevalence": "1 of 3 sources (Aside); unique.",
+    "mechanism": "In the accessibility-snapshot capture: drop values for input types password and tel and for sensitive autocomplete tokens; regexes on field labels (cvv, otp, pin, ssn, secret); value patterns (jwt, aws-access-key, api-key, slack-token, private-key-block, labelled secret, numeric OTP) plus a Luhn check for digit runs; replace with [redacted]. Rules are layered and applied before storage."
+   },
+   "verevonToday": {
+    "status": "absent",
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1053 (redact_egress_url redacts egress URLs only)",
+     "Light grep of apps/Ingestion Plane/Quarry-v2/crates found no input-type, secret-pattern or Luhn redaction outside a test site (INF)",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs (no password, secret or redact matches)"
+    ],
+    "gap": "Only URLs and egress receipts are redacted. No value-level redaction of AX snapshots, DOM observations or screenshots was found; the snapshot builder was not read end to end, so confirm before building."
+   },
+   "approach": "Ingestion Plane (quarry-browser snapshot and observation builder): a rule module with unit tests that run before persistence and before the response to the Model Plane; screenshot masking of password-like fields using their rects; keep rules auditable and versioned. Confirm separately whether typed text for sensitive fields appears in action receipts. Reuse rule definitions with R-t2-02-09 (PII stage for scraped content) but keep this pass deterministic and local to live observation.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane (Quarry)",
+   "risks": "False positives hide useful values (keep rules auditable); regex cost on large snapshots; screenshot masking depends on accurate rects.",
+   "tier": "recommended",
+   "significance": 4,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t2-08-048"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "R-t2-08-09",
+   "title": "Downloads into quarantined, tenant-scoped artifacts with a downloads drawer and agent-aware gating",
+   "summary": "Turn on downloads in the Chromiumoxide driver: route downloads to a per-session quarantine directory and register the result as a tenant-scoped Quarry artifact (size and type limits, hash, malware-scan hook), withheld under ZDR. User-initiated downloads under takeover are allowed; agent downloads need the existing single-use sensitive download_ref child grant, and unsolicited downloads are cancelled. Emit started, in_progress, complete, failed and canceled events into the timeline, and add a downloads drawer in BrowserChrome with 'Save to Knowledge'.",
+   "whyItMatters": "Agents and users need to fetch PDFs and exports into Knowledge, and the authority model already exists in the contracts and the broker. Without it any page that serves a file is a dead end.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (download gating, iab-042)",
+    "others": [
+     "Aside (download bubble and dangerous-download blocking, aside-browser-product-024)"
+    ],
+    "prevalence": "1 of 3 sources record it as a gated manager (Codex); Aside has a standard download bubble. Unique as an agent-aware gate.",
+    "mechanism": "will-download handler: cancel unless the download is user-initiated or matches a consumed agent grant (consumeAllowedBrowserUseDownload); a status machine started, in_progress, paused, complete, failed, canceled is pushed to the agent. Verevon: download_ref already requires a single-use sensitive child grant; files become tenant-scoped Quarry artifacts listed in a downloads drawer."
+   },
+   "verevonToday": {
+    "status": "absent",
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1877 (downloads_to_artifacts: false)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:487 (unsupported_action download_ref)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:803-810 (DownloadRef and FrameDownloadRef actions exist)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:233-274 (sensitive action requires a parent BrowserBroker run grant)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx (no downloads UI)"
+    ],
+    "gap": "Contracts and broker model download_ref as a sensitive single-use grant, but the driver reports the capability as false and there is no UI. Quarry's artifact store is not tenant-scoped yet (baseline gap 14)."
+   },
+   "approach": "Ingestion Plane: set the download behavior per session to a quarantine path, create the artifact through a tenant-scoped store, enforce caps and a scan hook, cancel unsolicited agent downloads, tag the source user|agent in the timeline, and withhold under ZDR. Frontend Plane: downloads drawer with 'Save to Knowledge' through the existing knowledge scrape route. Keep uploads separate (they stay unavailable until quarantine and OOPIF proof exist, chromiumoxide.rs:1877-1882).",
+   "effort": "M",
+   "dependencies": [
+    "R-t2-08-01",
+    "Tenant-scoped Quarry artifact store (baseline gap 14)"
+   ],
+   "planeOwner": "Ingestion Plane (Quarry)",
+   "risks": "Malware, exfiltration and storage of sensitive files; artifact store isolation is the single control until it is tenant-scoped.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "docs/BROWSER_WORKSPACE_PLAN.md open item 1 (downloads and uploads risk classification) and target capability 10 (file up/download); the plan itself is stale."
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t2-08-034"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t2-08-10",
+   "title": "Persist and restore a run's tab set with a live-page budget (task-scoped tabs)",
+   "summary": "Extend Quarry's existing AgentRunCheckpoint, which today stores one current_url, page hash, constraints, viewport, zdr, grant id and control mode, with the full tab list (URL, title, a bounded history window, active tab, agent or user flag). Resume then means a new lease plus lazy tab restore, and reopening a chat thread shows its tabs. Add a live-page budget in the lease scheduler that protects the active, agent-controlled, loading and downloading tabs and evicts by inactivity, restoring from the checkpoint on demand. Nothing is persisted under ZDR.",
+   "whyItMatters": "A paused agent run or a HITL handoff can resume on the same pages, and idle Chromium pages stop costing money. It is also what makes co-browsing durable across a closed laptop.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (iab-034 thread-keyed tabs, iab-035 history snapshots, iab-031 live-page budget)",
+    "others": [],
+    "prevalence": "1 of 3 sources (Codex); unique as a complete lifecycle.",
+    "mechanism": "Key pages by (conversationId, tabId). Persist {navigation:{currentIndex, entries[{url, title, pageState}]}, favicon, title}. Budget: at most N (32) live pages; protect active, agent-controlled, audible, capturing, loading and downloading tabs; evict by inactivity rank; restore lazily by recreating the page and replaying history."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:39-71 (AgentRunCheckpoint: single current_url, no tab list or history)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1436-1446 (resume_checkpoint; ZDR checkpoints refused; lease ttl defaults to 120 s)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:453,636 (checkpoint and browser-session projection)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:385-396,483-487 (tabs exist within one session)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1083-1134 (tab strip)"
+    ],
+    "gap": "A durable single-URL run checkpoint and a resume path exist, but tabs, per-tab history, titles and an agent/user flag are not persisted, there is no binding of a tab set to a chat thread, and there is no live-page budget. The comparator's status of absent was corrected after reading the checkpoint struct."
+   },
+   "approach": "Ingestion Plane: extend AgentRunCheckpoint (and its Postgres writer in postgres_step_receipts.rs) with a bounded tab list and history window; implement restore as lease plus navigate; add a scheduler budget with protection rules. Coordinate with R-t2-03-08 (durable session store, suspend/resume) and R-t2-05-11 (turn-scoped tab cleanup) so there is one session state machine. Frontend Plane: reopening a thread rehydrates its tabs.",
+   "effort": "L",
+   "dependencies": [
+    "R-t2-08-01",
+    "R-t2-08-02",
+    "R-t2-03-08"
+   ],
+   "planeOwner": "Ingestion Plane (Quarry)",
+   "risks": "Restored pages may differ (login expiry); stored URLs are sensitive, so scope them per tenant and never persist under ZDR; overlap with R-t2-03-08 can lead to two competing session models.",
+   "tier": "recommended",
+   "significance": 4,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t2-08-014"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t2-08-11",
+   "title": "Frame overlay layer: agent cursor and target highlight, plus real on-page annotation markers",
+   "summary": "Build one overlay layer in BrowserChrome that maps Quarry AX-ref rects (scaled to the frame) onto the frame stream. Use it for (a) an agent cursor and element highlight driven by the target rect that Quarry includes in the pre-action event, without blocking execution on a UI acknowledgement, and (b) an annotation mode where the user marks an element, text or region and the markers stay anchored to AX refs; a batch is sent to chat as one message carrying role, name, ref or selector, rect, nearby text, frame path and an optional screenshot. As an immediate small step, stop advertising the 'annotate' capability and remove the hard-coded placeholder anchor until this is real.",
+   "whyItMatters": "It makes agent actions legible and trustworthy during co-browsing, gives users a precise way to tell the agent what to change or extract, and removes a visibly fake feature: the gateway advertises annotate while the UI shows one fixed marker.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (annotation iab-060/061; agent cursor automation-and-safety-063)",
+    "others": [],
+    "prevalence": "1 of 3 sources (Codex) for both; unique.",
+    "mechanism": "Cursor: moveMouse assigns a sequence number, pushes {moveSequence, x, y} to the host overlay, and waits for a cursor-arrived ack (timeout 1500 ms) before dispatching the click. Annotation: comment payload {pageUrl, framePath, selectedText or targetDescription, targetRole, targetName, targetSelector, targetPath, targetRect, nearbyText, additionalSelections, marker point, screenshot}; overlay modes browse and comment; batch mode collects several comments before sending. Verevon: Quarry emits the target point from the AX-ref bbox before executing and may wait a short fixed delay instead of an ack."
+   },
+   "verevonToday": {
+    "status": "stub",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:128-135 (one hard-coded anchor at 7%/18% labelled '1')",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1844-1850 (renders commentAnchors)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1822 (AI rationale bubble and step badges only)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2578,2700 (gateway advertises 'annotate')"
+    ],
+    "gap": "Annotation is a placeholder while the capability is advertised, and there is no agent cursor or element highlight; only a rationale bubble per step exists."
+   },
+   "approach": "Ingestion Plane: include the target AX ref and rect in pre-action events (and the hit-test of R-t2-08-05 for user marks). Frontend Plane: overlay component with frame-scale mapping, annotation mode, batch send to chat; remove 'annotate' from the advertised capabilities until shipped.",
+   "effort": "M",
+   "dependencies": [
+    "R-t2-08-05",
+    "R-t2-08-03"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Coordinate mismatch with scaled frames; anchors drift on dynamic pages (re-resolve by AX ref and fail visibly).",
+   "tier": "recommended",
+   "significance": 4,
+   "confidence": "high",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t2-08-018",
+    "C-t2-08-026"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "R-t2-08-12",
+   "title": "Quarry-backed page utilities and capture: find, zoom, print-to-PDF, full-page and area screenshot, viewport emulation, colour scheme",
+   "summary": "Expose what the Chromiumoxide driver already does (full-page screenshot and PDF) through the gateway and the shell, and add the missing pieces in Quarry: a find action that returns match rects to highlight in the frame, viewport_set and reset through device-metrics emulation, a colorScheme session option that follows the user's theme, and a zoom scale. Frontend adds a find bar, zoom control, device presets, area-select capture and copy-to-clipboard. Print and screenshot outputs are artifacts, withheld under ZDR.",
+   "whyItMatters": "Find, zoom, print and capture are table-stakes for a browser panel, and viewport control is one of the plan's own never-closed capabilities. Most of the capture work is already in the driver, so the gap is exposure rather than engine work.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (find, per-tab zoom, device metrics override, emulated colour scheme); Aside for the screenshot overlay with area handles",
+    "others": [
+     "Aside (viewport and full-page capture, copy to clipboard)",
+     "Codex screenshots attached to comments and cropped thumbnails"
+    ],
+    "prevalence": "Utilities: 2 of 3 sources, table-stakes. Screenshots: 2 of 3, table-stakes. Viewport emulation: 1 of 3 and colour scheme: 1 of 3, both unique.",
+    "mechanism": "findInPage open, query, next, previous and close; zoom percent persisted per tab with a banner; Emulation.setDeviceMetricsOverride {width, height, deviceScaleFactor, mobile} with an explicit reset; Emulation.setEmulatedMedia for prefers-color-scheme re-synced on theme change; full-page capture through captureBeyondViewport or scroll-and-stitch with a drag-area overlay. For Verevon: Quarry CDP calls plus a thin UI."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2392-2400 (screenshot with capture_beyond_viewport(full_page))",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2440 (page.pdf with PrintToPdfParams)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:817-820 (Screenshot and Pdf actions)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1256 (viewport screenshot stored as an artifact)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1912-1940 (DevTools drawer: console, DOM, network, vision)",
+     "No set-device-metrics or emulated colour-scheme code found in apps/Ingestion Plane/Quarry-v2/crates by grep (INF); viewport is a session start parameter only",
+     "docs/BROWSER_WORKSPACE_PLAN.md target capability 12 (viewport and device controls) never closed (baseline)"
+    ],
+    "gap": "Viewport screenshot and the DevTools drawer ship. The shell exposes no full-page or area capture, no PDF, no find, no zoom, no device emulation and no copy to clipboard; colour scheme is not a session option."
+   },
+   "approach": "Ingestion Plane (Quarry): add find (DOM text search with rects), viewport_set and reset, colorScheme on session start, zoom scale; surface Pdf and full_page or clip screenshots as artifacts (withheld under ZDR). Frontend Plane: find bar, zoom control, device presets, area-select capture, copy to clipboard. Recording stays out of scope here (see dropped C-t2-08-032).",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane (Quarry) with Frontend Plane UI",
+   "risks": "Low. Colour-scheme emulation changes appearance in evidence screenshots; keep it a documented session option.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "docs/BROWSER_WORKSPACE_PLAN.md target capability 12 (viewport and device controls) listed but not closed; the plan is stale."
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t2-08-013",
+    "C-t2-08-031",
+    "C-t2-08-021",
+    "C-t2-08-045"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 11,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "R-t2-08-13",
+   "title": "Browser chrome polish in the SPA: tab menu, new-tab page, typed error cards, split view, keyboard commands, activity strip, reader view",
+   "summary": "A bundle of Frontend-led refinements that need little or no new Quarry surface. Tab context menu with duplicate (new tab, same URL and profile), reopen-closed (a closed-tab stack in Quarry session state), reorder, copy URL and open in the system browser. A new tab renders a compact search-or-ask page built from DashboardSearchPanel and the composer. Quarry returns typed navigation errors (network error, egress-policy denial, domain-lock denial, anti-bot) and BrowserChrome shows a Norwegian-first error card with retry and the reason. Register browser commands in the app's shortcut registry (without stealing keys forwarded to the remote page during takeover). Optional later: split view of two Quarry tab streams, a low-rate multi-run activity strip, and a reader view from the Quarry scrape markdown (translation through Model Plane inference outside ZDR).",
+   "whyItMatters": "Removes small daily frictions once the browser is usable (items 01 to 04) and makes denials and failures understandable instead of silent.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (tab menu commands, error pages, top sites, central keymap, browser activity preview)",
+    "others": [
+     "Aside (search-or-ask new tab page, split view, tab-capture live previews, reader mode)"
+    ],
+    "prevalence": "Tab operations: 1 of 3 recorded (table-stakes by inference). New tab page and live previews: 2 of 3, common. Error pages, split view, keyboard commands, reader/translation: 1 of 3, unique.",
+    "mechanism": "Tab context-menu command ids (copyUrl, duplicate, newTabToTheRight, rename, reload, openInExternalBrowser) dispatch to a tab store and duplicate clones history; on load failure net error codes map to localized categories and a local error document is rendered with the original URL stored so reload retries it; accelerators are named commands in a central keymap. Aside paints the new-tab omnibox immediately and mounts the composer in ask mode. Preview: thumbnail of each active run's latest frame, click to open the full panel."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1083-1134 and apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:385-396 (new, select and close tab only)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3697-3702 (tab routes)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardWebHistory.tsx and web-history.ts:10 (continue-where-you-left-off history)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx:729 (search plus ask entry)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:281,760 (frame and loop errors handled; no categorised navigation error page found, INF)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1057 (some keydown handlers; global keymap registration unverified)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:39,608 (one live frame view per session)"
+    ],
+    "gap": "Only new, select and close tab; no duplicate, reopen, reorder, copy URL, open externally, split view, activity strip or reader view. A new tab does not open the search-or-ask page. Navigation error pages and keymap integration are unverified."
+   },
+   "approach": "Frontend Plane: tab menu and dock the new-tab page in BrowserChrome; error card keyed on a typed navigation error that Quarry returns; shortcut registration. Quarry: closed-tab stack and a typed navigation error code. Defer split view, activity strip and reader view until the primary surface (items 03 and 04) lands.",
+   "effort": "M",
+   "dependencies": [
+    "R-t2-08-02"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Low. Frame bandwidth doubles for split view and for a multi-run strip (use low frame rates); translation inputs need ZDR handling.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t2-08-002",
+    "C-t2-08-007",
+    "C-t2-08-010",
+    "C-t2-08-012",
+    "C-t2-08-020",
+    "C-t2-08-033",
+    "C-t2-08-044"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 11,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "R-t2-08-14",
+   "title": "Browsing data lifecycle: server-side history with agent/user source, bookmarks, clear-site-data, permission-deny events, support export",
+   "summary": "Derive a per-user visit log from Quarry session timelines, tagged source agent|user, retention-limited and disabled under ZDR, and show it in a history page with an agent filter and a short list of user-scoped bookmarks (or reuse Knowledge saved sources). Add clear-site-data on a profile by type and origin (cookies, storage, cache) with counts first. Make permission handling deny-by-default in the driver with a 'permission requested' event shown as an info chip. Add an opt-in, redacted export of a session's timeline and receipts to support tickets, never under ZDR.",
+   "whyItMatters": "History and clear-data are table-stakes in both reference browsers and let users see and undo what the agent did in their profile; Verevon today only keeps a browser-local list of 10 entries. Category 1 deferred a consent-gated history query for agents to this item, so it also prepares a bounded read tool.",
+   "referenceBestPractice": {
+    "bestSource": "Codex in-app browser (history with Agent badge and source filter; clear-browsing-data dialog with counts; prompts keyed per page)",
+    "others": [
+     "Aside (bookmarks, history panel, downloads bubble, privacy page)"
+    ],
+    "prevalence": "History and bookmarks: 2 of 3 sources, table-stakes. Clear data: 2 of 3, table-stakes. Permission prompts and diagnostics: 1 of 3 each, unique.",
+    "mechanism": "History store deduplicated by day with favicons; each visit tagged agent|user; a settings page with search, delete-selected and a source filter; agent-facing history reads are gated by their own approval mode. Clear dialog maps selected data types and range to storage clears and shows counts first. Permissions: default deny for request and check handlers with a prompt store keyed per page. Diagnostics: opt-in tab diagnostics attachment and a bounded ring buffer of recent session events."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts:10 and DashboardWebHistory.tsx:1 (browser-local list, max 10, per workspace and user, purged under ZDR)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1181,1245 (profile popover: create, rename, delete, restore-probe, ZDR chip)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:1413 (profile and ZDR controls, per the comparator's evidence)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs (no permission handling found, INF)",
+     "docs/BROWSER_WORKSPACE_PLAN.md target capability 13 (debug export) never closed (baseline)"
+    ],
+    "gap": "No server-side history, no bookmarks, no agent/user tagging, no typed or ranged clearing of a profile's data, no permission events, and no browser-session diagnostics export."
+   },
+   "approach": "Ingestion Plane: visit log derived from the existing session timeline, tenant-scoped, TTL-bound, off under ZDR; clear-site-data endpoint by profile, type and origin (Storage.clearDataForOrigin, Network.clearBrowserCookies); explicit deny-all permission policy with events. Frontend Plane: history page in the browser settings hub (R-t2-08-07), clear-data options in the profile popover, bookmarks list. Gateway: opt-in redacted timeline export for support.",
+   "effort": "M",
+   "dependencies": [
+    "R-t2-08-02",
+    "R-t2-08-07"
+   ],
+   "planeOwner": "Ingestion Plane (Quarry) with Frontend Plane",
+   "risks": "Stored URLs are sensitive and must respect ZDR and retention; exports must be redacted and never include page data under ZDR.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "confidence": "medium",
+   "alreadyPlanned": {
+    "is": true,
+    "where": "docs/BROWSER_WORKSPACE_PLAN.md target capability 13 (debug export) listed but never closed; stale plan."
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t2-08-035",
+    "C-t2-08-039",
+    "C-t2-08-036",
+    "C-t2-08-046"
+   ],
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 12,
+    "DOC": 0,
+    "INF": 2
+   }
+  }
+ ],
+ "dropped": [
+  {
+   "cluster": "C-t2-08-030",
+   "reason": "Draft-preview cards for outgoing messages belong to provider-action approvals in integration-corev2 (Integration Plane), not the browser shell; revisit in that category."
+  },
+  {
+   "cluster": "C-t2-08-032",
+   "reason": "Duplicate of R-t2-03-08, which already proposes optional recording gated by org policy and off under ZDR; the leftover UI is an HLS player in BrowserTimelineDetail.tsx to add when that lands. Receipt replay is the lighter, more auditable default."
+  },
+  {
+   "cluster": "C-t2-08-040",
+   "reason": "Ad and tracker blocking is Quarry request interception owned by the rendering and anti-bot categories (Firecrawl-style blockAds); no shell-specific work, and it risks site breakage and anti-bot detection."
+  },
+  {
+   "cluster": "C-t2-08-043",
+   "reason": "No evidence of HTTP preview endpoints in Model Plane sandboxes (grep found none); Verevon's browser is remote, so localhost port-forwarding has no analogue and a scoped egress exception to internal hosts is a security risk. Revisit if sandboxes publish previews."
+  },
+  {
+   "cluster": "C-t2-08-051",
+   "reason": "Exposing browser.observe/act to external agents (CLI, skill and MCP install) overlaps R-t2-01-11 (external contract: OpenAPI, MCP server, SDK, CLI/skills) and needs customer API keys; build it there once R-t2-08-01 grants exist."
+  }
+ ],
+ "strengthsToKeep": [
+  "Remote isolation: the page runs in a leased Chromium inside Quarry and the SPA only receives frames and sends typed input, so nothing executes on the user's machine or in the SPA origin; stronger than Codex's and Aside's local embedding (apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs; apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:180; apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1600,1730). Keep this contract when adding docking, free browsing and co-browsing.",
+  "Host authority is broker-owned and revalidated: Quarry overwrites client allowed_domains with the broker's canonical list and rechecks it every step, and download, upload and dialog actions need a single-use parent grant (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:157,202,249,306-345,1397-1412; quarry-browser/src/lib.rs:59-77). Neither reference has an equivalent server-side authority; extend it, do not bypass it.",
+  "Take-over authority lives in Quarry: control_mode is persisted by the browser owner so a gateway restart cannot reset a human takeover, and agent actions are refused during takeover (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:67-70; comparator cluster C-t2-08-017).",
+  "Profiles and Zero-Data-Retention are better governed than either reference's incognito mode: scoped profiles with restore probe, persistent profiles refused under ZDR, artifacts withheld, vision summary skipped, local web history purged and run checkpoints refused (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:470-474; apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1181,1245; apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1436-1441).",
+  "Approval gate with named risk categories and a deterministic fail-closed backstop, reusing the durable Approval record instead of a parallel system (apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:159-164,322; apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:220-240).",
+  "Timeline and evidence drawer with receipt replay and a DevTools drawer that includes network and vision views: lighter and more auditable than video or a plain transcript (apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1912-1940,2090-2121; BrowserTimelineDetail.tsx).",
+  "Egress is policed at the driver (per-session proxy plus CDP Fetch boundary) and egress receipts are redacted before they leave the driver (apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1053,1877-1890)."
+ ]
+}

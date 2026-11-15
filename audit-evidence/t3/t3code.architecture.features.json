@@ -1,0 +1,1901 @@
+[
+ {
+  "id": "t3code-architecture-001",
+  "category": "Platform architecture",
+  "name": "Electron main process built as an Effect layer graph with staged startup",
+  "what": "The desktop shell is assembled as a typed dependency graph of services instead of imperative event handlers. Startup, fatal errors and shutdown follow an explicit sequence, so a failure at any stage shows one error dialog and a clean quit.",
+  "how": "main.ts merges Layers for every Electron API wrapped as a service (ElectronApp, ElectronWindow, ElectronDialog, ElectronUpdater, ElectronSafeStorage, ElectronProtocol, ElectronPowerMonitor, ElectronTheme, DesktopIpc over ipcMain) plus foundation, backend-pool, WSL, SSH, updates and Clerk layers, then runs DesktopApp.program with NodeRuntime.runMain. startup() runs: shell-environment import, userData path, settings load, lifecycle register, Clerk configure, whenReady, menu, updates, Linux URL handler, then bootstrap (port selection, exposure config, protocol registration, IPC handlers, backend start). Fatal errors at whenReady or bootstrap call handleFatalStartupError (log, error box, shutdown request, quit). A scoped finalizer stops every backend in the pool concurrently so none is hard-killed.",
+  "evidence": [
+   "recovered/desktop/src/main.ts:67-219",
+   "recovered/desktop/src/app/DesktopApp.ts:105-137",
+   "recovered/desktop/src/app/DesktopApp.ts:221-321"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's Rust gateway can copy the idea of wrapping every platform capability behind an injectable service interface with an explicit startup/shutdown DAG, which makes each stage testable and fail-loud.",
+  "notes": "Depends on Effect 4.0.0-beta.103 (pre-release) throughout; the pattern ports to Rust traits/actors, the library does not. Quality 4 because the staging is clean but the beta dependency is a maintenance risk."
+ },
+ {
+  "id": "t3code-architecture-002",
+  "category": "Platform architecture",
+  "name": "One server artifact, many hosting shells (desktop, headless, SSH, WSL, boot service)",
+  "what": "The same Node server bundle powers the desktop app, a headless `t3 serve`, a remote machine reached over SSH, a WSL distro, and a systemd/launchd boot service. The shells only differ in how they bootstrap and supervise it.",
+  "how": "ServerConfig.mode is 'web' or 'desktop'; the desktop passes a one-time bootstrap envelope (DesktopBackendBootstrap) and the CLI flag --bootstrap-fd. The desktop never embeds UI: the SPA lives in server.asar and is served by the backend. SSH sends a launcher script that runs `serve --host 127.0.0.1` on the remote box; WSL runs `wsl.exe --exec node bin.mjs`; the boot service points a unit/plist at a pinned runtime directory.",
+  "evidence": [
+   "recovered/server/src/config.ts:22-24",
+   "recovered/desktop/packages/contracts/src/desktopBootstrap.ts:5-23",
+   "recovered/desktop/src/backend/DesktopBackendConfiguration.ts:366-416",
+   "recovered/desktop/packages/ssh/src/tunnel.ts:593",
+   "recovered/server/src/cloud/bootService.ts:33-45"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon already separates a Rust gateway from the SolidJS SPA; the lesson is to keep one server artifact and make every deployment shape (cloud, on-prem, local dev) a thin bootstrap difference rather than a fork.",
+  "notes": "The scout noted the thin-shell layout; this record adds the multiplicity of shells and the bootstrap contract."
+ },
+ {
+  "id": "t3code-architecture-003",
+  "category": "Platform architecture",
+  "name": "Privileged t3code://app scheme that reverse-proxies the UI to the backend with an injected CSP",
+  "what": "The Electron window loads a custom secure origin instead of http://localhost:<port>, so the renderer origin stays stable while the backend port changes. Every response gets a Content-Security-Policy header.",
+  "how": "registerSchemesAsPrivileged marks t3code (and t3code-dev) standard, secure, fetch-capable and CORS-enabled before ready. protocol.handle proxies any request on host 'app' to the backend origin with Electron.net.fetch, strips host/origin/referer/sec-fetch headers, retries GET/HEAD at 0/50/150 ms, then rewrites the response with a CSP built by makeDesktopContentSecurityPolicy (script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' plus Clerk and Cloudflare challenge origins, connect-src limited only by scheme http/https/ws/wss).",
+  "evidence": [
+   "recovered/desktop/src/electron/ElectronProtocol.ts:67-110",
+   "recovered/desktop/src/electron/ElectronProtocol.ts:112-138",
+   "recovered/desktop/src/electron/ElectronProtocol.ts:140-183",
+   "recovered/desktop/src/app/DesktopApp.ts:176-186"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A web chat app can reuse the idea of one stable origin plus a response-level CSP injected at the edge (Verevon's Rust gateway) instead of relying on per-page meta tags.",
+  "notes": "The CSP is permissive by design (inline scripts, any http(s)/ws(s) connect target) because the renderer must reach user-configured environments; treat that as a trade-off, not a model for a multi-tenant SaaS."
+ },
+ {
+  "id": "t3code-architecture-004",
+  "category": "Platform architecture",
+  "name": "Backend child-process protocol: fd-3 bootstrap, readiness probe, SIGTERM-then-kill, restart backoff",
+  "what": "The desktop supervises its embedded server like a service. Secrets are passed without argv or env, readiness is probed over HTTP, crashes restart with backoff and unrecoverable preflight failures stop the loop with a visible reason.",
+  "how": "The server is spawned with process.execPath plus ELECTRON_RUN_AS_NODE=1, args [entry, --bootstrap-fd, 3]. The bootstrap JSON line (port, host, home, one-time desktopBootstrapToken, tailscale flags, OTLP URLs, telemetry fds 4/5, resource-monitor path) is written to an extra fd (stdin for WSL, because wsl.exe drops extra fds). Output is captured to rotating logs. waitForHttpReady polls /.well-known/t3/environment (100 ms interval, 1 s request timeout, 1 min budget). Exit triggers restart with delay from 500 ms up to 10 s; preflight failures flagged fatal stop after 5 attempts and call onPreflightFailed; transient failures (WSL cold start) retry. Stop sends SIGTERM and force-kills after 2 s.",
+  "evidence": [
+   "recovered/desktop/src/backend/DesktopBackendManager.ts:56-70",
+   "recovered/desktop/src/backend/DesktopBackendManager.ts:435-485",
+   "recovered/desktop/src/backend/DesktopBackendManager.ts:342-345",
+   "recovered/desktop/src/backend/DesktopBackendConfiguration.ts:366-416",
+   "recovered/desktop/packages/contracts/src/desktopBootstrap.ts:5-23"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's compose/runner supervision of Rust and Go services could adopt the same split between fatal and transient preflight failures plus a bounded restart loop that surfaces a reason instead of spinning.",
+  "notes": "Credential handoff via an inherited fd (not argv/env) is the right shape for any parent-child secret passing."
+ },
+ {
+  "id": "t3code-architecture-005",
+  "category": "Platform architecture",
+  "name": "Backend instance factory and pool (primary plus WSL) with per-instance logs",
+  "what": "Several backends can run side by side. Each has its own state, mutex, restart loop, log file and lifecycle callbacks; only the primary drives window readiness.",
+  "how": "makeBackendInstance(spec) builds an isolated lifecycle (state Ref, Semaphore, restart fiber, child process). DesktopBackendPool registers/unregisters instances in child scopes; the primary id refuses unregister. Config comes from a per-instance configResolve closure (resolvePrimary vs resolveWsl). Log writers are keyed by instance id (server-child.log vs server-child-<id>.log). The design header documents the 10-commit migration from a singleton manager.",
+  "evidence": [
+   "recovered/desktop/src/backend/DesktopBackendManager.ts:1-24",
+   "recovered/desktop/src/backend/DesktopBackendPool.ts:1-80",
+   "recovered/desktop/src/app/DesktopObservability.ts:24-29",
+   "recovered/desktop/src/app/DesktopApp.ts:301-314"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Useful as a template for a per-tenant or per-sandbox worker supervisor in Verevon: one factory, isolated state, shared pool registry.",
+  "notes": "The file header records design decisions and a migration history, which is rare and valuable (DOC-quality commentary inside SRC)."
+ },
+ {
+  "id": "t3code-architecture-006",
+  "category": "Platform architecture",
+  "name": "Typed RPC over WebSocket with one shared contracts package for client and server",
+  "what": "All interactive traffic (commands, queries, subscriptions) rides one WebSocket using Effect RPC; HTTP is used only for snapshots, attachments, assets, OTLP and auth. Client and server are generated from the same method group, so version drift is a compile error.",
+  "how": "packages/contracts defines WS_METHODS and ORCHESTRATION_WS_METHODS (97 plus 8 method names in the tables; 17 stream-typed definitions in rpc.ts plus the two orchestration subscriptions, for about 19 streaming methods) as Rpc.make groups; the server mounts them with RpcServer and RpcSerialization.layerJson; the client builds RpcClient.make(WsRpcGroup). The Bun/Node HTTP server negotiates permessage-deflate (dedicated compressor with context takeover on Bun). A wsTicket query parameter (5 min TTL) authenticates the upgrade because browsers cannot set headers on WebSocket.",
+  "evidence": [
+   "recovered/server/packages/contracts/src/rpc.ts:209-334",
+   "recovered/server/packages/contracts/src/orchestration.ts:27-36",
+   "recovered/server/src/ws.ts:2481-2492",
+   "recovered/desktop/packages/client-runtime/src/rpc/protocol.ts:5",
+   "recovered/desktop/packages/client-runtime/src/rpc/session.ts:108",
+   "recovered/server/src/server.ts:188-232"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon uses HTTP+SSE at the edge and gRPC internally; a typed bidirectional channel for the chat/agent page (approvals, interrupts, subscriptions) would remove the SSE-plus-POST split, and sharing one schema source keeps Rust and the SPA honest.",
+  "notes": "Wire format is JSON (msgpackr is a dependency but RPC uses layerJson). Correction to the scout: msgpackr is not the RPC codec."
+ },
+ {
+  "id": "t3code-architecture-007",
+  "category": "Platform architecture",
+  "name": "Connection supervisor with four target kinds, backoff and application wake-ups",
+  "what": "The client can connect to the local backend, a paired remote server by bearer token, a managed relay, or an SSH tunnel, all through one supervised connection state machine that reconnects when the app wakes or the network changes.",
+  "how": "client-runtime defines tagged targets (PrimaryConnectionTarget, BearerConnectionTarget, RelayConnectionTarget, SshConnectionTarget). ConnectionDriver.connect runs prepare, opening, synchronizing (session.ready). ConnectionSupervisor reacts to signals (ConnectRequested, DisconnectRequested, RetryRequested, NetworkChanged, Wakeup) with delays of 3, 4, 8 and 16 s, a 15 s establishment timeout, a 3 s probe on mobile, and resets backoff after 30 s of stability. Wakeups (application-active, -probe, -reconnect, credentials-changed) decide whether subscriptions are re-opened.",
+  "evidence": [
+   "recovered/desktop/packages/client-runtime/src/connection/model.ts:9-56",
+   "recovered/desktop/packages/client-runtime/src/connection/driver.ts:44-62",
+   "recovered/desktop/packages/client-runtime/src/connection/supervisor.ts:32-60",
+   "recovered/desktop/packages/client-runtime/src/connection/wakeups.ts:5-20"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "The Verevon SPA's SSE reconnection could adopt an explicit supervisor state machine with wake-up reasons (tab visible, credentials changed) instead of ad-hoc retries.",
+  "notes": "A mobile client is in the monorepo (Expo/React Native overrides in pnpm config) and shares this runtime; it is not in this build."
+ },
+ {
+  "id": "t3code-architecture-008",
+  "category": "Platform architecture",
+  "name": "Event-sourced single-writer command engine with receipts and transactional projections",
+  "what": "Every UI action is a command processed one at a time. Accepted commands produce events, update read models and store a receipt in a single SQL transaction, so retries are idempotent and a replayed command id cannot report success for work aimed at a different aggregate.",
+  "how": "OrchestrationEngine owns an unbounded Queue of CommandEnvelope and a worker fiber. For each command: look up the receipt (same id but other aggregate gives OrchestrationCommandIdConflictError; accepted returns the stored sequence; rejected gives PreviouslyRejected); run the pure decider against the in-memory command read model; stamp client origin on events; in sql.withTransaction append each event, project it in memory, run the projection pipeline, and upsert an accepted receipt; then publish to a PubSub (each consumer gets its own subscription). On failure the read model is reconciled from the event store and an invariant failure is persisted as a rejected receipt.",
+  "evidence": [
+   "recovered/server/src/orchestration/Layers/OrchestrationEngine.ts:94-100",
+   "recovered/server/src/orchestration/Layers/OrchestrationEngine.ts:109-260",
+   "recovered/server/src/orchestration/Layers/OrchestrationEngine.ts:287-325",
+   "recovered/server/src/orchestration/Layers/OrchestrationEngine.ts:331-369"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's session-core is already the single writer for threads/runs; adding command receipts with an aggregate-mismatch check and reconcile-after-failure would harden retries from the SPA and from reactors.",
+  "notes": "The sibling UI audit covers the client sync side (its record 091); this record is the server write path. Weakness: the queue is process-local and unbounded, fine for single-user, not for multi-replica."
+ },
+ {
+  "id": "t3code-architecture-009",
+  "category": "Platform architecture",
+  "name": "Command tiers and intent-event reactors",
+  "what": "Clients may only dispatch a fixed subset of commands; server-only commands (assistant deltas, session state, activity append, diff completion, revert completion) are internal. Side effects run in reactors that listen for requested-style intent events and report back by dispatching internal commands.",
+  "how": "contracts split DispatchableClientOrchestrationCommand, ClientOrchestrationCommand and InternalOrchestrationCommand unions. ProviderCommandReactor handles thread.meta-updated, runtime-mode-set, turn-start-requested, turn-interrupt-requested, approval-response-requested, user-input-response-requested and session-stop-requested. ProviderRuntimeIngestion turns provider runtime events into internal commands; CheckpointReactor, ThreadDeletionReactor and RuntimeReceiptBus complete the set; all are layered in ReactorLayerLive.",
+  "evidence": [
+   "recovered/server/packages/contracts/src/orchestration.ts:942-995",
+   "recovered/server/packages/contracts/src/orchestration.ts:1070-1084",
+   "recovered/server/src/orchestration/Layers/ProviderCommandReactor.ts:53-70",
+   "recovered/server/src/orchestration/Layers/ProviderCommandReactor.ts:1452-1480",
+   "recovered/server/src/server.ts:247-256"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Directly applicable to Verevon's session-core/gateway split: make the client-callable command set a closed schema and drive provider calls from intent events so approvals, interrupts and restarts are all auditable events.",
+  "notes": "Separating the 'requested' event from the 'happened' event is what makes crash recovery and the activity timeline simple."
+ },
+ {
+  "id": "t3code-architecture-010",
+  "category": "Platform architecture",
+  "name": "Projection pipeline with nine resumable projectors",
+  "what": "Read models (projects, messages, plans, activities, sessions, turns, checkpoints, pending approvals, threads) are separate projectors that each remember the last event sequence they applied, so a restart or a new projector replays only what it missed.",
+  "how": "ORCHESTRATION_PROJECTOR_NAMES lists the nine projectors; projectEvent runs them sequentially per event for deterministic ordering and writes lastAppliedSequence into projection state; bootstrap resumes each projector from its stored cursor before the engine starts accepting commands.",
+  "evidence": [
+   "recovered/server/src/orchestration/Layers/ProjectionPipeline.ts:58-71",
+   "recovered/server/src/orchestration/Layers/ProjectionPipeline.ts:1648-1770",
+   "recovered/server/src/orchestration/Services/ProjectionPipeline.ts:11-35"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Postgres-backed session-core could adopt per-projector cursors so new views (search, usage, activity feeds) are added by replay instead of backfill scripts.",
+  "notes": "The read side carries most of the code (ProjectionPipeline about 1.8k lines, ProjectionSnapshotQuery about 2.9k lines)."
+ },
+ {
+  "id": "t3code-architecture-011",
+  "category": "Platform architecture",
+  "name": "SQLite in WAL mode with dual Bun/Node drivers and in-place payload migrations",
+  "what": "State lives in one SQLite file with 43 ordered migrations. The server and the CLI can write from separate processes without lock errors. Event payloads are patched in place by SQL migrations when schemas change.",
+  "how": "makeRuntimeSqliteLayer picks @effect/sql-sqlite-bun or a NodeSqliteClient at runtime; setup runs PRAGMA busy_timeout=5000, foreign_keys=ON, journal_mode=WAL then runMigrations. Migration 001 creates orchestration_events with a unique (aggregate_kind, stream_id, stream_version) index; later migrations backfill projections and rewrite event payload_json via json_set/json_remove (011 adds a default runtimeMode to thread.created events; 016 rewrites model selections).",
+  "evidence": [
+   "recovered/server/src/persistence/Layers/Sqlite.ts:19-45",
+   "recovered/server/src/persistence/Migrations/001_OrchestrationEvents.ts:1-45",
+   "recovered/server/src/persistence/Migrations/011_OrchestrationThreadCreatedRuntimeMode.ts:1-12",
+   "recovered/server/src/persistence/Migrations/016_CanonicalizeModelSelections.ts:60-90"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon uses Postgres, so the transferable part is the stream_version unique index for optimistic concurrency per aggregate; the in-place event rewrite is a pattern to avoid in favour of versioned upcasters.",
+  "notes": "Rewriting stored events breaks the 'events are immutable' guarantee and makes replay-from-zero depend on migration order. Acceptable for a local single-user store."
+ },
+ {
+  "id": "t3code-architecture-012",
+  "category": "Platform architecture",
+  "name": "Staged server startup: parked roots, activation gate, command-readiness gate, orphan-session reconcile",
+  "what": "The server brings up long-running roots in a parked state and releases them only after the HTTP listener and runtime state are ready; HTTP requests wait until commands can be accepted; sessions that died with the previous process are marked as errors with an explanation.",
+  "how": "forkParked forks a fiber that signals it is parked then waits on a ServerActivation deferred. makeServerLayer wires parked layers (runtime-state file, Tailscale Serve, cloud link, reactors). commandReadinessLayer is a global HTTP middleware that awaits startup.awaitCommandReady; ws dispatch uses startup.enqueueCommand. reconcileProviderSessions compares persisted bindings and thread sessions in starting/running/active-turn state against live provider sessions and, for orphans, marks the binding stopped and dispatches thread.session.set with status error and a message that the session did not survive a restart.",
+  "evidence": [
+   "recovered/server/src/serverActivation.ts:1-27",
+   "recovered/server/src/server.ts:439-453",
+   "recovered/server/src/server.ts:493-560",
+   "recovered/server/src/serverRuntimeStartup.ts:296-360",
+   "recovered/server/src/serverRuntimeStartup.ts:443"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's gateway already drains on /readyz; the orphan-session reconcile step (mark in-flight runs as errored with a human message on boot) is a cheap, user-visible reliability win.",
+  "notes": "Pairs with the managed-run terminalization/recovery worker already in Verevon session-core."
+ },
+ {
+  "id": "t3code-architecture-013",
+  "category": "Platform architecture",
+  "name": "Headless server self-update: pinned runtimes, preflight, launcher trial child and database rollback",
+  "what": "A headless T3 server can update itself on remote request. The new version is installed beside the old one, checked, started as a trial against a snapshot of the database, and either committed or rolled back automatically.",
+  "how": "ServerSelfUpdate (capability 'boot-service' only when run under the launcher; 'desktop-managed' refuses) installs the exact t3@version into <baseDir>/runtime/versions/<v> under an install lock with a completion sentinel, then runs `__service-preflight --database-path ... --launcher-protocol 2` (30 s) and verifies the reported version. It then asks the service launcher (a separate service-launcher.mjs supervisor with an IPC protocol v2) to activate the update. The launcher records a pending update in service-state.json, stops the active child, snapshots state.sqlite plus -wal and -shm once, starts the target as a 'trial' child, and commits only when the trial reports 'prepared'; a 120 s timeout, a crash, a missing runtime or a failed backup returns to the previous version and restores the database (a .restore-pending marker protects an interrupted restore). Stop grace is 5 s, handoff delay 2 s. Progress streams to the client over server.updateServerWithProgress.",
+  "evidence": [
+   "recovered/server/src/cloud/selfUpdate.ts:28-199",
+   "tmp/t3arch/src/serviceLauncher.ts:32-34",
+   "tmp/t3arch/src/serviceLauncher.ts:55-56",
+   "tmp/t3arch/src/serviceLauncher.ts:97-162",
+   "tmp/t3arch/src/serviceLauncher.ts:354-392",
+   "tmp/t3arch/src/serviceLauncher.ts:514-548",
+   "recovered/server/src/cloud/pinnedRuntime.ts:13-40",
+   "recovered/server/src/cloud/serviceProtocol.ts:1-66",
+   "recovered/server/packages/contracts/src/rpc.ts:386-395"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "For a Rust-and-Go control plane the transferable idea is blue/green with a database snapshot and an automatic commit-or-rollback decision based on the new version reporting healthy; Verevon's signed-artifact runner could add a preflight command that validates migrations before cutover.",
+  "notes": "The launcher source was recovered from service-launcher.mjs.map (extracted to tmp/t3arch/src/serviceLauncher.ts). Supported only on Linux systemd and macOS launchd; the Windows status text says unavailable. SQLite snapshotting is trivial; it would not carry over to a shared Postgres."
+ },
+ {
+  "id": "t3code-architecture-014",
+  "category": "Platform architecture",
+  "name": "Desktop auto-update is user-driven, channel-aware and stops all backends before install",
+  "what": "The app checks for updates in the background but never downloads or installs without the user. Stable and nightly channels are supported, and installing shuts every backend down gracefully first.",
+  "how": "electron-updater is configured with autoDownload=false and autoInstallOnAppQuit=false; a first check runs 15 s after start, then every 4 minutes. The channel is derived from the app version (a -nightly.YYYYMMDD.N suffix means nightly); the nightly channel enables prerelease, downgrade and full changelog, a channel switch temporarily forces allowDowngrade for one held check (so moving from nightly to stable can land on an older stable build), and updates that do not match the selected channel are ignored. A pure reducer file (updateMachine.ts) models checking/available/downloading/downloaded/error with canRetry, and download failure keeps an 'available' state when a version is known. installUpdate stops all pool instances with a 5 s timeout, destroys windows, then quitAndInstall(silent, forceRunAfter). An Intel build on an Apple Silicon host disables differential download and switches to arm64 packages. Updates are disabled for dev builds, missing feed config, T3CODE_DISABLE_AUTO_UPDATE and non-AppImage Linux.",
+  "evidence": [
+   "recovered/desktop/src/updates/DesktopUpdates.ts:45-46",
+   "recovered/desktop/src/updates/DesktopUpdates.ts:225-250",
+   "recovered/desktop/src/updates/DesktopUpdates.ts:334-350",
+   "recovered/desktop/src/updates/DesktopUpdates.ts:796-830",
+   "recovered/desktop/src/updates/DesktopUpdates.ts:470-505",
+   "recovered/desktop/src/updates/DesktopUpdates.ts:584-590",
+   "recovered/desktop/src/updates/DesktopUpdates.ts:745-790",
+   "recovered/desktop/src/updates/updateChannels.ts:1-11",
+   "recovered/desktop/src/updates/updateMachine.ts:1-125"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon is a web app and does not need an updater, but the client-version skew handling (see the capability-flag record) matters when the SPA and gateway deploy at different times.",
+  "notes": "A 4-minute poll is aggressive for a GitHub releases feed; presumably cached by electron-updater. Release notes are fetched and parsed (releaseNotes.ts)."
+ },
+ {
+  "id": "t3code-architecture-015",
+  "category": "Platform architecture",
+  "name": "Capability flags in the environment descriptor for client/server version skew",
+  "what": "Each server advertises which features it understands, so a newer desktop client connected to an older remote server hides or falls back instead of sending commands the server would reject.",
+  "how": "GET /.well-known/t3/environment returns an ExecutionEnvironmentDescriptor with ExecutionEnvironmentCapabilities (optional booleans such as attachmentUploads, pullRequests, threadSettlement, threadSnooze, threadPinning, threadPinReorder, threadTitleRegeneration, threadPullRequestLinking, serverSelfUpdate, serverSelfUpdateProgress, agentActivityPublishing). Comments define the contract: a missing key means unsupported and the client must not probe. The same endpoint doubles as the desktop's readiness probe. Browser-automation hosts advertise their supported operations for mixed-version routing.",
+  "evidence": [
+   "recovered/server/packages/contracts/src/environment.ts:41-100",
+   "recovered/server/packages/contracts/src/environmentHttp.ts:405-410",
+   "recovered/desktop/src/backend/DesktopBackendManager.ts:68",
+   "recovered/server/packages/contracts/src/previewAutomation.ts:26-48"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's SPA and Rust gateway ship independently; a descriptor of supported commands/events (rather than a version number) lets the SPA degrade per feature during rolling deploys.",
+  "notes": "Pairs with the 'missing means unsupported' rule; the sibling UI audit noted capability gating in the pagination sync (its record 047)."
+ },
+ {
+  "id": "t3code-architecture-016",
+  "category": "Models & routing",
+  "name": "Model catalog and price tables refreshed from the web outside the release cycle",
+  "what": "Which models count as current (versus legacy) and what they cost are data files fetched at runtime, so a new model appears in the picker or in usage costs without shipping a release.",
+  "how": "ModelManifest fetches apps/server/src/provider/model-manifest.json from raw.githubusercontent.com main (1 h TTL, 5 min retry gap after failure, 10 s timeout), validates it with a version-literal schema, prefers remote then the on-disk copy of the last fetch then the bundled copy, and drivers apply it before publishing snapshots. UsageService separately fetches LiteLLM's model_prices_and_context_window.json (24 h TTL, disk cache) and prices transcript tokens from it. A failed fetch never fails a provider check.",
+  "evidence": [
+   "recovered/server/src/provider/ModelManifest.ts:1-60",
+   "recovered/server/src/provider/ModelManifest.ts:33-52",
+   "recovered/server/src/usage/UsageService.ts:56-60",
+   "recovered/server/src/usage/UsageService.ts:140-170",
+   "recovered/server/src/usage/usagePricing.ts:1-30"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's inference-core routing and cost-core could load model capability and price tables from a signed, versioned data artifact with a bundled fallback instead of redeploying services.",
+  "notes": "Trust boundary: the manifest and price table come from an unauthenticated branch of a public repo; the schema version gate limits breakage but not malicious values. The sibling audit found Claude catalogs are static and CLI-version gated, so this manifest only reclassifies, it does not discover."
+ },
+ {
+  "id": "t3code-architecture-017",
+  "category": "Platform architecture",
+  "name": "Native Rust resource-monitor sidecar with a versioned JSON command protocol",
+  "what": "Per-process CPU and memory telemetry for the server, its agents and terminals comes from a small bundled native helper instead of Node polling, with a handshake, history reads and automatic restart.",
+  "how": "t3-resource-monitor.exe is a 390 KB x86-64 PE built with rustc and the sysinfo 0.39.3 and serde_json crates (REA strings: sysinfo windows process.rs, cpu.rs; JSON field names pid, ppid, cpuPercent, cpuTimeMs, cumulativeCpuTime, sidecarPid, sampleIntervalMs, externalProcesses; command enum variants configure, setExternalProcesses, setSampleInterval, setStreaming, sampleNow, readHistory, shutdown). The server's NativeTelemetryClient spawns it, checks a hello handshake and RESOURCE_MONITOR_PROTOCOL_VERSION (5 s), sends configure/setStreaming/setExternalProcesses commands, requests sampleNow (5 s) and readHistory (15 s), restarts with 500 ms to 10 s backoff and gives up after 5 failures in 60 s. Sample interval adapts to power state (1 s live, 5 s battery, 15 s constrained). Samples are categorized (server, server-child, provider-root, terminal-root, electron-main, electron-renderer, electron-gpu, electron-utility, resource-monitor, unknown-t3), and ResourceAttribution adds per-component logical I/O counters (bytes, counts, durations; for example the trace writer reports its flushes).",
+  "evidence": [
+   "ev_c06e6b80f532ae5b500661b1348255cedcb32c39b87911731662478ec8163442",
+   "ev_940e04a814c0c0d15efb673def759914c78328f0295dec62dcb9cb451242366c",
+   "ev_974d9254a1d03539860ab3999ef3e83ef16d0ac17dc0cd8651bb94c4b329281c",
+   "recovered/server/src/resourceTelemetry/NativeTelemetryClient.ts:45-51",
+   "recovered/server/src/resourceTelemetry/NativeTelemetryClient.ts:600-660",
+   "recovered/server/src/resourceTelemetry/NativeTelemetryClient.ts:809-955",
+   "recovered/server/src/resourceTelemetry/ResourceMonitorBinary.ts:16-40",
+   "recovered/server/packages/contracts/src/resourceTelemetry.ts:14-30",
+   "recovered/server/src/resourceTelemetry/ResourceAttribution.ts:1-60"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A good small model for a Rust sidecar: versioned stdio JSON protocol, handshake, bounded restart and an adaptive sample rate; Verevon's Rust services could ship the same pattern for sandbox resource accounting.",
+  "notes": "REA tools used: open_binary, binary_overview (829 procedures, 531 strings, ev_c06e...), search_strings (ev_940e...); inspect_pe_resources was run earlier by the scout (ev_974d...). The scout left the implementation language unverified; it is Rust (rustc commit string and cargo registry paths in the binary). Only a Windows x64 build is shipped in this install."
+ },
+ {
+  "id": "t3code-architecture-018",
+  "category": "Platform architecture",
+  "name": "Desktop-to-server host telemetry side channel (fd 4 and fd 5)",
+  "what": "The Electron host feeds its power, lock, battery, thermal and idle state to the embedded server over inherited pipes, so the server can pause or slow background work when the machine is locked, on battery or throttled.",
+  "how": "The bootstrap passes desktopTelemetryFd=4 (host to server JSON lines) and desktopTelemetryControlFd=5 (server to host control). DesktopTelemetryPublisher samples every 1 s live, 5 s on battery, 15 s constrained, with idle threshold 60 s and host-power events (locked, suspended, onBattery, thermal, speedLimit). The server's DesktopTelemetryReceiver decodes the stream, flags stale or closed streams and exposes HostPowerMonitor; clients can also report power with server.reportHostPowerState.",
+  "evidence": [
+   "recovered/desktop/src/telemetry/DesktopTelemetryPublisher.ts:23-50",
+   "recovered/desktop/src/backend/DesktopBackendConfiguration.ts:384-386",
+   "recovered/desktop/src/backend/DesktopBackendManager.ts:454-470",
+   "recovered/server/src/resourceTelemetry/DesktopTelemetryReceiver.ts:60-110",
+   "recovered/server/src/background/HostPowerMonitor.ts:13-40",
+   "recovered/server/src/ws.ts:1752"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Mostly desktop-specific, but it shows how a host can lend context (power, idle) to a headless agent runtime; Verevon's browser client could report visibility/idle to the gateway to throttle runs and polling.",
+  "notes": "No comparable side channel exists in the other desktop apps audited."
+ },
+ {
+  "id": "t3code-architecture-019",
+  "category": "Platform architecture",
+  "name": "Demand-driven background work using client activity leases and power-aware policy",
+  "what": "Polling work (git status, provider health, discovered dev servers, diagnostics) runs only while some connected client actually shows that data, and slows or pauses with host power state.",
+  "how": "BackgroundPolicy tracks ClientActivityLease records per (session, RPC client, client) with a 45 s default and 120 s maximum TTL and at most 16 leases per RPC client; scopes are server-config, diagnostics, provider-status(instance), vcs-status(cwd), git-refs(cwd) and thread(id). Workers ask hasDemand/shouldRunScopeWork/shouldRunOpportunisticWork; settings pauseWhenOnBattery, pauseWhenHostLocked, pauseWhenHostLowPower, pauseWhenClientLowPower and active/idle intervals shape the answer. VcsStatusBroadcaster refreshes every 30 s with failure backoff up to 15 min; makeManagedServerProvider refreshes provider snapshots under the same policy; PortScanner polling is reference counted by retain.",
+  "evidence": [
+   "recovered/server/src/background/BackgroundPolicy.ts:29-100",
+   "recovered/server/packages/contracts/src/background.ts:48-100",
+   "recovered/server/src/vcs/VcsStatusBroadcaster.ts:28-31",
+   "recovered/server/src/provider/makeManagedServerProvider.ts:27-60",
+   "recovered/server/src/preview/PortScanner.ts:16-20",
+   "recovered/server/src/ws.ts:1743"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Directly relevant to Verevon's multi-tenant cost: the gateway can hold per-scope demand leases from the SPA so watches, polling and provider health checks do not run for tabs nobody is viewing; it also gives a principled alternative to the process-local registries that limit multi-replica.",
+  "notes": "Leases are in memory; a multi-replica Verevon would keep them in Redis/NATS with the same TTL semantics."
+ },
+ {
+  "id": "t3code-architecture-020",
+  "category": "Safety, permissions & governance",
+  "name": "Atomic JSON persistence and keystore-encrypted desktop catalog versus plaintext server secret files",
+  "what": "Desktop settings are written atomically and the saved-connection catalog (which holds bearer tokens) is encrypted with the OS keystore, but the server's own secret store keeps files in plaintext protected only by permissions.",
+  "how": "Desktop settings, client settings and the connection catalog write to a temp file named with the pid and rename over the target; the catalog has explicit encrypt-catalog/decrypt-catalog steps (Electron safeStorage, with a Linux password-store selection step). The server's ServerSecretStore writes <secretsDir>/<name>.bin with flag 'wx' (exclusive create) or temp+rename, chmod 0700 on the directory and 0600 on files, and has no encryption code at all; it stores signing keys, DPoP replay markers, relay credentials, CLI OAuth tokens and the asset signing key.",
+  "evidence": [
+   "recovered/desktop/src/app/DesktopConnectionCatalogStore.ts:55-70",
+   "recovered/desktop/src/app/DesktopApp.ts:236-269",
+   "recovered/desktop/src/app/DesktopConnectionCatalogStore.ts:223-265",
+   "recovered/desktop/src/settings/DesktopAppSettings.ts:402-450",
+   "recovered/desktop/src/app/DesktopEnvironment.ts:200-210",
+   "recovered/server/src/auth/ServerSecretStore.ts:150-236",
+   "recovered/server/src/cloud/CliTokenManager.ts:335-352"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Confirms the baseline for a hosted product: never keep tenant secrets as plain files; Verevon's envelope-encrypted continuation descriptors and secret handling are ahead of this on the server side.",
+  "notes": "chmod has no effect on Windows NTFS, so on Windows these files rely on the user profile ACL. The scout flagged encryption at rest as unverified; zero encryption identifiers exist in ServerSecretStore.ts."
+ },
+ {
+  "id": "t3code-architecture-021",
+  "category": "Computer & environment control",
+  "name": "Login-shell and PowerShell environment hydration so GUI-launched agents find their CLIs",
+  "what": "Apps started from the dock or Start menu do not inherit the user's shell PATH. T3 recovers it so the agent CLIs, git and package managers resolve the way they do in a terminal.",
+  "how": "DesktopShellEnvironment probes in order: login shell (POSIX), launchctl path (macOS), PowerShell with profile, PowerShell without profile (Windows). The server repeats this in fixPath(): hydratePosixPath reads PATH from login-shell candidates (markers __T3CODE_PATH_START__/END__), merges with the process PATH, falls back to launchctl, and fills HOME; on Windows resolveWindowsEnvironment repairs the environment. Terminals strip PORT, ELECTRON_RENDERER_PORT and ELECTRON_RUN_AS_NODE from the spawned shell environment.",
+  "evidence": [
+   "recovered/desktop/src/shell/DesktopShellEnvironment.ts:25-40",
+   "recovered/server/src/os-jank.ts:20-70",
+   "recovered/server/src/server.ts:495",
+   "recovered/desktop/packages/shared/src/shell.ts:1-60",
+   "recovered/server/src/terminal/Manager.ts:84"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Relevant only to a local agent runtime; for Verevon's sandboxes the same lesson is to construct an explicit environment rather than inherit one.",
+  "notes": "A tell-tale 'os-jank' file name: this is a long tail of per-OS workarounds."
+ },
+ {
+  "id": "t3code-architecture-022",
+  "category": "Computer & environment control",
+  "name": "Managed relay (T3 Connect): pinned cloudflared tunnel, environment-signed proofs and scoped links",
+  "what": "A user can reach their own machine's server from a phone or the hosted web app without opening ports. The server links to a relay, receives a managed endpoint, and runs a Cloudflare tunnel connector; it can also publish agent-activity snapshots for push notifications and Live Activities.",
+  "how": "RelayClient downloads a pinned cloudflared release per platform (2026.5.2) into the base dir, verifies SHA-256 against a pinned table ('invalid_checksum' otherwise) under an install lock with a 5 min stale-lock timeout, and CloudManagedEndpointRuntime runs it as a child process classifying its log lines. The link is an OAuth-style flow with environment-signed JWT proofs (EnvironmentLinkProofPayload with challenge, descriptor, public key, endpoint, scopes agent_activity_notifications and managed_tunnels); endpoint kinds are manual, cloudflare_tunnel and t3_relay. AgentAwarenessRelay projects thread shells to RelayAgentActivityState (titles, phase, headline, model, deep link) and publishes only on lifecycle events that change the authoritative state, signed with an environment key pair stored in the secret store.",
+  "evidence": [
+   "recovered/server/packages/shared/src/relayClient.ts:60-103",
+   "recovered/server/packages/shared/src/relayClient.ts:280-330",
+   "recovered/server/packages/contracts/src/relay.ts:95-107",
+   "recovered/server/packages/contracts/src/relay.ts:131-142",
+   "recovered/server/packages/contracts/src/relay.ts:209-224",
+   "recovered/server/src/cloud/ManagedEndpointRuntime.ts:64-100",
+   "recovered/server/src/relay/AgentAwarenessRelay.ts:60-100",
+   "recovered/server/packages/contracts/src/environmentHttp.ts:551-603"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's Channel Plane is docs-only; this shows a minimal, privacy-preserving notification payload (titles and phase only, no message content) and a signed-proof link model that Channel Plane could copy for mobile alerts.",
+  "notes": "The connect command reports 'unavailable in builds without public configuration', so the relay path needs a build with public config. Provider tokens and message text are not in the published state schema."
+ },
+ {
+  "id": "t3code-architecture-023",
+  "category": "Safety, permissions & governance",
+  "name": "Three auth policies, one-time pairing, scoped bearer sessions and DPoP proof-of-possession",
+  "what": "A server decides how strictly to authenticate based on how it is exposed: desktop-managed local, loopback browser, or remote-reachable. Remote clients pair with short one-time tokens and then use scoped sessions, optionally bound to a device key with DPoP.",
+  "how": "EnvironmentAuthPolicy selects the policy from mode and bind host and advertises bootstrap methods (desktop-bootstrap, one-time-token) and session methods (browser-session-cookie, bearer-access-token, dpop-access-token). Pairing tokens are 12 characters from an unambiguous alphabet with a 5 minute TTL (desktop bootstrap and dev startup tokens 24 h); sessions default to 30 days; WebSocket tickets 5 minutes. verifyRequestDpopProof validates the DPoP header against method, URL, expected thumbprint and access token, then records a hash of thumbprint+jti in the secret store with exclusive create so a replayed proof is rejected. HTTP routes cover pairing links, client list/revoke, revoke-others and an /oauth/token endpoint.",
+  "evidence": [
+   "recovered/server/src/auth/EnvironmentAuthPolicy.ts:18-50",
+   "recovered/server/src/auth/PairingGrantStore.ts:241-262",
+   "recovered/server/src/auth/SessionStore.ts:410-412",
+   "recovered/server/src/auth/dpop.ts:29-87",
+   "recovered/server/packages/contracts/src/environmentHttp.ts:412-480"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's Control Plane owns identity, but DPoP-bound sessions and one-time pairing for the future Channel Plane or desktop companions are a ready pattern.",
+  "notes": "Single-user trust model: all scopes belong to one operator. There is no org, role or audit model."
+ },
+ {
+  "id": "t3code-architecture-024",
+  "category": "Safety, permissions & governance",
+  "name": "Exhaustive RPC scope table enforced by the type system",
+  "what": "Every WebSocket RPC method must declare the auth scope it needs; forgetting one is a compile error rather than an open endpoint.",
+  "how": "RPC_REQUIRED_SCOPES is a total map keyed by the method names of WsRpcGroup, with scopes such as orchestration read, orchestration operate, terminal operate, review write, relay read/write and access read. Reads and writes are split deliberately (for example pullRequests.invalidate is read, request-reviewers is operate; terminal and review have their own scopes).",
+  "evidence": [
+   "recovered/server/src/auth/RpcAuthorization.ts:14-141",
+   "recovered/server/packages/contracts/src/rpc.ts:209-334"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's gateway routes could adopt a generated, total route-to-scope table (Rust match over a route enum) so every new endpoint must state its tenant and scope requirement at compile time.",
+  "notes": "Sensitive RPCs such as server.signalProcess and projects.writeFile require only the operate scope; there is no per-path or per-process authorization inside a scope."
+ },
+ {
+  "id": "t3code-architecture-025",
+  "category": "Safety, permissions & governance",
+  "name": "Telemetry is on by default and the identity is hashed from the user's provider account",
+  "what": "Anonymous analytics are enabled unless disabled by environment. The installation identifier is derived by hashing the Codex account id or Claude user id found in the provider CLIs' own config files, falling back to a random id.",
+  "how": "AnalyticsService reads T3CODE_TELEMETRY_ENABLED with default true, buffers events and sends to PostHog. getTelemetryIdentifierForHome prefers SHA-256 of the account id in the Codex auth file, then of the Claude user id, then of a generated anonymous id file. Events include client surface and app version origin properties.",
+  "evidence": [
+   "recovered/server/src/telemetry/AnalyticsService.ts:30-45",
+   "recovered/server/src/telemetry/Identify.ts:150-160",
+   "recovered/server/src/telemetry/Identify.ts:246-300",
+   "recovered/server/src/ws.ts:396-460"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Avoid: Verevon's ZDR and tenancy promises are incompatible with identifying users by reading third-party account files; any product analytics must be opt-in and tenant-scoped.",
+  "notes": "Resolves a scout open question: the default is enabled. The code reads the account id field only to hash it; no token values are used. This audit did not read any user files."
+ },
+ {
+  "id": "t3code-architecture-026",
+  "category": "Computer & environment control",
+  "name": "Server exposure modes with LAN binding and Tailscale Serve advertised endpoints",
+  "what": "A desktop-managed server is loopback-only by default. The user can switch it to network-accessible (LAN bind) or enable Tailscale Serve and the app computes which URLs to show other devices.",
+  "how": "DesktopServerExposure resolves mode local-only (127.0.0.1) or network-accessible (0.0.0.0 with an advertised LAN host from network interfaces or an override); it falls back to local-only with a warning when no advertised host exists. Tailscale status is read via the tailscale CLI (60 s cache), MagicDNS names and 100.x IPv4 addresses become advertised endpoint providers; the server itself runs ensureTailscaleServe on a parked layer and disables it on release. Changing the mode (or Tailscale Serve) triggers lifecycle.relaunch when a relaunch is required, so the backend restarts with the new bind host.",
+  "evidence": [
+   "recovered/desktop/src/backend/DesktopServerExposure.ts:26-60",
+   "recovered/desktop/src/backend/DesktopServerExposure.ts:105-135",
+   "recovered/desktop/src/backend/DesktopServerExposure.ts:360-381",
+   "recovered/desktop/src/ipc/methods/serverExposure.ts:30-69",
+   "recovered/desktop/src/backend/tailscaleEndpointProvider.ts:1-30",
+   "recovered/server/src/server.ts:536-580",
+   "recovered/desktop/src/app/DesktopApp.ts:190-198"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Not a hosted-product concern, but 'advertised endpoints' (a typed list of how this instance can be reached, with provider labels) is a useful descriptor for any multi-endpoint deployment.",
+  "notes": "The bind is plain HTTP on the LAN; protection comes from pairing and scoped sessions."
+ },
+ {
+  "id": "t3code-architecture-027",
+  "category": "Platform architecture",
+  "name": "Contract-first generated protocol clients for the Codex app-server and ACP",
+  "what": "T3 does not hand-write the wire types for the agents it drives. Two internal packages are generated from the upstream protocol schemas and expose typed request, notification and server-request handlers over stdio.",
+  "how": "effect-codex-app-server holds a 43k-line generated schema plus meta.gen.ts listing 87 client request methods (thread/*, turn/start|steer|interrupt, review/start, skills/*, plugin/*, marketplace/*, fs/*, command/exec*, mcpServer/*, account/*, config/*), 8 server requests (approvals, user input, MCP elicitation, tool call, token refresh, attestation) and 67 server notifications; CodexAppServerClient registers typed handlers and an unknown-method fallback. effect-acp is generated for ACP schema v0.11.3 (14 agent methods, 11 client methods) over JSON-RPC on stdio. T3 itself calls only about ten Codex methods today (initialize, thread/start|resume|read|rollback, turn/start|interrupt, skills/list, model/list, config/mcpServer/reload, account/read, feedback/upload).",
+  "evidence": [
+   "recovered/server/packages/effect-codex-app-server/src/_generated/meta.gen.ts:6-192",
+   "recovered/server/packages/effect-codex-app-server/src/client.ts:38-85",
+   "recovered/server/packages/effect-acp/src/_generated/meta.gen.ts:1-36",
+   "recovered/server/packages/effect-acp/src/client.ts:1-60"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon already routes to the user's ChatGPT subscription via Integration Core's Codex app-server; generating the Rust client from the same published JSON schema (as T3 does for TypeScript) would remove hand-maintained types and expose turn/steer, thread/rollback and plugin/skill methods.",
+  "notes": "Method counts are from meta.gen.ts line ranges 6-100, 105-117 and 118-192. T3 leaves most of the Codex surface (plugins, marketplace, fs, steer, review) unused."
+ },
+ {
+  "id": "t3code-architecture-028",
+  "category": "Platform architecture",
+  "name": "Desktop IPC surface: 101 channel operations behind an 86-member desktopBridge",
+  "what": "The renderer talks to Electron main through one context-isolated bridge object with typed, schema-decoded handlers. A static analysis of the shipped preload scripts confirms how large the surface is and that it includes Clerk's token, OAuth and passkey bridges.",
+  "how": "REA analyze_javascript_application on apps/desktop/dist-electron (8 JS files, 170,657 AST nodes) found 4 contextBridge APIs (desktopBridge with 86 members, previewPictureInPicture with 1, and two Clerk bridges), 101 IPC channel operations (78 invoke, 4 sendSync, 5 send, 14 listeners) all with identifier-based channel names, 14 renderer listeners and no resolvable main-process handlers. Cross-checking the 83 *_CHANNEL constants in ipc/channels.ts shows every one appears in the preload; the remaining 15 channels belong to Clerk (token cache get/save/clear, OAuth transport open/getRedirectUrl, passkeys create/get/capabilities) and to the preview element-picker preload (element picked, annotation captured, human input, mouse navigate). Main registers handlers through DesktopIpc.makeIpcMethod, which pairs each channel with a payload Schema, a result Schema and a handler Effect (decode, run with a span and log annotations, encode), so validation and error handling are centralized; synchronous channels use makeSyncIpcMethod.",
+  "evidence": [
+   "ev_8ebcd46dc2ee8ede8208d6fe11bb6e437f2360bba033d9cf2f3acab98f150c75",
+   "ev_34f79ed7a3aad2b134b63204e5cf10fb606ee50e1640c81b0a3527388f03b7a0",
+   "tmp/t3arch/rea_ipc_channels.tsv:1-100",
+   "recovered/desktop/src/ipc/channels.ts:1-85",
+   "recovered/desktop/src/ipc/DesktopIpc.ts:60-200",
+   "recovered/server/packages/contracts/src/ipc.ts:1064-1130"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "None directly for a web app; it documents how much native surface a desktop shell needs (folder pickers, SSH, WSL, updates, browser preview), which is the cost Verevon avoids by staying web-only.",
+  "notes": "REA could not resolve literal channel strings (dynamic identifiers) and found 0 main handlers (main.cjs semantic graph exceeded the result budget), so the main-side map comes from SRC. A trace_application_feature call with an api seed 'exposeInMainWorld' returned no match (ev_902fca7c...); a module seed on 'preload.cjs' produced the graph used here (result saved under tmp/t3arch/rea_trace_preload.json)."
+ },
+ {
+  "id": "t3code-architecture-029",
+  "category": "Safety, permissions & governance",
+  "name": "Hardened window and guarded preview webviews",
+  "what": "The main window runs sandboxed with context isolation, blocks navigation to other origins, and only allows webviews on T3's own browser partitions; guest pages get a sandbox but no Node.",
+  "how": "BrowserWindow webPreferences set contextIsolation true, nodeIntegration false, sandbox true, webviewTag true. will-attach-webview rejects any partition not created by the preview manager and forces sandbox true, nodeIntegration false, nodeIntegrationInSubFrames false (contextIsolation false in the guest so the Playwright injected runtime and react-grab can run in the page world). setWindowOpenHandler denies all new windows and opens only safe external URLs in the OS browser; will-navigate blocks anything but same-origin renderer navigation; ElectronShell.parseSafeExternalUrl only lets http(s)-style web protocols and vscode-remote editor URLs reach shell.openExternal. Preview sessions use persistent partitions with the prefix persist:t3code-preview-<scope>.",
+  "evidence": [
+   "recovered/desktop/src/window/DesktopWindow.ts:360-375",
+   "recovered/desktop/src/window/DesktopWindow.ts:466-477",
+   "recovered/desktop/src/window/DesktopWindow.ts:528-545",
+   "recovered/desktop/src/preview/BrowserSession.ts:12-20",
+   "recovered/desktop/src/preview/WebviewPreferences.ts:1-42",
+   "recovered/desktop/src/electron/ElectronShell.ts:20-40"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Reference checklist for Verevon's manual-browser/Quarry live view if it ever embeds third-party pages: partition per scope, deny window.open, same-origin navigation only.",
+  "notes": "Guest contextIsolation=false means page scripts can see the injected globals (for example __t3PlaywrightInjected)."
+ },
+ {
+  "id": "t3code-architecture-030",
+  "category": "UI/UX & product design",
+  "name": "Instant connecting splash and window readiness following the primary backend",
+  "what": "In WSL-only mode a lightweight 'Connecting to WSL' window appears immediately while the slow backend boots; in normal mode the real window opens as soon as the primary backend reports ready and re-opens if it restarts.",
+  "how": "DesktopWindow keeps a readiness latch driven by the pool's onReady/onShutdown callbacks, loads the application URL once ready, and reveals on ready-to-show. A data-URL splash with a strict CSP is created when settings say wslOnly and wslBackendEnabled, tracked in its own ref, closed once the real window is revealed, and re-revealed on dock activation if the backend is still not ready. The window follows only the primary backend.",
+  "evidence": [
+   "recovered/desktop/src/window/DesktopWindow.ts:85-100",
+   "recovered/desktop/src/window/DesktopWindow.ts:171-214",
+   "recovered/desktop/src/window/DesktopWindow.ts:278-310",
+   "recovered/desktop/src/window/DesktopWindow.ts:785-835",
+   "recovered/desktop/src/app/DesktopApp.ts:203-218"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "For the web app the equivalent is a skeleton or connecting state that appears before the Model Plane stream is ready, with an explicit reason when it is slow.",
+  "notes": "A Chrome-style hold-to-quit (1200 ms hold, 500 ms double tap) lives in window/QuitHold.ts; it is UI polish with some risk for keyboards without auto-repeat (falls back to the menu)."
+ },
+ {
+  "id": "t3code-architecture-031",
+  "category": "Models & routing",
+  "name": "ProviderDriver SPI: drivers as plain values, instances as captured closures, hot-reloadable registry",
+  "what": "Each supported agent (Claude, Codex, Cursor, Grok, OpenCode) is a driver value that can be instantiated many times with its own config. An instance bundles a status snapshot source, a session adapter and a text-generation capability; settings changes add or remove instances without a restart.",
+  "how": "ProviderDriver has driverKind, metadata (displayName, supportsMultipleInstances), configSchema (decoded once by the registry), defaultConfig and create(input) that returns a ProviderInstance {instanceId, driverKind, continuationIdentity, displayName, accentColor, enabled, snapshot, adapter, textGeneration}. There are deliberately no per-driver Context tags, so two Codex accounts share no mutable state. ProviderInstanceRegistryHydration merges legacy settings.providers.<kind> with explicit providerInstances; ProviderAdapterRegistryLive is a facade that resolves adapters from the registry on every call, so hot reload shows up immediately; decode failures become 'unavailable shadow' snapshots instead of defects. BUILT_IN_DRIVERS lists the static set.",
+  "evidence": [
+   "recovered/server/src/provider/ProviderDriver.ts:1-169",
+   "recovered/server/src/provider/builtInDrivers.ts:1-53",
+   "recovered/server/src/provider/Layers/ProviderAdapterRegistry.ts:1-60",
+   "recovered/server/src/provider/Layers/ProviderInstanceRegistryHydration.ts:60-110",
+   "recovered/server/src/provider/Layers/ProviderInstanceRegistryLive.ts:339-400"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's inference-core routes across Azure OpenAI, Anthropic, Cohere and the Codex subscription route; a driver/instance split with per-instance config schema and continuation identity would formalize multi-account and BYOK routing without singleton services.",
+  "notes": "The sibling UI audit covers how the UI consumes instances (its records 001-003); this record is the server-side SPI. The adapter interface file (Services/ProviderAdapter.ts) is type-only and was erased from the source map; its shape is inferred from ProviderService and the adapters (startSession, sendTurn, interruptTurn, respondToRequest, respondToUserInput, stopSession, listSessions, hasSession, rollbackThread, readThread, plus capabilities)."
+ },
+ {
+  "id": "t3code-architecture-032",
+  "category": "Models & routing",
+  "name": "Multi-account provider isolation: CLAUDE_CONFIG_DIR homes and Codex auth-overlay shadow homes",
+  "what": "A user can run two accounts of the same agent side by side. Claude instances are isolated by config directory; Codex instances can share sessions, skills and plugins while keeping a private login.",
+  "how": "makeClaudeEnvironment sets CLAUDE_CONFIG_DIR for an instance homePath instead of overriding HOME (overriding HOME breaks the macOS keychain lookup), and makeClaudeContinuationGroupKey = claude:home:<path>. For Codex, resolveCodexHomeLayout returns mode 'direct' or 'authOverlay': with a shadowHomePath it builds a shadow directory that symlinks the shared directories (sessions, archived_sessions, sqlite, shell_snapshots, worktrees, skills, plugins, cache, logs, mcp-oauth-locks) to the shared home while auth.json and models_cache.json stay private and log/memories/tmp stay local; the continuation key is codex:home:<sharedHomePath>. Threads can continue across instances that share a continuation key.",
+  "evidence": [
+   "recovered/server/src/provider/Drivers/ClaudeHome.ts:17-45",
+   "recovered/server/src/provider/Drivers/CodexHomeLayout.ts:15-70",
+   "recovered/server/src/provider/Drivers/CodexHomeLayout.ts:340-400",
+   "recovered/server/src/provider/ProviderDriver.ts:76-90",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:1129-1140"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "A direct model for Verevon's BYOK and subscription routes: separate credentials per instance but a shared continuation identity so a conversation can move between equivalent accounts.",
+  "notes": "The overlay needs symlinks, which are privileged on Windows without developer mode; the code reports a typed error when a shadow entry cannot be linked."
+ },
+ {
+  "id": "t3code-architecture-033",
+  "category": "Agent runtime",
+  "name": "ProviderService facade: thread-bound routing, lazy session recovery and stale-session cleanup",
+  "what": "One service routes every session and turn call to the right adapter. If a session is not live (for example after a restart), it is recovered from a persisted binding and resume cursor on first use.",
+  "how": "ProviderSessionDirectory persists a binding per thread {provider, providerInstanceId, adapterKey, status, resumeCursor, runtimePayload (cwd, modelSelection), runtimeMode}. resolveRoutableSession finds the binding, asks the adapter hasSession, and when absent and recovery is allowed calls recoverSessionForThread: it requires a stored resume cursor, re-prepares the MCP credential, calls adapter.startSession with the persisted cwd, model and runtime mode, verifies the adapter/provider match and re-binds. stopStaleSessionsForThread stops the same thread on other adapters when the user switches instance. Inputs are decoded with Schema and mapped to validation errors; all calls emit metrics and analytics events; a single PubSub fans out canonical runtime events and logs them to the canonical NDJSON stream.",
+  "evidence": [
+   "recovered/server/src/provider/Services/ProviderService.ts:1-130",
+   "recovered/server/src/provider/Services/ProviderSessionDirectory.ts:16-60",
+   "recovered/server/src/provider/Layers/ProviderService.ts:262-285",
+   "recovered/server/src/provider/Layers/ProviderService.ts:411-545",
+   "recovered/server/src/provider/Layers/ProviderService.ts:546-580",
+   "recovered/server/src/provider/Layers/ProviderService.ts:581-640"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's session-core already owns durable run state; persisting a provider resume cursor per thread and recovering lazily on the next turn is a cheap way to survive gateway restarts for long agent sessions.",
+  "notes": "A single in-process PubSub with no backpressure design is fine for one user and would need a bounded, tenant-partitioned bus (NATS) in Verevon."
+ },
+ {
+  "id": "t3code-architecture-034",
+  "category": "Agent runtime",
+  "name": "Idle session reaper that respects active turns and native background work",
+  "what": "Provider processes that have been idle for 30 minutes are stopped to free resources, unless a turn is running or the agent still has background tasks (subagents, workflows, monitors).",
+  "how": "ProviderSessionReaper sweeps every 5 minutes over persisted bindings not already stopped, parses lastSeenAt, skips sessions whose thread shell has an active turn id or a non-null backgroundLiveness, and otherwise calls providerService.stopSession (logging reason inactivity_threshold). ThreadBackgroundLivenessService keeps an in-memory per-thread registry of live agent and monitor tasks fed by task lifecycle events, reporting 'working' or 'monitoring'; it is deliberately not persisted because orphaned background work is not live after a restart.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ProviderSessionReaper.ts:17-125",
+   "recovered/server/src/orchestration/ThreadBackgroundLiveness.ts:1-80"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's sandbox leases and background processes (S4.2) need the same rule: never reap an idle session that still owns a running subagent, process or watch; derive liveness from task events instead of timers.",
+  "notes": "The reaper makes a stopped session cheap to resume because of the lazy recovery record above."
+ },
+ {
+  "id": "t3code-architecture-035",
+  "category": "Agent runtime",
+  "name": "Claude Agent SDK driven in streaming-input mode against the user's own Claude Code binary",
+  "what": "T3 does not call the Anthropic API for coding turns. It runs the user's installed Claude Code through the Agent SDK and feeds messages into a live session, so model, effort and permission mode can change mid-session and a message sent while a turn runs steers it.",
+  "how": "startSession builds ClaudeQueryOptions with pathToClaudeCodeExecutable (the configured binary), systemPrompt preset 'claude_code', settingSources user/project/local (so the user's Claude settings, memory files and skills apply), includePartialMessages true, permissionMode from the runtime mode (auto-accept-edits gives acceptEdits, auto gives auto, full-access gives bypassPermissions with allowDangerouslySkipPermissions), a settings overlay (alwaysThinkingEnabled, fastMode, ultracode, autoCompactWindow), additionalDirectories [cwd, attachments dir], env with CLAUDE_CONFIG_DIR, extraArgs from launchArgs, and an http mcpServers entry 't3-code' with a bearer header. The prompt is an AsyncIterable fed from an Effect Queue (Stream.toAsyncIterable), canUseTool and onUserDialog callbacks bridge approvals and questions into the event pipeline, and sendTurn calls query.setModel when the model changed and query.setPermissionMode('plan' or the session's base mode) for the interaction mode before offering the next message; a message sent while a turn is active reuses the running turn (steering).",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:3822-3866",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4253-4350",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:320-335",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4512-4570",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4596-4616"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon calls hosted models directly, but the streaming-input design (a long-lived session fed by a queue, with callbacks for permission and user dialogs) is the right shape for its Do-mode loop if it ever mid-run steers or switches model/effort.",
+  "notes": "Requires the user's own Claude Code install and login; the adapter file is the largest in the server (161 KB)."
+ },
+ {
+  "id": "t3code-architecture-036",
+  "category": "Agent runtime",
+  "name": "Claude interrupt is a hard session stop; rewind trims adapter bookkeeping only",
+  "what": "Pressing stop on a Claude thread closes the SDK query and escalates to SIGKILL if needed, then the next message resumes from the saved cursor. Reverting to an earlier turn restores files, but the Claude-side conversation rollback is lighter than Codex's.",
+  "how": "interruptTurn calls stopSessionInternal (comment: interrupt() can acknowledge while resumed background tasks keep the CLI alive, so stop is a hard boundary). The resume cursor is {threadId, resume (session UUID), resumeSessionAt (last assistant message UUID), turnCount}; lastAssistantUuid is set when assistant messages arrive. rollbackThread only splices the adapter's in-memory turn list and refreshes the cursor, without changing resumeSessionAt, whereas Codex implements rollbackThread through the real thread/rollback request.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4620-4647",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:1808-1826",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:2933",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:3014",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:2191-2203"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "When Verevon adds rewind (currently absent) it should make provider conversation rollback explicit and per-provider, not assume file revert implies model context revert.",
+  "notes": "INF (medium): because resumeSessionAt is not moved back on rollback, a resumed Claude session may still carry later turns in model context after a checkpoint revert; this was not verified at runtime."
+ },
+ {
+  "id": "t3code-architecture-037",
+  "category": "Agent runtime",
+  "name": "Codex app-server per-thread process with generated client and runtime-mode mapping",
+  "what": "Each Codex thread gets its own `codex app-server` child speaking JSON-RPC over stdio. T3's four runtime modes translate to Codex's approval policy, sandbox and approvals reviewer, and revert uses Codex's native thread rollback.",
+  "how": "CodexSessionRuntime spawns the configured binary with args [app-server, ...launchArgs] (T3CODE_CODEX_LAUNCH_ARGS overrides), cwd per thread, CODEX_HOME from the instance and forceKillAfter 2 s; then initialize + initialized, then openCodexThread (thread/start or thread/resume with recoverable-error snippets such as 'no such thread'). runtimeModeToThreadConfig maps approval-required to untrusted + read-only + reviewer user, auto-accept-edits to on-request + workspace-write, auto to on-request + workspace-write + approvals reviewer auto_review, and full-access to never + danger-full-access; the reviewer is always sent so a mode switch cannot leave auto_review sticky. Approvals, user input and MCP elicitation arrive as server requests held in pending maps. Child agents are registered from explicit thread_spawn signals and re-emitted as synthetic collabAgent events.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:487-545",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:1115-1160",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:2028-2045",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:2191-2203",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:877-935",
+   "recovered/server/src/provider/Layers/codexLaunchArgs.ts:1-24"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Directly comparable to Verevon's Integration Core Codex app-server route; the runtime-mode table and the 'always send the reviewer' lesson apply to any permission mapping.",
+  "notes": "The auto mode relies on Codex's AI reviewer; providers without one fall back to supervised behavior (see the OpenCode record)."
+ },
+ {
+  "id": "t3code-architecture-038",
+  "category": "Agent runtime",
+  "name": "ACP adapters for Cursor and Grok with minimal client capabilities and vendor extensions",
+  "what": "Cursor's `cursor-agent` and Grok's `grok agent stdio` are driven through the open Agent Client Protocol. T3 offers no filesystem or terminal tools to them, only permission and elicitation handling plus vendor extension methods for questions, plans and todos.",
+  "how": "AcpSessionRuntime initializes with clientCapabilities fs.readTextFile/writeTextFile false and terminal false (agent runs its own tools), authenticates, then loads, resumes or creates the session; session/load races the RPC response against a replay idle gap under a timeout while a load gate holds back replayed history notifications. Mode aliases map plan (plan, architect), implement (code, agent, default, chat, implement) and approval (ask) to T3's interaction modes. Cursor extension schemas (ask_question, create_plan, update_todos) and a Grok/xAI extension are decoded to T3's user-input and plan events; in full-access mode permission requests are auto-approved by selecting an allow option.",
+  "evidence": [
+   "recovered/server/src/provider/acp/AcpSessionRuntime.ts:413-425",
+   "recovered/server/src/provider/acp/AcpSessionRuntime.ts:580-660",
+   "recovered/server/src/provider/acp/CursorAcpExtension.ts:1-60",
+   "recovered/server/src/provider/acp/XAiAcpExtension.ts:54-120",
+   "recovered/server/src/provider/acp/GrokAcpSupport.ts:30-45",
+   "recovered/server/src/provider/Layers/CursorAdapter.ts:84-86",
+   "recovered/server/src/provider/Layers/CursorAdapter.ts:574-580"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon documents no ACP/AG-UI support; implementing an ACP client in Rust would let it host Cursor, Grok, Gemini CLI and Claude-compatible agents as selectable runtimes behind the same governance pipeline.",
+  "notes": "Vendor extensions are the fragile part: they track undocumented-or-private method schemas (a Cursor extension reference is cited in a source comment)."
+ },
+ {
+  "id": "t3code-architecture-039",
+  "category": "Agent runtime",
+  "name": "OpenCode adapter: spawned `opencode serve`, SDK client and a runtime-mode permission ruleset",
+  "what": "OpenCode is driven over its local HTTP server using its SDK. T3 either spawns the server for the session or attaches to a user-configured URL with Basic auth.",
+  "how": "opencodeRuntime spawns `opencode serve --hostname --port` and waits for the 'opencode server listening' line (30 s), or uses serverUrl without owning its lifetime; createOpencodeClient talks to it (optional Basic header with serverPassword) and event.subscribe streams events (logged as opencode.sdk.event). buildOpenCodePermissionRules maps full-access to allow-all and other modes to an ask-by-default ruleset (bash, webfetch, websearch, codesearch, external_directory, doom_loop ask; edit allow only for auto-accept-edits; question allow). Rollback uses session.revert. Skill discovery output is capped at 8 MiB.",
+  "evidence": [
+   "recovered/server/src/provider/opencodeRuntime.ts:44-60",
+   "recovered/server/src/provider/opencodeRuntime.ts:150-185",
+   "recovered/server/src/provider/opencodeRuntime.ts:371-392",
+   "recovered/server/src/provider/opencodeRuntime.ts:505-520",
+   "recovered/server/src/provider/opencodeRuntime.ts:655-690",
+   "recovered/server/src/provider/Layers/OpenCodeAdapter.ts:1204-1240",
+   "recovered/server/src/provider/Layers/OpenCodeAdapter.ts:1678-1700"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Shows how an HTTP-native agent runtime is wrapped behind the same adapter contract; the explicit permission ruleset per mode is a good table to mirror in Verevon's capability policy.",
+  "notes": "OpenCode can use local or custom models, so this is also T3's only path to non-vendor models (INF low; not verified)."
+ },
+ {
+  "id": "t3code-architecture-040",
+  "category": "Agent runtime",
+  "name": "Canonical provider runtime event taxonomy that preserves the raw native payload",
+  "what": "Five protocols (Claude SDK messages, Codex app-server notifications, ACP JSON-RPC, OpenCode SDK events, plus extensions) are normalized into one stream of 48 event types, 16 item types and 10 request types, with the original payload attached for debugging.",
+  "how": "providerRuntime.ts defines RuntimeEventRaw {source (codex.app-server.notification|request, codex.eventmsg, claude.sdk.message|permission, codex.sdk.thread-event, opencode.sdk.event, acp.jsonrpc, acp.<vendor>.extension), method, messageType, payload}, the 48 ProviderRuntimeEventType literals (session.*, thread.*, turn.*, item.*, content.delta, request.*, user-input.*, task.*, hook.*, tool.*, auth/account/mcp, model.rerouted, config/deprecation warnings, files.persisted, runtime.warning/error), TOOL_LIFECYCLE_ITEM_TYPES (command_execution, file_change, mcp_tool_call, dynamic_tool_call, collab_agent_tool_call, web_search, image_view), content stream kinds (assistant_text, reasoning_text, reasoning_summary_text, plan_text, command_output, file_change_output) and request types (command/file read/file change/apply patch/exec approvals, MCP elicitation, tool user input, dynamic tool call, token refresh). ProviderService logs this canonical stream beside the native stream.",
+  "evidence": [
+   "recovered/server/packages/contracts/src/providerRuntime.ts:22-45",
+   "recovered/server/packages/contracts/src/providerRuntime.ts:56-148",
+   "recovered/server/packages/contracts/src/providerRuntime.ts:150-199",
+   "recovered/server/src/provider/Layers/ProviderService.ts:300-310"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's typed SSE events are Model Plane specific; defining a canonical event schema that other runtimes (ACP, Codex) can be mapped onto is the prerequisite for hosting them, and the raw-payload attachment makes mapping bugs diagnosable.",
+  "notes": "The sibling UI audit counted the same taxonomy (its record 056); the counts here (48/16/10) were re-derived from the source. Event 'thread.realtime.*' events mirror Codex realtime but no T3 audio pipeline exists."
+ },
+ {
+  "id": "t3code-architecture-041",
+  "category": "Agent runtime",
+  "name": "Lifecycle guard that rejects stale or out-of-order provider events",
+  "what": "A late completion from an old turn, or a resume handshake that looks like a turn, cannot overwrite the thread's real running state.",
+  "how": "ProviderRuntimeIngestion applies thread-lifecycle events through shouldApplyThreadLifecycle when STRICT_PROVIDER_LIFECYCLE_GUARD is on (default; disabled only by T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD=0): turn.started is ignored if it conflicts with an active turn unless a turn start is pending; turn.completed must name the active turn, and an untargeted completion is dropped (the known emitter was the Claude resume handshake, system/init plus result(num_turns:0)); runtime.error only applies to the active turn or when none is tracked. Ingestion caches (10k turn-message ids, 20k buffered texts, 120 min TTL) are bounded.",
+  "evidence": [
+   "recovered/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:93-102",
+   "recovered/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:1520-1580",
+   "recovered/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:1886-1895"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Any multi-protocol ingestion layer needs this guard; Verevon can express it as a state-machine check in session-core when merging events from Do-mode workers, subagents and replays.",
+  "notes": "Evidence that provider protocols leak lifecycle ambiguities that a canonical layer must police."
+ },
+ {
+  "id": "t3code-architecture-042",
+  "category": "Chat experience",
+  "name": "Assistant text is buffered server-side and flushed as one message; token streaming is a legacy mode",
+  "what": "By default the timeline updates when a message is complete (or at a size cap) rather than on every token, which keeps the event log small. A legacy setting restores token-level streaming.",
+  "how": "ProviderRuntimeIngestion accumulates assistant deltas in a TTL cache keyed by message id (cap MAX_BUFFERED_ASSISTANT_CHARS 24,000, then a safety valve flushes the buffer as a delta), flushes buffered messages at turn end or item completion (flushBufferedAssistantMessage), and does the same for proposed-plan text. The setting enableLegacyTokenStreaming switches to per-delta commands (thread.message.assistant.delta).",
+  "evidence": [
+   "recovered/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:93-101",
+   "recovered/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:1080-1215",
+   "recovered/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:1680-1725",
+   "recovered/server/packages/contracts/src/settings.ts:623-630",
+   "recovered/server/src/orchestration/decider.ts:1231-1285"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon streams typed SSE tokens; the useful trick is to keep token deltas out of the durable log and persist only completed messages, while a separate ephemeral channel carries partials.",
+  "notes": "Trade-off: the UI loses perceived responsiveness versus peers (claude.ai, ChatGPT) that stream tokens; the sibling audit lists this under weaknesses."
+ },
+ {
+  "id": "t3code-architecture-043",
+  "category": "Agent runtime",
+  "name": "Workspace checkpoints as hidden git refs captured through a temporary index; revert coordinates files, provider and refs",
+  "what": "Before and after each turn T3 snapshots the working tree (including untracked files) without touching the user's index or branches. Reverting restores files, rolls the provider conversation back, deletes newer snapshots and refreshes the file picker.",
+  "how": "GitVcsDriver.captureCheckpoint uses a temporary GIT_INDEX_FILE inside the git common dir: read-tree HEAD, add -A, write-tree, commit-tree (author 'T3 Code') and update-ref to refs/t3/checkpoints/<base64url(threadId)>/turn/<n>; restoreCheckpoint runs git restore --source <commit> --worktree --staged then git clean -fd and git reset; diffCheckpoints compares refs with an ignore-whitespace option. CheckpointReactor captures a pre-turn baseline (turn 0) and per-turn checkpoints, and on thread.checkpoint-revert-requested validates the git workspace and turn count, restores, refreshes workspace entries, calls providerService.rollbackConversation for the number of rolled-back turns, deletes stale refs and dispatches thread.revert.complete; failures are recorded as checkpoint.revert.failed activities.",
+  "evidence": [
+   "recovered/server/src/vcs/GitVcsDriver.ts:711-830",
+   "recovered/server/src/checkpointing/Utils.ts:1-14",
+   "recovered/server/src/checkpointing/CheckpointStore.ts:1-130",
+   "recovered/server/src/orchestration/Layers/CheckpointReactor.ts:629-690",
+   "recovered/server/src/orchestration/Layers/CheckpointReactor.ts:690-830"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon has no rewind; for sandbox workspaces a content-addressed snapshot per run (Verevon already has CAS-backed workspace manifests) plus a coordinated provider/conversation rollback would deliver the same user-facing feature.",
+  "notes": "Correction to the scout: CheckpointStore itself does not coordinate provider rollback, but CheckpointReactor does (providerService.rollbackConversation). git clean -fd does not remove ignored files; checkpoints require a git repository. Whether the model context truly rewinds depends on the provider (see the Claude rollback record)."
+ },
+ {
+  "id": "t3code-architecture-044",
+  "category": "Computer & environment control",
+  "name": "Worktree-per-thread lifecycle with managed paths, submodule init, base-branch metadata and self-healing",
+  "what": "A thread can run in its own git worktree under the app's base directory. If the folder disappears it is recreated from the branch on the next turn, and the branch is renamed after the first message using an AI-generated name.",
+  "how": "createWorktree builds <baseDir>/worktrees/<repoName>/<sanitized-branch> with git worktree add (-b newRef baseRef), runs submodule update --init --recursive best-effort, and stores branch.<name>.gh-merge-base. ProviderCommandReactor.ensureThreadWorktree checks the persisted path, prunes stale admin entries and recreates it before every turn; on the first message it forks title generation and worktree-branch rename tasks. The turn-start bootstrap can fetch origin, resolve a remote tracking commit and base the worktree on it when 'start from origin' is enabled and an origin remote exists. ReviewService only reads diffs for cwds inside the workspace root or the worktrees root (canonicalized).",
+  "evidence": [
+   "recovered/server/src/vcs/GitVcsDriverCore.ts:2823-2883",
+   "recovered/server/src/config.ts:112-151",
+   "recovered/server/src/orchestration/Layers/ProviderCommandReactor.ts:430-480",
+   "recovered/server/src/orchestration/Layers/ProviderCommandReactor.ts:1140-1165",
+   "recovered/server/src/ws.ts:1019-1050",
+   "recovered/server/src/review/ReviewService.ts:60-90"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon is not an IDE and its ledger rejected worktree isolation for subagents, but for any code-capable Do mode the 'recreate missing workspace before each turn' rule and path-containment check are worth copying.",
+  "notes": "Worktrees live outside the repo, so the user's repo stays clean; checkpoints work per worktree."
+ },
+ {
+  "id": "t3code-architecture-045",
+  "category": "Agent runtime",
+  "name": "Single-command bootstrap saga: create thread, prepare worktree, run setup script, start turn, roll back on failure",
+  "what": "The first message of a new thread is one atomic server-side workflow, so the client does not orchestrate several round trips or leave half-created threads behind.",
+  "how": "dispatchBootstrapTurnStart in ws.ts runs a bootstrapProgram: optional thread.create dispatch, then prepareWorktree (fetch origin, resolve base commit, createWorktree with newRefName and baseRefName, thread.meta.update with branch and path, refresh git status), then the project setup script runner (t3.json runOnWorktreeCreate) with launch/failure activities, then the final thread.turn.start command. On failure, cleanupCreatedThread runs uninterruptibly and the error carries bootstrapThreadDisposition 'deleted'. All of it is enqueued behind the command-readiness gate.",
+  "evidence": [
+   "recovered/server/src/ws.ts:859-1050",
+   "recovered/server/src/ws.ts:1053-1122",
+   "recovered/server/src/project/ProjectSetupScriptRunner.ts:60-100"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's 'start a run in a Space' path (lease, workspace hydrate, plan, run) could be a single saga command with compensation, which also gives clean error semantics to the SPA.",
+  "notes": "The saga is imperative code inside the WebSocket handler (ws.ts is 108 KB), not a reusable workflow engine."
+ },
+ {
+  "id": "t3code-architecture-046",
+  "category": "Agent runtime",
+  "name": "Context compaction and resume prompts for long Claude sessions",
+  "what": "Compaction boundaries from the SDK show up as timeline events, an auto-compact window can be set, and when resuming a very old, large session the SDK's own question 'compact it first?' is surfaced as a normal user-input request with a never-ask-again answer.",
+  "how": "ClaudeAdapter maps the SDK system/compact_boundary message to a token-usage snapshot (thread.token-usage.updated) plus a thread.state.changed event with state 'compacted', and applies settings.autoCompactWindow from the provider settings. It declares supportedDialogKinds ['resume_return'] and implements onUserDialog (handleResumeDialog), which builds the question text from session age and estimated tokens and offers three answers (Compact and continue, Keep full history, Don't ask again) (shared claudeCompaction.ts also exports the matching pattern so the web client can recognize it and mirror the 'Don't ask again' dismissal in localStorage).",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:3174-3200",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4020-4100",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4286-4300",
+   "recovered/server/packages/shared/src/claudeCompaction.ts:1-27"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon compacts silently in the gateway; exposing an explicit 'resume a stale, large session: compact?' decision to the user (with a remembered default) is a transparent alternative for long-lived threads.",
+  "notes": "Manual compaction is Claude-only (sibling audit: it injects /compact)."
+ },
+ {
+  "id": "t3code-architecture-047",
+  "category": "Agent runtime",
+  "name": "Subagent, task and workflow mapping from provider streams to timeline rows",
+  "what": "Claude subagents, background shells, workflows and Codex child agents all surface as task.* events with identity (role, model, effort, title, owning agent), so the UI can show fleets and the server can compute background liveness.",
+  "how": "ClaudeAdapter remembers per-task identity from task_started (taskId, toolUseId, subagent type, task type, workflow name, owning agent via the launching tool, model and effort inherited from the Agent tool input or session), repeats a linkage bundle on every later task.* payload, bounds workflow phases and agents (64/100), dedupes workflow member arrays by fingerprint (task_progress repeats the full array each tick) and suppresses subagent narration deltas. CodexSessionRuntime registers children from thread_spawn signals and re-emits them as synthetic collabAgent events marked timelineBypass; the spawn turn id lets the UI group fleets. ThreadPlanProgress and ThreadBackgroundLiveness consume the same stream.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:231-312",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:1041-1110",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:3236-3300",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:877-935",
+   "recovered/server/src/orchestration/ThreadPlanProgress.ts:1-76"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's subagents are depth-1 child runs; self-describing task events (identity repeated on every progress row so it survives log retention) is a cheap improvement for its run/child-run timeline.",
+  "notes": "Codex child-agent registration is marked WIP and probe-gated in a source comment."
+ },
+ {
+  "id": "t3code-architecture-048",
+  "category": "Models & routing",
+  "name": "Utility-model calls through one-shot CLI structured output, with first-turn title and branch generation",
+  "what": "Commit messages, PR titles/bodies, thread titles and branch names are written by a chosen model by invoking the same agent CLIs in non-interactive mode with a JSON schema, not by calling provider APIs.",
+  "how": "ClaudeTextGeneration spawns `claude -p --output-format json --json-schema <schema>` (180 s timeout) and decodes structured_output; CodexTextGeneration spawns `codex exec --ephemeral --skip-git-repo-check --output-schema`; Cursor, Grok and OpenCode have their own implementations behind the same TextGeneration service held by each ProviderInstance. Prompts and presets live in TextGenerationPrompts/Presets; schemas come from Effect Schema converted to JSON Schema. ProviderCommandReactor triggers title and worktree-branch generation on the first user message in forked fibers.",
+  "evidence": [
+   "recovered/server/src/textGeneration/ClaudeTextGeneration.ts:48",
+   "recovered/server/src/textGeneration/ClaudeTextGeneration.ts:104-190",
+   "recovered/server/src/textGeneration/CodexTextGeneration.ts:185-205",
+   "recovered/server/src/textGeneration/TextGeneration.ts:1-60",
+   "recovered/server/src/orchestration/Layers/ProviderCommandReactor.ts:1140-1170"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon routes cheap utility calls through its intent router; T3's split (utility model selected separately from the main model, schema-validated output) matches that and could back titles, summaries and commit-style outputs.",
+  "notes": "Spawning a CLI per utility call is slower than an API call but reuses the user's existing auth with zero extra credentials."
+ },
+ {
+  "id": "t3code-architecture-049",
+  "category": "Safety, permissions & governance",
+  "name": "Approval and user-input requests are provider-held callbacks that become stale after restart",
+  "what": "Approval prompts live inside the provider process. If the app or session restarts, a pending approval cannot be answered anymore, and T3 says so explicitly instead of failing silently.",
+  "how": "Claude holds approvals in pendingApprovals/pendingUserInputs Deferreds resolved by canUseTool and AskUserQuestion; Codex holds them in pending maps keyed by request id. ProviderCommandReactor builds the message 'Stale pending <kind> request ... callback state does not survive app restarts or recovered sessions. Restart the turn to continue.' when a response targets a request the live session no longer has, and records it as a failed approval-response activity. A pendingApprovals projector tracks open requests for the sidebar and for the notification relay.",
+  "evidence": [
+   "recovered/server/src/orchestration/Layers/ProviderCommandReactor.ts:270-282",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:3880-4000",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4090-4253",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4649-4664",
+   "recovered/server/src/orchestration/Layers/ProjectionPipeline.ts:58-71"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon persists approvals durably with encrypted continuation descriptors, which is strictly better; the lesson is the explicit 'stale request' error path for any approval whose backing run no longer exists.",
+  "notes": "This is a limitation of driving external agent processes; the loop cannot be resumed after approval if the process is gone."
+ },
+ {
+  "id": "t3code-architecture-050",
+  "category": "Models & routing",
+  "name": "Provider snapshot lifecycle: instant initial snapshot, probe, progressive enrichment and disk status cache",
+  "what": "The model picker and provider health appear immediately from a cached or static snapshot and are refined by background probes, so a slow CLI never blocks the UI.",
+  "how": "makeManagedServerProvider takes getSettings/streamSettings, initialSnapshot, checkProvider and an optional enrichSnapshot that can publish additional snapshots with a generation counter; a refresh semaphore serializes probes, refresh respects BackgroundPolicy demand and providerHealthRefreshInterval, and a PubSub streams changes to subscribed clients. providerStatusCache persists snapshots per instance under <base>/caches and hydrateCachedProvider merges cached models into the fallback snapshot only when instance id and driver match. Probes have a 4 s default timeout.",
+  "evidence": [
+   "recovered/server/src/provider/makeManagedServerProvider.ts:27-110",
+   "recovered/server/src/provider/providerStatusCache.ts:1-80",
+   "recovered/server/src/provider/providerSnapshot.ts:21",
+   "recovered/server/src/provider/Layers/ProviderRegistry.ts:209-260",
+   "recovered/server/src/config.ts:112-134"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's model picker could render from a cached capability snapshot and refine asynchronously instead of waiting for provider probes in the request path.",
+  "notes": "The enrichment-generation counter prevents a slow older probe from overwriting a newer snapshot."
+ },
+ {
+  "id": "t3code-architecture-051",
+  "category": "Models & routing",
+  "name": "Provider CLI maintenance: version advisories and one-click install commands",
+  "what": "The app notices when an agent CLI has a newer version and can run the right installer (npm, pnpm, bun, brew) for the way it was installed, serialized by a lock.",
+  "how": "providerMaintenance caches the latest published version (1 h TTL, 4 s timeout) from the package registry, computes a ServerProviderVersionAdvisory, and exposes ProviderMaintenanceCapabilities {packageName, update action {command, executable, args, lockKey}}; providerMaintenanceRunner/CommandCoordinator execute updates and stream status; server.updateProvider is the RPC. Dismissed notification keys and update checks are settings.",
+  "evidence": [
+   "recovered/server/src/provider/providerMaintenance.ts:17-80",
+   "recovered/server/src/provider/providerMaintenanceRunner.ts:1-40",
+   "recovered/server/src/provider/providerMaintenanceCommandCoordinator.ts:1-40",
+   "recovered/server/packages/contracts/src/rpc.ts:374-379"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Not applicable to hosted inference; relevant only to a future local-runtime companion.",
+  "notes": "Marked medium confidence because only the head of the runner and coordinator files was read."
+ },
+ {
+  "id": "t3code-architecture-052",
+  "category": "Multimodal & creation",
+  "name": "Attachments: signed upload URLs, files on disk, path injected into the turn and a scoped directory grant",
+  "what": "Pasted images are uploaded over HTTP, stored by id under the state directory, and given to the agent both as pixels and as a file path the agent may read without an approval prompt.",
+  "how": "attachments.createUploadUrl returns an upload URL for /api/attachments/upload; files land in <state>/attachments (pending attachments are swept at startup). ProviderService appends '[Attached image \"name\" is saved at: <path>]' lines to the turn input, adapters inline the image content into the model prompt, and the Claude adapter grants the attachments directory as an additional directory so the agent can read or copy it without approval while secrets and the database stay outside the grant. Workspace images and HTML previews are served through short-lived HMAC-signed /api/assets URLs.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ProviderService.ts:724-760",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4298-4306",
+   "recovered/server/src/attachmentStore.ts:23",
+   "recovered/server/src/attachmentStore.ts:170-200",
+   "recovered/server/src/assets/AssetAccess.ts:44-50",
+   "recovered/server/src/config.ts:152-160"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Pattern for Verevon's file-in-chat path: store once, reference by id, and make the capability to read it explicit (a scoped grant) rather than implicit filesystem access.",
+  "notes": "Only images are first-class in the composer (sibling audit); no audio/video/document generation exists."
+ },
+ {
+  "id": "t3code-architecture-053",
+  "category": "Computer & environment control",
+  "name": "WSL as a second concurrent backend with its own home, database and preflight",
+  "what": "On Windows the user can run an additional backend inside a WSL distro, side by side with the Windows one, or WSL-only. The two have separate state and both appear as environments in the sidebar.",
+  "how": "resolveWslStartConfig launches `wsl.exe [-d distro] --exec env PATH=... <resolved node> <linux entry> --bootstrap-fd 0` with the bootstrap envelope on stdin (wsl.exe drops extra fds). A preflight resolves node and the user PATH through a login shell, converts the entry path with wslpath and classifies failures as transient (retry limit) or fatal. The packaged server.asar is materialized into a version-marked directory (t3code-wsl-server-tree.json) because plain node cannot read an asar. The WSL server binds 0.0.0.0 so the Windows side can reach it through localhost forwarding or the distro IP, omits t3Home so it uses its own Linux home and SQLite file (T3CODE_HOME is stripped to avoid both backends sharing a /mnt/c database), forwards selected env through WSLENV, and reports resource telemetry as unavailable (the sidecar is a Windows exe). The renderer registers it as a desktop-local environment, minting a bearer via the bootstrap token.",
+  "evidence": [
+   "recovered/desktop/src/backend/DesktopBackendConfiguration.ts:418-475",
+   "recovered/desktop/src/backend/DesktopBackendConfiguration.ts:520-610",
+   "recovered/desktop/src/wsl/DesktopWslServerTree.ts:1-50",
+   "recovered/desktop/src/backend/DesktopBackendPool.ts:1-80",
+   "recovered/desktop/src/backend/DesktopLocalEnvironmentAuth.ts:45-93",
+   "recovered/desktop/src/app/DesktopApp.ts:203-218"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "None for hosted chat; it is a useful reference for running a Linux toolchain next to a Windows UI, which Verevon solves with Linux sandboxes instead.",
+  "notes": "Not comparable in any other desktop app audited. Heavy platform-specific code (wsl.exe quirks) for one OS combination."
+ },
+ {
+  "id": "t3code-architecture-054",
+  "category": "Computer & environment control",
+  "name": "SSH remote environments via scripted remote launch, reused server, loopback tunnel and in-app password prompt",
+  "what": "A user can point the app at an SSH host. T3 installs or reuses a T3 server there, keeps it running, forwards a local port to it and pairs automatically, so the agents run on the remote machine while the UI stays local.",
+  "how": "launchOrReuseRemoteServer sends a shell script over ssh stdin that resolves the t3 CLI (npx --yes or npm exec of an exact package spec derived from the app version and update channel; it verifies that the CLI actually exists after install, with a hint about node-pty native builds), keeps state in ~/.t3/ssh-launch/<key>, reuses a running server (server-runtime.json) or starts `nohup env T3CODE_NO_BROWSER=1 t3 serve --host 127.0.0.1 --port <p> --base-dir ...`, and prints {remotePort, serverKind}. issueRemotePairingToken mints a token over SSH; startSshTunnel runs ssh -N -L <local>:127.0.0.1:<remote> with ExitOnForwardFailure, ControlMaster=no, ServerAliveInterval=15 and CountMax=3. Passwords never appear in argv: the renderer shows an in-app prompt, and ssh is re-run with SSH_ASKPASS/SSH_ASKPASS_REQUIRE=force pointing at generated POSIX and Windows helper scripts that read the cached value. Hosts are discovered from the user's ssh config.",
+  "evidence": [
+   "recovered/desktop/packages/ssh/src/tunnel.ts:425-470",
+   "recovered/desktop/packages/ssh/src/tunnel.ts:593",
+   "recovered/desktop/packages/ssh/src/tunnel.ts:711-767",
+   "recovered/desktop/packages/ssh/src/tunnel.ts:769-820",
+   "recovered/desktop/packages/ssh/src/tunnel.ts:942-1010",
+   "recovered/desktop/packages/ssh/src/auth.ts:63-110",
+   "recovered/desktop/packages/ssh/src/auth.ts:195-205",
+   "recovered/desktop/src/main.ts:84-103"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's remote execution is its own sandbox fleet, but the pattern of a pinned-version remote bootstrap with reuse, plus pairing, is the template for any customer-hosted worker (on-prem runner) agent.",
+  "notes": "Relies on the remote host having node/npm and a C toolchain for node-pty; failure messages are specific. The remote server is a full T3 server (not a thin agent), so remote auth uses the same pairing system."
+ },
+ {
+  "id": "t3code-architecture-055",
+  "category": "Computer & environment control",
+  "name": "Thread-scoped PTY terminals with persisted history, subprocess detection and Bun/Node adapters",
+  "what": "Each thread can have several terminals that survive reconnects, keep a scrollback on disk, show which command is running, and can be used as agent context.",
+  "how": "TerminalManager holds sessions keyed by (threadId, terminalId) over a PtyAdapter chosen at runtime (BunPtyAdapter or NodePtyAdapter with node-pty, ConPTY on Windows). Output is fanned out as attach/subscribe streams (subscribeTerminalEvents, subscribeTerminalMetadata); history is persisted per thread/terminal to <logs>/terminals/*.log with a 5,000-line limit and 40 ms debounce; up to 128 inactive sessions are retained; a poller (1 s) inspects the process tree (ps on POSIX, Get-CimInstance Win32_Process on Windows) to flag hasRunningSubprocess and a normalized child command label; spawn env strips PORT, ELECTRON_RENDERER_PORT, ELECTRON_RUN_AS_NODE and AppImage runtime variables; kill uses a 1 s grace. The RPC methods are open, attach, write, resize, clear, restart and close under a dedicated terminal scope.",
+  "evidence": [
+   "recovered/server/src/terminal/Manager.ts:77-86",
+   "recovered/server/src/terminal/Manager.ts:690-760",
+   "recovered/server/src/terminal/Manager.ts:1031-1060",
+   "recovered/server/src/terminal/Manager.ts:1130-1220",
+   "recovered/server/src/terminal/Manager.ts:2010-2075",
+   "recovered/server/src/server.ts:135-145",
+   "recovered/server/src/auth/RpcAuthorization.ts:108-120"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's `process_*` tools under bwrap could expose the same 'is a command still running, and which one' signal and persisted scrollback to the Do-mode UI.",
+  "notes": "Terminal output as composer context chips is a UI feature covered by the sibling audit. The terminal scope is separate from orchestration scope, which allows a read-only client without shell access."
+ },
+ {
+  "id": "t3code-architecture-056",
+  "category": "Computer & environment control",
+  "name": "Agent-driven embedded browser: CDP debugger, injected Playwright runtime and native input events",
+  "what": "Agents can open, inspect and operate a page inside the app's own preview browser. Locators work like Playwright's (roles, text, test ids) without launching a Playwright browser.",
+  "how": "The preview runs in Electron webviews on persistent partitions. A single control session per webContents (a Semaphore) attaches wc.debugger (CDP 1.3); it refuses if DevTools is open or another debugger is attached. ensurePlaywrightInjected extracts Playwright's InjectedScript source from playwright-core's lib/coreBundle.js by marker/terminator, evaluates it in a VM with a 1 s timeout and a 100 KB minimum-length check, and installs globalThis.__t3PlaywrightInjected with testIdAttributeName data-testid. Click resolves a locator via injected.parseSelector/querySelector, checks visible and enabled state, scrolls into view and computes the center point; before clicking it emits agent-cursor pointer events (move, then click) to the UI so the user sees where the agent acts, checks the point is inside the viewport, then sends CDP Input.dispatchMouseEvent mousePressed/mouseReleased; typing edits through the injected page runtime (a source comment notes CDP Input.insertText drops text until a hidden guest is activated) and key presses use Input.dispatchKeyEvent. Snapshots return URL, title, loading state, visible text, interactive elements, an accessibility tree, console and network entries, an action timeline and a PNG screenshot. Emulated color scheme is applied through CDP Emulation.setEmulatedMedia.",
+  "evidence": [
+   "recovered/desktop/src/preview/PlaywrightInjectedRuntime.ts:13-30",
+   "recovered/desktop/src/preview/PlaywrightInjectedRuntime.ts:123-214",
+   "recovered/desktop/src/preview/Manager.ts:995-1110",
+   "recovered/desktop/src/preview/Manager.ts:3179-3260",
+   "recovered/desktop/src/preview/Manager.ts:2343-2360",
+   "recovered/server/packages/contracts/src/previewAutomation.ts:530-547"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's rule is 'Model proposes, Quarry executes'; T3's perception design (accessibility tree plus console/network/action timeline plus screenshot in one snapshot, and locator-based actions) is a concrete richer observation schema Quarry could return to the model.",
+  "notes": "Scraping the Playwright bundle by string marker (source3 = ...) is brittle across playwright-core versions (the code validates length and fails with typed errors). Everything runs on the user's desktop, not in a sandbox."
+ },
+ {
+  "id": "t3code-architecture-057",
+  "category": "Computer & environment control",
+  "name": "Browser-host broker: agent on any server drives a browser on the user's desktop through a reverse RPC with session-to-host leases",
+  "what": "The agent may run on a remote machine while the browser it controls is the one open on the user's own desktop. The server relays each tool call to the right desktop client and pins the session to that client so multi-step flows keep cookies and DOM state.",
+  "how": "Desktop clients call previewAutomation.connect (a server-to-client stream of requests) advertising their environment id, supported operations and focus order, answer with previewAutomation.respond, and report focus with previewAutomation.focusHost. PreviewAutomationBroker keeps clients, per-session HostAssignment leases and pending requests in a SynchronizedRef. invoke() picks the leased host if it is live and supports the operation, otherwise the best host by number of supported operations, then focus, then recency; a live lease is never silently moved to a newer client (the caller gets a capability error and may start a new provider session); a dead lease is pruned and may fail over. Timeouts, oversize results (64 KB for evaluate), selector errors and disconnects map to typed errors.",
+  "evidence": [
+   "recovered/server/src/mcp/PreviewAutomationBroker.ts:55-130",
+   "recovered/server/src/mcp/PreviewAutomationBroker.ts:430-500",
+   "recovered/server/src/ws.ts:2286-2305",
+   "recovered/server/packages/contracts/src/previewAutomation.ts:26-48"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's browser grants and Quarry live frames could use the same lease idea to bind a Do-mode run to one browser session/host, and the reverse-RPC pattern to let a cloud run drive a user-owned browser when a grant exists.",
+  "notes": "The REA/IPC listing shows the desktop side as desktop:preview-automation-* channels. The 64 KB evaluate cap is from a tool description string; the typed ResultTooLarge error is in Manager.ts:3573."
+ },
+ {
+  "id": "t3code-architecture-058",
+  "category": "Computer & environment control",
+  "name": "Preview recording and screenshots built on CDP screencast frames and renderer-side encoding",
+  "what": "A browser tab can be recorded to MP4 or WebM and saved as an artifact, and screenshots can be copied or revealed, all from the same preview.",
+  "how": "startFrameCapture subscribes consumers (recording, screenshots) to CDP Page.startScreencast; Page.screencastFrame events are acked and, when a recording consumer exists, delivered to the renderer as DesktopPreviewRecordingFrame {tabId, data, width, height, receivedAt}; the renderer encodes with MediaRecorder (MP4/H.264 when supported, else WebM) and sends bytes back through desktop:preview-recording-save, where the manager writes browser-recording-<id>.<ext> into the artifact directory and returns an artifact record. Screenshots use webContents.capturePage; background throttling is disabled while capturing. The same operations are exposed to agents as preview_recording_start/stop.",
+  "evidence": [
+   "recovered/desktop/src/preview/Manager.ts:1015-1110",
+   "recovered/desktop/src/preview/Manager.ts:2449-2520",
+   "recovered/desktop/src/preview/Manager.ts:2984-3060",
+   "recovered/server/packages/contracts/src/previewAutomation.ts:549-565",
+   "tmp/t3arch/rea_ipc_channels.tsv:1-100"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Recorded agent browser sessions are a strong transparency artifact; Verevon's Quarry could store screencast artifacts per run next to its Proof Bundle.",
+  "notes": "Encoding in the renderer ties recording quality to the UI process."
+ },
+ {
+  "id": "t3code-architecture-059",
+  "category": "Computer & environment control",
+  "name": "Local dev-server discovery with bounded HTML probing and reference-counted polling",
+  "what": "The app notices web servers the agent started (dev servers on localhost) and offers them in the preview, without showing every listening port.",
+  "how": "PortScanner lists listeners with `lsof -iTCP -sTCP:LISTEN -P -n -F pcn` on macOS/Linux, with PowerShell Get-NetTCPConnection -State Listen on Windows (fallback: a curated list of common dev ports), then publishes a port only after a bounded HTTP(S) probe finds an HTML document or a redirect to one; positive and negative results are cached briefly by URL and listener identity. Polling is reference counted by scoped retain, so the single fiber is a no-op with zero subscribers. Configured URLs from t3.json previewUrl are included.",
+  "evidence": [
+   "recovered/server/src/preview/PortScanner.ts:1-20",
+   "recovered/server/src/preview/PortScanner.ts:470-540",
+   "recovered/server/packages/contracts/src/rpc.ts:324-333"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Low for chat; relevant if Verevon adds a code-capable mode with live previews of agent-built apps.",
+  "notes": "Corrects the scout: the Windows branch exists (PowerShell Get-NetTCPConnection)."
+ },
+ {
+  "id": "t3code-architecture-060",
+  "category": "Computer & environment control",
+  "name": "VCS driver SPI with a git implementation, detection cache and demand-driven status broadcaster",
+  "what": "All repository operations go through a driver interface with declared capabilities, so another VCS can be added. Status is computed once per directory and shared with every subscribed client.",
+  "how": "VcsDriver exposes capabilities, execute, optional checkpoints and getDiffPreview, detectRepository, isInsideWorkTree, listWorkspaceFiles, listRemotes, filterIgnoredPaths and initRepository; VcsDriverRegistry detects the driver per cwd with a cache (no caching of misses) and has only 'git' registered, although VcsDriverKind already includes 'jj' and source-control discovery has Jujutsu install hints. VcsStatusBroadcaster refreshes shared status every 30 s with failure backoff up to 15 minutes and streams subscribeVcsStatus results with freshness labels (live-local, cached-local, cached-remote, explicit-remote). GitVcsDriverCore (117 KB) wraps process execution with timeouts.",
+  "evidence": [
+   "recovered/server/src/vcs/VcsDriver.ts:46-81",
+   "recovered/server/src/vcs/VcsDriverRegistry.ts:62-150",
+   "recovered/server/packages/contracts/src/vcs.ts:4-14",
+   "recovered/server/src/vcs/VcsStatusBroadcaster.ts:28-31",
+   "recovered/server/src/sourceControl/SourceControlDiscovery.ts:56"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's Data v2 and Ingestion planes already abstract providers; the 'capabilities record on the driver plus optional operations' shape is a good way to model provider actions with uneven support.",
+  "notes": "Only git is implemented; jj is anticipated, not shipped."
+ },
+ {
+  "id": "t3code-architecture-061",
+  "category": "Coding capability",
+  "name": "Four source-control hosts behind one registry using the user's installed CLIs, with rate-limit cooldown",
+  "what": "Pull requests, reviews, checks and comments work on GitHub, GitLab, Azure DevOps and Bitbucket through the user's own gh, glab and az logins (Bitbucket via API token), without T3 holding forge credentials.",
+  "how": "SourceControlProviderRegistry and PullRequestProviderRegistry map a host to a provider implementation (GitHubCli/GitHubPullRequestCli with a GraphQL budget guard, GitLabCli, AzureDevOpsCli, BitbucketApi). Auth status helpers check gh/glab login; Bitbucket reads T3CODE_BITBUCKET_EMAIL/API_TOKEN/ACCESS_TOKEN. SourceControlRateLimit tracks per provider/host cooldowns (30 s base, up to 15 min). One PullRequestService instance backs both WebSocket and HTTP APIs, so caches single-flight across clients and WebSocket mutations invalidate data later read over HTTP. Text generation can write commit and PR text with a selected model and the repo's PR template.",
+  "evidence": [
+   "recovered/server/src/sourceControl/SourceControlRateLimit.ts:1-40",
+   "recovered/server/src/server.ts:213-245",
+   "recovered/server/src/server.ts:455-490",
+   "recovered/server/src/pullRequest/PullRequestProviderRegistry.ts:1-40",
+   "recovered/server/src/sourceControl/PrTemplateDetection.ts:1-30"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's integration-corev2 provider actions could reuse the 'reuse the user's tool login, share a cache, cool down on rate limit' approach for forge actions.",
+  "notes": "Coding-specific; Verevon is not an IDE, so only the harness patterns matter."
+ },
+ {
+  "id": "t3code-architecture-062",
+  "category": "Tools, plugins & extensibility",
+  "name": "Per-session scoped MCP server exposed to every agent through its native config mechanism",
+  "what": "T3 hosts one MCP endpoint (/mcp) that gives agents browser tools. Each provider session gets its own short-lived bearer credential limited to specific capabilities, and every adapter injects it in the way its protocol supports.",
+  "how": "McpSessionRegistry.issue creates a 32-byte random token, stores only its SHA-256 hash with a scope {environmentId, threadId, providerSessionId, providerInstanceId, capabilities Set(['preview']), issuedAt}, and prunes records after a 24 h liveness window refreshed by every provider turn (touch) and MCP call; stopSession/stopAll revoke eagerly. ProviderService.prepareMcpSession fails closed: if the enableAgentBrowserAccess setting is off or unreadable it revokes the credential and clears the session config. Injection: Claude SDK mcpServers {'t3-code': {type: http, url, Authorization header}}; Codex `-c mcp_servers.t3-code.url=...` plus bearer_token_env_var=T3_MCP_BEARER_TOKEN (token via env, not argv); ACP agents via the session/new mcpServers array; OpenCode via the SDK call mcp.add {name t3-code, type remote, url, Authorization header, oauth false}, only for an OpenCode server that T3 spawned itself (not for a user-configured external server). McpHttpServer is an Effect McpServer with an auth middleware (401 + WWW-Authenticate Bearer on bad credentials, logged reason) and normalizes empty 200 bodies to 202.",
+  "evidence": [
+   "recovered/server/src/mcp/McpSessionRegistry.ts:60-160",
+   "recovered/server/src/mcp/McpHttpServer.ts:26-128",
+   "recovered/server/src/mcp/McpProviderSession.ts:1-28",
+   "recovered/server/src/provider/Layers/ProviderService.ts:240-285",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4334-4346",
+   "recovered/server/src/provider/Layers/CodexAdapter.ts:1700-1712",
+   "recovered/server/src/provider/acp/AcpSessionRuntime.ts:570",
+   "recovered/server/src/provider/Layers/CursorAdapter.ts:534-560",
+   "recovered/server/src/provider/Layers/OpenCodeAdapter.ts:1228-1250"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon's baseline says MCP tools cannot be invoked by either loop; T3 shows a concrete way to expose platform tools to runtimes: per-run capability-scoped credentials, hashed at rest, fail-closed gating and one endpoint that every runtime can reach.",
+  "notes": "/mcp is mounted outside the environment auth stack and is reachable on whatever host the server binds to (a source comment says the token is the only guard on a remote-reachable server). Only one toolkit (preview) exists, so this is a mechanism with a single use. Credentials live in a module-global map, so they do not survive a restart."
+ },
+ {
+  "id": "t3code-architecture-063",
+  "category": "Tools, plugins & extensibility",
+  "name": "Preview MCP toolkit with honest tool annotations and a mixed-version operation set",
+  "what": "Fourteen browser tools are defined once as typed Effect tools and published over MCP with readOnly, destructive, idempotent and open-world hints that match what each tool does.",
+  "how": "tools.ts defines helpers browserTool (openWorld, destructive), safeBrowserTool (not destructive) and readonlyBrowserTool (readOnly and idempotent) and applies them to preview_open, navigate, status, snapshot, click, type, press, scroll, wait_for, evaluate, resize, set_appearance and recording start/stop with long descriptions that steer the model (prefer a Playwright locator, call snapshot before acting, 64 KB evaluate cap). handlers.ts maps each to a broker operation; open input normalizes the show alias to open and leaves the user's auto-show preference alone. The snapshot tool is registered separately so its result can return the PNG as an MCP image content block; failures become isError CallToolResults without leaking details. PREVIEW_AUTOMATION_V1_OPERATIONS vs the current list lets old desktops keep working.",
+  "evidence": [
+   "recovered/server/src/mcp/toolkits/preview/tools.ts:28-62",
+   "recovered/server/src/mcp/toolkits/preview/tools.ts:109-175",
+   "recovered/server/src/mcp/toolkits/preview/handlers.ts:20-104",
+   "recovered/server/src/mcp/McpHttpServer.ts:130-226",
+   "recovered/server/packages/contracts/src/previewAutomation.ts:26-48"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A template for how Verevon should describe its own tools to models and to MCP clients: accurate hint annotations, steering descriptions and a snapshot-before-act contract.",
+  "notes": "The tool list matches the scout's count of 14 names."
+ },
+ {
+  "id": "t3code-architecture-064",
+  "category": "Tools, plugins & extensibility",
+  "name": "CLI front door that acts as a client of a live server and falls back to an offline engine",
+  "what": "Commands such as `t3 project add|remove|rename` work whether or not the server is running: when it is, they go through its API; when it is not, they run the same engine against the database directly.",
+  "how": "The server persists server-runtime.json (version, pid, host, port, origin, devUrl, startedAt) atomically while listening and clears it on shutdown. The CLI's tryResolveLiveProjectExecutionMode reads it, issues an administrative-scope session (label 't3 project cli') straight from the shared SQLite-backed EnvironmentAuth for the duration of the command (acquireUseRelease revokes it afterwards), fetches /api/orchestration/snapshot and dispatches via /api/orchestration/dispatch; if the probe fails it clears the stale state and builds an offline runtime layer (OrchestrationEngine over the same state.sqlite, which is why busy_timeout is set). Other commands: start, serve, service install/update/uninstall/status, pair, auth (pairing and session issue/list/revoke), connect (login, link, publish, unlink), config, triage. detectCliRunner recognizes npx/pnpm dlx/bunx launches so suggested commands are copy-pasteable, and nightly builds keep the @nightly tag.",
+  "evidence": [
+   "recovered/server/src/cli/project.ts:300-460",
+   "recovered/server/src/serverRuntimeState.ts:10-70",
+   "recovered/server/src/cli/project.ts:205-225",
+   "recovered/server/src/config.ts:47-134",
+   "recovered/server/src/cli/invocation.ts:1-75",
+   "recovered/server/src/cli/service.ts:40-80",
+   "recovered/server/src/cli/connect.ts:1-40"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's ops tooling could follow the same rule for admin CLIs: talk to the running service when reachable, never write behind its back, and have a clearly labelled offline mode.",
+  "notes": "The CLI can mint administrative sessions because it shares the state directory and signing key with the server, so filesystem access to the state directory equals admin access; that is intentional for a single-user machine and would be unacceptable in a multi-tenant service."
+ },
+ {
+  "id": "t3code-architecture-065",
+  "category": "Tools, plugins & extensibility",
+  "name": "`t3 triage`: hand a misbehaving install to a local coding agent with machine facts and a remote playbook",
+  "what": "A support command collects version, paths and server liveness into context.md and launches the user's own Claude or Codex with a built-in playbook to diagnose the install, asking before writing to the database.",
+  "how": "cli/triage.ts writes the context file and launches `claude` or `codex` interactively (agent and model are flags). triagePrompt.ts holds the playbook text, which tells the agent to fetch the current .github/triage/PLAYBOOK.md from the main branch and fall back to the bundled copy.",
+  "evidence": [
+   "recovered/server/src/cli/triage.ts:1-60",
+   "recovered/server/src/cli/triagePrompt.ts:60-80"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "A neat support pattern (self-service diagnosis by an agent with scoped context); but a remote playbook fetched from a branch is a prompt-injection and supply-chain surface that Verevon should avoid or pin by digest.",
+  "notes": "The playbook was not fetched during this audit. The trust boundary (remote text steering a coding agent) was already noted by the scout."
+ },
+ {
+  "id": "t3code-architecture-066",
+  "category": "Tools, plugins & extensibility",
+  "name": "Project config file t3.json and setup scripts that run in a terminal on worktree creation",
+  "what": "A repository can carry t3.json to define scripts (with keybindings), a preview URL, auto-open behavior, a default thread environment mode and an icon; a setup script runs when a worktree is created.",
+  "how": "T3ProjectFileLoader best-effort loads and validates the checked-in file (missing or invalid means absent); the schema is published at t3.codes/schema/t3.json; ProjectSetupScriptRunner.runForThread starts the configured script in a thread terminal inside the worktree and reports started/failed as activities; shared projectScripts helpers drive keybindings.",
+  "evidence": [
+   "recovered/server/src/project/T3ProjectFileLoader.ts:1-40",
+   "recovered/server/packages/contracts/src/t3ProjectFile.ts:1-60",
+   "recovered/server/src/project/ProjectSetupScriptRunner.ts:60-120"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Equivalent of repo-level agent configuration; for Verevon the analogue is Space-level instructions and scripts, which Do mode currently does not receive.",
+  "notes": "Medium confidence: only the loader and runner headers were read this pass; field list is from the scout inventory."
+ },
+ {
+  "id": "t3code-architecture-067",
+  "category": "Tools, plugins & extensibility",
+  "name": "Typed HTTP API plus WebSocket RPC as a de facto SDK for third-party clients",
+  "what": "Anything the desktop UI does can be done by another client that pairs with the server: the same typed contracts are reachable over HTTP (snapshots, dispatch, auth) and WebSocket.",
+  "how": "EnvironmentHttpApi groups: descriptor (/.well-known/t3/environment), auth (session, browser-session, /oauth/token, websocket-ticket, pairing credential and links, clients, revoke), orchestration (snapshot, shell snapshot, thread snapshot by id, dispatch), pull-requests diff, connect (link-proof, relay-config, link-state, unlink, preferences, health, mint-credential). Bearer or DPoP tokens carry scopes; the CORS layer allows any origin for GET/POST/OPTIONS with authorization, dpop, traceparent and b3 headers so a hosted web client (app.t3.codes) can attach to a user's server.",
+  "evidence": [
+   "recovered/server/packages/contracts/src/environmentHttp.ts:400-610",
+   "recovered/server/src/httpCors.ts:1-15",
+   "recovered/server/packages/shared/src/connectAuth.ts:17"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon exposes its APIs through a BFF; publishing a stable, scoped, typed external API (plus pairing for companion apps) is the route to the plugin/app ecosystem the references (Codex, Manus) have.",
+  "notes": "No public documentation of the API was found in the app; it is internal-contract-first."
+ },
+ {
+  "id": "t3code-architecture-068",
+  "category": "Transparency, observability & control",
+  "name": "Dual-stream NDJSON provider logs (native and canonical) with rotation, batching and retention caps",
+  "what": "Every provider session writes what the agent really sent (native) and what T3 normalized it to (canonical), per thread, to rotating files, so any rendering bug can be traced to a protocol message.",
+  "how": "ProviderEventLoggers owns one shared EventNdjsonLogStore with views native, canonical and orchestration. Writers batch for 1 s, cap buffers at 1 MiB/512 records, rotate at 10 MiB across 10 files per thread, enforce a 512 MiB total and 14-day age with a 5 minute retention check, and skip transient canonical event types (content.delta, item.updated, task.progress, tool.progress, hook.progress, realtime audio, proposed deltas). Multiple provider instances share the same store to avoid rotation races; logging failures never block startup.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/EventNdjsonLogger.ts:1-60",
+   "recovered/server/src/provider/Layers/ProviderEventLoggers.ts:1-60",
+   "recovered/server/src/config.ts:112-134",
+   "recovered/server/src/provider/Layers/ProviderService.ts:300-310"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Directly supports Verevon's transparency goals: persist raw provider frames and canonical events side by side per run with bounded retention (subject to ZDR flags), exposed in a debug view.",
+  "notes": "These logs contain prompts and tool output on the user's disk; ZDR-style products would need per-tenant redaction or an off switch."
+ },
+ {
+  "id": "t3code-architecture-069",
+  "category": "Transparency, observability & control",
+  "name": "Local trace file plus OTLP export, browser trace ingest and in-app trace diagnostics",
+  "what": "Server spans are always written to a rotating local NDJSON file and optionally exported over OTLP; browser spans are forwarded through the server; and an in-app diagnostics view summarizes recent failures and slow spans.",
+  "how": "ObservabilityLive builds a local file tracer (serverTracePath, traceMaxBytes, traceMaxFiles, batch window) with an optional OtlpTracer delegate and OtlpMetrics (counters and timers: t3_rpc_requests_total, t3_orchestration_command_ack_duration, t3_provider_turn_duration, t3_git_command_duration, t3_terminal_sessions_total and others), HTTP header redaction, and BrowserTraceCollector fed by POST /api/observability/v1/traces (operate scope) which also proxies to the OTLP URL when set. TraceDiagnostics parses the local trace file into span summaries, recent failures and log events for server.getTraceDiagnostics. The desktop has its own rotating logs (10 MiB x 10) and per-backend child logs.",
+  "evidence": [
+   "recovered/server/src/observability/Layers/Observability.ts:1-95",
+   "recovered/server/src/observability/Metrics.ts:14-80",
+   "recovered/server/src/http.ts:151-200",
+   "recovered/server/src/diagnostics/TraceDiagnostics.ts:1-60",
+   "recovered/desktop/src/app/DesktopObservability.ts:24-29"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon can offer admins a per-run trace view built from its existing OTel data and show recent-failure summaries in the product, not only in Grafana.",
+  "notes": "Rare to see a consumer app surface its own trace diagnostics to the user."
+ },
+ {
+  "id": "t3code-architecture-070",
+  "category": "Transparency, observability & control",
+  "name": "Usage and cost computed from provider transcripts (ccusage approach) with priced buckets",
+  "what": "The usage page reflects what the agent CLIs actually did, including turns driven outside T3, priced from a public price table.",
+  "how": "UsageService scans the provider tools' own .jsonl transcripts modified in the window (30-day scans over about 1.4 GB in 2-3 s cold), memoises parsed records by (size, mtime) with an on-disk scan cache and a 36 h mtime slack, dedupes within files (message/request pair), buckets by hour/day/model/provider and prices input, output, cache-read and cache-creation tokens from LiteLLM's model_prices_and_context_window.json (24 h TTL) at the base tier only (the transcripts do not record the serving tier, so tiered, flex, priority and batch rates are deliberately ignored), while discounting history copied into forked or subagent rollouts with a 1 s gap rule. server.getUsageSummary returns a UsageSummary with a contract version.",
+  "evidence": [
+   "recovered/server/src/usage/UsageService.ts:1-70",
+   "recovered/server/src/usage/UsageService.ts:300-345",
+   "recovered/server/src/usage/usageTranscriptReader.ts:30-70",
+   "recovered/server/src/usage/usageTranscripts.ts:105-182",
+   "recovered/server/src/usage/usagePricing.ts:1-80"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's cost-core records authoritative per-call cost; the useful addition is a user-facing, hourly/daily/model bucketed usage view and a price table with a documented tiering rule.",
+  "notes": "The path was read as code only; no transcript files were opened. Reading another tool's private session files is only acceptable on a user-owned machine."
+ },
+ {
+  "id": "t3code-architecture-071",
+  "category": "Safety, permissions & governance",
+  "name": "Four runtime modes with provider-specific translation, defaulting to full access",
+  "what": "One permission vocabulary (approval-required, auto-accept-edits, auto, full-access) is translated for each agent; the default for new threads is full access.",
+  "how": "orchestration.ts defines RuntimeMode and DEFAULT_RUNTIME_MODE = full-access. Translations: Claude to permissionMode default/acceptEdits/auto/bypassPermissions (with allowDangerouslySkipPermissions); Codex to approvalPolicy untrusted/on-request/never with sandbox read-only/workspace-write/danger-full-access and an explicit approvals reviewer (auto_review for auto); OpenCode to a PermissionRuleset; ACP agents to mode aliases plus auto-approving allow options in full-access. Switching mode restarts the provider session (ensureSessionForThread compares desired and current mode). Providers without an AI reviewer fall back to supervised behavior for auto.",
+  "evidence": [
+   "recovered/server/packages/contracts/src/orchestration.ts:120-127",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4284-4296",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:487-520",
+   "recovered/server/src/provider/opencodeRuntime.ts:371-392",
+   "recovered/server/src/provider/Layers/CursorAdapter.ts:660-690",
+   "recovered/server/src/orchestration/Layers/ProviderCommandReactor.ts:517-560",
+   "recovered/server/src/orchestration/Layers/ProviderCommandReactor.ts:700-765"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's capability policy is stricter (ask posture, HITL); keep its defaults, but adopt the idea of a small, user-visible mode vocabulary that is mechanically translated per runtime.",
+  "notes": "Corrects the scout (three modes, not four). The full-access default is the riskiest default among the apps audited."
+ },
+ {
+  "id": "t3code-architecture-072",
+  "category": "Computer & environment control",
+  "name": "Human-versus-agent control arbitration in the shared browser tab",
+  "what": "The user can grab the mouse or keyboard in the preview at any time. The app distinguishes the agent's own synthetic input from the human's, shows who is in control, and aborts the agent's in-flight action when the human acts.",
+  "how": "Before each synthetic click or key the manager records an expected input signal for the tab (expires after 1 s). The guest preload reports real input over HUMAN_INPUT_CHANNEL; handleHumanInput consumes a matching expected signal (agent) or otherwise bumps a per-tab control epoch, sets controller 'human' and resets it to 'none' after 750 ms. withControlSession checks the epoch so a running action fails with PreviewAutomationControlInterruptedError (message: interrupted by human input), while cleanup commands (key up, focus emulation off) still run so Chromium is not left with a held key. Tab state carries controller human, agent or none for the UI.",
+  "evidence": [
+   "recovered/desktop/src/preview/Manager.ts:90-100",
+   "recovered/desktop/src/preview/Manager.ts:1170-1225",
+   "recovered/desktop/src/preview/Manager.ts:1370-1414",
+   "recovered/desktop/src/preview/Manager.ts:1600-1630",
+   "recovered/desktop/src/preview/Manager.ts:3988-4000",
+   "tmp/t3arch/rea_ipc_channels.tsv:1-100"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon has live frames and manual takeover in Quarry/BFF but no Model Plane path; an epoch-based interrupt (human input invalidates the running agent action and the UI shows the current controller) is the right primitive for safe takeover.",
+  "notes": "REA observed the HUMAN_INPUT_CHANNEL send in preview-pick-preload.cjs line 1588 and 1597. The mechanism is time-window based (1 s expectation), so a human action that exactly matches an expected synthetic signal within the window would be ignored."
+ },
+ {
+  "id": "t3code-architecture-073",
+  "category": "Models & routing",
+  "name": "Model catalogs by protocol: static Claude list gated by installed CLI version, live Codex list, ACP config options for Cursor and Grok",
+  "what": "Each agent's models and their tunable options (reasoning effort, fast mode, thinking, context window) are discovered the way that agent exposes them, then normalized into one capability descriptor the picker and the adapters share.",
+  "how": "ClaudeProvider ships a static catalog (claude-opus-5 with a 1M variant, opus 4.8/4.7/4.6/4.5, sonnet 5 and 4.6, haiku 4.5, fable-5) and filters entries by comparing the installed Claude Code version against per-model minimum versions with compareSemverVersions; CodexProvider pages through the app-server model/list request until nextCursor is empty; CursorProvider and Grok run a short ACP probe (clientInfo t3-code-provider-probe) and build capabilities from session config options (reasoning effort, context, fast, thinking). At session start the Claude adapter resolves capabilities for the chosen model, validates effort, maps ultracode to xhigh plus a settings flag, and only sets fastMode or thinking when the descriptor offers them. Codex service tier and fast mode share one option helper.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeProvider.ts:54-60",
+   "recovered/server/src/provider/Layers/ClaudeProvider.ts:90-130",
+   "recovered/server/src/provider/Layers/ClaudeProvider.ts:326-360",
+   "recovered/server/src/provider/Layers/CodexProvider.ts:285-300",
+   "recovered/server/src/provider/Layers/CursorProvider.ts:252-310",
+   "recovered/server/src/provider/Layers/CursorProvider.ts:415-425",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4256-4300",
+   "recovered/server/src/codexModelOptions.ts:1-12"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's router needs per-model capability descriptors too; the pattern 'discover live where possible, ship a version-gated static list otherwise, expose one descriptor' avoids hard-coding option UIs per provider.",
+  "notes": "The sibling UI audit covers how descriptors render in the picker (its records 004-011). Model identifiers such as claude-opus-5 and claude-fable-5 come from the shipped catalog."
+ },
+ {
+  "id": "t3code-architecture-074",
+  "category": "Coding capability",
+  "name": "In-process native workspace index with strict time and size budgets",
+  "what": "File and content search for @-mentions and the project search dialog is served by a native file index that runs inside the server process, with hard limits so a huge repo cannot stall the UI.",
+  "how": "WorkspaceSearchIndex wraps @ff-labs/fff-node FileFinder (a C-ABI native library) per workspace root: it indexes up to 25,000 entries, aborts a scan after 15 s, evicts idle indexes after 15 minutes, caps content search at 250 ms and 100 matches per file and returns cursor-paged mixed (file and directory) results; searchRanking in shared ranks results. WorkspaceEntries refreshes the index after revert or file mutations.",
+  "evidence": [
+   "recovered/server/src/workspace/WorkspaceSearchIndex.ts:1-40",
+   "recovered/server/src/workspace/WorkspaceEntries.ts:1-40",
+   "recovered/server/src/orchestration/Layers/CheckpointReactor.ts:770-778"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Space-scoped file search in Verevon's sandbox workspace could use the same budgeted, cursor-paged index (in Rust, the ignore and nucleo crates are the analogue).",
+  "notes": "Medium confidence: only the constants and imports were read. The native library is a dependency to replace in a Rust port."
+ },
+ {
+  "id": "t3code-architecture-075",
+  "category": "Safety, permissions & governance",
+  "name": "Layered path containment: lexical resolution plus realpath checks at I/O sites",
+  "what": "Reading and writing project files, serving workspace assets and reading workflow scripts all refuse paths that escape the allowed root, including through symlinks.",
+  "how": "WorkspacePaths.resolveRelativePathWithinRoot rejects absolute paths and results that are empty, '.', '..' or start with '../' after path.relative. WorkspaceFileSystem additionally takes realpath of the workspace root and of the target before writing (operations realpath-workspace-root and realpath-target) and writes atomically via temp file and rename. AssetAccess canonicalizes with fileSystem.realPath and only issues tokens for files under the canonical workspace root. workflowScriptQuery requires the resolved realpath to live under ~/.claude/projects. ReviewService canonicalizes cwd and requires it within the workspace or worktrees root. The attachments directory is granted to the agent as a leaf directory only.",
+  "evidence": [
+   "recovered/server/src/workspace/WorkspacePaths.ts:195-232",
+   "recovered/server/src/workspace/WorkspaceFileSystem.ts:36-40",
+   "recovered/server/src/workspace/WorkspaceFileSystem.ts:140-170",
+   "recovered/server/src/assets/AssetAccess.ts:130-165",
+   "recovered/server/src/orchestration/workflowScriptQuery.ts:1-40",
+   "recovered/server/src/review/ReviewService.ts:60-90",
+   "recovered/server/src/atomicWrite.ts:1-26"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Same checks are required in Verevon's workspace promotion and sandbox file APIs; the combination of lexical normalization with realpath at the point of use is the safe pattern.",
+  "notes": "The lexical resolver alone would not stop a symlink inside the workspace pointing outside; the realpath step at write time is what covers that."
+ },
+ {
+  "id": "t3code-architecture-076",
+  "category": "Safety, permissions & governance",
+  "name": "Short-lived HMAC capability URLs for workspace images, previews and favicons",
+  "what": "Files the browser needs (workspace images, HTML previews, project icons) are served through signed, expiring URLs instead of an authenticated path API, so an <img> tag can load them without custom headers.",
+  "how": "AssetAccess creates claims {kind, workspace or attachment id, relative path, expiresAt} base64url-encoded and signed with HMAC using a 32-byte random key stored in the secret store (asset-access-signing-key), producing /api/assets/<payload.signature>/<file>. Tokens live 1 hour (project favicon tokens are bucketed to 30 minutes for cache stability); resolveAsset verifies the signature with a timing-safe comparison, re-checks canonical paths and file types and only serves allowlisted preview extensions. Issuance goes through the authenticated assets.createUrl RPC.",
+  "evidence": [
+   "recovered/server/src/assets/AssetAccess.ts:44-70",
+   "recovered/server/src/assets/AssetAccess.ts:190-200",
+   "recovered/server/src/assets/AssetAccess.ts:416-460",
+   "recovered/server/src/auth/RpcAuthorization.ts:90-95",
+   "recovered/server/src/httpCors.ts:1-15"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon artifacts in MinIO and workspace files need the same short-lived signed capability links for the SPA and for shared previews; reuse the claim structure (kind, scope, path, expiry) and a rotating key.",
+  "notes": "CORS is wildcard origin for the whole API; the protection is authorization, not origin."
+ },
+ {
+  "id": "t3code-architecture-077",
+  "category": "Safety, permissions & governance",
+  "name": "Runtime-fetched control data: what is pinned and what is trusted blindly",
+  "what": "At runtime the server and CLI pull data and code from the network. Some of it is pinned by hash, some is only schema-gated, and one item is free-text that steers a coding agent.",
+  "how": "Pinned: cloudflared binaries (URL plus SHA-256 per platform, verified before install), the service launcher's pinned t3@version runtimes (exact versions, preflight before activation). Schema-gated but unauthenticated: model-manifest.json from the main branch of the T3 repository (version literal, schema decoded, only reclassifies models) and LiteLLM's price table (24 h TTL; shapes narrowed to the fields read). Unpinned free text: the triage playbook, which the playbook prompt instructs the agent to fetch from the main branch. Telemetry goes to PostHog. Provider CLI updates query the package registry.",
+  "evidence": [
+   "recovered/server/packages/shared/src/relayClient.ts:60-103",
+   "recovered/server/packages/shared/src/relayClient.ts:305-325",
+   "recovered/server/src/provider/ModelManifest.ts:33-52",
+   "recovered/server/src/usage/UsageService.ts:56-60",
+   "recovered/server/src/cli/triagePrompt.ts:60-80",
+   "recovered/server/src/provider/providerMaintenance.ts:17-30"
+  ],
+  "provenance": "INF",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "A checklist for Verevon's own runtime data dependencies (model tables, prompts, tool manifests): pin by digest, sign, or ship with the build; never let remote text steer an agent unreviewed.",
+  "notes": "INF: the classification of trust is my judgement from the code (the individual fetches are SRC). The triage playbook was not fetched in this audit."
+ },
+ {
+  "id": "t3code-architecture-078",
+  "category": "Transparency, observability & control",
+  "name": "Guarded kill switch for runaway processes with stale-identity and ancestry checks",
+  "what": "The diagnostics page can signal a process, but only one that is still the same process and a descendant of the T3 backend; the server never signals itself.",
+  "how": "server.getProcessDiagnostics lists the backend's process tree with elapsed time and resource data from the native monitor; server.signalProcess takes {pid, startTimeMs, signal}, refreshes the process table, refuses when the pid is the server process, when the pid's start time no longer matches (stale identity) or when it is not a descendant of the backend, then calls process.kill. The RPC requires the operate scope.",
+  "evidence": [
+   "recovered/server/src/diagnostics/ProcessDiagnostics.ts:28-40",
+   "recovered/server/src/diagnostics/ProcessDiagnostics.ts:91-150",
+   "recovered/server/src/diagnostics/ProcessResourceMonitor.ts:1-40",
+   "recovered/server/src/auth/RpcAuthorization.ts:50-55"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Good model for a user-facing 'stop this process' control in Verevon's background process tools: identity pinning by start time prevents PID reuse mistakes.",
+  "notes": "Scope is coarse (operate), but the per-call guards are strong."
+ },
+ {
+  "id": "t3code-architecture-079",
+  "category": "Transparency, observability & control",
+  "name": "Settings and keybindings as hot-reloaded files, with sensitive provider variables split into the secret store",
+  "what": "The two user-editable config files take effect when edited outside the app, and API keys or other sensitive environment variables for provider instances never live in settings.json.",
+  "how": "ServerSettings uses a capacity-1 cache, a semaphore and FileSystem.watch for external edit detection, writes atomically via temp directory plus rename, and runs the file through a schema with decoding defaults. Provider instance environment variables flagged sensitive are written to the secret store (providerEnvironmentSecretName per instance and variable) and materialized only when building a provider; clients receive redactServerSettingsForClient output where values are blank with valueRedacted true. Keybindings reload from keybindings.json with a 100 ms debounce on watch events (editors emit several events per save) and an RPC to upsert or remove a rule.",
+  "evidence": [
+   "recovered/server/src/serverSettings.ts:1-30",
+   "recovered/server/src/serverSettings.ts:140-166",
+   "recovered/server/src/serverSettings.ts:470-600",
+   "recovered/server/src/keybindings.ts:575-610",
+   "recovered/server/src/atomicWrite.ts:1-26"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "For Verevon's configuration surface (organization and Space settings), mark fields sensitive in the schema and split them to a secret store automatically, returning redacted values to clients.",
+  "notes": "Matches the 'highly customizable and transparent' goal: everything is a readable file and a typed RPC. The secrets in the store are plaintext files (see the secret store record)."
+ },
+ {
+  "id": "t3code-architecture-080",
+  "category": "Memory, learning & personalization",
+  "name": "No T3-owned memory; provider-owned memory and instructions pass through, and Codex memory-consolidation threads are hidden",
+  "what": "T3 has no long-term memory, user model or learning loop. It lets each agent use its own memory and instruction files and keeps the agents' background memory jobs out of the visible timeline.",
+  "how": "The Claude adapter loads user, project and local setting sources so CLAUDE.md and the user's settings apply. The Codex shadow home keeps log, memories and tmp local per instance. CodexSessionRuntime filters notifications and threads whose source is memory_consolidation so background memory consolidation does not appear as chat. Personalization is limited to settings, favorites, accent colors, themes and keybindings.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:1243-1247",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4312",
+   "recovered/server/src/provider/Drivers/CodexHomeLayout.ts:32-34",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:772-800",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:1131",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:1525"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "A clear gap in this reference and a place where Verevon (Letta bridge, Dreaming) already leads; do not copy, but note that surfacing a provider's own memory jobs as quiet background activity is a good UX.",
+  "notes": "Absence claim: based on keyword and structure searches in the recovered server source (no memory service, store or tools); the scout reached the same conclusion."
+ },
+ {
+  "id": "t3code-architecture-081",
+  "category": "Research & web",
+  "name": "Web search and research are delegated to the agents; T3 only renders the tool items",
+  "what": "T3 provides no search, browsing-for-answers, citation or research mode of its own. When an agent uses a search tool, the event is normalized to a web_search item and shown in the timeline.",
+  "how": "Claude WebSearch and ACP web tool kinds map to the canonical web_search item type (one of seven tool lifecycle types); there are no search providers, source cards or research orchestrations in the server. The built-in preview browser is for the user and for browser automation tools, not for grounding answers.",
+  "evidence": [
+   "recovered/server/packages/contracts/src/providerRuntime.ts:105-113",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:772",
+   "recovered/server/src/provider/acp/AcpCoreRuntimeEvents.ts:57",
+   "recovered/server/src/provider/acp/AcpRuntimeModel.ts:374"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Confirms T3 is not a research competitor; Verevon's in-gateway deep research and citation work is a differentiator versus this reference.",
+  "notes": "Absence claim; the scout reached the same conclusion."
+ },
+ {
+  "id": "t3code-architecture-082",
+  "category": "Platform architecture",
+  "name": "State directory layout and ownership map",
+  "what": "Everything the server persists sits under one base directory with a clear layout, so backup, diagnosis, multi-instance isolation and uninstall are simple.",
+  "how": "deriveServerPaths: <base>/userdata (or dev/ when a dev URL is set without explicit base) holds state.sqlite (+wal/shm), settings.json, keybindings.json, attachments/, logs/ (server.log, server.trace.ndjson, provider/events.log, terminals/*.log), anonymous-id, environment-id, server-runtime.json and secrets/ (0700); <base>/caches holds provider status caches; <base>/worktrees holds managed worktrees; <base>/runtime/versions holds pinned runtimes for the boot service; relay client binaries install under the base dir. The desktop keeps its own userData (t3code or t3code-dev) with desktop-settings.json, client-settings.json, saved-environments.json and an encrypted connection catalog, and a separate WSL backend has its own Linux home.",
+  "evidence": [
+   "recovered/server/src/config.ts:30-50",
+   "recovered/server/src/config.ts:102-151",
+   "recovered/desktop/src/app/DesktopEnvironment.ts:175-235",
+   "recovered/server/src/cloud/pinnedRuntime.ts:13-40",
+   "recovered/server/src/environment/ServerEnvironment.ts:20-40"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "A reminder to define a single, documented data-ownership map for any local companion; for the hosted plane the equivalent is the per-plane database ownership already enforced by the no-cross-plane-DB rule.",
+  "notes": "No user data files were read; only path derivation code."
+ },
+ {
+  "id": "t3code-architecture-083",
+  "category": "Platform architecture",
+  "name": "Monorepo layering: contracts, shared, client-runtime and protocol packages under thin apps",
+  "what": "The code base is organized so that wire contracts and protocol clients are standalone packages that the desktop, server and web app all depend on, keeping apps thin.",
+  "how": "pnpm workspace with apps (desktop, server, web) and packages: contracts (Effect Schema wire types for rpc, ipc, orchestration, settings, provider, preview, terminal, git/vcs, pull requests, relay, usage and more), shared (git, shell, keybindings, preview, relay JWT, semver, qr code, observability helpers), client-runtime (connection, authorization, rpc session, relay discovery, persistence), effect-acp, effect-codex-app-server, ssh, tailscale; a mobile app exists in the monorepo (Expo/React Native overrides) but is not in this build. Dependencies are pinned by pnpm overrides and patches (Effect 4.0.0-beta.103, @effect/atom-react, a patched virtual-list library, vite-plus).",
+  "evidence": [
+   "recovered/server/packages/contracts/src/rpc.ts:1-60",
+   "recovered/desktop/packages/client-runtime/src/connection/layer.ts:1-44",
+   "recovered/server/packages/shared/src/relayClient.ts:1-60",
+   "tmp/t3code/deps_server_pnpm.txt:1-22",
+   "tmp/t3code/deps_desktop_flat.txt:1-30"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's monorepo already splits planes; the transferable rule is that wire contracts and protocol clients must be packages with no app imports so the SPA, gateway and tools cannot drift.",
+  "notes": "Medium confidence: workspace layout is from the scout inventory and package directories; pnpm-workspace.yaml was not re-read in this pass."
+ },
+ {
+  "id": "t3code-architecture-084",
+  "category": "Platform architecture",
+  "name": "Rust-portability assessment of the T3 architecture",
+  "what": "Which parts of T3's architecture map cleanly onto a Rust implementation (Verevon's Model Plane is Rust and Go) and which parts exist only because of Node, Electron or Effect.",
+  "how": "Portable as-is in concept: the pure decider and projector functions over events; command receipts; the canonical runtime event schema; JSON-RPC over stdio clients generated from published schemas (Codex app-server, ACP); SQLite or Postgres projection tables with per-projector cursors; NDJSON logs with rotation; demand-lease background policy; DPoP and scoped-token auth; the launcher/trial/rollback update protocol; the Rust sidecar protocol (already Rust). Needs replacement: Effect layers (use traits plus a supervisor), node-pty (portable-pty), the native file index (ignore plus a matcher crate), Electron shell pieces (Tauri or none for web), the Playwright injected-script extraction (a different perception layer such as CDP accessibility snapshots), Clerk/Electron bridges. Better in Rust: the resource monitor and any hot-path event fan-out with bounded channels.",
+  "evidence": [
+   "recovered/server/src/orchestration/decider.ts:1-60",
+   "recovered/server/src/orchestration/projector.ts:1-60",
+   "recovered/server/packages/effect-acp/src/_generated/meta.gen.ts:1-36",
+   "recovered/server/src/resourceTelemetry/NativeTelemetryClient.ts:45-51",
+   "ev_940e04a814c0c0d15efb673def759914c78328f0295dec62dcb9cb451242366c"
+  ],
+  "provenance": "INF",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Use as the porting checklist when Verevon recreates the Claude-desktop-style runtime features in Rust.",
+  "notes": "INF: basis is the module structure and dependencies read in this audit; no Rust prototype was built."
+ },
+ {
+  "id": "t3code-architecture-085",
+  "category": "Platform architecture",
+  "name": "Distribution layout: two ASAR archives, unpacked natives, sidecar executable and a GitHub-release update feed",
+  "what": "The installed app is a small Electron shell archive plus a separate, larger server archive, a native resource monitor and an elevation helper; updates come from GitHub releases for the repository owner.",
+  "how": "resources/ contains app.asar (91.6 MB: apps/desktop plus node_modules including effect, Clerk, Playwright core, undici), server.asar (130.5 MB: apps/server with the built SPA in dist/client, node-pty prebuilds, fff natives), app.asar.unpacked and server.asar.unpacked/node_modules for native modules that cannot run from an archive, resource-monitor/t3-resource-monitor.exe and elevate.exe (an installer elevation helper). app-update.yml configures electron-updater with provider github, owner pingdotgg, repo t3code, releaseType release, a dedicated updater cache directory and a publisherName allow-list. The server runs from the archive via ELECTRON_RUN_AS_NODE (asar-aware); the WSL backend needs a loose copy, extracted on demand.",
+  "evidence": [
+   "INSTALL:resources/app-update.yml:1-7",
+   "recovered/desktop/src/updates/DesktopUpdates.ts:225-250",
+   "recovered/desktop/src/wsl/DesktopWslServerTree.ts:1-20",
+   "recovered/desktop/src/backend/DesktopBackendConfiguration.ts:396-408",
+   "tmp/t3code/app_asar_entries.tsv:1-5",
+   "tmp/t3code/server_asar_entries.tsv:1-5"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "None for a hosted product; relevant only if Verevon ships a desktop companion, where the 'shell archive plus server archive' split lets the engine update on its own cadence.",
+  "notes": "File sizes were read from the install folder listing (91,615,439 and 130,516,741 bytes). The publisherName entry implies signature publisher verification by electron-updater on Windows (INF: library behavior, not read in this audit)."
+ },
+ {
+  "id": "t3code-architecture-086",
+  "category": "Platform architecture",
+  "name": "Test seams built into production code: injectable loggers, mock update server and in-memory database layer",
+  "what": "Production modules expose small hooks so tests can run without the real network, filesystem or provider processes.",
+  "how": "ProviderServiceLiveOptions lets tests swap the canonical event logger and the MCP credential issue/revoke functions (so the agent-browser gate is observable); DesktopConfig reads T3CODE_DESKTOP_MOCK_UPDATES and a mock server port so the updater can point at a local generic feed; Sqlite.ts exports SqlitePersistenceMemory (':memory:' with the same migrations and pragmas); ServerConfig has layerTest(cwd, baseDir or prefix); PreviewAutomationBroker and McpSessionRegistry take clock and options parameters; ProviderEventLoggers has NoOpProviderEventLoggers; RuntimeReceiptBus publishes checkpoint-baseline, diff-finalized and turn-quiesced receipts that exist only so tests can wait for exact milestones (streamEventsForTest), and DrainableWorker.drain replaces timing-based sleeps. fast-check ships in the desktop dependency list.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ProviderService.ts:33-48",
+   "recovered/desktop/src/app/DesktopConfig.ts:45-58",
+   "recovered/desktop/src/updates/DesktopUpdates.ts:295-310",
+   "recovered/server/src/persistence/Layers/Sqlite.ts:63-67",
+   "recovered/server/src/config.ts:92-98",
+   "recovered/server/src/config.ts:214-230",
+   "recovered/server/src/mcp/McpSessionRegistry.ts:62-72",
+   "recovered/server/src/orchestration/Services/RuntimeReceiptBus.ts:1-66",
+   "recovered/server/packages/shared/src/DrainableWorker.ts:1-30"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "For the Model Plane: keep clocks, ID generators and network clients injectable so failure paths (credential revocation, restart recovery) are unit-testable.",
+  "notes": "The test hooks are env-gated, so a user could enable the mock update server by environment; they are dev/test hooks, not security controls."
+ },
+ {
+  "id": "t3code-architecture-087",
+  "category": "Tools, plugins & extensibility",
+  "name": "Per-instance harness customization: binary path, launch arguments, home, environment variables and custom models",
+  "what": "Every provider instance can be pointed at a specific binary, started with extra arguments, run with its own config home and environment, and extended with custom model names, which makes the harness adjustable without code changes.",
+  "how": "Settings per instance carry binaryPath, launchArgs, homePath/shadowHomePath, environment variables (with a sensitive flag) and customModels. The Claude adapter parses launchArgs with parseCliArgs and passes them as extraArgs to the SDK; Codex builds app-server args from launchArgs and lets T3CODE_CODEX_LAUNCH_ARGS override them; mergeProviderInstanceEnvironment layers instance variables over the process environment; custom model lists extend the picker. Binary paths resolve through the login-shell-hydrated PATH.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4261",
+   "recovered/server/src/provider/Layers/codexLaunchArgs.ts:1-24",
+   "recovered/server/src/provider/ProviderInstanceEnvironment.ts:1-17",
+   "recovered/server/packages/shared/src/cliArgs.ts:1-40",
+   "recovered/server/packages/contracts/src/settings.ts:360-370",
+   "recovered/server/src/provider/Drivers/ClaudeHome.ts:17-45"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Matches the 'highly customizable harness' goal: expose per-runtime launch parameters, env and extra models as typed, auditable settings rather than code.",
+  "notes": "No UI to edit MCP servers or hooks exists; customization is via CLI flags and env, which assumes a technical user."
+ },
+ {
+  "id": "t3code-architecture-088",
+  "category": "Tools, plugins & extensibility",
+  "name": "Plugin and MCP lifecycle events pass through, but T3 has no plugin or MCP management of its own",
+  "what": "When an agent installs a plugin or an MCP server reports status or an OAuth completion, T3 receives the event and shows it, but T3 itself offers no marketplace, manifest or MCP configuration surface.",
+  "how": "ClaudeAdapter maps the SDK plugin_install system message to a runtime event; the canonical taxonomy includes mcp.status.updated and mcp.oauth.completed and an mcp_elicitation_approval request type that routes MCP prompts through the approval UI; the Codex app-server client has plugin/marketplace/mcpServer methods in its generated schema that T3 does not call (it only calls config/mcpServer/reload after registering its own server).",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:3456",
+   "recovered/server/packages/contracts/src/providerRuntime.ts:136-148",
+   "recovered/server/packages/contracts/src/providerRuntime.ts:242-243",
+   "recovered/server/src/provider/Layers/CodexSessionRuntime.ts:2097",
+   "recovered/server/packages/effect-codex-app-server/src/_generated/meta.gen.ts:6-100"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "A gap Verevon can exploit: Codex's plugin, marketplace and MCP APIs exist in the app-server protocol Verevon already speaks, and T3 leaves them unused, so a first-class plugin surface is a differentiator.",
+  "notes": "Consistent with the sibling audit: 'no user-facing MCP/plugin management'."
+ },
+ {
+  "id": "t3code-architecture-089",
+  "category": "UI/UX & product design",
+  "name": "Zero-install web launch: running `t3` in a repo auto-creates the project and a thread and opens a one-time pairing URL",
+  "what": "Running the CLI from a project directory starts the server, registers that directory as a project (or finds the existing one), makes sure it has a thread, and opens the browser at a URL that carries a one-time pairing credential.",
+  "how": "With autoBootstrapProjectFromCwd, resolveAutoBootstrapWelcomeTargets looks up the active project by workspace root, creates it via project.create (title from the folder name, default model selection) when missing, then ensures the first active thread exists or dispatches thread.create (default interaction mode, runtime mode full-access), and publishes a 'welcome' lifecycle event with the bootstrap project and thread ids. resolveStartupBrowserTarget issues a startup pairing URL (issueStartupPairingUrl) in non-desktop mode and maybeOpenBrowser launches it unless --no-browser. The CLI detects how it was launched (npx, pnpm dlx, bunx) to print matching follow-up commands.",
+  "evidence": [
+   "recovered/server/src/serverRuntimeStartup.ts:185-290",
+   "recovered/server/src/serverRuntimeStartup.ts:445-540",
+   "recovered/server/src/auth/EnvironmentAuth.ts:485-495",
+   "recovered/server/src/cli/invocation.ts:1-75",
+   "recovered/server/src/config.ts:76-80"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Onboarding lesson for Verevon: open directly into a ready-to-type workspace with a pre-created thread and a credentialed link; no empty states or setup wizard.",
+  "notes": "The new thread defaults to full-access runtime mode."
+ },
+ {
+  "id": "t3code-architecture-090",
+  "category": "Safety, permissions & governance",
+  "name": "Account sign-in through Clerk's Electron bridge (token cache, OAuth transport, passkeys), gated by a build-time key",
+  "what": "Signing in to T3 Connect uses Clerk with native bridges for token storage, OAuth redirects and passkeys, and exists only in builds that carry a Clerk publishable key.",
+  "how": "DesktopClerk configures the @clerk/electron bridge for the state directory and derives the Clerk frontend API hostname from a build-time constant (__T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__) to extend the CSP; passkeys are enabled. REA found two contextBridge APIs for Clerk (__clerk_internal_electron and __clerk_internal_electron_passkeys) and Clerk channels for token cache get/save/clear, OAuth transport open/getRedirectUrl and passkey create/get/capabilities. CLI login uses OAuth PKCE (loopback or out-of-band code prompt) and stores the refreshed token in the server secret store.",
+  "evidence": [
+   "ev_34f79ed7a3aad2b134b63204e5cf10fb606ee50e1640c81b0a3527388f03b7a0",
+   "tmp/t3arch/rea_ipc_channels.tsv:1-100",
+   "recovered/desktop/src/app/DesktopClerk.ts:17-90",
+   "recovered/server/src/cloud/CliTokenManager.ts:285-352",
+   "recovered/desktop/src/electron/ElectronProtocol.ts:67-90"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Control Plane already owns identity, orgs and SSO; T3 shows only consumer sign-in, so it is a negative reference for enterprise requirements.",
+  "notes": "The relay and connect features are unavailable in builds without public configuration (CLI text). No SSO, SAML or org model exists."
+ },
+ {
+  "id": "t3code-architecture-091",
+  "category": "Models & routing",
+  "name": "Reasoning effort, fast mode and thinking as per-model descriptors applied live to a running session",
+  "what": "Effort, fast mode and thinking are exposed only when the selected model's descriptor offers them, and a change applies to the live session without restarting it.",
+  "how": "ClaudeAdapter reads getClaudeModelCapabilities(model) and getProviderOptionDescriptors, resolves effort with resolveClaudeEffort, enables fastMode and thinking only when a boolean descriptor with that id exists, and maps the special ultracode effort to xhigh plus settings.ultracode. On later turns it compares the API model id and calls query.setModel when it differs and recomputes current effort; context-window selection comes from selectedClaudeContextWindow. Codex service tier and fast mode share getCodexServiceTierOptionValue; ACP agents change options through session/set_config_option with value validation (validateConfigOptionValue) and session/set_model.",
+  "evidence": [
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4256-4300",
+   "recovered/server/src/provider/Layers/ClaudeAdapter.ts:4524-4550",
+   "recovered/server/src/codexModelOptions.ts:1-12",
+   "recovered/server/src/provider/acp/AcpSessionRuntime.ts:430-470",
+   "recovered/server/src/provider/acp/AcpSessionRuntime.ts:520-535"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's cost-aware intent router and per-model options could share one descriptor so the SPA can expose reasoning controls that apply mid-conversation.",
+  "notes": "Complements the catalog record; the sibling audit covers the picker UI."
+ },
+ {
+  "id": "t3code-architecture-092",
+  "category": "Platform architecture",
+  "name": "Live shell stream: attach before snapshot, coalesce per aggregate, refetch the projection, resume from the client's sequence",
+  "what": "The sidebar stream stays correct and cheap under bursts of events. Many events for one thread collapse into a single re-read of that thread's summary, and a client that already holds a snapshot only receives what it missed.",
+  "how": "subscribeShell first attaches a scope-bound live buffer on streamDomainEvents (so nothing published during the snapshot query is lost), then loads the shell snapshot or, when the client passes its snapshot sequence, replays shell events after it. Live events pass through coalesceShellLiveStream, a keyed worker that keeps only the latest value per key (KeyedCoalescingWorker with drainKey), so high-frequency events (message deltas, activity appends) become one refetch per aggregate per window. toShellStreamEvent maps events to project-upserted/removed or thread-upserted/removed by refetching the projection row (retry once; a persistence error is logged and dropped rather than treated as a missing row); a removal is emitted when the refetch returns none, which stays correct when a burst collapses a delete into a later event. A 'synchronized' completion marker is offered into the same queue so everything buffered is delivered before the client is told it is in sync. Clients dedupe by sequence. A small helper (subscribeBeforeSnapshot, with a mutex form that serializes snapshot then subscribe and a no-mutex form that subscribes first) provides the snapshot/subscription handoff for other streams.",
+  "evidence": [
+   "recovered/server/src/ws.ts:640-700",
+   "recovered/server/src/ws.ts:725-760",
+   "recovered/server/src/ws.ts:1322-1385",
+   "recovered/server/packages/shared/src/KeyedCoalescingWorker.ts:1-40",
+   "recovered/server/packages/shared/src/DrainableWorker.ts:1-30",
+   "recovered/server/src/utils/subscribeBeforeSnapshot.ts:1-37"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's SSE and NATS fan-out can adopt the same recipe: treat events as invalidation triggers, coalesce per aggregate, refetch from the projection, and attach the live tail before loading the snapshot to avoid the classic gap.",
+  "notes": "The sibling UI audit describes the client half (snapshot then resume, dedupe by sequence); this record documents the server's race-free ordering and coalescing."
+ },
+ {
+  "id": "t3code-architecture-093",
+  "category": "Agent runtime",
+  "name": "Thread deletion cascade through a reactor, and what it leaves behind",
+  "what": "Deleting a thread stops its agent session and closes its terminals including their saved history. Other per-thread artifacts are handled elsewhere or not at all.",
+  "how": "ThreadDeletionReactor listens on the domain event stream for thread.deleted, enqueues into a drainable worker, calls providerService.stopSession and terminalManager.close({deleteHistory: true}) with best-effort logging of failures (interrupts propagate). A search of the server source finds checkpoint refs deleted only by the revert path (CheckpointReactor) and attachments deleted only by the client-driven attachments.delete RPC or the pending-attachment sweep; no thread-deletion path removes the hidden refs/t3/checkpoints/<thread>/... refs or the thread's worktree.",
+  "evidence": [
+   "recovered/server/src/orchestration/Layers/ThreadDeletionReactor.ts:20-100",
+   "recovered/server/src/orchestration/Layers/CheckpointReactor.ts:790-800",
+   "recovered/server/src/checkpointing/CheckpointStore.ts:150-158",
+   "recovered/server/src/attachmentStore.ts:23-30",
+   "recovered/server/src/orchestration/decider.ts:386-408"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "A deletion-cascade checklist item for Verevon (runs, child runs, sandbox leases, artifacts, memory, ZDR purge): make every per-thread resource owner subscribe to the deletion event and test that nothing is left behind.",
+  "notes": "The 'left behind' part is INF from absence of calls in the code read (medium confidence); it was not verified at runtime. Hidden git refs are cheap but accumulate in the user's repository."
+ },
+ {
+  "id": "t3code-architecture-094",
+  "category": "Platform architecture",
+  "name": "Cross-environment repository identity from the normalized git remote",
+  "what": "The same repository gets the same identity key wherever it is cloned (local disk, WSL, an SSH host), so projects and pull requests can be grouped and matched across environments.",
+  "how": "RepositoryIdentityResolver runs git remote -v for a cwd, prefers the upstream then origin fetch URL (else the first remote alphabetically), normalizes it with normalizeGitRemoteUrl into a canonicalKey (host/owner/name), detects the source-control provider from the URL, and returns {canonicalKey, locator{source git-remote, remoteName, remoteUrl}, rootPath, displayName, provider, owner, name}; results are cached (512 entries, 1 minute positive and negative TTL). Every client-side reference is scoped by environment (ScopedProjectRef, ScopedThreadRef carry environmentId) because ids are unique only per environment.",
+  "evidence": [
+   "recovered/server/src/project/RepositoryIdentityResolver.ts:1-90",
+   "recovered/server/packages/contracts/src/environment.ts:114-140"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon Spaces that point at the same external repository or document set could carry a canonical identity key so grouping, de-duplication and cross-plane references do not depend on per-plane ids.",
+  "notes": "Capability is advertised in the descriptor (repositoryIdentity) so older servers are not probed."
+ }
+]

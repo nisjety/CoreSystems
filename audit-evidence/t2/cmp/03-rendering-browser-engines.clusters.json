@@ -1,0 +1,1723 @@
+{
+  "category": "Rendering & browser engines",
+  "excluded": [
+    {
+      "id": "firecrawl-engine-and-infra-005",
+      "reason": "Meta observation about Firecrawl's open-core split (which engines are OSS vs closed fire-engine), not a capability; used only as a caveat that Firecrawl parity is measured against the closed contract."
+    }
+  ],
+  "clusters": [
+    {
+      "id": "C-t2-03-001",
+      "name": "Multi-tier fetch engine core (HTTP, TLS-impersonating HTTP and headless browser behind one interface)",
+      "description": "One crawler/scrape interface that can fetch with a plain HTTP client, a browser-mimicking client or a real headless browser, with charset handling and redirects.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "apify-platform-054",
+        "apify-platform-063",
+        "firecrawl-engine-and-infra-006"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-054"
+        ],
+        "why": "Crawlee (q5, DOC) gives one class hierarchy over HTTP/Cheerio/JSDOM and Playwright/Puppeteer (Chromium, Firefox, WebKit) with routing by label and lifecycle hooks; Firecrawl's OSS fetch engine (q3) is a plain undici tier."
+      },
+      "mechanism": "A BasicCrawler base owns the request queue, retries, autoscaling and hooks; subclasses differ only in how a request becomes a page (HTTP client + parser vs browser page). For Rust: a Driver trait {fetch(req)->Response} with Static, Tls and Browser impls, shared queue/retry/scheduler, charset decode order Content-Type header -> meta charset -> UTF-8 with lossy fallback.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-quarry-044",
+          "v-quarry-045",
+          "v-quarry-046",
+          "v-quarry-048"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:36-95",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:56-260",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fetch.rs:48",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:116-272"
+        ],
+        "gap": "No Firefox/WebKit engines (Chromium only); otherwise equivalent.",
+        "strengths": "Static (pinned DNS, per-hop redirect validation), TLS-impersonation and local chromiumoxide drivers already sit behind one FallbackDriver; this is at or above Firecrawl OSS. Keep the single trait and per-hop SSRF validation."
+      },
+      "benefit": "Already delivered.",
+      "approach": "Keep; no new work beyond the clusters below.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "None new.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon is at parity; Firefox/WebKit engines add little for an AI-first product.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-002",
+      "name": "Capability-declared engine selection (callers state needs, planner picks the engine)",
+      "description": "Callers never name an engine; request features (actions, screenshot, location, mobile, file type, stealth) become flags, and a declared engine-by-feature matrix with weights filters and orders engines.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-061",
+        "firecrawl-engine-and-infra-001"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-001"
+        ],
+        "why": "Declared 17-flag matrix with hand-set priorities; engines lacking required features are dropped, rest ordered by support score then quality (SRC, q4)."
+      },
+      "mechanism": "buildFeatureFlags(request) -> Set<Flag>; each engine declares {flag: bool} and a quality number; candidate = engines whose unsupported-flag weight is below threshold, sorted by (supported weight desc, quality desc). Rust: const ENGINE_MATRIX: &[(DriverKind, FlagSet, quality)] and a pure plan(flags, registered) -> Vec<DriverKind>, unit-testable.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-044",
+          "v-quarry-050"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:15-41",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:265-269"
+        ],
+        "gap": "DriverPlan picks from five booleans (actions, screenshot, pdf, prior_block_signals, profile_required) with a fixed static->TLS->browser order; there is no declared per-driver feature matrix, so adding Kernel/Browserless (crate-only, unregistered) or a stealth tier means editing branching code. BrowserDriverCapabilities exists for agent drivers but is not used by the scrape planner.",
+        "strengths": "Callers already do not name drivers; keep that."
+      },
+      "benefit": "Lets Quarry add engine tiers (stealth, remote provider, file parsers, provider-API engines) without touching callers, and makes driver choice explainable in receipts, which fits the audit-first design.",
+      "approach": "Ingestion Plane (Quarry quarry-runtime): replace the boolean plan with a FeatureFlags bitset and a static capability table per registered driver, reusing BrowserDriverCapabilities for browser drivers; record the chosen plan and dropped engines in the scrape determinism stamp.",
+      "effort": "M",
+      "dependencies": [
+        "Typed re-plan signals (C-t2-03-004)",
+        "Registered remote drivers"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Over-engineering if only three drivers ever exist; keep the table small.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Enabler for most other engine gaps (geo, stealth, file routing), but invisible to users on its own.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-003",
+      "name": "Learned per-site rendering mode (HTTP-first with sampled browser comparison)",
+      "description": "Start each request over HTTP, sample a fraction in both modes, compare results and learn per domain whether a browser is required.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "apify-platform-055"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-055"
+        ],
+        "why": "AdaptivePlaywrightCrawler (DOC, q5): renderingTypeDetectionRatio 0.1 samples dual runs, resultComparator decides equal/different, resultChecker rejects bad HTTP results and retries in a browser; the learned verdict is cached per site."
+      },
+      "mechanism": "Per registrable domain keep a small model {p_browser_needed, samples}. With probability r (0.1) run both HTTP and browser and compare extracted outputs (equal/different/inconclusive); otherwise use the predicted mode and fall back to browser if a checker rejects the HTTP result. Rust: DomainRenderStats in Redis/Postgres keyed by eTLD+1, updated after each comparison.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-044"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:354-455"
+        ],
+        "gap": "Quarry escalates per request when it detects a JS shell (needs_browser_escalation) but does not remember the verdict per domain, so every request to a SPA-only site pays the static attempt plus a hydration settle; no sampled dual-mode comparison. The 'domain intelligence registry' is only planned (SOVEREIGN_SCRAPING_RELIABILITY.md, DOC).",
+        "strengths": "JS-shell detection with best-shell retention is already a good per-request checker."
+      },
+      "benefit": "Lower latency and browser cost on large crawls; fewer wasted static fetches; aligns with cost tracking.",
+      "approach": "Ingestion Plane: a DomainRenderProfile store (Postgres + Redis cache, org-scoped or global for public hosts only) fed by FallbackDriver escalations and a 5-10% dual-run sampler on crawls; DriverPlan reads it as a prior. ZDR orgs: store only host-level verdicts, never content.",
+      "effort": "M",
+      "dependencies": [
+        "Capability-declared engine selection (C-t2-03-002)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Stale verdicts after a site redesign; sampling doubles cost for sampled requests; cross-org sharing of verdicts must not leak tenant behaviour.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Clear cost/latency win for crawl-heavy Ingestion workloads; only documented (DOC) at Apify so confidence in exact behaviour is from docs.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-004",
+      "name": "Hedged engine waterfall with typed re-plan signals and retry budgets",
+      "description": "Engines are raced after a per-engine 'reasonable time' instead of strictly in sequence; engines can request re-planning (add stealth/pdf/document, drop a feature) under capped budgets; empty 2xx pages count as failures while non-2xx pages are returned as results.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-002",
+        "firecrawl-engine-and-infra-003",
+        "firecrawl-engine-and-infra-004"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-002",
+          "firecrawl-engine-and-infra-003"
+        ],
+        "why": "Both q5 SRC: Promise.race over in-flight engines plus a timer that starts the next engine, losers aborted; AddFeatureError/RemoveFeatureError carry flags and prefetch payloads, ScrapeRetryTracker caps total attempts (6) and per-feature toggles."
+      },
+      "mechanism": "Loop: start engine[i]; select over {in-flight results, timer(maxReasonableTime_i)}; on timer, start engine[i+1] while keeping others; first acceptable result wins, abort others. Acceptable = non-empty markdown for 2xx/304, any non-2xx passes through with status. Errors of type NeedsFeature{flag, prefetch?} or DropFeature{flag} re-run planning with merged flags; a tracker caps total re-plans and per-flag flips. Rust: tokio::select! over a FuturesUnordered with AbortHandles; enum Replan { Add(Flag, Option<Prefetch>), Drop(Flag) }.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-044"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:56-260",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:387"
+        ],
+        "gap": "FallbackDriver is strictly sequential (rotate on 401/403/407/429/503 or JS shell); no hedging, no typed escalation vocabulary (NeedsStealth/NeedsBrowser/IsFile), and no global retry budget object; retry.rs execute_with_retry is exported but unused (baseline, SRC).",
+        "strengths": "Soft-404, JS-shell and ChallengeKind classification already exist and are richer than Firecrawl's empty-page gate."
+      },
+      "benefit": "Better tail latency on slow static hosts and a principled place for file routing and stealth escalation; budgets make cost bounded and auditable.",
+      "approach": "Ingestion Plane: introduce enum Replan in quarry-runtime, have drivers and the content checker return it, and drive the loop with a ScrapeBudget {max_attempts, per_flag_flips, deadline}. Hedge only static->browser on idempotent GETs, never for authenticated profiles or ZDR runs with egress receipts that must be one-per-request.",
+      "effort": "M",
+      "dependencies": [
+        "Capability-declared engine selection (C-t2-03-002)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Hedging doubles origin load and can trip rate limits; must respect HostScheduler AIMD and robots/politeness.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Typed re-plan is the valuable part; hedging is secondary and should be opt-in per preset.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-005",
+      "name": "TLS/HTTP2 impersonation tier and browser-consistent header generation",
+      "description": "A fast no-JS client that matches a real browser's TLS/JA3/H2 fingerprint and header order, with headers generated consistently per session, and rules for when not to fall back to it.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "apify-platform-062",
+        "firecrawl-engine-and-infra-007"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-007"
+        ],
+        "why": "SRC q4: tlsclient tier with explicit demotion rule (never fall from Chrome to a plain client unless fast mode or the per-domain picker says so); Apify's got-scraping (DOC) contributes per-session header generation."
+      },
+      "mechanism": "Impersonation client (BoringSSL with browser cipher/extension order, H2 SETTINGS/priority frames) + a header generator keyed by {browser, OS, device, locale} and a session token so the same session always sends the same header set. Planner rule: after a browser attempt fails, do not retry with a non-browser tier unless explicitly allowed.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-046",
+          "v-quarry-047"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-tls/src/lib.rs",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/tls_driver.rs:21",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/http3.rs:47"
+        ],
+        "gap": "Only the Chrome TLS profile is registered, the TLS driver does not follow redirects, no per-session header generator tied to the profile/locale, and HTTP/3 has no fingerprint; 'rotation' is driver hopping.",
+        "strengths": "A real wreq JA3/JA4/H2 driver in Rust is more than Firecrawl OSS ships."
+      },
+      "benefit": "Higher static-tier success on bot-protected sites, avoiding browser cost.",
+      "approach": "Ingestion Plane: add Firefox/Safari/Edge profiles in quarry-tls, follow redirects with the same per-hop SSRF validation as StaticDriver, derive headers (UA, sec-ch-ua, Accept-Language) from the profile and session locale, and adopt the 'no browser->plain demotion' rule in DriverPlan.",
+      "effort": "M",
+      "dependencies": [
+        "Geo/locale emulation (C-t2-03-011) for consistent Accept-Language"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Fingerprint drift as browsers update; legal/ToS exposure on protected sites.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Do the redirect-following fix (S) as hygiene; extra profiles and header generation are incremental and can wait for the stealth preset.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-006",
+      "name": "Browser fingerprint generation and stealth tier",
+      "description": "Inject realistic, internally consistent browser fingerprints (UA, platform, screen, WebGL, canvas, fonts) or use a stealth browser build (Camoufox), and hide automation tells like navigator.webdriver; hosted engines expose behaviour toggles for these heuristics.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "common"
+      },
+      "members": [
+        "apify-platform-056",
+        "apify-platform-057",
+        "firecrawl-engine-and-infra-013",
+        "codexbrowser-in-app-browser-011"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-056"
+        ],
+        "why": "fingerprint-suite (DOC, q5) generates fingerprints from a statistical model constrained by browser/OS/device/locale and ties them to the proxy session, so fingerprint and IP stay consistent; Firecrawl's behaviorOverrides (SRC) give the checklist (webdriver, headless UA, platform, country, automatic referrer)."
+      },
+      "mechanism": "Per session: sample a fingerprint {UA, sec-ch-ua, platform, screen, deviceMemory, WebGL vendor/renderer, fonts, locale, timezone} consistent with the egress country; apply via CDP Emulation.setUserAgentOverride (with userAgentMetadata), setLocaleOverride, setTimezoneOverride, setDeviceMetricsOverride and Page.addScriptToEvaluateOnNewDocument for JS surface patches; persist the fingerprint with the profile so it never changes mid-identity.",
+      "verevon": {
+        "status": "stub",
+        "baselineIds": [
+          "v-quarry-051",
+          "v-quarry-058"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:52",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:292",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:226-244"
+        ],
+        "gap": "STEALTH_SCRIPT and CONSENT_DISMISS_SCRIPT are defined but never injected by any driver; Chromium launches with only crash/dev-shm flags; no fingerprint generator and no UA/locale/tz override. Note Codex (codexbrowser-in-app-browser-011, SRC) deliberately ships no stealth because it drives real user browsers.",
+        "strengths": "Dead code is ready to wire; governance (egress receipts, policy denials) is stronger than any reference."
+      },
+      "benefit": "Scrape and crawl success on protected public sites; consistent identity per profile reduces login challenges for agent sessions.",
+      "approach": "Ingestion Plane: a FingerprintProfile persisted with the browser profile (SessionSnapshot already has UA/locale/tz fields), applied on context creation; STEALTH_SCRIPT injected only under the 'stealth' RunPolicy preset and recorded in receipts; consent dismissal as a separate, default-on scrape option. Never apply stealth to authenticated enterprise SaaS sessions where the customer owns the account.",
+      "effort": "M",
+      "dependencies": [
+        "Geo/locale emulation (C-t2-03-011)",
+        "Profile persistence fixes (C-t2-03-008)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Terms-of-service and legal exposure; arms race maintenance; inconsistent fingerprints are worse than none.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Apify-side evidence is DOC only; worth doing in a policy-gated preset, not as default behaviour.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-007",
+      "name": "Browser pool lifecycle and per-request context isolation",
+      "description": "A pool that launches, limits pages per browser, retires and kills browsers, gives each request or session its own context, bounds concurrent pages with a semaphore and offers a real health probe.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "apify-platform-058",
+        "firecrawl-engine-and-infra-008",
+        "firecrawl-api-surface-116"
+      ],
+      "bestInClass": {
+        "source": "apify",
+        "recordIds": [
+          "apify-platform-058"
+        ],
+        "why": "BrowserPool (DOC, q4) has maxOpenPagesPerBrowser, retireBrowserAfterPageCount, incognito pages per context and ordered pre/post launch/page hooks; Firecrawl's Playwright service (SRC, q2-3) adds a health probe that really opens a page and a page semaphore."
+      },
+      "mechanism": "Pool of N browser processes; each tracks open pages and total pages served; new contexts go to the least-loaded browser below maxOpenPages; after retireAfter pages a browser stops taking work and is closed when idle; hooks run in fixed order; /health opens about:blank in a fresh context with a deadline. Rust: Vec<BrowserSlot{proc, open, served, retiring}> behind a Mutex plus a tokio Semaphore for pages.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-048",
+          "v-browser-app-028"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-226",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/pool.rs",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs"
+        ],
+        "gap": "One shared Chromium process; a lease with a different viewport than the running browser closes and relaunches the whole browser and clears all sessions' pages (INF from ensure_browser, baseline); the local adapter lease pool has size 2 (main.rs:337); no evidence of retire-after-N-pages or a multi-process pool (check quarry-browser/src/pool.rs).",
+        "strengths": "Per-session CDP BrowserContext with its own cookie jar, download dir and DNS-pinned egress proxy is stronger isolation than Firecrawl OSS."
+      },
+      "benefit": "Concurrent users/agents stop disrupting each other; predictable capacity for the in-app browser and crawl rendering; crash containment.",
+      "approach": "Ingestion Plane: apply viewport per page with Emulation.setDeviceMetricsOverride instead of relaunching; move to a pool of K Chromium processes with maxOpenPages and retireAfter, a page semaphore, and a /health probe that opens a page; size the lease pool from config.",
+      "effort": "M",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Memory pressure with more processes; must keep per-session egress proxy binding when sessions move between processes.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "The viewport-relaunch behaviour (INF, medium confidence) would be visible to any two concurrent users with different viewports; fixing it is cheap relative to impact.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-008",
+      "name": "Persistent sessions and browser profiles (cookies and storage across runs)",
+      "description": "Named, scoped profiles that persist cookies, storage and identity between scrapes and agent sessions, with correct ordering of concurrent saves, deletion tombstones, and seeding caller cookies into the browser jar.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "apify-platform-059",
+        "firecrawl-api-surface-058",
+        "firecrawl-engine-and-infra-106",
+        "firecrawl-engine-and-infra-010"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-058",
+          "firecrawl-engine-and-infra-106"
+        ],
+        "why": "SRC q4: team-scoped named profiles with saveChanges, rejected under ZDR/lockdown/Safe Mode, and a registry that only moves saved_at forward and uses deletion tombstones so late saves cannot resurrect a deleted profile; Apify adds session-to-proxy-IP pinning (DOC)."
+      },
+      "mechanism": "Profile = {id, scope, owner, fingerprint, egress affinity, snapshot blob ref, saved_at, deleted_at}. Save: UPSERT ... saved_at = GREATEST(saved_at, $new) and ignore if a tombstone newer than the save exists. Snapshot = all cookies (with expiry, SameSite, partition key) + localStorage/sessionStorage per origin + IndexedDB export, encrypted at rest with a per-org key. Caller cookies are added with Network.setCookies at the public-suffix-registrable domain, not as a header.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-054",
+          "v-quarry-055",
+          "v-quarry-056",
+          "v-browser-app-032"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/profile_routes.rs:102-432",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:675",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1771-1832",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:925-968",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:72"
+        ],
+        "gap": "Profiles CRUD, scopes (ephemeral/user_private/org_shared/run_scoped) and restore probe ship, but snapshots drop cookie expiry, capture storage only for the current origin, never capture IndexedDB, do not re-apply UA/locale/tz, are not encrypted at rest, S3 store is unwired, and there is no save ordering/tombstone guard.",
+        "strengths": "Scope model and restore probe are richer than Firecrawl's flat team-named profiles; keep scopes and the probe."
+      },
+      "benefit": "Reliable logged-in browsing for users and agents (the main reason to have an in-app browser); encryption at rest is a security baseline for session cookies.",
+      "approach": "Ingestion Plane: capture Network.getAllCookies with expiry, iterate visited origins for storage, add IndexedDB export via CDP IndexedDB domain, envelope-encrypt snapshots (KMS/org key; Control Plane owns keys via API, not DB), add saved_at monotonic upsert + tombstones, wire S3ProfileStore for large blobs. Disallow profiles under ZDR as Firecrawl does.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane key management API"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Storing session cookies is high-value data; key handling and scope checks must not widen ACLs (Space access never widens owner ACL).",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Users would notice being logged out after restarts; unencrypted cookies at rest is a security gap.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-009",
+      "name": "Authenticated-profile routing: pin browser, bypass shared caches",
+      "description": "Requests that use a persistent profile, custom headers or actions run only on browser engines that carry the profile and never read or write the shared URL cache.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-018"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-018"
+        ],
+        "why": "SRC q5: buildFallbackList skips every non-chrome-cdp engine when a profile is set (except parsers fed by browser-downloaded bytes); hasCustomRequestContext disables cache read and write."
+      },
+      "mechanism": "In the planner: if request.profile is set, candidate engines = browser engines that support profiles; file parsers allowed only with bytes prefetched by that browser. Cache layer: personalised = headers||actions||profile -> no cache lookup, no cache store.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-044"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:19-41"
+        ],
+        "gap": "DriverSignals.profile_required forces the browser driver, but grep finds no caller that sets it, so /v1/scrape cannot run with a profile at all (profiles are used only by agent sessions). The invariant is therefore trivially safe today; it must be added together with any profile-on-scrape feature. Quarry's cache is content-fingerprint keyed and opt-in (prev_fingerprint), which limits leak risk.",
+        "strengths": "No personalised content can currently enter the scrape cache."
+      },
+      "benefit": "Enables 'scrape behind my login' safely for knowledge ingestion without leaking personalised pages across tenants.",
+      "approach": "Ingestion Plane: add profile_id to ScrapeRequest, set profile_required, forbid non-browser drivers and cache admission when set, and record the profile scope in receipts.",
+      "effort": "S",
+      "dependencies": [
+        "Persistent profiles fixes (C-t2-03-008)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Authenticated scrape content must inherit the owner's ACL in Data Plane ingestion.",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Small, but it is the safety rule that must ship with authenticated scraping.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-010",
+      "name": "Declarative page actions on scrape (wait, click, write, press, scroll, screenshot, snapshot, JS)",
+      "description": "An ordered, capped action script runs before extraction in a single browser job; includes waits, clicks, typing, scrolling, screenshots, intermediate snapshots and cookie-banner/expand helpers.",
+      "prevalence": {
+        "sourcesWith": [
+          "apify",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "firecrawl-api-surface-057",
+        "firecrawl-engine-and-infra-012",
+        "apify-platform-060"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-057",
+          "firecrawl-engine-and-infra-012"
+        ],
+        "why": "SRC q4: zod union of nine action types, max 50 actions and 60 s total wait, actions force a browser-capable engine, and waitFor/screenshots/branding are lowered into the same ordered list so the job is atomic."
+      },
+      "mechanism": "Request.actions: Vec<Action> (tagged enum); validate caps (count, total wait, script size); lower implicit options (waitFor, screenshot, consent removal) into the list; execute sequentially on one page, collecting per-action outputs (screenshots, scrape snapshots, JS return values) into an ordered results array; any action forces a browser driver.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-052",
+          "v-quarry-053",
+          "v-browser-app-030",
+          "v-browser-app-031"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_runtime.rs:1-200",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/actions.rs:7-78",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:209-245",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3702"
+        ],
+        "gap": "Scrape exposes only render.waitForSelector plus automatic hydration settle; ActionRuntime (Firecrawl-style, on_error retry) exists but no route invokes it, and ScrapeRequest has no actions field. Interactive agent/UI actions are shipped (navigate/click/type/scroll/wait/screenshot...) but that is the session path, not scrape.",
+        "strengths": "Agent action set is richer (AX refs, dialogs, uploads/downloads gated by approval grants)."
+      },
+      "benefit": "Scrapes of SPAs, paginated or click-to-expand content without opening an agent session; parity with the most-used Firecrawl option.",
+      "approach": "Ingestion Plane: add actions[] to ScrapeRequest mapped onto ActionRuntime with Firecrawl caps; reject evaluate unless a policy grant exists; Model Plane may propose scrape actions but Quarry validates and executes (authority rule); screenshots go to artifacts with ZDR no-store.",
+      "effort": "M",
+      "dependencies": [
+        "Screenshot on scrape (C-t2-03-016)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "CSS selectors from model output are an injection surface; keep evaluate out of default.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Code already exists (stub) so cost is low and the user-facing gain is large.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-011",
+      "name": "Geolocation, language and mobile/device emulation with country egress",
+      "description": "First-class location {country, languages} and mobile options that pick egress country, set Accept-Language/locale/timezone/geolocation and emulate a device, and partition caches accordingly.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-060",
+        "firecrawl-engine-and-infra-014"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-060"
+        ],
+        "why": "SRC q4: ISO alpha-2 validation with special pools (us-generic, us-whitelist gated by team permission), Safe Mode can disable country selection, options partition cache and choose geo proxies. (Apify supports locale-constrained fingerprints and proxy country, but not as records in this category.)"
+      },
+      "mechanism": "location -> {egress pool by country, Accept-Language from languages[], Emulation.setLocaleOverride, Emulation.setTimezoneOverride (country default tz), Emulation.setGeolocationOverride (optional coordinates), Emulation.setDeviceMetricsOverride + setUserAgentOverride for mobile}; cache key includes (country, languages, mobile).",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-057",
+          "v-quarry-058",
+          "v-browser-app-033"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1851-1860",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-244",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:345",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:817"
+        ],
+        "gap": "Only viewport.is_mobile (no device presets); no UA/locale/timezone/geolocation override and no country egress selection; gateway accepts viewport but the SPA hard-codes 1280x800; search has country/language but browser does not.",
+        "strengths": "Per-run proxy affinity and sticky (org, host) proxy pool exist and can carry a country dimension."
+      },
+      "benefit": "Correct localized results for Norwegian/Nordic users (the UI is Norwegian-first) and region-specific pricing/content; consistency with stealth fingerprints.",
+      "approach": "Ingestion Plane: add location/mobile to ScrapeRequest and lease options, apply CDP overrides at context creation, add country tagging to QUARRY_PROXY_POOL entries and a PrivacyPolicy check for third-party proxy processors; Frontend Plane: device/locale picker in BrowserChrome.",
+      "effort": "M",
+      "dependencies": [
+        "Geo-capable proxy supply",
+        "Browser pool per-page viewport (C-t2-03-007)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Third-party residential proxies are a data processor under ZDR/DPA; geolocation spoofing must be disclosed in receipts.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Locale/timezone overrides are cheap CDP calls; country egress depends on proxy supply.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-012",
+      "name": "Ad and cookie-notice blocking for browser sessions",
+      "description": "Browser sessions block ads (and often cookie notices) by default, e.g. via a bundled uBlock Origin Lite extension, with session options derived from scrape options.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-api-surface-059"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-api-surface-059"
+        ],
+        "why": "SRC q4: blockAds maps to extensions ['ublock'] on Hangar sessions; browserOptionsFromScrape keeps scrape and session behaviour identical."
+      },
+      "mechanism": "Either load an MV3 content-blocker extension into the browser context, or use CDP Fetch.enable with request patterns + an EasyList-derived domain/path matcher (adblock-rust crate) to fail ad/tracker requests; run a consent-dismiss script after DOMContentLoaded.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-quarry-051"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:292",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:706"
+        ],
+        "gap": "No ad-block code found (baseline stale-doc table: 'no adblock code'; grep finds 'block' only in security preflight); CONSENT_DISMISS_SCRIPT is dormant. The ref record's claim that Quarry blocks ads via CDP Fetch lists conflicts with the baseline; the CDP Fetch guard is an SSRF/network guard.",
+        "strengths": "The CDP Fetch guard hook point already exists and can host a filter-list matcher."
+      },
+      "benefit": "Faster renders, cleaner markdown, fewer tracker requests leaving through Verevon's egress (privacy), cleaner live view for users.",
+      "approach": "Ingestion Plane: add adblock-rust filtering inside the existing CDP Fetch guard (no extension needed in headless), plus wiring CONSENT_DISMISS_SCRIPT as a default-on scrape option; expose 'block ads' toggle in BrowserChrome.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Breakage on sites that require ad scripts; filter-list licensing (EasyList is GPL/CC-BY-SA; check).",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Cheap quality and privacy gain, not a blocker.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-013",
+      "name": "Background agent-tab hygiene (focus emulation, forced active lifecycle, no throttling, stable viewport)",
+      "description": "Agent-driven tabs behave like a focused foreground tab even when hidden: lifecycle forced active, focus emulated, background throttling disabled while driven or captured, and a fixed viewport for deterministic coordinates.",
+      "prevalence": {
+        "sourcesWith": [
+          "aside",
+          "codexbrowser"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "aside-agent-control-architecture-029",
+        "aside-browser-product-085",
+        "codexbrowser-automation-and-safety-129"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-agent-control-architecture-029",
+          "aside-browser-product-085"
+        ],
+        "why": "SRC q4: on first attach the daemon sends Page.setWebLifecycleState{active}, Emulation.setFocusEmulationEnabled{true}, Target.setAutoAttach(flatten) and uses a 1440x900 stable viewport floor; Codex (SRC) adds a throttling exemption only while driven or captured."
+      },
+      "mechanism": "On attach per page: Page.enable, DOM.enable, Network.enable, Page.setWebLifecycleState('active'), Emulation.setFocusEmulationEnabled(true), Target.setAutoAttach({autoAttach, flatten:true}); fixed viewport constant per session; in a desktop shell, webContents.setBackgroundThrottling(false) only when isAgentActive || isBeingCaptured.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-048",
+          "v-browser-app-033"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:226-244",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:813-818"
+        ],
+        "gap": "Quarry's remote headless Chromium is not subject to desktop tab throttling (INF, by design), and the SPA always requests 1280x800, but grep finds no setFocusEmulationEnabled or setWebLifecycleState, so pages that check document.hasFocus/visibility may behave differently; mixed viewports relaunch the browser (see C-t2-03-007).",
+        "strengths": "Remote leased headless browser avoids most desktop hygiene problems that Aside/Codex must solve."
+      },
+      "benefit": "Fewer flaky agent runs on focus-sensitive sites (menus, video, chat widgets); deterministic screenshots/coordinates.",
+      "approach": "Ingestion Plane: add the two CDP calls to chromiumoxide page attach and a per-lease fixed viewport; no desktop-shell work.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Minimal.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Two CDP calls; low impact because headless already avoids throttling.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-014",
+      "name": "Post-action settle heuristics (commit, first paint, AX/DOM quiescence, learned waits)",
+      "description": "After each action or navigation, wait for navigation commit, first paint and accessibility-tree quiescence with hard caps instead of fixed sleeps; optionally learn per-site settle times.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-058",
+        "firecrawl-engine-and-infra-109"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-058"
+        ],
+        "why": "SRC q4: commit/load wait up to 5 s polling 10 ms, waitForFirstPaint up to 5 s, waitForAXQuiet requiring 50-100 ms without AX updates capped at 750 ms. Firecrawl's 'smart wait cache' is INF/low confidence (closed fire-engine)."
+      },
+      "mechanism": "After action: if a navigation started, await Page.frameNavigated/lifecycle 'commit' then first paint (cap 5 s); then subscribe to Accessibility/DOM mutation events and resolve when no update for 50-100 ms or 750 ms elapsed; report the settle time in telemetry; optionally store p90 settle per host as a prior.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-052"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:33-65",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:209-245"
+        ],
+        "gap": "Scrape has a hydration settle (3.5 s budget, 300 ms poll, waits until visible text stops growing or reaches 600 chars, QUARRY_BROWSER_SETTLE_MS); no AX-quiescence or first-paint settle was found for agent actions in chromiumoxide.rs or agent routes (grep 'settle|quiesc|network idle'), so agent steps rely on explicit wait/wait_for. To verify in code.",
+        "strengths": "Scrape settle is text-growth based, which is a reasonable content signal."
+      },
+      "benefit": "Fewer explicit wait steps proposed by the Model, fewer wasted LLM turns, more reliable observe-after-act.",
+      "approach": "Ingestion Plane: add a settle() after every AgentAction in chromiumoxide with per-action budgets (navigation vs click vs type) and emit settle_ms in BrowserTelemetry.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Long-polling pages never quiesce; caps are essential.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Directly reduces step count in 12-step / 5-step budgets the UI imposes.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 1
+      }
+    },
+    {
+      "id": "C-t2-03-015",
+      "name": "Frame-aware accessibility/DOM snapshot (OOPIF merge, per-frame warnings, deadlines, iframe selector markers)",
+      "description": "The page snapshot merges main frame, same-process and out-of-process iframes into one tree, reports per-frame failures as warnings rather than failing, and keeps selectors working across flattened frames.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser",
+          "firecrawl"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-057",
+        "firecrawl-engine-and-infra-015"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-057"
+        ],
+        "why": "SRC q4: Page.getFrameTree + DOMSnapshot.captureSnapshot + Accessibility.getFullAXTree per frame session, walking OOPIF targets, with deadlines and warnings for frames that fail."
+      },
+      "mechanism": "For each frame target (auto-attached flat sessions), call Accessibility.getFullAXTree with a per-frame timeout inside a global deadline; stitch child trees under their IFRAME owner node; collect {frameId, error} into warnings[]; for DOM flattening, tag inlined iframe content with data-original-tag=iframe so user selectors still match.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-browser-app-031"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1086-1200",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1236-1256"
+        ],
+        "gap": "Quarry projects an AX tree capped at 300 nodes with frame topology and frame refs, and returns TargetRepairRequired when a frame is gone; no global traversal deadline or per-frame warning list was seen (check captureAX-equivalent around chromiumoxide.rs:1086-1200 and :2722). The Verevon UI cannot show or use AX refs (v-browser-app-031 absent).",
+        "strengths": "Atomic actions by backend node id with frame-scoped execution contexts are already robust against OOPIF realm mix-ups."
+      },
+      "benefit": "Agents can act on embedded login widgets, payment iframes and embedded docs; partial failures do not blank the whole observation.",
+      "approach": "Ingestion Plane: add warnings[] and a deadline to the AX projection, revisit the 300-node cap with viewport-priority truncation; Frontend Plane: surface refs in BrowserChrome for co-browsing.",
+      "effort": "M",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Larger snapshots cost tokens; keep truncation explicit.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Observation quality drives every agent step.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-016",
+      "name": "Screenshot pipeline (fresh frames, CSS/device pixels, clip/full-page) and screenshots on scrape",
+      "description": "Screenshots that are guaranteed fresh for hidden pages (short screencast capture), in CSS or device pixels, clipped or full page, with fixed quality.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-061"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-061"
+        ],
+        "why": "SRC q4: JPEG q80; device-pixel mode starts a screencast and waits up to 2 s for a frame newer than the request, avoiding stale compositor frames on background pages."
+      },
+      "mechanism": "capture(mode): if css -> Page.captureScreenshot with clip scaled by 1/devicePixelRatio; if device -> Page.startScreencast, await first frame whose metadata timestamp > request time (2 s cap), ack and stop; fallback captureScreenshot; full-page via captureBeyondViewport.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-browser-app-030"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1702-1734",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2392-2445",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3702"
+        ],
+        "gap": "Agent/UI screenshots, PDF and live JPEG/PNG screencast frames (250 ms cache, timeout-bounded first frame) are shipped, but /v1/scrape always returns screenshot=None (DriverSignals.screenshot only forces the browser driver).",
+        "strengths": "Live frames over HTTP/SSE with private no-store caching are on par with Codex for the session path."
+      },
+      "benefit": "Visual evidence in ingestion (source previews, change monitoring diffs) and Firecrawl format parity.",
+      "approach": "Ingestion Plane: make BrowserDriverAdapter capture a screenshot when requested and return it as an artifact ref (no-store under ZDR); Frontend Plane shows it in scrape preview.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Artifact storage cost; ZDR must suppress persistence.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Small change that closes a documented format gap.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-017",
+      "name": "Multi-backend browser abstraction with per-backend capability sets",
+      "description": "One agent/browser API drives several backends (embedded browser, user's own browser, remote CDP cloud browser, DOM-only app webviews), each advertising its capabilities.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-139",
+        "codexbrowser-in-app-browser-009"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-in-app-browser-009",
+          "codexbrowser-automation-and-safety-139"
+        ],
+        "why": "SRC q5: Browsers.list returns {type iab|extension|cdp|mcpapps, family, profile, metadata}; backends advertised via env; each backend has its own capability set behind the same service."
+      },
+      "mechanism": "trait BrowserBackend { kind(); capabilities() -> Caps; open_session(); ... } registered at startup from config; the session API lists available backends and the planner/model chooses by required caps (e.g. needs_user_login -> extension backend; needs_isolated_egress -> hosted).",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-048",
+          "v-quarry-049",
+          "v-quarry-050",
+          "v-quarry-060"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:265-269",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1873-1891",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs:243",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:497"
+        ],
+        "gap": "BrowserDriver trait and BrowserDriverCapabilities exist; local chromiumoxide ships; Browserbase is scrape-only (no isolated_egress, cannot run agent sessions); Kernel and Browserless are implemented but unregistered; no user-browser or DOM-only backend.",
+        "strengths": "Capability flags such as isolated_egress and security_evidence are stronger than Codex's: Quarry refuses backends that cannot prove containment."
+      },
+      "benefit": "Scale-out and burst capacity via remote providers, and a path to user-session backends, without changing Model Plane tools.",
+      "approach": "Ingestion Plane: register Kernel/Browserless behind config, implement an egress-containment proof (route provider traffic through Quarry's pinned proxy or provider-side allowlist attestations) so remote drivers can run governed agent sessions; expose backend list + caps on the session API.",
+      "effort": "L",
+      "dependencies": [
+        "Remote-provider containment proof (planned in WEB_AGENT_ROADMAP_EXECUTION.md, DOC)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Remote providers are data processors (ZDR, DPA); containment proof is hard.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Capacity and reliability matter once the in-app browser has real usage; lease pool of 2 is a ceiling today.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-018",
+      "name": "Driving the user's own Chrome-family browser via extension and native messaging",
+      "description": "An extension plus native messaging host lets the agent use the user's real browser with existing logins, extensions and tabs.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-in-app-browser-010"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-in-app-browser-010"
+        ],
+        "why": "SRC q4: native messaging host com.openai.codexextension with an extension that uses chrome.debugger; the only route to the user's signed-in state without importing credentials."
+      },
+      "mechanism": "MV3 extension with debugger permission attaches chrome.debugger to tabs the user shares; a native messaging host (or a hosted WebSocket bridge) relays CDP commands from the agent service; the extension enforces per-tab consent and shows an indicator.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-browser-app-034"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1-6"
+        ],
+        "gap": "No extension or user-browser bridge; login is handled only by persisted profiles and human takeover. Gateway rule: the browser never sees CDP endpoints or Quarry tokens, so a bridge would have to be designed around that.",
+        "strengths": "Keeping all agent browsing in governed, egress-receipted Quarry sessions is a deliberate compliance strength."
+      },
+      "benefit": "Access to SSO-protected enterprise apps without credential handling; strong 'it uses my browser' UX.",
+      "approach": "If pursued: Frontend Plane extension + Ingestion Plane 'user_browser' BrowserBackend with capabilities isolated_egress=false and security_evidence=false, allowed only for interactive (non-background) runs with explicit per-tab user consent; Model proposes, Quarry relays and records.",
+      "effort": "XL",
+      "dependencies": [
+        "Multi-backend abstraction (C-t2-03-017)",
+        "Approval grants for sensitive actions"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Loses egress containment and SSRF guarantees; ZDR evidence cannot be guaranteed; extension store review and enterprise policy deployment.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "High user value but conflicts with the governed-egress model; revisit after hosted profiles are solid.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-019",
+      "name": "Embedded/native browser shell (Chromium fork or embedded Chromium with debugger leases)",
+      "description": "Ship a full Chromium (fork or embedded) as the product's own browser, attaching the agent through per-webContents debugger leases with flat child-target sessions.",
+      "prevalence": {
+        "sourcesWith": [
+          "aside",
+          "codexbrowser"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "common"
+      },
+      "members": [
+        "aside-browser-product-001",
+        "codexbrowser-in-app-browser-012",
+        "codexbrowser-automation-and-safety-140"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-140",
+          "codexbrowser-in-app-browser-012"
+        ],
+        "why": "SRC/REA q4: chrome.dll Chromium runtime behind a 20 KB launcher (REA), and lease-based debugger attach so user DevTools and agent control coexist and are cleaned up on detach/turn end; Aside is a full Chromium 153 fork (SRC)."
+      },
+      "mechanism": "Embedded Chromium (Electron webContents) with debugger.attach per webContents held by a lease object; Target.attachToTarget{flatten:true} for child targets; release on detach, turn end or timeout.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-browser-app-028"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:247",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:369-449"
+        ],
+        "gap": "By design Verevon has no embedded browser: the in-app browser is a remote leased Chromium streamed as frames into BrowserChrome (baseline: 'must stay a remote, leased Chromium').",
+        "strengths": "Remote leasing keeps CDP endpoints and secrets away from the client and makes every page load pass the egress proxy; keep it."
+      },
+      "benefit": "Little for Verevon; a native shell would add distribution and update burden and break the governance model.",
+      "approach": "Do not build. Reuse the lease idea inside Quarry (already: per-session context leases).",
+      "effort": "XL",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Huge maintenance (Chromium updates, security patches).",
+      "tier": "skip",
+      "significance": 2,
+      "rationale": "Conflicts with the architecture rule that the browser is a remote leased Chromium; parity here is not needed.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-020",
+      "name": "Desktop (non-browser) computer use with background capture and input",
+      "description": "Agents operate native desktop windows: occlusion-proof window capture, multi-image states for popups, and background input injection without stealing focus (per-OS APIs).",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-091",
+        "codexbrowser-automation-and-safety-087"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-087",
+          "codexbrowser-automation-and-safety-091"
+        ],
+        "why": "SRC/DOC q4: Windows.Graphics.Capture with a free-threaded frame pool and DPI awareness; per-OS scoping (mac app-scoped, Windows window-scoped, Linux X11 background input)."
+      },
+      "mechanism": "Capture via OS compositor APIs (WGC on Windows, ScreenCaptureKit on macOS, Xvfb/X11 in Linux containers), cache by snapshot revision, return bounded image sets with z-order; input via accessibility APIs or XTest into a specific window.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3 (Remote support /support via @verevon/remote-core, separate stack per v-browser-app baseline)"
+        ],
+        "gap": "No agent desktop control; remote support (RustDesk protocol) is human-operated with a local AI frame sampler. Model Plane sandbox-manager has no desktop/browser role (baseline grep).",
+        "strengths": "n/a"
+      },
+      "benefit": "Would extend agents beyond the web, but outside the Quarry/browser scope of this audit.",
+      "approach": "If ever needed: Model Plane sandboxes with Xvfb Linux desktops (the X11 background-input pattern), not end-user machines.",
+      "effort": "XL",
+      "dependencies": [
+        "Model Plane sandbox leases with display"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Large security surface; ZDR for screen frames.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Not a web/browser-engine capability and not on Verevon's web-access roadmap.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-021",
+      "name": "Hosted browser session lifecycle with live view and recording",
+      "description": "Sessions as a resource with a state machine (starting/running/suspended/stopped/failed), idle and absolute TTLs, idempotent create, CDP URL, read-only and interactive live-view URLs, optional recording; per-run debug URL exposing DevTools.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl",
+          "apify"
+        ],
+        "n": 2,
+        "of": 4,
+        "cls": "differentiator"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-019",
+        "apify-platform-061"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-019"
+        ],
+        "why": "SRC q4: Idempotency-Key create with retries, long-poll until running (5 min) and stop on readiness failure, suspend/resume, idle vs absolute TTL, separate read-only and interactive live-view URLs, HLS recording; Apify's container URL (DOC) shows DevTools exposure."
+      },
+      "mechanism": "Session row {state, created_at, last_activity_at, idle_ttl, abs_ttl, idempotency_key}; reaper transitions on TTL; suspend = snapshot profile + release browser, resume = new browser + restore; live view = signed short-lived URLs with view vs control scopes; recording = screencast frames to segmented video, disabled under ZDR.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-060",
+          "v-browser-app-028"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:421-440",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2608-2656",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1600-1782"
+        ],
+        "gap": "Leases with max_runtime_s 120 and max_steps 12 per UI session; live frames over HTTP poll/SSE shipped (WS not advertised); provider live-view URL trait returns None for local Chromium; no suspend/resume, no idle-vs-absolute TTL pair, no recording, idempotent create not evidenced (check agent_routes session create). Agent runs live in an in-process map (not durable).",
+        "strengths": "Own live-frame streaming with takeover, DevTools panel and Quarry timeline is already a strong live view; keep frames no-store."
+      },
+      "benefit": "Longer user sessions (2 min is short for real browsing), resumable agent runs, and audit recordings for enterprise.",
+      "approach": "Ingestion Plane: durable session store (Postgres) with state machine, idle/absolute TTL, idempotency key, suspend/resume via profile snapshot; optional recording to artifacts gated by org policy and off under ZDR. Frontend Plane: separate view/control live-view tokens.",
+      "effort": "L",
+      "dependencies": [
+        "Profile persistence fixes (C-t2-03-008)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Recording is sensitive data; long sessions raise cost.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Session durability matters for agent reliability; recording is optional.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-022",
+      "name": "Bounded code execution beside the browser",
+      "description": "A session endpoint that runs node/python/bash next to the browser with access to the page, with size, time and language limits and a truncation flag.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-020"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-020"
+        ],
+        "why": "SRC q4: /execute {code<=100,000 bytes, timeout 1-300 s default 30, language allowlist} returning stdout/stderr/result/exit code/truncated."
+      },
+      "mechanism": "Sandbox process co-located with the browser (connected over CDP), run with timeout and output caps; results returned as structured fields with truncation flag.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-browser-app-030"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3751"
+        ],
+        "gap": "No bounded execution endpoint. Quarry agent runs allow an unrestricted evaluate action without approval (baseline: observation.rs:243-260), while the gateway denies evaluate for UI sessions. The gap is the missing bounds and approval, not the missing feature.",
+        "strengths": "UI-path denial of evaluate is correct."
+      },
+      "benefit": "Safer scripted extraction for power users and the Model (as proposals), replacing unbounded evaluate.",
+      "approach": "Ingestion Plane: cap evaluate (script size, timeout, result size), require a BrowserBroker approval grant outside allowlisted presets, log script hash in receipts; if code execution is needed, use Model Plane sandboxes connecting to the Quarry session via a Quarry-mediated API rather than raw CDP.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Prompt-injected pages driving the Model to propose harmful JS.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Security hardening of an existing unbounded path; full code execution is not needed.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-023",
+      "name": "Scrape-to-interactive session promotion by replay",
+      "description": "A completed scrape can be continued interactively: a new browser replays the original URL, waits and actions to reach the same state, then a prompt or code runs on top.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-021"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-021"
+        ],
+        "why": "SRC q4: ownership check, replay context from stored scrape options, create-or-adopt a session, then run prompt/code."
+      },
+      "mechanism": "Store a replay context with each scrape {url, waitFor, actions, profile, location}; promote(scrape_id) -> verify caller owns it -> create session -> replay -> hand session id to the agent/UI.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-browser-app-028"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-490",
+          "apps/Model Plane (EC/browser_agent.rs:669-684 per baseline)"
+        ],
+        "gap": "The scrape preview panel is itself a live browser session, but an AI run acquires its own hidden lease and continuity is only start_url + profile_id; scrape jobs have no stored replay context because scrape has no actions.",
+        "strengths": "Preview-as-live-session already gives users a visual continuation."
+      },
+      "benefit": "'Continue interactively' from a search/scrape result in chat or the omnibox, a natural AI-first flow.",
+      "approach": "Ingestion Plane: persist ReplayContext on scrape results (not under ZDR), add POST /v1/scrape/:id/session; Model Plane uses it to start a browser run on the same state.",
+      "effort": "M",
+      "dependencies": [
+        "Scrape actions (C-t2-03-010)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Replays are not deterministic on dynamic pages.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Nice UX bridge but depends on scrape actions first.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-024",
+      "name": "Content-type and magic-byte routing of files to PDF/document/image parsers",
+      "description": "When a fetch or browser lands on a PDF, Office file or image (even if mislabelled), the bytes are routed to the right parser instead of HTML readability.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-017"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-017"
+        ],
+        "why": "SRC q5: specialtyScrapeCheck checks Content-Type then magic bytes and throws AddFeatureError(pdf|document|image) with the already-downloaded bytes as prefetch, so parsers need no refetch."
+      },
+      "mechanism": "After any driver returns bytes: kind = sniff(content_type) or sniff_magic(first 512 bytes: %PDF-, PK zip with [Content_Types].xml, OLE CF, PNG/JPEG/WebP); if kind != html -> route to parser with the bytes; record kind in output metadata.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/pdf.rs",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:839"
+        ],
+        "gap": "PDF text extraction (lopdf, heading detection) is used only by the answer pipeline; the scrape pipeline runs readability over any body including PDFs; DOCX/image parsers are unwired (v-quarry baseline section 2, SRC). No base record covers this; status from the Quarry baseline narrative.",
+        "strengths": "Parsers already exist in quarry-transform."
+      },
+      "benefit": "Correct ingestion of PDFs and Office files linked from sites, a common knowledge-base input; users would notice garbage markdown immediately.",
+      "approach": "Ingestion Plane: add a content sniffer after driver fetch in pipeline.rs and dispatch to quarry-transform pdf/docx/image parsers; express it as a typed Replan::IsFile when built.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Large files: cap sizes and stream to artifacts.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Small effort, existing parsers, high user-visible impact for knowledge ingestion.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-025",
+      "name": "Site-specific official-API engines, URL rewrites and per-domain engine overrides",
+      "description": "For hostile or terms-sensitive sites, use an official API instead of rendering (Wikipedia Enterprise, X via xAI); rewrite Google Docs/Sheets/Slides/Drive URLs to export URLs; let operators force engines per domain pattern.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-022",
+        "firecrawl-engine-and-infra-023"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-022",
+          "firecrawl-engine-and-infra-023"
+        ],
+        "why": "SRC q3-4: API engines participate in the waterfall with high quality scores and return normal scrape results; rewriteUrl maps docs/presentation/spreadsheet/drive ids to export endpoints preserving gid."
+      },
+      "mechanism": "URL normaliser with a rewrite table (regex -> export URL); engine resolver: if host matches a provider and the org has a connected account, call the provider action and return a ScrapeResult; config map domain_pattern -> forced driver.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates (grep docs.google.com: no hits)",
+          "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:164 (per baseline)"
+        ],
+        "gap": "No URL rewrite table or per-domain driver override in Quarry (grep). integration-corev2 has about 142 named provider actions, but Quarry does not prefer a connected-account action for provider URLs (github.com, notion.so, Google Docs).",
+        "strengths": "integration-corev2 already owns OAuth tokens and provider actions; the bridge is an API call, not new connectors."
+      },
+      "benefit": "Better fidelity and ToS-safe access for Google Docs/GitHub/Notion links pasted into Verevon; reuses connected accounts.",
+      "approach": "Ingestion Plane: Quarry URL normaliser rewrite table (S) and a ProviderResolver that calls integration-corev2's actions API (no cross-plane DB) with the caller's identity; ACLs from the provider must propagate to Data Plane ingestion; config-driven domain->driver overrides next to presets.",
+      "effort": "M",
+      "dependencies": [
+        "integration-corev2 action API for document fetch"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Must not widen access: use the requesting user's connection only; ZDR propagation to integration-corev2.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Leverages Verevon's unique integration plane; rewrites are near-free.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-026",
+      "name": "Rendered branding extraction by injected script",
+      "description": "Extract design tokens (colors, fonts, logo) from the rendered page via a bundled in-page script after a settle wait, with a non-render fast path when only DOM data is needed.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-016"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-016"
+        ],
+        "why": "SRC q4: esbuild IIFE injected as an internal executeJavascript action with 2 s default wait; forces non-render engines when rendering is unnecessary."
+      },
+      "mechanism": "Bundle an extractor script that reads getComputedStyle on key elements, collects CSS variables, favicon/logo candidates and palette; run it as an internal action after settle; return JSON.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:562",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:783"
+        ],
+        "gap": "quarry_transform::branding_rendered::extract runs on the HTML string (rendered HTML when the browser driver was used) for favicon, theme colour, palette, logo, font, og:image; it does not read computed styles in the page. No base record covers this.",
+        "strengths": "Branding is returned on scrape already."
+      },
+      "benefit": "Minor: better brand tokens for onboarding/workspace theming.",
+      "approach": "Ingestion Plane: once scrape actions exist, add an internal computed-style action when branding is requested.",
+      "effort": "S",
+      "dependencies": [
+        "Scrape actions (C-t2-03-010)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Low.",
+      "tier": "nice-to-have",
+      "significance": 1,
+      "rationale": "Existing HTML-based branding covers most needs.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-027",
+      "name": "SSRF containment for browser traffic",
+      "description": "Every browser request is forced through a filtering proxy and/or request interception that refuses private/internal destinations, reporting blocked navigations as results.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-009"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-009"
+        ],
+        "why": "Among references, Firecrawl (SRC q3) is the only one with explicit browser SSRF containment (loopback proxy-chain plus Playwright route check), but it resolves twice, leaving a DNS-rebinding window. Verevon is stronger."
+      },
+      "mechanism": "Per-session loopback proxy that resolves once, validates all addresses (unicast/public only), and connects to the pinned IP; plus CDP Fetch interception as a second check; QUIC disabled so traffic cannot bypass the proxy.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-quarry-048"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:186-243",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:706",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fetch.rs:193-217"
+        ],
+        "gap": "None versus references.",
+        "strengths": "Per-session DNS-pinned loopback egress proxy (resolve once and connect to the pinned IP, closing the rebinding window), CDP Fetch guard, --disable-quic, per-hop redirect validation and egress receipts. Keep, and require equivalent proof before enabling remote providers."
+      },
+      "benefit": "Already delivered.",
+      "approach": "Keep; extend the same guarantee to any new backend.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Regression if new drivers bypass the proxy.",
+      "tier": "n/a",
+      "significance": 4,
+      "rationale": "Verevon is ahead; baseline rates SSRF/egress best-in-class.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-028",
+      "name": "Asynchronous browser-job protocol (submit, poll, delete, large-result offload)",
+      "description": "Browser scrapes run as async jobs against a browser fleet: submit typed request, receive result or job id, poll with an error budget, delete, offload large results to object storage.",
+      "prevalence": {
+        "sourcesWith": [
+          "firecrawl"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "firecrawl-engine-and-infra-011"
+      ],
+      "bestInClass": {
+        "source": "firecrawl",
+        "recordIds": [
+          "firecrawl-engine-and-infra-011"
+        ],
+        "why": "SRC q3: three zod response schemas (success, processing, failed), 500 ms polling, GCS offload and rehydration, instantReturn/priority/zeroDataRetention fields."
+      },
+      "mechanism": "POST /scrape -> {status: done|processing|failed, jobId?}; client polls GET /scrape/:id every 500 ms with a small error budget, then DELETE; results > N MB are written to object storage and referenced.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-quarry-048"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:398-530"
+        ],
+        "gap": "Scrape is synchronous with an SSE stream variant; crawl/batch are async jobs; browser rendering is in-process (no separate browser fleet protocol). Artifacts already offload html/markdown as FormatRef ids.",
+        "strengths": "FormatRef artifact offload already covers large results."
+      },
+      "benefit": "Only relevant once Quarry runs an owned browser fleet separate from quarry-edge.",
+      "approach": "Defer; if the planned owned browser fleet (SOVEREIGN_SCRAPING_RELIABILITY.md, DOC) is built, adopt submit/poll/delete with ZDR flag in the request.",
+      "effort": "M",
+      "dependencies": [
+        "Owned browser fleet"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "None now.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Internal protocol to a closed engine; no user-visible value today.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-029",
+      "name": "Console capture and page-level debugging aids",
+      "description": "Capture page console logs (ring buffer, filter by level), with frame-aware page APIs and drag-and-drop polyfills, as an observe/debug output.",
+      "prevalence": {
+        "sourcesWith": [
+          "aside"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "aside-agent-control-architecture-080"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-agent-control-architecture-080"
+        ],
+        "why": "SRC q3: console interceptor script with a 1,000-entry ring buffer drained by level/filter/limit, plus DataTransfer polyfill for drag."
+      },
+      "mechanism": "Inject a script patching console.* into a bounded ring buffer, or (better) subscribe to CDP Runtime.consoleAPICalled/Log.entryAdded per session into a bounded buffer; expose drain(level, filter, limit).",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-browser-app-030"
+        ],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:575",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1446-1610",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1890-2020"
+        ],
+        "gap": "No drag-and-drop helper action (minor).",
+        "strengths": "CDP-level collectors for console, log, request, response and lifecycle (no page-script patching, so pages cannot tamper) plus a DevTools drawer (console/dom/network/vision) in the UI: ahead of Aside's in-page interceptor. Keep collectors bounded and redacted."
+      },
+      "benefit": "Already delivered.",
+      "approach": "Keep; consider adding console summary to Model observations.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Console logs can contain PII; keep ZDR redaction.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon equal or ahead.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-030",
+      "name": "Per-session virtual clipboard",
+      "description": "Agent copy/paste uses a per-session virtual clipboard and restores page clipboards at turn end, never touching the user's OS clipboard.",
+      "prevalence": {
+        "sourcesWith": [
+          "codexbrowser"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "codexbrowser-automation-and-safety-062"
+      ],
+      "bestInClass": {
+        "source": "codexbrowser",
+        "recordIds": [
+          "codexbrowser-automation-and-safety-062"
+        ],
+        "why": "SRC q3: TabClipboardAPI with read/write and restorePageClipboards on turn end."
+      },
+      "mechanism": "Override navigator.clipboard in the page (or intercept via CDP) to a session-scoped store; paste action inserts from the store; restore on turn end.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src (grep clipboard: no hits)"
+        ],
+        "gap": "No clipboard support; Quarry's remote headless browser has no access to the user's OS clipboard, so the safety property holds by construction. A paste action for agents does not exist.",
+        "strengths": "Remote isolation means agent actions cannot read or overwrite the user's clipboard."
+      },
+      "benefit": "Low; only for sites that require paste events.",
+      "approach": "Skip unless a paste action is needed; then implement a session-scoped clipboard in Quarry.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "None.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "The safety goal is met by architecture; the feature itself is marginal.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t2-03-031",
+      "name": "Agent-controlled browser privacy settings (third-party cookies)",
+      "description": "The agent runtime can read and change global browser privacy settings such as third-party cookie blocking.",
+      "prevalence": {
+        "sourcesWith": [
+          "aside"
+        ],
+        "n": 1,
+        "of": 4,
+        "cls": "unique"
+      },
+      "members": [
+        "aside-agent-control-architecture-043"
+      ],
+      "bestInClass": {
+        "source": "aside",
+        "recordIds": [
+          "aside-agent-control-architecture-043"
+        ],
+        "why": "SRC q2, medium confidence: Aside.getThirdPartyCookies/setThirdPartyCookies via chrome.privacy; included only as a reference, not a recommended pattern."
+      },
+      "mechanism": "Bridge command calling chrome.privacy.websites.thirdPartyCookiesAllowed.set and reporting levelOfControl.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not present and should not be.",
+        "strengths": "Agents have no route to change browser privacy settings; session settings are fixed by Quarry policy. Keep it that way; if embedded sign-in needs third-party cookies, make it a per-profile policy set by a human."
+      },
+      "benefit": "None for Verevon.",
+      "approach": "Do not build as an agent capability.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Agent weakening privacy posture.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Policy-sensitive global setting; conflicts with 'Model proposes, Quarry executes or rejects'.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    }
+  ]
+}

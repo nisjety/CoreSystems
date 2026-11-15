@@ -1,0 +1,70 @@
+{
+ "applied": 96,
+ "failed": [],
+ "noPatch": [
+  {
+   "tag": "t1:faith#3 [minor] F-t1-019, Quick win paragraph (vs sec-70-roadmap.md section 9.2)",
+   "problem": "The F-t1-019 card keeps a 'Quick win' paragraph, while sec-70-roadmap.md section 9.2 lists F-t1-019 with F-t1-047, 056 and 057 under 'verification says these are not quick wins'. The two sections cont"
+  },
+  {
+   "tag": "t1:faith#15 [minor] rows F-t1-001, F-t1-003, F-t1-004 (Plane column)",
+   "problem": "Appendix B still shows the pre-verification plane text, which contradicts the corrected card headers. For F-t1-001 it shows a 'space:post/thread:append decision', although verification says reuse thre"
+  },
+  {
+   "tag": "t1:faith#16 [minor] F-t1-029, F-t1-066, F-t1-068, F-t1-069",
+   "problem": "The F-t1-005 card marks its demotion ('moved down from Priority by verification'), but the four entries demoted from Recommended to Nice to have carry no such marker in sec-50-n.md. A reader of sectio"
+  },
+  {
+   "tag": "t1:coherence#19 [minor] 2.2 and 2.4 room directory rows",
+   "problem": "Room directory and self-join appears twice (2.2 'Room visibility ... directory, browse and self-join', 3 of 5 Buzz, Teams, QM; 2.4 'Room directory: browse and join', 3 of 5), both pointing to F-t1-048"
+  },
+  {
+   "tag": "t1:coherence#26 [minor] 9.1 wave tables, Plane column (other rows)",
+   "problem": "Beyond F-t1-003 and F-t1-004, the Plane column differs from the card headers on about 20 rows, mostly by listing extra or missing planes: for example F-t1-027 (card: Model Plane; roadmap: Model, Contr"
+  },
+  {
+   "tag": "t1:coherence#27 [minor] 9.1 wave tables, ADR references in Depends on",
+   "problem": "ADR references in the Depends on column do not match the ADR item lists in 9.3 and _context.json: F-t1-017 (ADR 1), F-t1-004 and F-t1-009 (ADR 2), F-t1-023 (ADR 4 and ADR 10), F-t1-067 (ADR 7) and F-t"
+  },
+  {
+   "tag": "t2:faith#14 [minor] F-t2-029, Dependencies and risks (with sec-30-p1.md F-t2-004)",
+   "problem": "Circular sequencing. F-t2-004 defers the ZDR sampler to 'Phase 2 (M), once spans exist (F-t2-029)', and F-t2-029 says 'Spans wait for the ZDR sampler in F-t2-004'. Both come from verification, but rea"
+  },
+  {
+   "tag": "t2:faith#15 [minor] F-t2-009 heading",
+   "problem": "The card heading ('Route PDFs and Office files ...') differs from the verified title in _titles.json ('Route PDFs, Office files and images ...'). The card's wording is the more accurate one, since ima"
+  },
+  {
+   "tag": "t2:coherence#5 [major] Best reference column, rows F-t2-001 and F-t2-024",
+   "problem": "Appendix B (generated from _titles.json bestSource) still names the pre-verification best reference for two Priority items whose reference was corrected: F-t2-001 shows 'Codex in-app browser (hardened"
+  },
+  {
+   "tag": "t2:coherence#17 [minor] 1.4 note under the Priority table vs 9.4 dependency note 3",
+   "problem": "1.4 says F-t2-008, F-t2-025, F-t2-032 and F-t2-058 read their caps from F-t2-022; 9.4 note 3 says F-t2-022 supplies the claim channel for F-t2-008, F-t2-025, F-t2-046, F-t2-048 and F-t2-058. The two d"
+  },
+  {
+   "tag": "t2:coherence#18 [minor] 9.1 wave tables, Dependencies column for F-t2-025, F-t2-067, F-t2-072",
+   "problem": "Dependencies name a 'fail-open ADR', an 'identity ADR' and a 'Resource taxonomy ADR' that are not among the ten ADR topics in 1.5 and 9.3 (F-t2-025 sits under the policy ADR, F-t2-067 under the anti-b"
+  },
+  {
+   "tag": "t2:coherence#19 [minor] Framing sections generally (1.2, 1.3, 1.4, 8, 9)",
+   "problem": "Several acronyms are used before or without definition in the framing sections: SSRF (1.2, section 8), AX (headline 9), TTL (headline 10, 1.4), OTP (1.4 table, defined only in 7.1), LLM (1.2, 1.4), AI"
+  },
+  {
+   "tag": "t3:faith#10 [minor] F-t3-065, F-t3-066, F-t3-068, F-t3-016",
+   "problem": "Four Claude desktop claims are tagged [REA]. The underlying records are tagged SRC (bundle reading, not REA tool analysis), and these items' provenanceMix shows REA 0. The evidence is still shipped-ap"
+  },
+  {
+   "tag": "t3:faith#11 [minor] F-t3-060, Reference practice",
+   "problem": "Prevalence of persistent named agents differs between cards: F-t3-060 says 4 of 12, while F-t3-019 (sec-30-p3.md) says 5 of 12. Both figures come from different clusters (F-t3-060 prevalence vs R-t3-0"
+  },
+  {
+   "tag": "t3:coherence#22 [minor] 9.3 ADR candidates (and 1.4 'Decisions leadership must make' in sec-10-front.md)",
+   "problem": "Several items that 9.3 and _context.json adrNeeded place under an ADR carry no ADR, OD or owner-decision mention on their card or in their wave-table dependency column: F-t3-035 and F-t3-084 (sandbox "
+  }
+ ],
+ "bySeverity": {
+  "major": 23,
+  "minor": 88
+ }
+}

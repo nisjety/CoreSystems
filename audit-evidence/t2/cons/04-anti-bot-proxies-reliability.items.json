@@ -1,0 +1,644 @@
+{
+  "category": "Anti-bot, proxies & reliability",
+  "items": [
+    {
+      "id": "R-t2-04-01",
+      "title": "Enforce robots.txt on crawl, batch and autonomous fetches, with an audited override",
+      "summary": "Call the existing RobotsCache from the page-fetch preflight so crawl, batch and API scrape skip disallowed URLs by default, and apply the same check to fetches the Model initiates through the agent browser. Record each skipped URL on the job using the already-defined CrawlDenialReason::RobotsDisallowed, and make 'ignore robots' (including the fast preset's RobotsIgnore) a Control Plane entitlement that emits an audit event.",
+      "whyItMatters": "A governed-web product that lets an AI crawl without honouring robots.txt is a compliance and reputational exposure that enterprise buyers check first. Both scraping benchmarks (Firecrawl, Apify) enforce or offer it, and Verevon's own GAP.md tells readers it is closed while the code says otherwise.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (SRC)",
+        "others": [
+          "Apify (DOC): opt-in flag that also discovers sitemaps"
+        ],
+        "prevalence": "2 of 4 sources (Firecrawl, Apify); table-stakes for the scraping half",
+        "mechanism": "Before enqueue/fetch, get robots.txt for the origin from a cache (TTL about 1 day), fetching it through the normal engine chain with a short timeout. Evaluate it for the product user agent. If disallowed, skip the URL and record {url, reason: robots} in a per-job blocked set that the errors endpoint returns. Crawl enforces by default and scrape is opt-in. Override flags (ignore robots, custom UA) are team entitlements checked at request time and forbidden under a compliance profile. Fetch errors fail open."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:175",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/robots_cache.rs:49",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/robots.rs:25-98",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:60-78",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs:16",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs:238-300",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:69",
+          "apps/Ingestion Plane/Quarry-v2/docs/GAP.md:178"
+        ],
+        "gap": "Parser, RobotsCache and a typed RobotsDisallowed denial reason all exist, but the only consumer is the /v1/map URL filter (map_routes.rs:175). Scrape, crawl and batch never call it. CrawlFrontier.enqueue filters on depth, scope and patterns but never emits RobotsDisallowed. RunPolicy.discovery.respect_robots (default true) only feeds the determinism fingerprint, quarry-core RunPolicy.robots (Respect/Strict/Ignore) is not enforced anywhere, and the control-plane 'fast' preset ships RobotsIgnore. No Go orchestrator robots check or check_robots endpoint exists in code, although GAP.md rows 178, 202, 292 and 431 claim it is closed."
+      },
+      "approach": "Ingestion Plane (Quarry-v2). (1) Add an async robots preflight next to SecurityEngine.preflight / validate_navigation: resolve the product UA token (see R-t2-04-09), read robots from RobotsCache (about 24 h TTL, short fetch timeout) fetched through the same SSRF-guarded, DNS-pinned driver chain, evaluate with quarry-transform robots.rs. (2) Wherever crawl dispatch lives (Go CrawlJobWF today, Rust crawl workers per GAP.md Phase 5), check before dispatch and push (url, RobotsDisallowed) into CrawlFrontier.denials; surface the blocked list on crawl/batch status. (3) For agent runs, enforce on Model-proposed navigations under an org default, while human-driven manual browsing in the Verevon browser pane stays exempt as a user agent (policy decision to confirm). (4) Treat 4xx on /robots.txt as allow-all and 5xx or unreachable as disallow-all with a bounded retry, as RFC 9309 specifies (INF), rather than a blanket fail-open; make it configurable. (5) Control Plane: entitlement robots.ignore plus an audit event; the Model can never request a bypass. Change the fast preset to require it. (6) Fix the GAP.md rows that wrongly say closed.",
+      "effort": "M",
+      "dependencies": [
+        "RobotsCache and RobotsTxt parser (exist)",
+        "Single product user-agent token (R-t2-04-09)",
+        "Crawl dispatch path (Go CrawlJobWF or Rust crawl workers) to host the preflight call",
+        "Control Plane entitlements and audit events (shared with R-t2-04-05)"
+      ],
+      "planeOwner": "Ingestion Plane (Quarry-v2); Control Plane for the override entitlement and audit",
+      "risks": "Agent runs will be blocked more often on sites that disallow all bots, so the user-facing message must be clear (reuse the R-t2-04-03 state). Whether manual browsing is exempt is a product decision. Check that ReqwestRobotsFetcher goes through the DNS-pinned SSRF guard and sends the product UA (not verified).",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "GAP.md rows 178, 202, 292, 431 mark it closed, but the code contradicts them (no check_robots endpoint, no Go robots check); only GAP.md Phase 5 (crawl workers to Rust) touches the area"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-04-013"
+      ]
+    },
+    {
+      "id": "R-t2-04-02",
+      "title": "Close the gateway search-cache ZDR and tenant-scope hole with one shared cache-admission rule",
+      "summary": "In the verevonv3 gateway, make the 4 h search-web cache respect Zero-Data-Retention and org scope: reuse the CacheAdmission::resolve logic that scrape-preview already uses (ZDR header, body flag or org posture via crate::zdr) and put the org id in the cache key. Then extract one shared should_cache() rule (no ZDR, no credentialed headers/actions/profiles, no partial or low-fidelity output) that every cache writer calls: gateway search, scrape-preview, quarry-edge and the future URL cache.",
+      "whyItMatters": "This is a direct breach of the ZDR-must-propagate rule: a ZDR org's search queries and answers are written to shared Dragonfly for 4 h and can be served to any later caller with the same query. It is also a small, cheap fix, and it is the prerequisite for any URL-keyed cache (R-t2-04-10).",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (SRC)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Firecrawl) has an explicit admission function; unique as a function, but ZDR propagation is a Verevon architecture rule, so it is required regardless",
+        "mechanism": "One pure function shouldCache(request, result) is evaluated before every cache write. It returns false for opt-out, ZDR, any credential-bearing input (custom headers, actions, profile or session), custom screenshot sizes and partial or low-fidelity engine output (for example truncated or unparsed PDFs)."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:218",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:286",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/cache.rs:194",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs:44-90",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:92-118",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:213-250",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:430-436"
+        ],
+        "gap": "search.rs has no ZDR reference at all (checked). The search-web key is a hash of query, limit, include_answer and filters, with no org or user component, and results plus the synthesized answer are stored for 4 h regardless of ZDR. scrape-preview does apply ZDR through CacheAdmission, but its key is the URL alone (no org, no request variant), and CacheAdmission is private to that file, so there is no single shared rule. Quarry edge has its own should_read/should_write in routes.rs. Whether the Quarry search router mixes any org-scoped sources into results (which would turn this from a retention breach into a cross-tenant leak) was not checked."
+      },
+      "approach": "Frontend Plane gateway first (S): move CacheAdmission into a shared module (for example next to zdr.rs), call it from search_web before lookup and store, and include the authorized org id in the key. Extend the scrape-preview key with the request variant (formats, headers, actions) or refuse to cache when any are present. Ingestion Plane second: add one should_cache() in quarry-core, used by quarry-edge, the search router and the future URL cache, excluding ZDR, credentialed inputs, actions/profiles and PII-redacted raw bodies. Add a test that a ZDR org's search leaves no gateway cache entry.",
+      "effort": "S",
+      "dependencies": [
+        "crate::zdr::{request_zdr, org_zdr_enabled} (exist)",
+        "Authorized org id from AuthenticatedUser / upstream::authorized_org_id"
+      ],
+      "planeOwner": "Frontend Plane (gateway BFF) first; Ingestion Plane (quarry-core) for the shared function",
+      "risks": "Lower hit rate for repeated queries across orgs, which is acceptable. The search path should fail closed on a ZDR lookup failure, as zdr.rs already does.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-04-021"
+      ]
+    },
+    {
+      "id": "R-t2-04-03",
+      "title": "Honest bot-block handling: closed block taxonomy, non-signals, one recovery, and no stealth code",
+      "summary": "Split outcomes into strong bot-block signals (captcha, WAF interstitial, challenge loop) and non-signals (bare 403/429, timeouts, sign-in or paywall pages, region blocks). Add a closed BlockReason enum with hostname-only aggregated telemetry, give the browser planner an explicit rule (at most one low-risk recovery such as a short wait and one reload, then stop, tell the user and switch source), and render a 'site blocked automated access' state with take-over and try-another-source actions in the Verevon browser. Delete the unused stealth scripts and the vestigial stealth_level plumbing.",
+      "whyItMatters": "Users and agents get a truthful, consistent result when a site blocks automation, and enterprise buyers get a defensible no-evasion posture that fits 'Model proposes, Quarry executes or rejects'. Hostname-only counters are ZDR-safe and can feed the later domain registry. The dead stealth code currently contradicts the stance.",
+      "referenceBestPractice": {
+        "bestSource": "Codex in-app browser (SRC)",
+        "others": [
+          "Apify academy (DOC): detection taxonomy, but it recommends evasion, so only the taxonomy is useful"
+        ],
+        "prevalence": "2 of 4 sources (Codex, Apify); differentiator, and the one that matches Verevon's governance stance",
+        "mechanism": "A classifier reads site-served evidence (URL, DOM markers of Cloudflare/Akamai/hCaptcha/Turnstile, a fresh screenshot) and outputs {kind, confidence, evidence}. Strong signals versus non-signals are defined explicitly: bare 403/429, timeouts, sign-in pages, paywalls and region blocks are not bot detection. At most one recovery (short wait, single reload), no fingerprint or network changes, then stop and tell the user. A closed-reason report (captcha_failed, access_denied, challenge_loop, unexpected_bot_error) records only the hostname."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:236-257",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-35",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:158-180",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/host_scheduler.rs:36-47",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:52",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:57-90",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:287"
+        ],
+        "gap": "Detection exists: ChallengeKind (Captcha/Waf/Login/Consent/RateLimit/AccessDenied/Unknown), ChallengeSignal.requires_escalation defaulting to true, ErrorCode::ChallengeDetected. Missing: explicit non-signal rules (the host scheduler lumps 401/403/451/999/CDN-challenge into one Blocked bucket), a closed report taxonomy with hostname-only telemetry, planner text for the one-recovery rule, and a user-facing blocked state. stealth.rs (STEALTH_SCRIPT and an auto-accept CONSENT_DISMISS_SCRIPT) has no caller outside its own file, and DriverPlan.stealth_level is set (0/1/2) but never read outside driver_plan.rs, so the code contradicts the stance and one baseline narrative wrongly describes it as active."
+      },
+      "approach": "Ingestion Plane: add a BlockReason closed enum (strong: captcha, waf_challenge, challenge_loop; non-signal reasons stay as rate_limited, auth_required, paywall, geo_blocked), reusing the taxonomies already proposed in SOVEREIGN_SCRAPING_RELIABILITY.md section 4 and the improvements doc section 39, plus a hostname-only counter (no URL, path or content; in-memory count only for ZDR orgs). Split the host scheduler's Blocked bucket so a bare 403 is not auto-classified as a bot block. Model Plane: add the strong-signal / non-signal and one-recovery rule to the browser planner instructions, mapped onto ChallengeSignal (locate the planner prompt in the Model Plane first). Frontend Plane: show a 'Site blocked automated access' state in the browser pane with 'Take over' and 'Try another source' actions. Delete stealth.rs and stealth_level. If a consent helper is ever wired it should default to declining non-essential cookies or asking the user, never accepting on their behalf (INF).",
+      "effort": "S",
+      "dependencies": [
+        "ChallengeSignal and ErrorCode::ChallengeDetected (shipped)",
+        "Model Plane browser planner prompts",
+        "Verevon browser-pane UI state"
+      ],
+      "planeOwner": "Ingestion Plane (taxonomy, telemetry, dead-code removal); Model Plane (planner rule); Frontend Plane (UI state)",
+      "risks": "Misreading a transient 403 as a bot block could end runs early, so keep confidence thresholds and the single-retry rule. The later egress-tier work (R-t2-04-07) must not use proxy rotation to escape a strong signal.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: docs/SOVEREIGN_SCRAPING_RELIABILITY.md section 4 plans a challenge classifier with reasons (bot_wall, captcha, auth_required, paywall, geo_blocked, robots_disallowed) and QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md section 39 plans an acquisition-failure taxonomy; neither specifies non-signals, the one-recovery rule, hostname-only telemetry or the UI state"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-04-005"
+      ]
+    },
+    {
+      "id": "R-t2-04-04",
+      "title": "Per-operation browser deadlines, bounded tab attach and retry-once on destroyed context",
+      "summary": "Give every CDP operation in quarry-browser an explicit deadline from one constants table (command, page-ready, capture, accessibility quiet window, tab attach), wrapped by a single helper that returns a typed Timeout with the operation name. Add one retry for lightweight calls that fail with a destroyed execution context (re-resolving the context first), and never replay coordinate actions after state changed. Make the table overridable per run policy.",
+      "whyItMatters": "Hung or flaky browser steps are the first thing users watching the live view and agents will notice, and they waste Model steps on transport errors. The fix is small and has a clear reference design.",
+      "referenceBestPractice": {
+        "bestSource": "Codex in-app browser (SRC)",
+        "others": [
+          "Firecrawl AbortManager (SRC) and Crawlee handler timeout (DOC) bound whole requests rather than each operation"
+        ],
+        "prevalence": "1 of 4 sources has a per-operation table (Codex); every reference bounds work in some form, so the capability is common even though the table is unique",
+        "mechanism": "A constants table of deadlines wrapped around every CDP call (about 20 s per command, 15 s page-ready, 1.5 s cursor, 5 s capture, 750 ms accessibility quiet cap), with debugger leases cleaned up on timeout. A pending-open map resolves when a tab attaches or rejects after a 15 s handshake with distinct failure causes. DOM operations cache an isolated world per (target, frame, loader); on a context-destroyed error the cache is dropped and the call is retried once. Semantic errors are never retried."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:76-77",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:226-262",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:685",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2116",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-490"
+        ],
+        "gap": "Only download begin/complete (10 s / 30 s), snapshot capture (5 s) and a few bounded waits carry explicit timeouts. The BrowserConfig builder sets no request or launch timeout, so CDP calls rely on the chromiumoxide library default (not verified). Agent runs are bounded only by step and runtime budgets (max_steps 12, max_runtime_s 120 in the gateway request). No documented retry-once rule exists for destroyed contexts or stale targets, although stale nodes already fail instead of being rebound (chromiumoxide.rs:2116)."
+      },
+      "approach": "Ingestion Plane (quarry-browser): add a deadlines module and a cdp_call(op, fut) helper using tokio::time::timeout, returning ErrorCode::Timeout with details {op, ms}; wrap navigation, evaluate, screenshot, accessibility snapshot, input dispatch and tab/target attach. Add a retry_once_on_context_destroyed helper for DOM evaluation and snapshot calls only. Surface stale targets as TargetRepairRequired where appropriate and count timeouts in metrics. Calibrate values against Verevon's own latency histograms instead of copying Codex's numbers, and make them overridable through the run constraints. Model Plane: add the planner rule 'retry a lightweight call once after a short wait; never replay coordinates after the page changed'.",
+      "effort": "S",
+      "dependencies": [
+        "quarry-browser chromiumoxide driver",
+        "Optional: R-t2-04-06 typed sub-codes for the timeout detail"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-browser); Model Plane for the planner rule",
+      "risks": "Deadlines that are too tight cause false failures on slow pages, so make them configurable and log which operation timed out.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-04-009"
+      ]
+    },
+    {
+      "id": "R-t2-04-05",
+      "title": "Org-pinned compliance policy that requests, Spaces and the Model can only tighten",
+      "summary": "Make RunPolicy real. Define one resolved fetch/browse policy per org (robots mode, maximum proxy tier, strip credentials/cookies/custom headers, no login or form-write actions for autonomous runs, domain allow/deny, ZDR) owned by Control Plane and delivered to Quarry as a floor in the service-token claims, the same way the ZDR floor already works. Quarry edge rejects requests that ask for more, and PageRunner / agent step execution re-resolves it per URL and downgrades as a backstop, emitting an audit event for each violation.",
+      "whyItMatters": "It is the direct expression of the architecture rules 'Space access never widens an owner-plane ACL' and 'the Model proposes, Quarry executes or rejects'. An org admin pins a compliance tier that no user, Space or Model can widen, which is a key enterprise differentiator and the foundation for the robots override, the proxy-tier cap and the no-egress mode.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl Safe Mode (SRC)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Firecrawl); unique, but it maps onto Verevon's own governance rules",
+        "mechanism": "ResolvedPolicy = merge(orgPolicy, defaults) is computed in the API layer, which rejects requests that ask for forbidden options (403 SAFE_MODE_BLOCKED), and is recomputed in the worker for every URL including crawl children as a backstop that downgrades instead of trusting the request. It strips Authorization/Cookie/Proxy-Authorization, write/press/executeJavascript actions, profiles and URL userinfo, blocks browser endpoints, and bypasses allow-listed domains. All violations produce audit events."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:60-78",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/policy.rs:6-17",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:414-417",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:461",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1435-1441",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2296-2304",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:55-75"
+        ],
+        "gap": "There are two RunPolicy types (quarry-core, mirrored in Go, and quarry-runtime, a determinism/fingerprint bag) and the edge hard-wires quarry_runtime::RunPolicy::default() in its handlers, so no org or request policy is applied. Sub-policies such as respect_robots are fingerprinted, not enforced. Control-plane presets (fast, polite, stealth, deterministic) are not consumed by the edge. Partial equivalents do exist: ZDR floor in token claims (raised, never lowered), privacy processor gating, per-run allowed_domains, and Model Plane human-in-the-loop gates for login and checkout. There is no org-pinned policy that strips credentials or actions."
+      },
+      "approach": "Control Plane: org policy record, entitlements (robots.ignore, proxy.enhanced, and so on) and audit events. Gateway shared::quarry_token adds a compact policy_floor claim beside the ZDR floor. Ingestion Plane: one resolved-policy type in quarry-core that merges the org floor over the request (replace the hard-wired defaults at routes.rs:461 and similar, and reconcile the two RunPolicy types). Enforce at the edge by rejecting with a typed sub-code, and again in PageRunner and agent step execution per URL (including crawl children and redirects), downgrading rather than trusting the request. Remove or entitlement-gate presets that contradict governance (fast = RobotsIgnore, stealth). Model Plane: pass the resolved policy in the run grant so the planner does not propose forbidden actions. Scope it to autonomous and agent actions and credential use; the human user's own manual browsing in the pane is not blocked, unlike Firecrawl's blanket 'no interactive sessions'.",
+      "effort": "L",
+      "dependencies": [
+        "R-t2-04-01 robots enforcement",
+        "R-t2-04-07 proxy-tier cap",
+        "Control Plane policy record, entitlements and audit",
+        "Quarry service-token claims extension"
+      ],
+      "planeOwner": "Control Plane (policy, entitlements, audit) plus Ingestion Plane (enforcement); Model Plane consumes the resolved policy",
+      "risks": "Policy resolved in two places can drift, so share one crate and test both paths. Overly strict defaults can break legitimate login-based research. A Space must never be able to widen the org policy (ownership-matrix rule). Ship a thin first slice (claims floor, robots, proxy-tier cap, credential stripping) together with R-t2-04-01.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "docs/POLICY.md describes RunPolicy as a determinism and fetch-pinning bag, not an org-pinned governance floor"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-04-018"
+      ]
+    },
+    {
+      "id": "R-t2-04-06",
+      "title": "Fetch-path reliability: one deadline budget, wired retries and typed failure sub-codes",
+      "summary": "Add timeout_ms to scrape and agent requests and split it across the FallbackDriver waterfall with child cancellation tokens (reserve a minimum slice for the final browser tier, map client disconnect to the root token). Wire the already-written execute_with_retry into PageRunner using ErrorCode::retryable(), with maxRetries on the policy and no retries for ChallengeDetected or SecurityBlocked. Add a sub-code and detail field on QuarryError (DNS, TLS, all drivers failed, robots-blocked, and a processing-continues detail for long jobs), versioned across Temporal, webhooks and the gateway.",
+      "whyItMatters": "Escalation through the static, TLS and browser drivers should finish inside one user-visible deadline instead of timing out with nothing. Transient failures should be retried the same way on scrape, crawl and agent paths. The Model and UI need to know why a fetch failed so they can switch source, wait or ask the user, instead of seeing a generic DriverFailed.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (SRC) for abort tiers and the transportable error vocabulary; Apify Crawlee (DOC) for the retry contract",
+        "others": [
+          "Apify Crawlee (DOC): maxRequestRetries, errorHandler before each retry, failedRequestHandler",
+          "Firecrawl robustFetch (SRC): shared internal client with retry-on-status and cooldown"
+        ],
+        "prevalence": "Retries: 2 of 4 sources (Apify, Firecrawl), table-stakes. Deadline budgeting and transportable error codes: 1 of 4 (Firecrawl), unique",
+        "mechanism": "Compose cancellation tokens: request token (client disconnect) to scrape deadline token to per-engine child tokens, so an engine timeout cancels only that engine and the waterfall continues, while a scrape timeout cancels everything. Queue waits get a fraction of the budget (2/3), waitFor is at most half the timeout, and defaults are computed from the requested features. One ErrorCode union with about 55 codes extends a transportable base with serialize/deserialize so code and details cross queues and webhooks unchanged; long jobs return a processing_continues detail with estimated remaining time. Retry: count per request, an error hook may change the request, then requeue with backoff until the retry cap, then a failure hook."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/retry.rs:15-60",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:164",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:56-260",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:94-104",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-60",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:4-51",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:287"
+        ],
+        "gap": "execute_with_retry is exported but called only from its own tests; Temporal activity retries (5 attempts, exponential) and the FallbackDriver chain are the only live retry paths. Per the baseline, cancellation is a flat token, /v1/scrape exposes no request timeout and the waterfall has no per-driver budget (not re-checked here). quarry-core ErrorCode has 17 coarse codes with retryable() and http_status(); it has no fetch-level detail (DNS, TLS, all drivers failed, robots-blocked, cache miss) and no processing-continues contract, although api_error carries retry_after_seconds. Strict TLS everywhere is already the safe default (no accept-invalid-certs found)."
+      },
+      "approach": "Ingestion Plane. (a) Deadlines: add timeout_ms to scrape and agent-run requests with defaults computed in one function from the requested features; build a child CancellationToken per driver attempt with remaining-budget accounting in FallbackDriver and a reserved minimum slice for the last driver; map axum client disconnect to the root token; keep strict TLS. (b) Retries: call execute_with_retry from PageRunner, take the cap from RunPolicy.retry (exists in the quarry-core contract), skip ChallengeDetected, SecurityBlocked and robots denials, and consult the AIMD host scheduler so retries cannot storm a blocked host. Share one reqwest retry middleware for edge-to-control and Model Plane calls. (c) Errors: add a sub_code plus details to QuarryError (for example DriverFailed{dns|tls|connect|all_drivers_failed}, Forbidden{robots|policy}) rather than exploding the top-level enum, as the improvements doc section 39 also advises; add a processing_continues detail for long jobs; propagate through Temporal activities, webhooks, the gateway's recoverable/unrecoverable classification and Model Plane tool results; version the error schema.",
+      "effort": "M",
+      "dependencies": [
+        "FallbackDriver and PageRunner",
+        "quarry-core error.rs and api_error.rs",
+        "R-t2-04-01 (robots sub-code)",
+        "R-t2-04-03 (BlockReason maps onto the same detail field)"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-runtime, quarry-core, orchestrator); Frontend Plane gateway for classification",
+      "risks": "Budget splitting can starve the browser tier, hence the reserved slice. Retry storms against blocked hosts. Contract churn for gateway and Model Plane clients, hence a versioned schema.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Typed failure classes are planned in QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md section 39 (extend the existing ErrorCode and CrawlDenialReason enums). Deadline budgeting and wiring retry.rs are not planned in the docs reviewed"
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-04-010",
+        "C-t2-04-011",
+        "C-t2-04-012"
+      ]
+    },
+    {
+      "id": "R-t2-04-07",
+      "title": "Policy-gated egress tiers and country targeting with auto-escalation, then session health",
+      "summary": "Extend ProxyPool and EgressBroker with a vendor-neutral tier (direct/first-party, basic datacenter, enhanced residential or mobile) and an optional country, exposed as proxy: auto|basic|enhanced and country on scrape and agent runs. The broker plans basic first and escalates to enhanced only on rate-limit, transport or region-block outcomes when org policy allows it. The Model never picks the proxy. In a second phase turn the in-memory (host, proxy) health into a SessionPool that scores identities (proxy, cookie jar, fingerprint) and retires bad ones.",
+      "whyItMatters": "Higher success on geo-restricted and rate-limited public sites for both user browsing and agent research, and localized results for market-research use cases, without a per-request choice by the Model. Verevon currently has only a flat proxy list, no geo control in the gateway or UI, and no identity health beyond a 60 s cooldown.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (SRC) for the user contract; Apify (DOC) for the knob set and Crawlee SessionPool",
+        "others": [
+          "Apify proxy groups, country incl. US states, sticky sessions (DOC)",
+          "Crawlee SessionPool markGood/markBad/retire, rotations not counted against retries, state persisted (DOC)"
+        ],
+        "prevalence": "Tiers and geo proxies: 2 of 4 sources (Firecrawl, Apify), table-stakes for scrapers. Session health: 1 of 4 (Apify), unique",
+        "mechanism": "Request field proxy: basic|enhanced|auto (default auto). Attempt 1 uses the basic pool. On a block signal (401/403/429 or a challenge hint) a typed 'needs stronger egress' error is caught by the waterfall, which retries once on the enhanced pool inside the same retry budget, with the timeout raised for stronger tiers. Pool choice is encoded as (group, country, sticky session id). Policy can pin the maximum tier per org (Safe Mode forces basic). A SessionPool holds N sessions (proxy session id, cookie jar, score): markGood decays the score, markBad raises it, a blocked status retires the session, and state persists across restarts."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/proxy_pool.rs:1-40",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/egress_broker.rs:1-30",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/egress_broker.rs:50-70",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/proxy_affinity.rs",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:37-70",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:95-108",
+          "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:106-141"
+        ],
+        "gap": "The proxy pool is a flat env list (QUARRY_PROXY_POOL) with sticky (org, host) hashing, processor-approval gating, per-run affinity and a DNS-pinned browser egress proxy, which is richer than either reference at the plumbing level. Missing: tier or class, country, residential or mobile integration, any request-level proxy field, tier escalation, and any proxy or geo control in the gateway or UI. EgressBroker keeps in-memory (host, proxy) health with a 60 s block cooldown and 3 attempts, but there is no session object binding proxy, cookie jar and fingerprint, no retirement or score decay, and no persistence across instances."
+      },
+      "approach": "Ingestion Plane. Phase 1: add ProxyTier plus country tags to ProxyPool entries; add proxy and country fields to /v1/scrape, crawl and agent-run requests; EgressBroker plans basic first and escalates to enhanced only for 429, repeated transport failure or an explicit region-block signal, and only when the org policy floor (R-t2-04-05) allows enhanced; never escalate to get past a strong bot signal (R-t2-04-03, INF adaptation of Firecrawl's 401/403/429 trigger). Record tier and country in the existing redacted egress receipts and in usage so Control Plane can meter per-GB cost and entitlement. Every vendor stays a registered third-party processor under the PrivacyPolicy gate, and ZDR orgs may only use processors with ZDR terms. Phase 2: promote broker health to a SessionPool keyed (org, host-group) with EWMA error scores and retirement; keep it in memory for ZDR orgs and use Redis with TTL otherwise; keep agent-run affinity sticky and, when blocked mid-run, propose a choice to the user instead of silently rotating mid-login. Follow the egress-tier and session-health phases already drafted in SOVEREIGN_SCRAPING_RELIABILITY.md.",
+      "effort": "L",
+      "dependencies": [
+        "Processor registry / PrivacyPolicy gate (shipped)",
+        "Control Plane entitlements and cost metering",
+        "R-t2-04-05 org policy floor (tier cap)",
+        "R-t2-04-03 block taxonomy (escalation triggers)",
+        "Redis for phase 2"
+      ],
+      "planeOwner": "Ingestion Plane; Control Plane for entitlement and cost metering",
+      "risks": "Residential proxies carry consent and sourcing risk and conflict with the explicit anti-evasion stance, so keep them off by default and use them for geo and rate-limit resilience, not to defeat a deliberate block. Cost per GB. Rotating identities during an authenticated run breaks sessions.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 4,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "docs/SOVEREIGN_SCRAPING_RELIABILITY.md: Phase 2 (EgressBroker v2: egress tiers, per-domain health scoring, cooldown and quarantine, BYO proxy pools) and Phase 3 (session health states, encrypted profile TTLs, ZDR persistence tests); status 'proposed backlog feature'"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-04-002",
+        "C-t2-04-004"
+      ]
+    },
+    {
+      "id": "R-t2-04-08",
+      "title": "URL and domain reputation gate before fetch and navigation",
+      "summary": "Add a ReputationProvider trait in quarry-security that SecurityEngine.preflight and the agent validate_navigation hook call before any fetch, redirect or discovered crawl link. Start with a local hash-prefix list (Web Risk Update-style) so full URLs never leave the platform, add per-org modes (off, normal, customer secure-web-gateway categories such as Zscaler) in Control Plane, and never persist verdicts for ZDR orgs.",
+      "whyItMatters": "Autonomous browsing can reach phishing or malware pages, and enterprise customers want their own secure-web-gateway policy applied to Verevon's agent traffic. validate_navigation already gates every Model-proposed navigation, so the hook exists and the feature is a strong enterprise-sales point.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (SRC)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Firecrawl); unique",
+        "mechanism": "checkUrl(url, orgConfig): local allow/deny lists and blocked TLDs, then optional customer SWG category rules synced on an interval, then a reputation provider (Google Web Risk hash-prefix database or a batched Zscaler lookup) with a risk threshold and an explicit fail-open or fail-closed policy. It runs before the first engine and on every redirect and discovered link. Modes are off, manual, normal, zscaler. Verdicts are cached only within the request, which respects the ZDR boundary, and a per-request override is allowed only if org config permits."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-security/src/heur.rs:15",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:109",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2307",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3092"
+        ],
+        "gap": "quarry-security has SSRF heuristics, URL-signature analysis and blocklists but no reputation provider and no customer SWG integration (no WebRisk or reputation code found). The right hook, validate_navigation, is already called for Model-proposed navigation and recovery actions."
+      },
+      "approach": "Ingestion Plane: ReputationProvider trait in quarry-security, called from SecurityEngine.preflight, validate_navigation, redirect handling and crawl-link discovery. Implement a local hash-prefix provider first (periodic list sync, local match, full-URL lookup only if a prefix matches and the org mode allows it), then an optional Zscaler adapter. Per-org mode and failure policy live in Control Plane and arrive through the policy floor (R-t2-04-05). Return ErrorCode::SecurityBlocked with a reputation sub-code and show a clear block message in the browser pane. No verdict persistence for ZDR orgs.",
+      "effort": "M",
+      "dependencies": [
+        "SecurityEngine.preflight and validate_navigation (exist)",
+        "Control Plane org config (R-t2-04-05)"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-security); Control Plane for org mode",
+      "risks": "Lookup APIs that receive full URLs leak user intent (ZDR), hence the local-prefix design. False positives block legitimate research, so offer an allow-list and clear messages.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-04-017"
+      ]
+    },
+    {
+      "id": "R-t2-04-09",
+      "title": "One honest product identity: unified user-agent and optional signed agent traffic",
+      "summary": "Step 1 (S): replace the four inconsistent Quarry user-agent strings with one product UA, publish a matching bot-information page, and use the same token for robots matching. Step 2 (M): add optional Web Bot Auth style request signing (Ed25519 key per deployment, Signature-Agent header) for agent-originated traffic on the static, TLS and browser-egress paths, with the key held in Control Plane. Human-driven browsing stays unsigned unless policy says otherwise.",
+      "whyItMatters": "Sites that allow verified agents will let governed Verevon traffic through instead of blocking it, which is the compliant alternative to stealth and fits the governance story. The inconsistent UAs (one still pointing at an older domain) also undermine robots matching and site-owner trust.",
+      "referenceBestPractice": {
+        "bestSource": "Codex in-app browser (SRC, medium confidence)",
+        "others": [
+          "Industry analogue: Web Bot Auth, HTTP Message Signatures with a published key directory (INF, not a studied source)"
+        ],
+        "prevalence": "1 of 4 sources (Codex); unique",
+        "mechanism": "A feature gate requires an identifying agent header on every agent-originated request from the extension backend, and clients without support get an 'update required' refusal. Web Bot Auth extends this by signing requests so sites and WAFs can verify the agent against a key directory."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs:301-303",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1263",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:23",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:716",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:37-70"
+        ],
+        "gap": "HTTP drivers do identify themselves, but inconsistently: 'Quarry/2.0 (+https://triodelab.com/quarry)' as the default (config.rs, answer.rs), 'QuarryBot/1.0 (+https://verevon.io/bot)' for HTTP/3 (main.rs:1263) and bare 'QuarryBot' for /v1/map (map_routes.rs:23). TLS-impersonating and browser drivers present a Chrome identity; the browser UA path was not verified. There is no signed identity, no published key directory and no agent marker on browser traffic."
+      },
+      "approach": "Ingestion Plane: define one product UA constant and bot-info URL in quarry-core and use it everywhere, including robots matching (R-t2-04-01) and map. Add an optional signer (Ed25519, Signature-Agent, covered components per the draft standard) applied in the static and TLS drivers and in the browser egress proxy for agent-run traffic only; mark the policy flag in the run policy. Control Plane holds and rotates the key and serves the key directory. Decide explicitly how the browser driver's UA should look when it presents a Chrome identity, so the product's stance on honest identification is consistent.",
+      "effort": "M",
+      "dependencies": [
+        "Browser egress proxy (shipped)",
+        "Key management in Control Plane",
+        "R-t2-04-01 robots enforcement (UA token)"
+      ],
+      "planeOwner": "Ingestion Plane; Control Plane for key custody",
+      "risks": "Self-identifying makes some sites block more, and the standard is still emerging. Signing must not apply to user-driven browsing by default.",
+      "tier": "recommended",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-04-007"
+      ]
+    },
+    {
+      "id": "R-t2-04-10",
+      "title": "Org-scoped URL cache with explicit freshness, and a cache-only no-egress mode",
+      "summary": "Add a URL plus variant keyed cache in Ingestion Plane over the existing artifact storage (Postgres metadata, Redis hot path), keyed by org, with maxAge/minAge/store flags on scrape and agent fetches, cacheState and cachedAt in the output metadata, and negative caching. ZDR orgs bypass it entirely. In a second phase add a no_egress policy flag that pins the driver plan to cache and Data Plane artifacts and returns a typed miss without logging the URL.",
+      "whyItMatters": "Repeated agent research becomes cheaper and faster, fewer requests hit target sites (which also reduces blocks), and the Model gets explicit freshness it can reason about. The no-egress mode gives regulated or sovereign workspaces a hard guarantee of no outbound traffic.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (SRC)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Firecrawl); unique, with lockdown as a further unique mode",
+        "mechanism": "Key = hash(normalised URL) plus variant (mobile, country, stealth, blockAds, wait, screenshot options). Raw body goes to object storage, a metadata row to an index table, hot entries to a Redis LRU that fails fast. The read path resolves maxAge (explicit, then dynamic per domain via a 200 ms race, then a 2-day default), queries the newest entry in the window and returns cacheState hit/miss plus cachedAt; negative windows skip the DB on repeat misses and entries whose body is missing are deleted. Lockdown rewrites the engine plan to index-only, disables robots/sitemap/redirect fetching, forces ZDR and returns a typed cache-miss error that does not log the URL."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs:1-7",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:430-436",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:480",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:218",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:286",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:92-118"
+        ],
+        "gap": "The Quarry cache is keyed by content fingerprint and is read only when the caller sends prev_fingerprint (and never under ZDR), so there is no URL or maxAge cache, no cacheState metadata, no negative caching and no cache-only mode; SWR claimed in PRESETS.md is absent. The gateway has separate 4 h search and scrape-preview caches (see R-t2-04-02). Artifact storage and Data Plane document storage already exist as bodies to serve from."
+      },
+      "approach": "Ingestion Plane: after R-t2-04-02 lands the shared should_cache(), build the URL index with org-scoped keys, store bodies in the existing artifact store, hot path in Redis, flags maxAge/minAge/store on scrape and agent observation fetches, cacheState and cachedAt in NormalizedOutput, negative cache for failures, self-healing when a body is missing. Never cache credentialed, action or profile requests, or anything produced under ZDR. Phase 2: no_egress policy flag (carried by the org policy floor, R-t2-04-05) that pins DriverPlan to a cache/Data-Plane-artifact driver, calling Data Plane APIs rather than its database, and returns a typed miss error without logging the URL.",
+      "effort": "L",
+      "dependencies": [
+        "R-t2-04-02 cache admission",
+        "R-t2-04-05 org policy floor (for no_egress)",
+        "Artifact store",
+        "Data Plane retrieval API (phase 2)"
+      ],
+      "planeOwner": "Ingestion Plane; Data Plane for the artifact-backed no-egress path",
+      "risks": "Cross-tenant leakage if keys are not org-scoped or authenticated content is cached; stale answers surprise users, so always show cachedAt. Lockdown value is limited to a niche of regulated orgs.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-04-020",
+        "C-t2-04-019"
+      ]
+    },
+    {
+      "id": "R-t2-04-11",
+      "title": "Per-class and per-org capacity limits for browser, scrape and search",
+      "summary": "Keep the gateway's global per-org token bucket, but add endpoint classes with their own limits (browser session start and step, scrape and crawl start, paid search, cheap status polling), scaled by plan from Control Plane entitlements and returning 429 with Retry-After. Add a Quarry-side per-org share of the browser lease pool so one org cannot exhaust the global concurrency cap.",
+      "whyItMatters": "Protects Quarry capacity and paid search or proxy cost from runaway agents or abusive users, gives fair sharing across orgs, and is a prerequisite for usage-based plans. A single blanket limit treats a status poll and a Chrome session start the same.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (SRC)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Firecrawl); unique as a documented design",
+        "mechanism": "A Redis limiter keyed by (org, endpoint class). Limit = base[class] x plan multiplier, with per-org overrides. Cheap status polling has a high limit and browser sessions a low one. The limiter fails open if the entitlement lookup is down, and returns 429 with Retry-After."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:147-148",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:58",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:350",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:448",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:46",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:34",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:4-51"
+        ],
+        "gap": "Correction to the comparator: the gateway already applies a distributed (Dragonfly, with in-process fallback) token-bucket limiter to every merged router, keyed by org, user or IP, at a default 600 requests per minute and with only auth-session and health paths exempt. What is missing is class-specific limits and plan scaling: browser, search and scrape routes share that one blanket budget. On the Quarry side the browser lease pool enforces a global concurrency semaphore with no per-org share, and no per-tenant API limiter was found in quarry-edge (the vector retrieval budget is per-org hourly only)."
+      },
+      "approach": "Frontend Plane gateway: replace the single DEFAULT_RPM bucket lookup with a class-aware limiter (class derived from route, key = org, base limits multiplied by Control Plane plan entitlements, separate interactive and agent classes so human browsing is not throttled by agents). Ingestion Plane: per-org permit accounting in the lease pool (guaranteed minimum plus burst) and a coarse per-org backstop in quarry-edge that returns the existing RATE_LIMITED envelope with retry_after_seconds.",
+      "effort": "M",
+      "dependencies": [
+        "Gateway rate_limit.rs (exists)",
+        "Control Plane entitlements",
+        "quarry-edge api_error RATE_LIMITED envelope (exists)"
+      ],
+      "planeOwner": "Frontend Plane (gateway) for classes; Ingestion Plane for lease-pool fairness",
+      "risks": "Over-tight limits frustrate interactive browsing, so keep interactive and agent classes separate and the global bucket generous.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-04-024"
+      ]
+    },
+    {
+      "id": "R-t2-04-12",
+      "title": "Domain-intelligence registry with learned per-domain driver verdicts and trusted site guidance",
+      "summary": "Build the planned per-domain registry in quarry-control and give it two first consumers. (1) Passive, non-ZDR learning of which driver (static, TLS, browser) works per domain, using deterministic text similarity in Rust, feeding DriverPlan. (2) A trusted site-guidance field (rate hints, playbooks, 'do not automate' notes) that Quarry attaches to observations as labelled trusted metadata for the Model, separate from page content.",
+      "whyItMatters": "Cheaper and faster crawls with fewer wasted browser launches and fewer block events, and a clean way to steer the Model with trusted site knowledge that does not come from the untrusted page, reducing prompt-injection exposure.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl engpicker (SRC) for learned verdicts; Codex in-app browser (SRC) for the trusted guidance channel",
+        "others": [],
+        "prevalence": "1 of 4 sources for each (Firecrawl, Codex); unique",
+        "mechanism": "Verdicts: a background job samples about 10 indexed pages per domain, scrapes each with Chrome and with a TLS client, judges success, computes text similarity and stores a verdict (TlsClientOk, ChromeCdpRequired, Uncertain) that the scrape path looks up in about 250 ms to boost the cheap engine. Guidance: a trusted operator proxy sets a header on document responses; the runtime captures it through CDP Fetch, strips it before the page sees it, keys it by (tab, URL), clears it on navigation, delivers it once to the model as trusted metadata, ignores private hosts, and suppresses it once credentials were used."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:95-108",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:36-95",
+          "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:83-104",
+          "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:292-296",
+          "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md:1503",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:706"
+        ],
+        "gap": "FallbackDriver escalates per request (JS-shell detection, block statuses, prior_block_signals) but nothing is learned or persisted per domain, and no site-guidance field exists on observations. The registry is only planned (Phase 4 of the reliability proposal; the improvements doc marks site profiles GREENFIELD). The CDP Fetch guard and pinned browser egress proxy are in place as the hook for guidance injection."
+      },
+      "approach": "Ingestion Plane: after the registry schema exists in quarry-control (Postgres), record per-domain outcomes passively from production runs (driver used, shell detected, block reason from R-t2-04-03) for non-ZDR orgs only, compute a verdict with deterministic similarity in Rust (no model calls inside Quarry, optionally ask Model Plane), with TTL and re-calibration, and feed it into DriverPlan. Proposed profile changes need operator approval, as the reliability doc already requires. For guidance, populate it from the registry inside Quarry (no external header needed) and attach it as a labelled trusted field on observations returned to Model Plane; if a header channel is ever used it must come only from Verevon's own egress proxy, never from a response of an arbitrary site.",
+      "effort": "L",
+      "dependencies": [
+        "Domain intelligence registry (planned, Phase 4)",
+        "Postgres in quarry-control",
+        "R-t2-04-03 BlockReason",
+        "Observation trust labelling (prompt-injection program)"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-control for the registry)",
+      "risks": "Stale verdicts when sites change (TTL and re-calibration). A compromised registry could steer agents, so authorship is operator-only. Value is cost and robustness rather than a user-visible capability.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "docs/SOVEREIGN_SCRAPING_RELIABILITY.md section 1 (Domain Intelligence Registry) and Phase 4; QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md section 25 (site profiles) and section 38 (adaptive target memory)"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-04-023",
+        "C-t2-04-008"
+      ]
+    }
+  ],
+  "dropped": [],
+  "strengthsToKeep": [
+    "SSRF and egress control is best in class: resolve-once DNS pinning, redirect re-validation, a per-session pinned browser egress proxy with QUIC disabled, a CDP Fetch guard and redacted egress receipts (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs, browser_egress_proxy.rs:37-70, crates/quarry-browser/src/chromiumoxide.rs:226-250). Keep this as the invariant under every new proxy, cache or signing feature.",
+    "Proxy plumbing is richer than Firecrawl or Apify at the platform level: sticky (org, host) hashing, processor-approval gating through PrivacyPolicy and per-agent-run affinity (crates/quarry-runtime/src/proxy_pool.rs, proxy_affinity.rs, egress_broker.rs). Keep processor gating as the hard rule for any new proxy vendor.",
+    "Politeness is ahead of both scrapers: an AIMD per-host scheduler with per-host isolation, errors that raise delay and never lower it, plus an autoscaled pool (crates/quarry-runtime/src/host_scheduler.rs:1-48, autoscale.rs). Firecrawl only has a coarse crawl delay.",
+    "ChallengeSignal.requires_escalation defaults to true, so the planner contract already forbids automatic bypass of a challenge, which is ahead of Apify and Firecrawl (crates/quarry-core/src/contracts.rs:236-257).",
+    "Agent-specific error codes (ActionUnknown, TargetRepairRequired, CheckpointLost) and a driver that fails on a stale node instead of rebinding it are ahead of Firecrawl for browser automation (crates/quarry-core/src/error.rs:10-40, crates/quarry-browser/src/chromiumoxide.rs:2116).",
+    "ZDR is already enforced as a floor in Quarry service-token claims that a request can raise but never lower, and the gateway scrape-preview cache mirrors it (crates/quarry-edge/src/routes.rs:414-417, agent_routes.rs:1435-1441, apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:92-118). Reuse this pattern for the org compliance floor.",
+    "Strict TLS everywhere: no accept-invalid-certificates option was found in the Quarry crates, which is safer than Firecrawl's relaxation when no credentials are sent.",
+    "The gateway already has a distributed (Dragonfly) token-bucket limiter with an in-process fallback applied to every router (apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs, main.rs:147-148) and an idempotency-key type in Quarry's retry module (crates/quarry-runtime/src/lib.rs:164)."
+  ]
+}

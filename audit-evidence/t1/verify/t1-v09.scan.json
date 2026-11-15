@@ -1,0 +1,255 @@
+[
+ {
+  "finalId": "F-t1-026",
+  "title": "Typed cards and agent input requests (forms and secret drop)",
+  "searches": [
+   "request_input|requestInput|RequestInput|secret_drop|secretDrop|secure_field|opaque handle|secret_handle (all apps, node_modules excluded)",
+   "card_type|CardType|card schema|ActionCard|InputCard|FormCard|block_kit|adaptive_card|typed card|rich card (all apps)",
+   "client_tool|ClientTool|generative_ui|CUSTOM|TOOL_CALL_RESULT (gateway ag_ui.rs)",
+   "resume_run|run_signal|RunSignal|pause_run|awaiting_approval|continuation (Model Plane rust services)",
+   "credential broker|CredentialBroker|secret store|SecretRef|one-time|mint redeem|keychain (Control Plane)",
+   "chat-nodes|ConversationNode|plan-approval|follow-ups|tool-chips (features/spaces: no hits; chat-nodes/types.ts read)",
+   "SpaceApprovalPanel|decide|awaiting_approval|pending_approval (features/spaces/components)",
+   "S3.4|credential broker|request_input|typed card|card schema|secret drop (Frontend docs and apps docs)",
+   "secret|Secret (features/spaces: no secret handling)"
+  ],
+  "hits": [
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx", "line": 46, "why": "Built-in approval card: approve/reject buttons (142-160); only card-like room control.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts", "line": 125, "why": "Typed chat node union (approvals, plan-approval, follow-ups); chat-only, spaces do not import it.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs", "line": 32, "why": "Client tools capped at 32; whether a client result resumes a Space run is unverified.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs", "line": 397, "why": "Caller-supplied tools normalised and pushed into the run request.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs", "line": 887, "why": "Governance pauses/approvals sent as non-executable CUSTOM events, avoiding a second mutation path.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/approval_delivery.rs", "line": 5, "why": "Approval resume waits on a durable continuation descriptor; pause/resume precedent for request_input.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0022_encrypted_approval_continuation_descriptors.sql", "line": 1, "why": "Encrypted approval continuation descriptors table (file-level pointer).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs", "line": 170, "why": "awaiting_approval step outcome: the runtime can pause a run for a human.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotStudioCards.tsx", "line": 51, "why": "ActionCard is a studio tile, not an agent-emitted card; not a precedent.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs", "line": 29, "why": "Quarry opaque handles scoped to one run and generation; opaque-handle precedent.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs", "line": 792, "why": "BrowserBroker binds an opaque run grant; second opaque-handle precedent.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Control Plane", "line": 0, "why": "NEGATIVE: no credential broker, secret drop or secret handle code found in Control Plane.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces", "line": 0, "why": "NEGATIVE: no request_input, form or secret-field renderer in Space components.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md", "line": 1979, "why": "S3.4 credential broker is plan-only; says reuse existing secret stores, no keychain.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md", "line": 433, "why": "Research rule: a secret must never travel through the ordinary chat channel.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/Control Plane/ENVIRONMENT_FILES.md", "line": 152, "why": "secretRef appears only as deployment config; not a credential broker.", "kind": "doc"}
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-028",
+  "title": "Persistent per-agent computer with lifecycle UX and a governed egress boundary",
+  "searches": [
+   "hibernat|thaw|lifecycle_state|durable_home|pre_thaw|presence_intent (Model Plane)",
+   "egress|allowed_hosts|denied_hosts|capability_token|network_policy (sandbox-manager)",
+   "sandbox_lease|SandboxLease|lease_ttl|persistence (execution-core src)",
+   "process_registry|ProcessRegistry|kill_process|signal_process|watch (all apps)",
+   "AllowDomains|egress_proxy|EgressProxy|space:egress (execution-core src)",
+   "owner_machine|ExecTarget|exec_target|local_device (Model Plane): no hits",
+   "process|kill|stop in SpaceWorkPanel.tsx and gateway spaces.rs routes: no kill controls",
+   "scope_kind values in capability-core migrations: no 'space'",
+   "S3.2|S3.3|S4.2|S4.3 headings and status line in Frontend QM plan"
+  ],
+  "hits": [
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sandboxes.proto", "line": 97, "why": "SandboxLifecycleState has SCRATCH, ACTIVE, SNAPSHOTTING, DESTROYED; no hibernated or starting state.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/process/store.go", "line": 1, "why": "Durable Postgres process registry; execution-core owns the OS process, not the registry.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/server/process.go", "line": 110, "why": "Register, state, output, list and read RPCs exist; no kill RPC at this layer.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/process_host.rs", "line": 363, "why": "Host-local signal and kill_for_lease exist; no room route exposes them.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go", "line": 158, "why": "Promote merges a run overlay into the Space's durable workspace (S3.3).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs", "line": 1, "why": "Header says Space overlay is restart-durable compute state; conflicts with the item's no-durable-home gap.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs", "line": 7, "why": "Space lease is credential-free, has no network, egress disabled by default.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/authz/capability_verifier.go", "line": 179, "why": "Egress claim needs a space:egress permission; disabled_by_default is the baseline.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/policy.rs", "line": 32, "why": "AllowDomains: per-host network allowlist policy variant.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/executor.rs", "line": 173, "why": "AllowDomains is refused without an egress proxy (fail-closed).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox.rs", "line": 210, "why": "AllowDomains is not self-enforcing; relies on proxy and namespace controls.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/predicate.go", "line": 26, "why": "Watch grammar: any-change, literal line contains, state-change predicates; no regex.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql", "line": 1, "why": "S4.3 Watch record and event log, bound to one resource in one Space.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx", "line": 116, "why": "Processes and schedules rendered read-only; no stop or kill controls in this file.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 0, "why": "NEGATIVE: no process stop, kill or signal route in the Space gateway domain.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane", "line": 0, "why": "NEGATIVE: no owner-machine execute target; execute target not abstracted in code.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0007_tenant_scopes_and_risk_constraints.up.sql", "line": 70, "why": "Capability scope_kind allowed set has no 'space' value.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md", "line": 225, "why": "Status line 225: S3.2 profile exists; durable Space leases and workspace state listed as open.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md", "line": 2193, "why": "S4.2 durable process registry plan heading; S4.3 Watch primitive heading at line 2200.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md", "line": 1, "why": "Design doc for the durable process registry; cited by sandbox-manager code.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/S4_3_WATCH_PRIMITIVE_DESIGN_2026-09-14.md", "line": 1, "why": "Design doc for the general Watch primitive; cited by session-core and capability-core code.", "kind": "doc"}
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-034",
+  "title": "Scalable room timeline: server-computed windows with exact cursors and reply summaries, virtualised rows with scroll anchoring, jump-to-latest and history paging",
+  "searches": [
+   "timeline|before=|cursor|has_more|keyset|reply_count|last_reply|participants (gateway spaces.rs)",
+   "virtual|IntersectionObserver|scrollIntoView|scrollTop|anchor|aria-setsize|posinset (features/spaces and shared)",
+   "6000|setInterval|refetchInterval|POLL (features/spaces)",
+   "after_run_id|has_more|limit + 1 (session-core src)",
+   "scrollToBottom|scrollHeight|scrollTop|atBottom (features/chat)",
+   "THREAD_ORIGINS|origin space (session-core grpc.rs)",
+   "virtual|virtua|tanstack|react-window|intersection (package.json)",
+   "virtualis|jump to latest|anchoring|keyset|reply summar|history paging (Frontend docs)",
+   "reply_count|last_reply|participant summary (session-core src): no hits"
+  ],
+  "hits": [
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 952, "why": "SpaceThreadsQuery accepts only limit; no cursor or before parameter.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 1157, "why": "Thread list limit defaults to 80, clamped 1 to 200; no paging cursor.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs", "line": 710, "why": "Only room thread route: GET /api/v1/spaces/{space_ref}/threads.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx", "line": 87, "why": "Timeline re-polled every 6 seconds (SPACE_TIMELINE_POLL_MS); full list each poll.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 50, "why": "MAX_TURNS_PER_POST = 30 caps turns per post; no paging of older turns.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/ui/verevon/createElementHeight.ts", "line": 13, "why": "Shared measured-height helper (scrollHeight); spaces code has no scroll measurement.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts", "line": 1956, "why": "Chat computes distance-from-bottom and scrollToBottom; anchoring precedent outside Space rooms.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx", "line": 937, "why": "Jump-to-bottom control exists in Chat only; Space rooms have none.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs", "line": 657, "why": "Run listing already uses after_run_id cursor, limit and has_more (lines 700, 744).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs", "line": 2324, "why": "origin=space requires space_id and the two must agree; origins enumerated at 2252.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/package.json", "line": 28, "why": "NEGATIVE: no virtualisation library in package.json (only tanstack solid-query and ai).", "kind": "config"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src", "line": 0, "why": "NEGATIVE: no reply_count, last_reply or participant summary fields in session-core.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/UI_UX_AUDIT_2026-09-29.md", "line": 97, "why": "Audit notes no virtualisation on chat transcript; suggests content-visibility instead.", "kind": "doc"}
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-065",
+  "title": "Governed Space skills and plugin bundles (ecosystem-compatible manifests)",
+  "searches": [
+   ".claude-plugin|cursor-plugin|marketplace.json|plugin_pack|PluginPack|pack_manifest|PluginManifest (all apps)",
+   "skill_scope|SkillScope|space_skill|skill_store|skill_review|review_state|reviewed_version|scope_kind|skill_publish (all apps)",
+   "git_sha|commit_sha|pinned_sha|variables_schema|git pack|pack_import|DNS pin|hook_runner|hooks.json (all apps)",
+   "git clone|tarball|git archive (Model Plane, gateway, integration code): no hits",
+   "scope_kind values in capability-core migrations: no 'space'",
+   "Frontend PluginsSection.tsx and SkillsSection.tsx read for manifest and scope handling",
+   "Frontend docs S3.5/S3.6 and QM plan inventory lines"
+  ],
+  "hits": [
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0003_capabilities_registry.up.sql", "line": 240, "why": "plugin_packages table; enabled and pinned default FALSE (disabled until pinned and tested).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/plugins.go", "line": 22, "why": "Plugin registry defaults disabled and unpinned; inert until a host loads it.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0003_capabilities_registry.up.sql", "line": 137, "why": "skill_packages has pinned_version and enabled flags.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0003_capabilities_registry.up.sql", "line": 325, "why": "Registry audit actions include pinned, quarantined and promoted; a lifecycle vocabulary.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/migrations/0007_tenant_scopes_and_risk_constraints.up.sql", "line": 70, "why": "Capability scope_kind set omits 'space'; no Space scope kind exists.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/skills.rs", "line": 242, "why": "Skill ownership scope is org or user only, from session-core AgentSkill scope.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql", "line": 165, "why": "hook_configs: tool-call interceptors (approve, block, modify); hook runner precedent.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs", "line": 51, "why": "MCP servers can be shared via /share route; sharing precedent for Space tools.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/PluginsSection.tsx", "line": 72, "why": "Admins paste a JSON plugin manifest, parsed client-side; no ecosystem format handling.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx", "line": 141, "why": "Skills described as org-wide instructions with trigger keywords; org scope only.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc.rs", "line": 230, "why": "Maps capability-core plugin_packages rows onto gateway wire format.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/plugins-client.ts", "line": 4, "why": "Client type mirrors capability-core plugin_packages row.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane", "line": 0, "why": "NEGATIVE: no .claude-plugin, .cursor-plugin or marketplace.json parser; ecosystem manifests absent.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/go/services", "line": 0, "why": "NEGATIVE: no git clone, tarball or pack importer in Model Plane or gateway code.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md", "line": 1988, "why": "S3.5 governed Space skills and S3.6 plugin cockpit are planned.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md", "line": 1992, "why": "Plan says to inventory capability_versions and skill_packages before choosing the canonical record.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/docs/GATEWAY_DEDUPLICATION_PLAN.md", "line": 394, "why": "Doc: plugin_packages designed disabled until pinned and tested.", "kind": "doc"}
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-038",
+  "title": "Agents and AI answers over room history under the asker's authority: search_space_history and open_space_entry tools, cited answers over messages and Space knowledge",
+  "searches": [
+   "search_space|searchSpace|space_history|history_search|open_space_entry|Ask agent|askAgent|ask_agent (all apps): no hits",
+   "knowledge_search|KnowledgeSearch|retrieval_read_entitled|cap.retrieval.query (execution-core src)",
+   "private_to|privateToMember|member private|shared room|quote private (Model Plane rust services)",
+   "tsvector|websearch_to_tsquery|ILIKE|search_messages (session-core src): no hits",
+   "search (gateway domains/search.rs)",
+   "/conversations/search|SearchConversations (conversation-core)",
+   "retrieval_read_entitled|RetrievalReadEntitled (Control user-core spaces)",
+   "search (features/spaces): no Space search UI"
+  ],
+  "hits": [
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs", "line": 795, "why": "knowledge_search maps to cap.retrieval.query; no room-history tool in the map.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/knowledge_tools.rs", "line": 1, "why": "Real knowledge_search tool: RAG over the org corpus for the agentic loop.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs", "line": 314, "why": "knowledge_search classed customer_private; subagent answers may quote the org corpus.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/provenance.rs", "line": 337, "why": "Test classes knowledge_search as OrgInternal trust class; not untrusted.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/authority.go", "line": 157, "why": "RetrievalReadEntitled flag in Space decision evidence (retrieval authority).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go", "line": 975, "why": "Shared decision evidence loads retrieval_read_entitled from Control storage.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/shared_retrieval_decision.go", "line": 1, "why": "Shared-Space retrieval decision logic (file-level pointer).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs", "line": 39, "why": "Search routes are web, image and video via quarry-edge; answer stream covers web only.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go", "line": 74, "why": "POST /conversations/search exists for inbox conversations, not room messages.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs", "line": 48, "why": "MCP tools filtered to owned or shared-to-them; authority-scoped listing precedent.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps", "line": 0, "why": "NEGATIVE: no search_space_history, open_space_entry or Ask agent symbols anywhere.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src", "line": 0, "why": "NEGATIVE: no full-text or message index in session-core (no tsvector, ILIKE).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces", "line": 7, "why": "NEGATIVE: no Space search UI; only a doc comment mentions search.", "kind": "code"}
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-071",
+  "title": "Shareable, versioned agent templates with an export policy, and an internal catalogue of org agents and skills",
+  "searches": [
+   "template|blueprint (SpaceCreateAgentDialog.tsx and features/agents/lib)",
+   "catalog|catalogue|marketplace|agent_template|shareLink|share_link (features/agents, features/spaces, gateway agents/spaces/shares)",
+   "version|projection|installable|bind (convex-core agents.ts and spaceAgents.ts)",
+   "personal agent|personal_agent|personalAgent (Space FE, user-core spaces, spaceAgents.ts): no hits",
+   "/api/v1/mcp/servers/{id}/share (sharing precedent)",
+   "template|catalog|installable (Frontend SPACE_AGENT_SCOPE_PLAN and CROSS_SPACE_AGENT_REGISTRY_ADR docs)"
+  ],
+  "hits": [
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx", "line": 43, "why": "Hard-coded AGENT_TEMPLATES list; not user-published and not versioned.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx", "line": 95, "why": "applyTemplate copies template text into the create form.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/lib/verevon-agent-blueprints.tsx", "line": 774, "why": "Second static blueprint array (agentBlueprints) for the Agents surface.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts", "line": 486, "why": "listInstallableSpaceAgentsForGateway: org agents with per-room binding status; catalogue-like read model.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts", "line": 529, "why": "bindExistingSpaceAgentForGateway reuses an existing agent in another Space.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts", "line": 159, "why": "projectAgentInstallationsForOrg: org-wide installation projection.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts", "line": 369, "why": "projectionVersion counts binding changes, not template or definition versions.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/agents.ts", "line": 0, "why": "NEGATIVE: no version field in agents.ts; agent definitions are unversioned.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs", "line": 51, "why": "Sharing precedent: MCP servers have a /share route.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents.rs", "line": 0, "why": "NEGATIVE: no share link, export policy or template record in gateway agents or shares.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces", "line": 0, "why": "NEGATIVE: no personal-agent code in Space frontend, user-core spaces or spaceAgents.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md", "line": 639, "why": "Doc: listInstallableSpaceAgentsForGateway described as org agents per room.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md", "line": 726, "why": "Doc: Grok-style template suggestions in agent creation, planned.", "kind": "doc"},
+   {"path": "C:/dev/CoresSystem/apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md", "line": 0, "why": "ADR exists; grep for template, catalog, installable found nothing.", "kind": "doc"}
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t1-092",
+  "title": "Delivery health: channel failover and a 'why am I not notified' diagnosis",
+  "searches": [
+   "failover|fallback order|channel[_ -]?health|consecutive_failures|failover_at (all apps)",
+   "not notified|do not disturb|DND|quiet hours|permission denied|subscription expired (all apps)",
+   "new Notification(|requestPermission(|pushManager|serviceWorker.register (Frontend src): no hits",
+   "delivery_state|DeliveryAttempt|delivery_status|ChannelHealth (notification-core)",
+   "quiet (notification-core): no hits; quietHours (user-core handlers.go)",
+   "notification-core http server.go routes; gateway notifications.rs routes",
+   "payload|cta_href (Frontend notifications-client.ts)",
+   "Frontend docs: QM plan quiet hours line"
+  ],
+  "hits": [
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/delivery_state.go", "line": 12, "why": "Per-attempt status enum (pending, claimed, sent_unconfirmed, acknowledged, failed, unknown); no failover.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/notification/delivery_state.go", "line": 10, "why": "Comment: ambiguous provider responses must not be retried blindly; no channel fallback exists.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/feed/types.go", "line": 16, "why": "Channel constants: in_app, email, sms, push; no fallback order defined.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/runtime/client.go", "line": 212, "why": "Channel mapping to Novu runtime; no fallback or failover logic.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Application Plane/notification-core/internal/http/server.go", "line": 59, "why": "Route list has no delivery-status or diagnostics endpoint for users.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs", "line": 20, "why": "Gateway routes: preferences, unread count, list, read, delete; no diagnostics route.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbarPanels.tsx", "line": 139, "why": "Only empty state: Connect Novu to show notifications; no typed reasons.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/handlers.go", "line": 838, "why": "QuietHours default kept in user notification settings (838, 852); notification-core never reads it.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/notifications-client.ts", "line": 14, "why": "Client type has cta_href and untyped payload; no delivery status fields.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/", "line": 0, "why": "NEGATIVE: no browser Notification, requestPermission or PushManager code in Frontend src.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql", "line": 101, "why": "consecutive_failures exists only for Space watches, not notification channels.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Infra Plane/core-gateway/pkg/circuitbreaker/circuitbreaker.go", "line": 170, "why": "Precedent: generic circuit-breaker consecutive failure counter (outside search scope).", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md", "line": 2216, "why": "Plan: add preferences, quiet hours and ZDR-minimised content; web first.", "kind": "doc"}
+  ],
+  "impression": "absent"
+ },
+ {
+  "finalId": "F-t1-074",
+  "title": "Provenance footer on relayed and automated messages and notifications; optional system voice",
+  "searches": [
+   "on_behalf_of|onBehalfOf|on behalf of|sent for|relay_sender|sender_agent|trigger_kind|schedule_ref|scheduleRef (Frontend, Control, Model Plane)",
+   "author_subject_id|authorSubjectId|agent_name|agentName (features/spaces, session-core, gateway)",
+   "system sender|system_sender|announcement|platform notice (all apps): no hits",
+   "PrepareScheduledRunThread|schedule (session-core and Control user-core spaces)",
+   "THREAD_ORIGINS (session-core grpc.rs)",
+   "payload|cta_href (notifications-client.ts)",
+   "ScheduleFireEntitled|schedule_fire (Control user-core spaces)"
+  ],
+  "hits": [
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 43, "why": "Turns carry agentName and authorSubjectId recorded server-side at append time.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx", "line": 87, "why": "resolveAuthorName: unknown authors render unnamed rather than guessed.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs", "line": 2381, "why": "author_subject_id is the verified caller; agent_name recorded for agent turns.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs", "line": 2572, "why": "Message insert stores agent_name, metadata, author_subject_id; trigger not seen.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs", "line": 2252, "why": "THREAD_ORIGINS includes agent_run and system; no relay or on-behalf-of origin.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs", "line": 4670, "why": "PrepareScheduledRunThread creates scheduled-run threads under authority bindings.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go", "line": 217, "why": "Schedule result thread is system-owned, created by orchestrator service identity.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx", "line": 172, "why": "Fired scheduled runs get a room thread; no attribution footer on the post.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/notifications-client.ts", "line": 15, "why": "Notification payload is untyped Record; no sender, trigger or on-behalf-of fields.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs", "line": 428, "why": "False positive: on-behalf-of here means token minting, not message attribution.", "kind": "code"},
+   {"path": "C:/dev/CoresSystem/apps", "line": 0, "why": "NEGATIVE: no system sender identity, announcement store or platform notice code found.", "kind": "code"}
+  ],
+  "impression": "partial"
+ }
+]

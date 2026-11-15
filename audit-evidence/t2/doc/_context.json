@@ -1,0 +1,418 @@
+{
+ "task": "t2",
+ "title": "Quarry v2 and the Verevon in-app browser: audit of Codex, Aside, Firecrawl and Apify",
+ "asOf": "2026-10-14",
+ "verevonCommit": "afb83928 (2026-10-10), C:/dev/CoresSystem",
+ "sources": [
+  {
+   "key": "codexbrowser",
+   "name": "Codex desktop app (in-app browser, computer use)",
+   "version": "26.1007.2314.0",
+   "kind": "installed app",
+   "method": "REA on app.asar + native binaries; extracted bundle",
+   "featureRecords": 261
+  },
+  {
+   "key": "aside",
+   "name": "Aside browser",
+   "version": "1.0.928.2",
+   "kind": "installed app",
+   "method": "REA native/PE/string analysis; no JS bundle available",
+   "featureRecords": 187
+  },
+  {
+   "key": "firecrawl",
+   "name": "Firecrawl",
+   "version": "commit 11e9dc5e2 (2026-10-12)",
+   "kind": "open-source repo",
+   "method": "source and docs",
+   "featureRecords": 226
+  },
+  {
+   "key": "apify",
+   "name": "Apify platform",
+   "version": "public docs, October 2026",
+   "kind": "public documentation",
+   "method": "public web docs only (provenance DOC)",
+   "featureRecords": 112
+  }
+ ],
+ "referenceRecordsTotal": 786,
+ "clustersTotal": 322,
+ "verevonBaselineByCategoryStatus": {
+  "Acquisition API surface": {
+   "shipped": 24,
+   "partial": 10,
+   "stub": 3,
+   "absent": 7
+  },
+  "Output formats & content processing": {
+   "shipped": 16,
+   "absent": 2,
+   "stub": 3,
+   "partial": 5
+  },
+  "Rendering & browser engines": {
+   "shipped": 9,
+   "absent": 4,
+   "partial": 8,
+   "stub": 3
+  },
+  "Anti-bot, proxies & reliability": {
+   "shipped": 10,
+   "partial": 4,
+   "absent": 4
+  },
+  "Orchestration & scale": {
+   "shipped": 8,
+   "absent": 3,
+   "partial": 5,
+   "stub": 4
+  },
+  "Platform & ecosystem": {
+   "absent": 5,
+   "stub": 2,
+   "shipped": 10,
+   "partial": 2
+  },
+  "Observability & operations": {
+   "shipped": 10,
+   "partial": 5,
+   "absent": 4
+  },
+  "In-app browser shell (user-facing)": {
+   "partial": 5,
+   "shipped": 19,
+   "absent": 7,
+   "stub": 3
+  },
+  "AI-browser control": {
+   "partial": 7,
+   "shipped": 22,
+   "absent": 5,
+   "stub": 4
+  },
+  "Integration-plane overlap": {
+   "shipped": 14,
+   "absent": 3,
+   "partial": 1
+  }
+ },
+ "categories": [
+  {
+   "n": 1,
+   "name": "Acquisition API surface",
+   "refs": 64,
+   "base": 44
+  },
+  {
+   "n": 2,
+   "name": "Output formats & content processing",
+   "refs": 50,
+   "base": 26
+  },
+  {
+   "n": 3,
+   "name": "Rendering & browser engines",
+   "refs": 59,
+   "base": 24
+  },
+  {
+   "n": 4,
+   "name": "Anti-bot, proxies & reliability",
+   "refs": 51,
+   "base": 18
+  },
+  {
+   "n": 5,
+   "name": "Orchestration & scale",
+   "refs": 46,
+   "base": 20
+  },
+  {
+   "n": 6,
+   "name": "Platform & ecosystem",
+   "refs": 77,
+   "base": 19
+  },
+  {
+   "n": 7,
+   "name": "Observability & operations",
+   "refs": 91,
+   "base": 19
+  },
+  {
+   "n": 8,
+   "name": "In-app browser shell (user-facing)",
+   "refs": 112,
+   "base": 34
+  },
+  {
+   "n": 9,
+   "name": "AI-browser control",
+   "refs": 205,
+   "base": 38
+  },
+  {
+   "n": 10,
+   "name": "Integration-plane overlap",
+   "refs": 31,
+   "base": 18
+  }
+ ],
+ "tiersAfterVerification": {
+  "priority": 24,
+  "recommended": 35,
+  "niceToHave": 18
+ },
+ "tiersBeforeVerification": {
+  "priority": 24,
+  "recommended": 41,
+  "niceToHave": 12
+ },
+ "verificationSummary": {
+  "items": 77,
+  "originalTier": {
+   "priority": 24,
+   "recommended": 41,
+   "nice-to-have": 12
+  },
+  "finalTier": {
+   "priority": 24,
+   "recommended": 35,
+   "nice-to-have": 18
+  },
+  "verevonStatus": {
+   "partial": 61,
+   "stub": 3,
+   "absent": 11,
+   "planned": 2
+  },
+  "verdict": {
+   "keep": 8,
+   "reword": 61,
+   "demote": 8
+  },
+  "refcheck": {
+   "partial": 22,
+   "confirmed": 2
+  },
+  "stillNeedsVerification": 0,
+  "lowConfidence": 0,
+  "effortRevised": 33,
+  "prevalenceWrong": 14
+ },
+ "waves": [
+  {
+   "wave": "W1",
+   "goal": "Unblock and make safe: production browser grants, close ZDR/tenant leaks and ungated script, stop resource leaks and relaunches, ship the inline ScrapeOptions contract and file routing, plus S-sized reliability fixes. Includes phase 1 of F-t2-013 (takeover enforced in Quarry).",
+   "items": [
+    "F-t2-001",
+    "F-t2-002",
+    "F-t2-003",
+    "F-t2-004",
+    "F-t2-005",
+    "F-t2-006",
+    "F-t2-007",
+    "F-t2-009",
+    "F-t2-026",
+    "F-t2-027"
+   ]
+  },
+  {
+   "wave": "W2",
+   "goal": "Reach table-stakes parity on both halves: the shared user+AI browser (free browsing, chat beside the page, co-browsing, planner on, trusted input, run trace) and the acquisition API (scoped robots-compliant crawl, job lifecycle, executable schedules, structured extraction, actions and screenshots), with budgets, profile encryption, redaction, org policy and capacity limits.",
+   "items": [
+    "F-t2-008",
+    "F-t2-010",
+    "F-t2-011",
+    "F-t2-012",
+    "F-t2-013",
+    "F-t2-014",
+    "F-t2-015",
+    "F-t2-016",
+    "F-t2-017",
+    "F-t2-018",
+    "F-t2-019",
+    "F-t2-020",
+    "F-t2-021",
+    "F-t2-022",
+    "F-t2-023",
+    "F-t2-025",
+    "F-t2-029",
+    "F-t2-045"
+   ]
+  },
+  {
+   "wave": "W3",
+   "goal": "Governed depth: credential handoff, per-origin consent and approval UX, presence overlay, observation quality, durable sessions, downloads, monitors, document parsing, webhooks, decision audit, batch and discovery, metering, caching and screening.",
+   "items": [
+    "F-t2-024",
+    "F-t2-028",
+    "F-t2-030",
+    "F-t2-031",
+    "F-t2-032",
+    "F-t2-033",
+    "F-t2-034",
+    "F-t2-035",
+    "F-t2-036",
+    "F-t2-037",
+    "F-t2-038",
+    "F-t2-039",
+    "F-t2-040",
+    "F-t2-041",
+    "F-t2-042",
+    "F-t2-044",
+    "F-t2-046",
+    "F-t2-047",
+    "F-t2-048",
+    "F-t2-049",
+    "F-t2-050"
+   ]
+  },
+  {
+   "wave": "W4",
+   "goal": "Platform and leverage: procedures, result sets, packs, crawl planning, provider-API routing, engine planner v2, geo/egress tiers, remote and isolated backends, routines, research jobs, code mode, external MCP contract and extraction profiles.",
+   "items": [
+    "F-t2-043",
+    "F-t2-051",
+    "F-t2-052",
+    "F-t2-053",
+    "F-t2-054",
+    "F-t2-055",
+    "F-t2-056",
+    "F-t2-057",
+    "F-t2-058",
+    "F-t2-059",
+    "F-t2-060",
+    "F-t2-061",
+    "F-t2-062",
+    "F-t2-063",
+    "F-t2-064",
+    "F-t2-065"
+   ]
+  },
+  {
+   "wave": "W5",
+   "goal": "Nice-to-have polish and long-tail bets, scheduled opportunistically or after an ADR.",
+   "items": [
+    "F-t2-066",
+    "F-t2-067",
+    "F-t2-068",
+    "F-t2-069",
+    "F-t2-070",
+    "F-t2-071",
+    "F-t2-072",
+    "F-t2-073",
+    "F-t2-074",
+    "F-t2-075",
+    "F-t2-076",
+    "F-t2-077"
+   ]
+  }
+ ],
+ "adrNeeded": [
+  {
+   "topic": "Web policy of record and tighten-only claims (org-core in Control Plane vs capability-core in Model Plane)",
+   "items": [
+    "F-t2-022",
+    "F-t2-032",
+    "F-t2-008",
+    "F-t2-025"
+   ],
+   "why": "Several items need one owner for disabled/allowed/forced capability policy that reaches Quarry only as signed claims (no cross-plane DB access). The consolidators left the owner open; Space access must never widen it."
+  },
+  {
+   "topic": "Secret custody across planes for browser credential use",
+   "items": [
+    "F-t2-024",
+    "F-t2-021"
+   ],
+   "why": "integration-corev2 holds secrets, Quarry would resolve and fill them, and the Model must only ever see opaque references. This touches plane ownership, audit and ZDR (no secret material in receipts or telemetry)."
+  },
+  {
+   "topic": "Shared human+agent sessions: grant binding, control lease and human-session navigation policy",
+   "items": [
+    "F-t2-001",
+    "F-t2-011",
+    "F-t2-013",
+    "F-t2-054"
+   ],
+   "why": "Free human browsing needs a broker-defined navigation policy that is not a single-host allowlist, and co-browsing binds a Model run to a user lease. Both change what a grant means and must keep \"the Model proposes, Quarry executes or rejects\"."
+  },
+  {
+   "topic": "ZDR semantics for caches, monitors, schedules, durable crawl and telemetry",
+   "items": [
+    "F-t2-003",
+    "F-t2-004",
+    "F-t2-016",
+    "F-t2-030",
+    "F-t2-048",
+    "F-t2-018"
+   ],
+   "why": "Monitors, URL caches, schedules and durable crawls all store content or fingerprints; the team must decide per feature whether ZDR means hash-only, inline-only or refused, and publish it as the ZDR capability matrix."
+  },
+  {
+   "topic": "Anti-bot posture: honest identity vs stealth, robots override, proxy escalation",
+   "items": [
+    "F-t2-027",
+    "F-t2-066",
+    "F-t2-067",
+    "F-t2-016",
+    "F-t2-058"
+   ],
+   "why": "Consolidated items conflict (delete stealth code vs wire it under policy). Verevon contracts forbid challenge bypass; the ADR should confirm the honest posture and what policy-gated escalation is allowed."
+  },
+  {
+   "topic": "Script execution model: evaluate, scrape actions and code-mode vs one governed action per call",
+   "items": [
+    "F-t2-002",
+    "F-t2-023",
+    "F-t2-063",
+    "F-t2-065"
+   ],
+   "why": "Code-mode REPL and generated extractors are model-written programs; they fit only if every binding call is still validated and executed by Quarry with grants, caps and no raw mutating script by default."
+  },
+  {
+   "topic": "External agent exposure (MCP server) and its auth model",
+   "items": [
+    "F-t2-064",
+    "F-t2-042"
+   ],
+   "why": "docs/OSS_PARITY_BACKLOG defers MCP exposure; an MCP front needs audience-bound OAuth, delegation to Quarry and integration-corev2, and a ZDR-aware tool-call log. Owner decision required."
+  },
+  {
+   "topic": "Run trace envelope and sharing: Model Plane run trace vs Application Plane projections and Space grants",
+   "items": [
+    "F-t2-014",
+    "F-t2-038",
+    "F-t2-072"
+   ],
+   "why": "A canonical cross-plane trace envelope and live projections must not let a Space member see more than the owning plane ACL allows."
+  },
+  {
+   "topic": "Automation owner for follow-ups and routines (Application Plane vs Model Plane routines)",
+   "items": [
+    "F-t2-031",
+    "F-t2-061"
+   ],
+   "why": "Completion-triggered follow-ups and scheduled/heartbeat agent runs need one owner and per-fire browser grants for unattended runs."
+  },
+  {
+   "topic": "Browser execution substrate: shared Chromium pool vs per-session containers/VMs, remote providers and user-browser extension",
+   "items": [
+    "F-t2-007",
+    "F-t2-059",
+    "F-t2-060",
+    "F-t2-077"
+   ],
+   "why": "Isolation level, processor approval for remote providers and the egress-containment proof decide which backends may run agent sessions; the user-browser extension gives up containment and ZDR evidence."
+  }
+ ],
+ "modelTiers": {
+  "inventory": "Claude Haiku 5.5, max effort",
+  "deepDive": "Claude Sonnet 5.5, extra-high effort",
+  "baselineAndComparison": "Claude Opus 5.5, high effort",
+  "webResearchAndWriting": "Claude Fable 5.1, medium effort"
+ }
+}

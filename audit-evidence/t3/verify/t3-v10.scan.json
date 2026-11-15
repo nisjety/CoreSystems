@@ -1,0 +1,852 @@
+[
+ {
+  "finalId": "F-t3-077",
+  "title": "One action-registry-driven command surface: palette, slash commands, shortcut sheet and safe double-Escape stop",
+  "searches": [
+   "CommandPalette|command palette|cmdk|Ctrl+K|Mod+K (src, gateway, packages)",
+   "shortcut sheet|keyboard shortcut|keybinding|hotkey|Ctrl+/|whenClause (src)",
+   "ComposerCommand|slashCommand|SlashMenu|commandCatalog|argumentHint (src)",
+   "double.?esc|doubleEscape|stopRun|cancelRun|interrupt (chat FE, chat gateway, agents_runs.rs)",
+   "risk|reversible|ownerPlane|requiresApproval (src/shared/actions)",
+   "keydown listeners in CoreNavbar.tsx and use-chat-shortcuts.ts",
+   "palette|spotlight|quick actions|combobox (src, excluding tests)",
+   "DashboardComposer use in ChatPage; executeAction|previewAction callers in dashboard and chat features"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx",
+    "line": 122,
+    "why": "Ctrl/Cmd+K opens the global search panel, not an action palette.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx",
+    "line": 132,
+    "why": "Escape only closes shell overlays; no stop-run or double-Escape logic.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts",
+    "line": 80,
+    "why": "matchChatShortcut: three fixed chords plus Escape dismiss; no table, sheet or rebinding.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts",
+    "line": 109,
+    "why": "Escape returns a dismiss action that blurs the composer, not a run stop.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.ts",
+    "line": 26,
+    "why": "Manifest type carries ownerPlane, requiresApproval, reversible and risk fields.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 2266,
+    "why": "Registry descriptors (example navbar.save_theme) carry risk, approval and reversibility metadata.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts",
+    "line": 47,
+    "why": "Agent tool definitions expose the same owner, risk and approval metadata to models.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/ActionCommand.tsx",
+    "line": 67,
+    "why": "Preview-then-execute component shows approval-gated or direct-run badges.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "line": 259,
+    "why": "ComposerCommand type: name, aliases, argument hint, builtin or specialized.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "line": 458,
+    "why": "BUILTIN_COMMANDS: file, image, search, research, schedule, with Norwegian aliases.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "line": 1258,
+    "why": "commandCatalog memo filters built-ins by route and appends specialized actions.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-actions-client.ts",
+    "line": 56,
+    "why": "Specialized slash entries load from skills, capabilities and integrations, not action-registry.ts.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "line": 577,
+    "why": "Unknown /name is returned as plain text, not a failed command; deliberate choice.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "line": 2394,
+    "why": "Typed commands such as /image apply even when the menu was never opened.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "line": 231,
+    "why": "Chat page renders DashboardComposer, so the chat composer shares the slash catalog.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "line": 2508,
+    "why": "Stop path calls cancelRun(runId); no keyboard double-Escape stop exists.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.enter-to-send.test.tsx",
+    "line": 18,
+    "why": "Test comment calls the deliberate \"/\" actions menu \"a command palette\".",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx",
+    "line": 926,
+    "why": "Global search panel is a combobox of search results, not action execution.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src",
+    "line": 0,
+    "why": "NONE: no CommandPalette, cmdk, shortcut-sheet or key-recorder component under src.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 215,
+    "why": "Plan item I1: keyboard-shortcut sheet (about one day); not built.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 222,
+    "why": "Plan item I12: full-text chat search (about one week); planned, not built.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 223,
+    "why": "Plan item I13: user slash-command templates; planned, not built.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-078",
+  "title": "Feedback surfaces and limit notices: shell toasts, composer banners, connection pill and role-aware limit messages",
+  "searches": [
+   "toast|Toaster|sonner|snackbar (src, excluding tests)",
+   "Notice|Banner|Alert|Toast component exports (src)",
+   "ConnectionPill|connection status|reconnecting|navigator.onLine|offline (chat, shared, core)",
+   "429|retry-after|retryAfter|resetsAt|usage limit|rate limit (chat, shared/api, settings, gateway)",
+   "refusal|x-mp-provider-error|x-mp-retry-after-ms|zdr_refusal|subscription_failure (Model Plane, shared/api)",
+   "quota|org_quota|OrgQuotasSection (settings, model-gateway)",
+   "TOO_MANY_REQUESTS|Retry-After (gateway rate_limit.rs)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/ui",
+    "line": 0,
+    "why": "NONE: no toast, snackbar or notice primitive; shared/ui holds Button, Badge and MetricCard.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "line": 3416,
+    "why": "Inline error notice with a reconnect link for ChatGPT connection failures.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "line": 273,
+    "why": "Usage-limit notices state the plan reset time or retry delay.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "line": 413,
+    "why": "Maps stream failures to wait, reconnect or retry actions with localized copy.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "line": 242,
+    "why": "StreamFailureAction union: retry, reconnect, wait, open_integrations, none.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 263,
+    "why": "Error event carries retryAfterMs and the usage-limit reset instant.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 931,
+    "why": "Parses retry_after_ms and reset fields from failure payloads.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 2047,
+    "why": "Client branches on HTTP 429 responses.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+    "line": 130,
+    "why": "Reconnect button re-runs the stream while keeping reduced run state.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/OrgQuotasSection.tsx",
+    "line": 258,
+    "why": "Settings panel shows the org quota last-reset time.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs",
+    "line": 4,
+    "why": "Token-bucket limiter returns 429 TOO_MANY_REQUESTS with Retry-After.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/subscription_failure.rs",
+    "line": 1,
+    "why": "Typed subscription refusals declare reason, retry-after and resets-at trailers.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "line": 43,
+    "why": "Stable ZDR refusal codes (zdr_unavailable and others) for clients to branch on.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json",
+    "line": 202,
+    "why": "Frontend copy of the refusal catalogue, including gRPC trailer names.",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/OrgDeletionBanner.tsx",
+    "line": 1,
+    "why": "Org deletion banner: the only banner-style component found in core.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/support/components/RemoteSupportPage.tsx",
+    "line": 137,
+    "why": "Connected and reconnecting labels for remote support; precedent, not chat.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat",
+    "line": 0,
+    "why": "NONE: no ConnectionPill, online or offline indicator, or stream-health pill in chat.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 225,
+    "why": "Plan item I16: live usage meter during a run (about one week); not built.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-080",
+  "title": "Library of generated and uploaded files across chats, with org publishing built on Data Plane documents",
+  "searches": [
+   "file library|artifact library|my files|library page|fileIndex (src, gateway)",
+   "save as document|saveAsDocument|promote|PromotedDocument|promote_workspace (chat FE, gateway, Model Plane)",
+   "origin_thread|origin_session (apps/Data Plane v2, src, Model Plane rust)",
+   "publish|public link|resource_grants|share (gateway shares.rs, chat)",
+   "Artefakter|ChatArtifactPanel|artifact store|Save as PDF (chat components, model-gateway)",
+   "chat/documents|chat-attachment (gateway chat, shared/api)",
+   "Findings|Reports|readChatThreadTranscript (ChatUtilityPage)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs",
+    "line": 43,
+    "why": "Chat text attachment persisted as a durable Data Plane v2 document.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs",
+    "line": 103,
+    "why": "Document metadata origin is chat-attachment; no thread origin or library index.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "line": 65,
+    "why": "Routes POST /api/v1/chat/documents and /extract for chat uploads.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "line": 2108,
+    "why": "Client posts chat attachments to /api/v1/chat/documents; a caller exists.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "line": 1,
+    "why": "Versioned per-thread chat artifacts: documents, code, HTML and generated binaries.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "line": 2,
+    "why": "Artefakter tab renders artifacts per thread; no library or share action.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "line": 256,
+    "why": "Artifact export offers Save as PDF download only.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs",
+    "line": 4,
+    "why": "Promotes workspace paths into durable Data Plane v2 documents (sandbox PromoteWorkspace).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs",
+    "line": 125,
+    "why": "promote-document API: one workspace path becomes one Data Plane document.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs",
+    "line": 21,
+    "why": "Promote-on-use primitive; promoted docs land owner=user, visibility=private.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs",
+    "line": 1,
+    "why": "ShareDialog backend over user-core resource_grants; view-only sharing for MVP.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/studio/components/StudioPage.tsx",
+    "line": 784,
+    "why": "Studio \"library\" is a static list of campaign and template cards.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatUtilityPage.tsx",
+    "line": 55,
+    "why": "Reports come from the local transcript cache, matched by title regex (line 64).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat",
+    "line": 0,
+    "why": "NONE: no cross-chat file library page, index or origin-thread listing.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2",
+    "line": 0,
+    "why": "NONE: no origin_thread or origin_session document metadata in Data Plane services.",
+    "kind": "code"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-081",
+  "title": "Teach mode: record a user's hosted-browser workflow and distil it into a reviewed, replayable skill",
+  "searches": [
+   "teach|demonstrat|record_session|recording bundle|recorder (Quarry-v2, Model Plane, src)",
+   "step_receipt|StepReceipt|step receipt (Quarry-v2, Model Plane)",
+   "takeover|live frame|live_view|hosted browser (Quarry-v2, browser-broker, chat and agents features)",
+   "learned skill|skill proposal|UpsertAgentSkill|distill (Model Plane, learning-plane)",
+   "trajectory|enable_replay|replay_url|screenshot (Quarry-v2, model-gateway)",
+   "teach-by-demonstration (VEREVON_UI_COWORK_RESEARCH, Quarry-v2 docs)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+    "line": 1,
+    "why": "Append-only step receipts for every agent action; substrate for audit and replay.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+    "line": 68,
+    "why": "Receipt design keeps a human takeover from reverting to agent control.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+    "line": 2539,
+    "why": "Transient live-frame route for human takeover; writes no artifact.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs",
+    "line": 64,
+    "why": "Provider session replay flag (enable_replay); off by default (line 75).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/trajectory.rs",
+    "line": 1,
+    "why": "In-memory trajectory recording of completed runs with Atropos-format export.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/learning_events.rs",
+    "line": 1,
+    "why": "RUN_COMPLETED drives a transcript-to-learned-skill review loop.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "line": 211,
+    "why": "G7 review persists learned skills on RUN_COMPLETED; kill switch near line 742.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "line": 5659,
+    "why": "Lazy-loads org learned skills so chat turns can use them.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/learning-plane/learning-core/internal/learning/attempts.go",
+    "line": 64,
+    "why": "False positive: \"demonstrate\" is a learning-attempt mode, not skill capture.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md",
+    "line": 3111,
+    "why": "Planned human live-takeover recording; not built.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md",
+    "line": 3637,
+    "why": "Plan: record human takeover and verified agent trajectories.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+    "line": 449,
+    "why": "Section 2.3 teach-by-demonstration shortlisted (#3, effort L); not built.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2",
+    "line": 0,
+    "why": "NONE: no demonstration recorder or recording-to-skill path in Quarry-v2 or Model Plane code.",
+    "kind": "code"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-089",
+  "title": "Use Verevon from other agents and work tools: outward MCP endpoint and channel adapters",
+  "searches": [
+   "serverInfo|protocolVersion|tools/list|tools/call|mcp serve (gateway, Model Plane, Quarry-v2)",
+   "webmcp|navigator.modelContext|registerTool (apps)",
+   "authorization_endpoint|oauth/authorize|oauth/token|oauth-authorization-server (gateway, Control Plane, model-gateway)",
+   "slack|teams|channel adapter|ChannelAdapter|inbound webhook (bridge-core, bridges, Channel Plane, gateway)",
+   "/v1/mcp and /api/v1/mcp route tables (model-gateway http_routes.rs, gateway domains/mcp.rs)",
+   "trigger_inbox_sync and channel enum email|teams|slack (action-registry, dispatchers)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs",
+    "line": 1,
+    "why": "MCP Streamable HTTP client for remote servers; consumer side only.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs",
+    "line": 1,
+    "why": "Pure JSON-RPC framing for MCP client transports; no server role.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs",
+    "line": 1,
+    "why": "OAuth 2.1 with dynamic client registration to connect remote MCP servers.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs",
+    "line": 47,
+    "why": "SPA-facing registry routes and OAuth start for MCP servers; nothing serves MCP.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 330,
+    "why": "MCP routes manage the registry only; no tools/list or tools/call server.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs",
+    "line": 1,
+    "why": "Agent loop offers and calls org MCP tools through the gateway (consumer).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/bridges/mcp-bridge/server.js",
+    "line": 112,
+    "why": "stdio bridge sends tools/call to a child MCP server (consumer).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go",
+    "line": 1,
+    "why": "Ingress adapter interface for CLI, VS Code, web and API; no Slack or Teams ingress.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/channel/webhook.go",
+    "line": 16,
+    "why": "Generic outbound webhook adapter, described for Slack, Discord or Teams payloads.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/cmd/main.go",
+    "line": 67,
+    "why": "Webhook adapter registered only when a webhook URL is configured.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 948,
+    "why": "Inbox sync channel enum (email, teams, slack): inbound sync, not a chat entry point.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "line": 4196,
+    "why": "trigger_inbox_sync dispatcher for email, Teams or Slack integrations.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/vision.md",
+    "line": 1,
+    "why": "Channel Plane is future docs-only; no runtime exists.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md",
+    "line": 1,
+    "why": "Deep-dive design doc for the planned channel plane.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps",
+    "line": 0,
+    "why": "NONE: no WebMCP registration (modelContext) and no OAuth authorization server for external agents.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps",
+    "line": 0,
+    "why": "NONE: cited Verevon-ai-first-plan.md not found under apps/ (rg --files).",
+    "kind": "doc"
+   }
+  ],
+  "impression": "absent"
+ },
+ {
+  "finalId": "F-t3-090",
+  "title": "Time-based media on demand: transcribe recordings into documents, pull meeting minutes, and expose video generation and understanding",
+  "searches": [
+   "speech.?to.?text|transcri(be|ption)|whisper|stt (inference-core, model-gateway, gateway, shared/api voice)",
+   "meeting|minutes|zoom|callRecording|onlineMeeting (integration-corev2, src, Model Plane)",
+   "sora|video_generate|CreateVideoGenerationJob|ai/video (Model Plane, gateway, src)",
+   "gemini|video understanding|video/mp4|audio/ (inference-core, model-gateway, imports-core)",
+   "ffmpeg|transcode|embed/audio|embed/video (Data Plane v2, Ingestion Plane)",
+   "/api/v1/ai/ routes (gateway ai.rs, src/shared/api)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts",
+    "line": 14,
+    "why": "transcribeAudioBlob posts to /api/v1/ai/speech for composer voice input.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts",
+    "line": 52,
+    "why": "Speech-to-text plus LLM cleanup pass for browser webm recordings.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs",
+    "line": 47,
+    "why": "Gateway routes speech, transcribe and dictate; forwards to model-gateway.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "line": 2365,
+    "why": "speech_to_text requires explicit ZDR contract, then transcribes.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/speech.rs",
+    "line": 1,
+    "why": "Speech routing for text-to-speech and speech-to-text transcription.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "line": 69,
+    "why": "Proto rpcs for create, get and stream video generation jobs.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 451,
+    "why": "/v1/ai/video/generate exists only in model-gateway; no gateway or UI route.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/video.rs",
+    "line": 1,
+    "why": "Video generation job provider module (async jobs).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/media-embedder/app.py",
+    "line": 1,
+    "why": "Audio and video embedding service via ffmpeg; no transcription.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/media-embedder/app.py",
+    "line": 530,
+    "why": "/embed/audio and /embed/video endpoints give retrieval embeddings, not transcripts.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/calendar_read.go",
+    "line": 94,
+    "why": "Graph calendar read with attendees and body preview; no transcript APIs.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2",
+    "line": 0,
+    "why": "NONE: no meeting-transcript, Zoom or Teams recording connector in integration-corev2.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/compaction.rs",
+    "line": 1078,
+    "why": "NONE: no Gemini video provider; only a test model string appears here.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/imports-core",
+    "line": 0,
+    "why": "NONE: no audio or video MIME, ffmpeg or transcription handling in imports-core.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/meeting-intelligence.md",
+    "line": 1,
+    "why": "Docs-only meeting-intelligence design for the future Channel Plane.",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-091",
+  "title": "Data-connected dashboards with visible queries, and sensitivity-label-aware document policy",
+  "searches": [
+   "dashboard|chart spec|ChartSpec|saved quer|refreshed_at|pinned chart (src chat, insights, knowledge; gateway insights)",
+   "result_query|handle_id|parked result (model-gateway tool_loop.rs)",
+   "sensitivity.?label|MIP|informationProtection|labelId|classification label (src, gateway, integration-corev2, Data Plane, Control Plane)",
+   "office add.?in|Office.js|OneDrive|SharePoint (src, integration-corev2)",
+   "OD14|Excel|PowerPoint in place (verevon-web plans/system-audits)",
+   "chart fence|parseChartFence|chartFromTable (chat-chart)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-chart/spec.ts",
+    "line": 30,
+    "why": "ChartSpec holds static categories and series values; no query or source binding.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-chart/spec.ts",
+    "line": 2,
+    "why": "Chart fence: model-emitted JSON chart; invalid specs return a failure result.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatTableTools.tsx",
+    "line": 6,
+    "why": "chartFromTable turns a chat table into a static chart.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx",
+    "line": 31,
+    "why": "Chart SVG export; no refresh timestamp or visible query.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "line": 4354,
+    "why": "result_query reads parked tool results by handle; aggregation, not a dashboard.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/insights/components/InsightsPage.tsx",
+    "line": 68,
+    "why": "Fixed insights tabs with bar and line chart icons; no user-built queries.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+    "line": 63,
+    "why": "Excel and PowerPoint in-place editing and OneDrive save are marked not built.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 482,
+    "why": "OD14 owner decision: write posture for calendar, Excel, Sheets and file saves.",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2",
+    "line": 0,
+    "why": "NONE: no sensitivity-label or MIP code; only Gmail labelIds matched.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src",
+    "line": 0,
+    "why": "NONE: no Office add-in or Office.js code in src (also none in integration-corev2).",
+    "kind": "code"
+   }
+  ],
+  "impression": "absent"
+ },
+ {
+  "finalId": "F-t3-098",
+  "title": "Reader and appearance polish: conversation TOC and chapters, font size and dyslexia-friendly font, org accent and environment identity, calm tips, reasoning translation",
+  "searches": [
+   "table of contents|toc|mark_chapter|chapter (src chat, shared chat, model-gateway tools)",
+   "dyslexi|fontSize|font-size|compactMode|density (src, gateway)",
+   "accent|accentColor|colorScheme|navbar.save_theme (src core, shared api, actions)",
+   "environment pill|APP_ENV|deployment identity (src, gateway)",
+   "tip registry|what's new|whatsNew|onboarding tip (src, gateway)",
+   "translate.*(reason|thinking)|reasoning.*translat (src, Model Plane)"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/theme/appearance.rs",
+    "line": 9,
+    "why": "Appearance body stores fontSize and compactMode; no frontend code reads them.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts",
+    "line": 114,
+    "why": "saveNavbarTheme sends theme and colorScheme, the accent colour preference.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx",
+    "line": 99,
+    "why": "Workspace accent colour applied as the sidebar accent CSS variable.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 2266,
+    "why": "navbar.save_theme saves light, dark or system theme plus accent preference.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAppearancePreview.tsx",
+    "line": 21,
+    "why": "Chat appearance options are layout variants; no font, density or accent controls.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/styles/global.css",
+    "line": 55,
+    "why": "CSS custom-property colour tokens form the light and dark theming base.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/styles/global.css",
+    "line": 368,
+    "why": "Visible keyboard focus-ring token (accessibility baseline).",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/thinking.rs",
+    "line": 1,
+    "why": "Extended-thinking effort profiles exist; no reasoning-translation path found.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/translation.rs",
+    "line": 1,
+    "why": "Text translation and language-detection provider; no reasoning path found.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat",
+    "line": 0,
+    "why": "NONE: no table of contents, chapter divider or mark_chapter tool in chat or model tools.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src",
+    "line": 0,
+    "why": "NONE: no dyslexia font, font-size or density preference UI in src.",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src",
+    "line": 0,
+    "why": "NONE: no environment pill, tip registry or What's New code in src or gateway.",
+    "kind": "code"
+   }
+  ],
+  "impression": "partial"
+ }
+]

@@ -1,0 +1,1459 @@
+[
+  {
+    "id": "v-space-backend-001",
+    "category": "Messaging core",
+    "name": "Room post persisted as a Model Plane chat thread (origin=space, space_id)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-420",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:54-293",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:2252",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:2301-2330",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:97-130"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Gateway mints a Control thread:create decision and passes it to Model Gateway; Session Core enforces origin/space_id pairing via CHECK. Partial because every post is always an AI turn."
+  },
+  {
+    "id": "v-space-backend-002",
+    "category": "Messaging core",
+    "name": "Human-only message (post without an AI reply)",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402-420",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-737",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:17-78"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md"
+    ],
+    "notes": "Searched the Spaces router, the room composer (only streamChat) and the chat router: no route posts a human message without a model invocation. Doc claims a human-only flow exists (doc-vs-code discrepancy)."
+  },
+  {
+    "id": "v-space-backend-003",
+    "category": "Messaging core",
+    "name": "Shared thread listing for all Space members (thread-read decision)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1086-1264",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1268-1374",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2734-2745",
+      "apps/Control Plane/user-core/internal/http/server.go:359",
+      "apps/Control Plane/user-core/migrations/026_space_thread_read_effect_policy.up.sql",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:5320-5345"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Policy-gated by space_effect_policies; Control 403/404 degrades to owner-bound listing; gateway verifies every thread belongs to the Space. Present in source, not proven deployed."
+  },
+  {
+    "id": "v-space-backend-004",
+    "category": "Messaging core",
+    "name": "Room transcript read \"as the room\" with audience-revision filtering",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2732",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:5340-5360"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Separate from owner-bound chat transcript; Session Core drops rows stamped with a newer audience revision than the decision. Policy-gated."
+  },
+  {
+    "id": "v-space-backend-005",
+    "category": "Messaging core",
+    "name": "Reply into another member's thread (shared append)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:120-184",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:4397-4416",
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:581"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Gateway mints digest-bound thread:append decision, but Session Core append_message still calls authorize_thread_owner(Mutate), so non-owner replies are refused. UI still offers Reply."
+  },
+  {
+    "id": "v-space-backend-006",
+    "category": "Messaging core",
+    "name": "Mid-stream steer / queued input",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:41-43",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:165-205"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Re-mints the append decision per queued message."
+  },
+  {
+    "id": "v-space-backend-007",
+    "category": "Messaging core",
+    "name": "Stop / cancel a running turn",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:35-37",
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:37-50"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Composer aborts SSE then calls cancel; run flips to cancelled."
+  },
+  {
+    "id": "v-space-backend-008",
+    "category": "Messaging core",
+    "name": "Author attribution per turn (human subject and agent name)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/migrations/0035_message_author_attribution.sql",
+      "apps/Model Plane/rust/services/session-core/migrations/0030_message_agent_attribution.sql",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:2570-2590"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. author_subject_id from verified caller only, never from request."
+  },
+  {
+    "id": "v-space-backend-009",
+    "category": "Messaging core",
+    "name": "Retitle / pin a post",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2183-2340",
+      "apps/Model Plane/proto/model_plane/v1/sessions.proto:1034-1056"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Owner-only: non-owner gets thread_presentation_owner_only. Pinned threads sort first. Space-authorized presentation write is planned."
+  },
+  {
+    "id": "v-space-backend-010",
+    "category": "Messaging core",
+    "name": "@agent mention invokes a bound agent (server re-resolves roster and binding)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4175-4216",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4399-4498"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+      "apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md"
+    ],
+    "notes": "SRC. Browser sends only mentioned_agent_ref (Control subject id); gateway intersects Control roster with Application binding and injects agent_name/system prompt."
+  },
+  {
+    "id": "v-space-backend-011",
+    "category": "Messaging core",
+    "name": "@person mention",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:187",
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:308",
+      "apps/Application Plane/notification-core/internal/http/handlers.go:197-215"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Text insertion only; no server-side mention record and no notification (notification allowlist blocks it)."
+  },
+  {
+    "id": "v-space-backend-012",
+    "category": "Messaging core",
+    "name": "Markdown / code / citation rendering in room",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:3"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Frontend reuses ChatMarkdown; listed because the backend stream carries markdown and citations."
+  },
+  {
+    "id": "v-space-backend-013",
+    "category": "Messaging core",
+    "name": "Edit or delete a single message",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:144-160"
+    ],
+    "plannedIn": [],
+    "notes": "Searched Model Plane proto for EditMessage|UpdateMessage|edit_message: no hits. Spaces router has no message delete route. Only whole-thread DELETE /v1/threads/:id for the owner via Chat."
+  },
+  {
+    "id": "v-space-backend-014",
+    "category": "Messaging core",
+    "name": "Reactions / emoji",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched \"reaction\" and \"emoji\" in session-core src and migrations and in gateway spaces.rs: none."
+  },
+  {
+    "id": "v-space-backend-015",
+    "category": "Messaging core",
+    "name": "Attachments / link previews in room",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:64-68"
+    ],
+    "plannedIn": [],
+    "notes": "Searched attach|upload|file in the room composer and Spaces router: none. Chat has /api/v1/chat/documents but the room does not use it."
+  },
+  {
+    "id": "v-space-backend-016",
+    "category": "Messaging core",
+    "name": "Presence and typing indicators",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1918-2061",
+      "apps/Application Plane/convex-core/convex/spacePresence.ts:42",
+      "apps/Application Plane/convex-core/convex/spacePresence.ts:50",
+      "apps/Application Plane/convex-core/convex/spacePresence.ts:122",
+      "apps/Application Plane/convex-core/convex/schema.ts:1003-1011"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. POST /spaces/{ref}/presence (online|typing|offline); caller writes only own row; TTL 30 s, typing decays after 8 s; no content in rows. Delivered by polling, not push."
+  },
+  {
+    "id": "v-space-backend-017",
+    "category": "Messaging core",
+    "name": "Read state (room-level last-read marker)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1894-1916",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2063-2181",
+      "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:50",
+      "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:123",
+      "apps/Application Plane/convex-core/convex/schema.ts:845-851"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Per-member lastReadAt only; unread derived client-side; no per-thread or per-message read receipts."
+  },
+  {
+    "id": "v-space-backend-018",
+    "category": "Messaging core",
+    "name": "DMs / group DMs",
+    "status": "absent",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:546-556",
+      "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2837-2955"
+    ],
+    "plannedIn": [],
+    "notes": "Searched Space kinds: only personal, room, project, case; create accepts only personal and room. No DM kind or route."
+  },
+  {
+    "id": "v-space-backend-019",
+    "category": "Messaging core",
+    "name": "Drafts, scheduled send, polls, forwarding, voice clips, saved items",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:45-55"
+    ],
+    "plannedIn": [],
+    "notes": "Searched Spaces router, Convex schema and session-core migrations for draft|schedule_send|poll|forward|voice|saved|bookmark: no Space hits. Inbox drafts exist only for support conversations."
+  },
+  {
+    "id": "v-space-backend-020",
+    "category": "Org & membership",
+    "name": "Space aggregate with lifecycle and Control registration outbox",
+    "status": "shipped",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:546-604",
+      "apps/Application Plane/convex-core/convex/schema.ts:680-716",
+      "apps/Application Plane/convex-core/convex/spaceRegistration.ts:26",
+      "apps/Application Plane/convex-core/convex/spaces.ts:92",
+      "apps/Application Plane/convex-core/convex/spaces.ts:1325-1500",
+      "apps/Control Plane/user-core/internal/http/server.go:345"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Lifecycle pending_registration|active|suspended|deleting|deleted|failed_registration; unusable until Control acks; create returns 202."
+  },
+  {
+    "id": "v-space-backend-021",
+    "category": "Org & membership",
+    "name": "Control membership, roles and authority revisions",
+    "status": "shipped",
+    "evidence": [
+      "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-66"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. registered_spaces, space_authority_revisions, space_memberships (subject_type user|service; roles viewer|editor|manager|owner)."
+  },
+  {
+    "id": "v-space-backend-022",
+    "category": "Org & membership",
+    "name": "Space listing (Control index intersected with Application labels)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2747-2835",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4575-4634"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. If Control is unavailable, only the personal Space is shown."
+  },
+  {
+    "id": "v-space-backend-023",
+    "category": "Org & membership",
+    "name": "Organization room (#general) with org-roster sync",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2949-3017",
+      "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:1-64",
+      "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:135-147",
+      "apps/Application Plane/convex-core/convex/spaces.ts:1441"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Idempotent ensure; roster from active org members as editor; sync on registration ack. syncAllOrganizationRooms has no caller and no crons.ts exists (INF: later roster changes not auto-synced)."
+  },
+  {
+    "id": "v-space-backend-024",
+    "category": "Org & membership",
+    "name": "Create a named room",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2873-2905",
+      "apps/Application Plane/convex-core/convex/spaces.ts:364-406"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Any active org member; creator becomes registration owner."
+  },
+  {
+    "id": "v-space-backend-025",
+    "category": "Org & membership",
+    "name": "Add / remove a person in a room",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3399-3542",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3669-3718",
+      "apps/Application Plane/convex-core/convex/spaceMembers.ts:31-44",
+      "apps/Application Plane/convex-core/convex/spaceMembers.ts:98",
+      "apps/Application Plane/convex-core/convex/spaceMembers.ts:206",
+      "apps/Application Plane/convex-core/convex/schema.ts:821-836"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Owner/manager only; managed_subject_types [\"user\"] so human roster changes cannot remove agents; grants always editor; personal Space and org room refused."
+  },
+  {
+    "id": "v-space-backend-026",
+    "category": "Org & membership",
+    "name": "Change a member's room role",
+    "status": "absent",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:831"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "Searched Spaces router for role update routes: none. Grant role is v.literal(\"editor\")."
+  },
+  {
+    "id": "v-space-backend-027",
+    "category": "Org & membership",
+    "name": "Roster read (proxy to Control)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3013-3052",
+      "apps/Control Plane/user-core/internal/http/server.go:351"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Non-member gets 404."
+  },
+  {
+    "id": "v-space-backend-028",
+    "category": "Org & membership",
+    "name": "Personal Space (one per principal)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:600-603",
+      "apps/Application Plane/convex-core/convex/spaces.ts:158-296",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2925-2955"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. by_personal_owner index plus ensure mutation."
+  },
+  {
+    "id": "v-space-backend-029",
+    "category": "Org & membership",
+    "name": "Project / case Spaces",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2879-2890",
+      "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-27"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC. Control and Convex schema accept the kinds, but the gateway refuses creating anything other than personal or room."
+  },
+  {
+    "id": "v-space-backend-030",
+    "category": "Org & membership",
+    "name": "Guests / external users / shared channels",
+    "status": "absent",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:34-48"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "Searched membership sources: rosters come only from active org members or manually added org members. External identity link is only an ADR (S5.1)."
+  },
+  {
+    "id": "v-space-backend-031",
+    "category": "Org & membership",
+    "name": "Room discovery / browse / self-join",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2747-2810"
+    ],
+    "plannedIn": [],
+    "notes": "Searched Spaces router for browse|join|public routes: none. Listing shows only Spaces in the caller's Control index."
+  },
+  {
+    "id": "v-space-backend-032",
+    "category": "Org & membership",
+    "name": "Org members, invites, org roles and RBAC catalog",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/roles.rs",
+      "apps/Control Plane/org-core/internal/rbac/catalog.go:15-60"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Org-level only, not room-level."
+  },
+  {
+    "id": "v-space-backend-033",
+    "category": "Org & membership",
+    "name": "Teams / sub-groups inside an org",
+    "status": "absent",
+    "evidence": [
+      "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:92",
+      "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:135"
+    ],
+    "plannedIn": [],
+    "notes": "Searched org-core Go for \"team\": no hits. conversation-core ticket teams are support routing only."
+  },
+  {
+    "id": "v-space-backend-034",
+    "category": "Org & membership",
+    "name": "Room deletion",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:960-1084",
+      "apps/Control Plane/user-core/internal/spaces/deletion_authorization.go:17-22",
+      "apps/Control Plane/user-core/internal/spaces/repository.go:228-230"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Only personal Spaces can be deleted; Control rejects non-personal deletion."
+  },
+  {
+    "id": "v-space-backend-035",
+    "category": "Calls & meetings",
+    "name": "Audio / video calls, huddles, screen share between members",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Channel Plane/docs/meeting-intelligence.md",
+      "apps/Channel Plane/docs/vision.md"
+    ],
+    "notes": "Searched gateway router list and Model/Application planes for call|huddle|webrtc|livekit|meeting routes: none. Channel Plane is docs-only."
+  },
+  {
+    "id": "v-space-backend-036",
+    "category": "Calls & meetings",
+    "name": "Remote desktop assistance (RustDesk config)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/remote_support.rs:1-30"
+    ],
+    "plannedIn": [
+      "apps/Support Plane/README.md"
+    ],
+    "notes": "SRC. Gateway serves only config; sessions go browser to hbbs/hbbr and never pass through the gateway; no durable session or audit record. Not a Space feature."
+  },
+  {
+    "id": "v-space-backend-037",
+    "category": "Calls & meetings",
+    "name": "Meeting transcription / recap / minutes",
+    "status": "planned",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Channel Plane/docs/meeting-intelligence.md"
+    ],
+    "notes": "DOC. WhisperX ASR, keyframes and wiki minutes in phased plan; no code."
+  },
+  {
+    "id": "v-space-backend-038",
+    "category": "Calls & meetings",
+    "name": "AI realtime voice (Model Gateway)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:448-450"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. /v1/ai/realtime* exists for human-to-AI voice; not a human call and not Space-scoped."
+  },
+  {
+    "id": "v-space-backend-039",
+    "category": "Calls & meetings",
+    "name": "Calendar / meeting scheduling",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched gateway domains for calendar|meeting scheduling: none. Only agent cron schedules exist."
+  },
+  {
+    "id": "v-space-backend-040",
+    "category": "Search & discovery",
+    "name": "Space Knowledge tab (documents + wiki bound to the Space)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1664-1892",
+      "apps/Data Plane v2/services/retrieval-engine-rs/src/api/mod.rs:498",
+      "apps/Data Plane v2/services/retrieval-engine-rs/src/api/mod.rs:573-590"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Control retrieval.read decision feeds Data Plane /v1/knowledge/space-sources. DOC: no import writes space_ref yet, so lists are empty in practice."
+  },
+  {
+    "id": "v-space-backend-041",
+    "category": "Search & discovery",
+    "name": "Grounded room turns (Space retrieval)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:225-280",
+      "apps/Control Plane/user-core/internal/http/server.go:361",
+      "apps/Control Plane/user-core/migrations/019_space_retrieval_effect_policy.up.sql"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Separate retrieval_read_entitled bit; 403 degrades the turn to ungrounded. Policy-gated."
+  },
+  {
+    "id": "v-space-backend-042",
+    "category": "Search & discovery",
+    "name": "Search messages / threads in a Space",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:39-45",
+      "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:74"
+    ],
+    "plannedIn": [],
+    "notes": "Searched gateway for Space/thread search routes: search.rs is web/image/video only; conversation search exists only for the support inbox."
+  },
+  {
+    "id": "v-space-backend-043",
+    "category": "Search & discovery",
+    "name": "People directory",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3019",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Per-Space roster plus org members list; no cross-org directory."
+  },
+  {
+    "id": "v-space-backend-044",
+    "category": "Search & discovery",
+    "name": "Org-wide agent registry (\"installations\")",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3165-3259",
+      "apps/Application Plane/convex-core/convex/spaceAgents.ts:159-286"
+    ],
+    "plannedIn": [
+      "apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md"
+    ],
+    "notes": "SRC. One Convex query grouped by definition; answers presence, not authority."
+  },
+  {
+    "id": "v-space-backend-045",
+    "category": "Notifications & attention",
+    "name": "Notification feed / unread count / preferences (notification-core proxy)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs:17-30"
+    ],
+    "plannedIn": [
+      "apps/Application Plane/notification-core/README.md"
+    ],
+    "notes": "SRC. Proxy exists; Novu delivery mode disabled by default and delivery worker off (DOC)."
+  },
+  {
+    "id": "v-space-backend-046",
+    "category": "Notifications & attention",
+    "name": "Notifications from Space events (mention, reply, approval needed, room invite)",
+    "status": "absent",
+    "evidence": [
+      "apps/Application Plane/notification-core/internal/http/handlers.go:163-215",
+      "apps/Application Plane/notification-core/migrations/005_create_channel_configs.up.sql:60-62"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "Searched notification-core producer allowlist: gateway may send only notification.created to itself; capability-core only run_completed/run_failed. mention.received is seeded but has no producer."
+  },
+  {
+    "id": "v-space-backend-047",
+    "category": "Notifications & attention",
+    "name": "Notify me when a run finishes (run watchers)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs:1-56",
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:225-303"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Per user, not per room."
+  },
+  {
+    "id": "v-space-backend-048",
+    "category": "Notifications & attention",
+    "name": "Space watches (S4.3)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/go/services/capability-core/internal/watch/routes.go:15-33",
+      "apps/Model Plane/go/services/capability-core/internal/watch/handler.go:21",
+      "apps/Model Plane/go/services/capability-core/internal/watch/handler.go:27",
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:329-362",
+      "apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql",
+      "apps/Control Plane/user-core/internal/http/server.go:367-368",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1624-1628"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/S4_3_WATCH_PRIMITIVE_DESIGN_2026-09-14.md",
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC. capability-core create/list/cancel with Control watch-create/observe decisions, TTL 8 h (max 7 d), max 8 per Space, process-output adapter. Not exposed via Model Gateway or Verevon gateway; Activity reports watches_not_built."
+  },
+  {
+    "id": "v-space-backend-049",
+    "category": "Notifications & attention",
+    "name": "Space Activity feed (runs, approvals, owner receipts, named gaps)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1349-1652",
+      "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:81"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Runs (limit 100), awaiting_approval approvals (max 10), owner effect receipts and authorizing grants; named gaps for delivery and watches."
+  },
+  {
+    "id": "v-space-backend-050",
+    "category": "Notifications & attention",
+    "name": "Unread badges",
+    "status": "partial",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:50"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Room-level for the open room only; no cross-room aggregate in sidebar."
+  },
+  {
+    "id": "v-space-backend-051",
+    "category": "Notifications & attention",
+    "name": "Mute / DND / quiet hours / digest",
+    "status": "absent",
+    "evidence": [
+      "apps/Application Plane/notification-core/internal/channels/channels.go:1-40"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "Searched Spaces router and Convex schema for mute|dnd|quiet|digest: none. Only per-event/channel preferences in notification-core. Quiet hours planned in S4.4."
+  },
+  {
+    "id": "v-space-backend-052",
+    "category": "Notifications & attention",
+    "name": "Durable Space delivery ledger (S4.4)",
+    "status": "planned",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1618-1622"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC named gap delivery_ledger_not_built."
+  },
+  {
+    "id": "v-space-backend-053",
+    "category": "Notifications & attention",
+    "name": "Mobile / desktop push delivery",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs:17-30"
+    ],
+    "plannedIn": [
+      "apps/Application Plane/notification-core/README.md"
+    ],
+    "notes": "DOC. Novu adapter in source, disabled by default; provider-side ZDR not proven."
+  },
+  {
+    "id": "v-space-backend-054",
+    "category": "Apps & extensibility",
+    "name": "AI-first action registry for Spaces (14 spaces.* actions)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1991-2134",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs:476-505"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC. Gateway dispatches; drift guard checks registry/dispatcher parity."
+  },
+  {
+    "id": "v-space-backend-055",
+    "category": "Apps & extensibility",
+    "name": "/ skill picker in room (skill_ids resolved server-side)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:5",
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:413-417"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-space-backend-056",
+    "category": "Apps & extensibility",
+    "name": "Space-scoped schedules (cron agent work)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:426-596",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/schedule_template.rs:1-30",
+      "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:886-1000",
+      "apps/Control Plane/user-core/internal/http/server.go:363",
+      "apps/Control Plane/user-core/internal/http/server.go:370"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC. Control schedule-create decision bound to template digest; separate fire decision per tick; creation stays in Settings; Work tab lists read-only."
+  },
+  {
+    "id": "v-space-backend-057",
+    "category": "Apps & extensibility",
+    "name": "Owner agent-action grants (tickets.create)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:743-937",
+      "apps/Control Plane/user-core/internal/http/server.go:375"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Org owner/admin requests owner-grant decision forwarded to Conversation Core; only tickets.create correlated."
+  },
+  {
+    "id": "v-space-backend-058",
+    "category": "Apps & extensibility",
+    "name": "Delivery targets on bindings (Teams, Messenger, embed)",
+    "status": "stub",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:644-664",
+      "apps/Application Plane/convex-core/convex/spaceAgents.ts:319-385"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+      "apps/Channel Plane/docs/vision.md"
+    ],
+    "notes": "SRC. Schema field and internal mutation only; no adapter."
+  },
+  {
+    "id": "v-space-backend-059",
+    "category": "Apps & extensibility",
+    "name": "External surfaces (Slack / Teams mirror)",
+    "status": "planned",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+      "apps/Channel Plane/docs/vision.md"
+    ],
+    "notes": "DOC. S5.1 ADR adopted, S5.3 blocked behind S4.4 and S4.3; Channel Plane is docs-only."
+  },
+  {
+    "id": "v-space-backend-060",
+    "category": "Apps & extensibility",
+    "name": "Third-party bots, webhooks, slash-command apps, app directory",
+    "status": "absent",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:257-276"
+    ],
+    "plannedIn": [],
+    "notes": "Searched Spaces router and Convex schema for webhook|bot|marketplace|app directory: only a legacy non-Space webhooks table."
+  },
+  {
+    "id": "v-space-backend-061",
+    "category": "Apps & extensibility",
+    "name": "MCP servers (register / share / OAuth)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:330-343"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC. Exists in Model Gateway but not Space-scoped; Space MCP cockpit planned (S3.6)."
+  },
+  {
+    "id": "v-space-backend-062",
+    "category": "Apps & extensibility",
+    "name": "Mail-to-task (email an agent)",
+    "status": "stub",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs:1-30",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mail_task.rs:135"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Verification, rate limit and dedup, then always 503 mail_task_pipeline_not_configured."
+  },
+  {
+    "id": "v-space-backend-063",
+    "category": "Apps & extensibility",
+    "name": "AG-UI protocol stream with Space persona/authority injection",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:58-61",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:93-121"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-space-backend-064",
+    "category": "Agents in the room",
+    "name": "Agent identity as a room member (Control service membership + Convex binding)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3116-3188",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4052-4173",
+      "apps/Application Plane/convex-core/convex/schema.ts:606-678"
+    ],
+    "plannedIn": [
+      "apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md",
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md"
+    ],
+    "notes": "SRC. Control-first join: unnamed but authorized agent shown, unauthorized binding dropped."
+  },
+  {
+    "id": "v-space-backend-065",
+    "category": "Agents in the room",
+    "name": "Create a simple agent from the room",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3261-3405",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3890-3911",
+      "apps/Application Plane/convex-core/convex/spaceAgents.ts:412-484",
+      "apps/Application Plane/convex-core/convex/spaceAgents.ts:709-763"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md"
+    ],
+    "notes": "SRC. Definition + pending binding, then Control service roster declared and set active. Owner/manager; name 2-60 chars, instructions up to 4,000."
+  },
+  {
+    "id": "v-space-backend-066",
+    "category": "Agents in the room",
+    "name": "Bind an existing agent definition to a room",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3913-4055",
+      "apps/Application Plane/convex-core/convex/spaceAgents.ts:486-595"
+    ],
+    "plannedIn": [
+      "apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-space-backend-067",
+    "category": "Agents in the room",
+    "name": "Pause / resume / revoke an agent binding",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3544-3666",
+      "apps/Application Plane/convex-core/convex/spaceAgents.ts:596-665"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md"
+    ],
+    "notes": "SRC. Revoke re-converges the Control roster."
+  },
+  {
+    "id": "v-space-backend-068",
+    "category": "Agents in the room",
+    "name": "Binding policy enforced at invocation (trigger modes, approval mode, allowed tools)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4500-4573",
+      "apps/Application Plane/convex-core/convex/schema.ts:620-634"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md"
+    ],
+    "notes": "SRC. trigger_modes, approval_mode (blocked refuses; require_confirmation strips agentic/plan_mode), allowed_tools filter. knowledge_scope, default_thread_policy, audit_visibility deliberately not stored."
+  },
+  {
+    "id": "v-space-backend-069",
+    "category": "Agents in the room",
+    "name": "Authored instruction hierarchy (platform > org > Space > user > agent)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3720-3888",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4231-4398",
+      "apps/Application Plane/convex-core/convex/spaces.ts:1503-1555"
+    ],
+    "plannedIn": [
+      "apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md"
+    ],
+    "notes": "SRC. Editor+ writes Space instructions (max 4,000 chars); client-supplied values stripped; no versioning."
+  },
+  {
+    "id": "v-space-backend-070",
+    "category": "Agents in the room",
+    "name": "Personal agents (per-user, Grok-style)",
+    "status": "absent",
+    "evidence": [
+      "apps/Control Plane/user-core/internal/spaces/repository.go:670-673",
+      "apps/Application Plane/convex-core/convex/spaceMembers.ts:31-44"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md"
+    ],
+    "notes": "Searched personal-Space agent binding paths: Control refuses personal membership replacement and requireManagedRoom refuses personal Spaces; agents exist only in shared rooms."
+  },
+  {
+    "id": "v-space-backend-071",
+    "category": "Agents in the room",
+    "name": "In-room approvals (approve / deny)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:64-115",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:1505-1570",
+      "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs:2630-2700"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. decided_by pinned to caller; org-scoped. Granted approval recorded but continuation quarantined (no resume on this path); deny cancels; no approval scopes."
+  },
+  {
+    "id": "v-space-backend-072",
+    "category": "Agents in the room",
+    "name": "Work projection (runs, schedules, background processes)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2316-2614"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC. Read-only; each section reports its own gap. Cancel/steer controls planned (S4.5)."
+  },
+  {
+    "id": "v-space-backend-073",
+    "category": "Agents in the room",
+    "name": "Agent \"PC\": durable Space sandbox workspace for code_interpreter",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-60"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md"
+    ],
+    "notes": "SRC. Credential-free, no-network sandbox lease; hydrated and snapshotted at run end; inline ExecuteStep runs lose edits."
+  },
+  {
+    "id": "v-space-backend-074",
+    "category": "Agents in the room",
+    "name": "Agent browser scoped to a Space",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:435-441"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md"
+    ],
+    "notes": "SRC. Browser-agent runs always send space_id \"\" (BrowserRunStartRequest has no Space field). Browser actions governed by Quarry grants."
+  },
+  {
+    "id": "v-space-backend-075",
+    "category": "Agents in the room",
+    "name": "Background process registry (S4.2)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2530-2598"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC. Read path into the Work tab under audience-pinned read decision."
+  },
+  {
+    "id": "v-space-backend-076",
+    "category": "Agents in the room",
+    "name": "Agent-to-agent delegation inside a room",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/subagent_results.rs:1-30",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/subagent_results.rs:127"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+      "apps/Frontend Plane/verevonv3/docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md"
+    ],
+    "notes": "Searched Space paths for delegation: generic subagent machinery exists but carries no Space context and no gateway path."
+  },
+  {
+    "id": "v-space-backend-077",
+    "category": "Agents in the room",
+    "name": "Memory scoped per room",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:70"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "Searched memory scope enums: run, thread, workspace, session, user; no space scope."
+  },
+  {
+    "id": "v-space-backend-078",
+    "category": "Agents in the room",
+    "name": "Cost / allowance per Space",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "Searched cost-core for space_ref|space_id: none. Only org budget_exceeded hard stop."
+  },
+  {
+    "id": "v-space-backend-079",
+    "category": "Agents in the room",
+    "name": "Chief/Core routing view (org registry + per-Space roster)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3192"
+    ],
+    "plannedIn": [
+      "apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md"
+    ],
+    "notes": "SRC. Read-only; broad visibility does not grant authority."
+  },
+  {
+    "id": "v-space-backend-080",
+    "category": "Agents in the room",
+    "name": "Membership revocation propagated to Model Plane",
+    "status": "shipped",
+    "evidence": [
+      "apps/Control Plane/user-core/internal/nats/shared_publisher.go:196-214",
+      "apps/Model Plane/rust/services/session-core/src/space_membership_nats.rs:1-80",
+      "apps/Model Plane/rust/services/session-core/migrations/0032_space_membership_revocations.sql"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Plain NATS (not JetStream), best effort, tolerates loss."
+  },
+  {
+    "id": "v-space-backend-081",
+    "category": "Agents in the room",
+    "name": "Tool-call / run event visibility in the room",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:73-78",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:207-220"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Run events SSE/replay for run owner; room shows thread status from 6 s poll."
+  },
+  {
+    "id": "v-space-backend-082",
+    "category": "Agents in the room",
+    "name": "Agent permissions & secrets (Space credential grants/broker)",
+    "status": "planned",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "DOC S3.4. Searched Spaces router and Convex schema for credential|secret grants: none; sandbox is credential-free."
+  },
+  {
+    "id": "v-space-backend-083",
+    "category": "Collaborative artifacts",
+    "name": "Document sharing (view-only resource grants)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:1-44",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:90-130"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. user-core resource_grants enforced by retrieval and documents-api; not Space-scoped."
+  },
+  {
+    "id": "v-space-backend-084",
+    "category": "Collaborative artifacts",
+    "name": "Canvases / wiki / docs authored in the room",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched Spaces router and Convex schema for canvas|wiki authoring: none; wiki pages reachable only via retrieval binding."
+  },
+  {
+    "id": "v-space-backend-085",
+    "category": "Collaborative artifacts",
+    "name": "Tasks / boards",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:66-69",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:345-347"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Per-thread orchestration todos and Model /v1/tasks; no Space board."
+  },
+  {
+    "id": "v-space-backend-086",
+    "category": "Collaborative artifacts",
+    "name": "Planner documents (legacy workspaceId)",
+    "status": "stub",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:277-304"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Resource-local workspaceId; ADR-0001 migration candidate."
+  },
+  {
+    "id": "v-space-backend-087",
+    "category": "Collaborative artifacts",
+    "name": "Support inbox / tickets (separate domain, planned case Space)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs:1-100",
+      "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:62-143"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Full support desk in conversation-core; not a Space today."
+  },
+  {
+    "id": "v-space-backend-088",
+    "category": "Realtime & sync architecture",
+    "name": "Room updates by visible-tab polling (6 s)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:78",
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:87",
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:276-320"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. 6 s thread projection, 30 s context recheck, typing beat."
+  },
+  {
+    "id": "v-space-backend-089",
+    "category": "Realtime & sync architecture",
+    "name": "Own-turn SSE streaming with resume",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:17",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:31-32",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:136-142"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-space-backend-090",
+    "category": "Realtime & sync architecture",
+    "name": "Push transport to browsers (WS / SSE / Convex subscription) for rooms",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "Searched FE for convex|ConvexClient: only demo/settings hits; no room subscription."
+  },
+  {
+    "id": "v-space-backend-091",
+    "category": "Realtime & sync architecture",
+    "name": "Transactional outboxes (lifecycle, audience, deletion, owner receipts)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:680-820",
+      "apps/Application Plane/convex-core/convex/schema.ts:873-903",
+      "apps/Application Plane/convex-core/convex/spaceAudienceRegistration.ts:13-22",
+      "apps/Application Plane/convex-core/convex/spaces.ts:1053-1062"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Leases, retry, at-least-once, idempotent event ids."
+  },
+  {
+    "id": "v-space-backend-092",
+    "category": "Realtime & sync architecture",
+    "name": "Cross-plane events (NATS)",
+    "status": "partial",
+    "evidence": [
+      "apps/Control Plane/user-core/internal/nats/shared_publisher.go:196-214",
+      "apps/Application Plane/convex-core/nats-subscriber.js"
+    ],
+    "plannedIn": [
+      "apps/Application Plane/APPLICATION_PLANE_STATUS.md"
+    ],
+    "notes": "SRC+DOC. Unsigned, best-effort fan-out."
+  },
+  {
+    "id": "v-space-backend-093",
+    "category": "Realtime & sync architecture",
+    "name": "Offline cache / multi-device sync / E2EE",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "INF from transport design (all content through BFF and Model Gateway). Searched FE for an offline room store: none found."
+  },
+  {
+    "id": "v-space-backend-094",
+    "category": "Realtime & sync architecture",
+    "name": "Cross-room aggregates (sidebar unread / presence)",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "DOC audit sections 16 and 18; no aggregate endpoint in Spaces router."
+  },
+  {
+    "id": "v-space-backend-095",
+    "category": "Governance, security & compliance",
+    "name": "Signed, short-lived, effect-bound Control decisions (Ed25519)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Control Plane/user-core/internal/spaces/decision.go:4-60",
+      "apps/Control Plane/user-core/internal/spaces/decision.go:145-222",
+      "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:21",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:34-47",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:60-98",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:1521-1790"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Binds subject, org, Space, audience, authority revision, privacy policy, action, schema hash, payload digest, idempotency key; BFF strips 12 forged fields."
+  },
+  {
+    "id": "v-space-backend-096",
+    "category": "Governance, security & compliance",
+    "name": "Deny-by-default per-org Space effect policies",
+    "status": "shipped",
+    "evidence": [
+      "apps/Control Plane/user-core/migrations/018_space_effect_policies.up.sql",
+      "apps/Control Plane/user-core/migrations/024_space_agent_action_effect_policy.up.sql",
+      "apps/Control Plane/user-core/migrations/028_space_process_registry_effect_policy.up.sql"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Migrations 018-028 add separate bits; absence of a row denies issuance. Not seeded in dev per docs."
+  },
+  {
+    "id": "v-space-backend-097",
+    "category": "Governance, security & compliance",
+    "name": "Recipient audience snapshots (immutable set + hash + revision)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Application Plane/convex-core/convex/schema.ts:853-903",
+      "apps/Application Plane/convex-core/convex/spaceAudience.ts:32-76",
+      "apps/Control Plane/user-core/internal/http/server.go:353"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-space-backend-098",
+    "category": "Governance, security & compliance",
+    "name": "Zero-Data-Retention propagation",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:80-116",
+      "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:292-294",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:1749-1755"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+      "apps/Application Plane/notification-core/README.md"
+    ],
+    "notes": "SRC. Gateway raises zdr flag (fail closed); Control forbids durable owner actions under ZDR; Session Core decodes but does not act on the claim; notification payloads still go to Novu."
+  },
+  {
+    "id": "v-space-backend-099",
+    "category": "Governance, security & compliance",
+    "name": "Space deletion saga with per-plane receipts and legal hold",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:960-1084",
+      "apps/Application Plane/convex-core/convex/spaces.ts:484-1325",
+      "apps/Control Plane/user-core/internal/http/server.go:346-349",
+      "apps/Control Plane/user-core/migrations/022_space_deletion_authority.up.sql"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md"
+    ],
+    "notes": "SRC. Personal only; 7-day receipt deadlines; final deleted only when all owners succeed. Migrations not applied in staging per tracker."
+  },
+  {
+    "id": "v-space-backend-100",
+    "category": "Governance, security & compliance",
+    "name": "Audit (tool actions; Space receipts in Activity)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs:1-30",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1569-1610"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/space-defenition.md"
+    ],
+    "notes": "SRC. No Space-scoped audit view; no dedicated agent-invocation audit table."
+  },
+  {
+    "id": "v-space-backend-101",
+    "category": "Governance, security & compliance",
+    "name": "User privacy export / erase",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/privacy.rs:39-40"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Per user; Space export absent."
+  },
+  {
+    "id": "v-space-backend-102",
+    "category": "Governance, security & compliance",
+    "name": "SSO / SCIM",
+    "status": "partial",
+    "evidence": [
+      "apps/Control Plane/auth-core/src/auth/auth.ts:1018-1030"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. SSO behind SSO_ENABLED; searched scim in auth-core, user-core, org-core: no code."
+  },
+  {
+    "id": "v-space-backend-103",
+    "category": "Governance, security & compliance",
+    "name": "Approval tenant isolation (org_id from verified JWT)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:1510-1540",
+      "apps/Model Plane/proto/model_plane/v1/orchestration.proto:719-760"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Gateway comment claiming an IDOR is stale."
+  },
+  {
+    "id": "v-space-backend-104",
+    "category": "Governance, security & compliance",
+    "name": "DLP / moderation / eDiscovery for rooms",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Low confidence. Searched gateway and Control routes for dlp|ediscovery|moderation on Spaces: none found; Model Plane provenance/moderation not traced into rooms."
+  },
+  {
+    "id": "v-space-backend-105",
+    "category": "Governance, security & compliance",
+    "name": "Multi-tenancy (org from verified session, member re-check per call)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4704-4746",
+      "apps/Application Plane/convex-core/convex/spaces.ts:373",
+      "apps/Application Plane/convex-core/convex/spaces.ts:428"
+    ],
+    "plannedIn": [
+      "apps/SPACE_AUTHORITY_ADR_2026-08-13.md"
+    ],
+    "notes": "SRC. Application service key never reaches browser."
+  },
+  {
+    "id": "v-space-backend-106",
+    "category": "Client shell",
+    "name": "Same-origin BFF session layer for all Space routes",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:736"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Browser holds no upstream credential. Other client shell items are in the v-space-ui baseline."
+  },
+  {
+    "id": "v-space-backend-107",
+    "category": "UX patterns & layout",
+    "name": "\"Never go dark\" unavailable[] contract on composed Space responses",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1205-1222",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1600-1640",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2470-2610",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1780-1880"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. {section, code, reason} keeps empty distinct from could-not-ask."
+  },
+  {
+    "id": "v-space-backend-108",
+    "category": "UX patterns & layout",
+    "name": "Six-tab cockpit backed by these endpoints (Chat, Work, Activity, Knowledge, Agents, Members)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC (frontend)."
+  },
+  {
+    "id": "v-space-backend-109",
+    "category": "UX patterns & layout",
+    "name": "space_actions endpoint (org catalog echoed under a space_ref)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4890-4925"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md"
+    ],
+    "notes": "SRC. Returns human_owner_action_catalog_for(user); only echoes the ref, misleading as Space-scoped."
+  }
+]

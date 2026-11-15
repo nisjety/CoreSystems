@@ -1,0 +1,127 @@
+[
+ {
+  "finalId": "F-t3-014",
+  "verdict": "partial",
+  "checked": [
+   "extract/claude/resources/bundled-skills/manifest.json (6 skills, all tier 'always')",
+   "extract/claude/resources/bundled-skills/{docx,pptx,xlsx,pdf,pdf-reading,frontend-design}.skill (unzip -l listings)",
+   "pptx.skill!pptx/SKILL.md:17-52 (thumbnail.py grid, scripts/office/validate.py after writeFile)",
+   "xlsx.skill!xlsx/SKILL.md:23-44 (mandatory recalc.py, zero formula errors)",
+   "docx.skill!docx/SKILL.md:42-44 (soffice.py convert to PDF, pdftoppm, Read the page images)",
+   "C:/dev/deepseek-harness/packages/skill/skill-office/README.md (office-docx/pptx/xlsx only; check_office.py; Known Limitations)",
+   "C:/dev/deepseek-harness/packages/skill/skill-office/assets/ (3 SKILL.md + scripts/check_office.py)",
+   "C:/dev/deepseek-harness/docs/subsystems/office-to-pdf.md:1-40",
+   "C:/dev/deepseek-harness/packages/client/ui-sidebar-documentpreview/README.md:12-142 (register API, excel.maxBytes 16 MiB, maxCells 250000, Office->PDF preview)",
+   "extract/manus/frontend/out/_next/static/chunks/2jwv7cz4lh77_.js (filePreviewer/officePreviewer/codeViewer slice names) and 32_2-1jr2qqin.js ('Cannot preview this file')",
+   "C:/dev/hermes-agent/agent/skill_utils.py:822-839 (SKILL_PROMPT_DESC_LIMIT = 60)"
+  ],
+  "corrections": "1) Claude desktop: not all six always-on skills 'ship scripts and validators'. docx, pptx, xlsx share scripts/office/validate.py with OOXML XSD schemas plus soffice.py; pdf ships form/bounding-box check scripts; pdf-reading has only SKILL.md and REFERENCE.md; frontend-design has only SKILL.md and is not a document skill. Say 'four document skills with scripts, three with OOXML schema validators'. 2) Best-in-class for verify-and-render should be Claude desktop (SRC), not DeepSeek. Claude's shipped SKILL.md files already require render-and-look (docx: soffice to PDF, pdftoppm, then read the page images; pptx: thumbnail.py grid plus validate.py; xlsx: mandatory recalc.py). DeepSeek's checker README says it does NOT judge pagination, clipping, fonts, chart appearance or Excel recalculation. Rendering comes only from the separate LibreOffice Kit. 3) DeepSeek ships office-docx/pptx/xlsx only, with no PDF authoring skill, so the title 'docx, xlsx, pptx and pdf skills' applies to Claude only. 4) 'description <= 200' is the claude.ai custom-skill upload limit, not an open-standard limit: Claude's own bundled skill descriptions exceed 200 characters. Attribute it to the claude.ai upload UI (DOC). 5) The DeepSeek previewer best-in-class is accurate: register-by-extension, 16 MiB / 250k-cell Excel caps, Office->PDF conversion with a missing-font notice.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "claude.ai creation and sandbox limits are DOC-only. Claude desktop skills are SRC (shipped bundle), but their runtime execution was not observed.",
+   "DeepSeek office skills need a deployment-supplied Python and authoring libraries. LibreOffice Kit is an external package.",
+   "Manus previewer evidence is UI strings and slice names (SRC, medium confidence). Behavior not exercised.",
+   "Codex 'distinct skill approval category' is medium-confidence string evidence."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-006",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/tmp/codex_rt/codexexe.prose.txt:11177 (approved_with_amendment, approved_for_session, approved_mcp_policy_amendment, approved_with_network_policy_allow, denied_with_network_policy_deny, abort)",
+   "scratchpad/tmp/cxpe/codex_exe.strings.txt:1304554-1306500 (mcp_tool_approval_templates.rs, schema_version 4, 55 'template' entries, e.g. 'Allow {connector_name} to add a comment to a pull request?')",
+   "scratchpad/tmp/cxpe/codex_exe.strings.txt ('User verification is required' / 'is not available in this build or account' / 'unavailable for remote workspaces')",
+   "scratchpad/tmp/claude-ext/pretty/core.js:154868-154872 (Fya map, 33 cause-code sentences)",
+   "scratchpad/tmp/claude-ext/pretty/core.js:88348-88351 (yir: rewrites rule destinations to 'session'; exported as aO at :171948, call site in another chunk not traced)",
+   "scratchpad/tmp/ag2/protos/third_party__jetski__cortex_pb__cortex.proto.txt:68 (AutoRunDecision USER/SYSTEM/MODEL/DEFAULT x ALLOW/DENY), :1760 (trigger_source)",
+   "C:/dev/deepseek-harness/packages/interaction/user-approval/src/types.ts:32 (ApprovalOutcome = allowed-once | rejected | cancelled | unavailable)",
+   "scratchpad/tmp/t3code/recovered/server/packages/contracts/src/orchestration.ts:142 (acceptForSession)",
+   "findings/t3/manus.computer-control-architecture.features.json#manus-computer-control-architecture-056 (Allow once / for this task / Always allow / Deny)",
+   "findings/t3/web-chatgpt.web-product.features.json#web-chatgpt-web-product-130",
+   "findings/t3/antigravity.architecture.features.json#antigravity-architecture-072"
+  ],
+  "corrections": "1) Step-up: 'web-chatgpt (passkey step-up documented)' is wrong. The ChatGPT record covers Advanced Account Security: passkey-only sign-in, parental controls, age prediction. It is not a fresh proof bound to an approval. Step-up for sensitive approvals is 1 of 12 (Codex SRC), not 2. Codex strings also show it is build- or account-gated and unavailable for remote workspaces, and which approvals require it is not established. 2) Decision-scope prevalence: DeepSeek has no scopes (outcomes are allowed-once/rejected/cancelled/unavailable). It belongs only to the fail-closed point. Manus does have scopes (once / this task / always). The count stays near 4 (Claude, Codex, T3 Code, Manus), but the membership must change. 3) The Codex decision taxonomy is wider than listed: it also has approved_mcp_policy_amendment and network-policy allow/deny variants. The template example has no PR number in the sentence; parameters are separate labelled fields ('Allow {connector_name} to add a comment to a pull request?'). The '55 versioned templates' count is confirmed (schema_version 4). 4) Claude cause codes: 33 confirmed. The coercion of 'always' to session scope is a confirmed helper, but its call site was not traced, so keep medium confidence. 5) The request shape {kind, tool, args, reason_code, matched_rule, suggestions[]} is a synthesis (INF), not any single reference's schema.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Codex passkey verification: SRC strings only. Gated by build or account. Scope of applicable approvals unknown.",
+   "Claude 'always'->session coercion: function confirmed, invocation path not traced (medium).",
+   "Antigravity denied-action equivalence is an embedded prompt (single source). Runtime behavior not observed.",
+   "Approval card request schema in the doc is a synthesized design (INF)."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-020",
+  "verdict": "partial",
+  "checked": [
+   "C:/Program Files/WindowsApps/Claude_2.31226.1.0_x64__pzs8sxrjxfjjc/app/resources/ion-dist/i18n/en-US.json (keys piKk2bn+h0 'Pause memory', 08McIOFwlq pause semantics, 3xmoDkCUN0 'Enable memory for your team', 'Reset memory', 'Reading memory...', 'Saved to memory', 'Searching memory', 'Memory is turned off for your organization', 'This summary is regenerated each night')",
+   "https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context",
+   "https://www.perplexity.ai/help-center/en/articles/10968016-memory",
+   "https://www.perplexity.ai/help-center/en/articles/19700001-what-is-brain",
+   "findings/t3/cmp/08-memory-learning-personalization.clusters.json C-t3-08-001 (6 members, 5 sources) and C-t3-08-008 (1 member)",
+   "findings/t3/cursor.ai-features.features.json#cursor-ai-features-064/-071, cursor.harness-architecture#-111",
+   "findings/t3/codexagent.plugins-and-extensibility.features.json#codexagent-plugins-and-extensibility-087"
+  ],
+  "corrections": "1) Prevalence '9 of 12' is not backed by cluster members: C-t3-08-001 lists only claude, web-claudeai, web-perplexity, manus and web-manus. Records elsewhere support ChatGPT (DOC), Antigravity (SRC, view/edit/delete) and Codex (SRC, reset/import), but Cursor must be removed. Cursor has no account memory store: legacy memory RPCs are probably retired, and current learning is transcript search plus per-automation memories. Use 8 of 12 at most (7 distinct vendors). 2) A separate pause control (keep rows, stop use and generation) is shown only for Claude. Perplexity's doc has toggles but no distinct pause. ChatGPT pause applies to Computer History, not memory. Do not imply pause is table-stakes. 3) Org governance '3 of 12' counts Claude desktop and claude.ai separately: 2 distinct vendors. Both confirmed: Perplexity Enterprise admins manage memory org-wide and memories belong to the org; Claude Team/Enterprise owners enable memory and members opt in. Turning it off at org level deletes all memory data. 4) The topic-based-entries claim is correct for the current claude.ai experience (doc). The nightly summary still exists in desktop strings and is the legacy mode. 5) claude.ai memory is unavailable to orgs with HIPAA, public-sector or custom data-retention agreements. Carry this into the Verevon ZDR discussion. 6) The doc says it does not describe a read/write indicator, but the indicator is confirmed by desktop strings ('Reading memory...', 'Saved to memory'), so mark it SRC rather than DOC.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Perplexity org controls and memory ownership: DOC-only (Enterprise).",
+   "Claude desktop memory UI: SRC strings. Both the legacy nightly-summary mode and the topic-entry mode are present in the shipped strings.",
+   "Codex memories are config-driven (generate_memories/use_memories) and may be feature-gated.",
+   "claude.ai memory is excluded for custom-retention, HIPAA and public-sector orgs (DOC)."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-002",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/deepseek-harness/packages/session/session-checkpoint-policy/src/index.ts:20-60 (checkpoint before model dispatch, before tool body, at next request boundary; fail-closed)",
+   "C:/dev/deepseek-harness/packages/session/session-checkpoint-policy/README.md:105-125 (Known Limitations: durable intent not exactly-once; no checkpoint inside active model attempt; unknown outcome, no auto retry)",
+   "C:/dev/deepseek-harness/packages/core/agent-loop/src/index.ts:845-895 (resume with ownership)",
+   "C:/dev/deepseek-harness/packages/interaction/user-approval/README.md:153 (durable out-of-turn approval workflow deferred)",
+   "C:/dev/hermes-agent/tui_gateway/AGENTS.md:19-35 (server->client requests; send() blocks the agent thread; open_requests replayed on session.resume)",
+   "C:/dev/hermes-agent/tui_gateway/server_requests.py:71,189 (threading.Event in memory, wait(timeout))",
+   "C:/dev/hermes-agent/agent/turn_facade_lease.py:1-30 (row lease, TTL 300s, refresher, stall watchdog)",
+   "C:/dev/hermes-agent/agent/error_classifier.py:34-90 (FailoverReason: 29 values)",
+   "C:/dev/hermes-agent/agent/turn_recovery_autorecover.py:1-14 (park with visible countdown, 5 cycles, 15/30/60/60/60s)",
+   "extract/manus/node_modules/@next-agent/browser-runtime/src/BrowserMcpServer.ts:44-120,254-300 (in-memory Map actionLedger, max 4096 entries, digest conflict -> replay-conflict result)",
+   "extract/manus/node_modules/@next-agent/browser-runtime/src/contract/browserContract.ts:10 (10-minute horizon)",
+   "findings/t3/cursor.ai-features.features.json#cursor-ai-features-045 (flags)"
+  ],
+  "corrections": "1) 'Pause, resume in place after approval' as a crash-durable continuation is not shown by any reference. Hermes blocks the agent thread on an in-memory threading.Event with a deadline, and replays open requests only to reconnecting clients while the process lives. DeepSeek requests are valid only inside an open turn, and its README defers a durable out-of-turn approval workflow. Present durable approval pauses as a Verevon design synthesis (INF) built from DeepSeek checkpoints, not as a reference behavior. 2) The Manus 'exactly-once ledger' is a process-local, in-memory Map (max 4096 entries, 10-minute horizon) scoped to browser MCP side-effect actions only. It deduplicates retries within a live process; it is not a durable cross-crash ledger. Mismatched digests return a replay-conflict result (confirmed). 3) DeepSeek explicitly disclaims exactly-once: it records dispatch intent, writes an unknown-outcome closer instead of retrying, and recommends forwarding exec.callId as an idempotency key. It has no checkpoint inside an active model attempt. 4) Cursor auto-continue and durable question delivery are server-flag-gated (glass_auto_continue_*, ask_question_durable_delivery fallback default off). 5) Hermes failover reasons: 29, so 'about 30' is fine. Lease TTL is 300s. The parked-turn countdown is confirmed. 6) Server-to-client-requests prevalence 3 of 12 includes a low-confidence Claude record (claude-product-ux-122); treat as 2 confirmed (Hermes, DeepSeek).",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Manus ledger: browser-runtime only, in-memory (SRC).",
+   "Cursor recovery behavior is flag-gated with server-controlled values (SRC strings/flags only).",
+   "Claude desktop auto-resume (claude-product-ux-087) is medium confidence and was not exercised at runtime.",
+   "Durable approval pause and resume across crashes is INF (synthesis), not observed in any reference."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-017",
+  "verdict": "partial",
+  "checked": [
+   "https://support.claude.com/en/articles/8241126-upload-files-to-claude (500MB per chat file, 20 files, PDF <=100 pages visual, 101-1000 text only, project files 30MB)",
+   "https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude (egress: off / package managers only (default) / package managers + specific domains / all domains; 30MB per file for uploads and downloads in the file-creation environment; sandboxes never shared between users)",
+   "scratchpad/tmp/t3code/recovered/client/src/lib/attachmentUploadQueue.ts:16-17,80,213,343 (3 per environment, 5-min timeout, retry)",
+   "scratchpad/tmp/t3code/recovered/client/src/lib/imageCompression.ts:8-31 (HEIC decode, 2048 max dimension, quality ladder to wire cap)",
+   "scratchpad/tmp/t3code/recovered/server/src/attachmentStore.ts:20-26 (pending attachments, max-age; no content hashing found)",
+   "C:/dev/deepseek-harness/packages/attachment/attachment-local/README.md:12,59,78,84,88 (objects/<sha256-prefix>/<sha256>, dedup, per-route request-image cache, under DSH_HOME)",
+   "C:/dev/deepseek-harness/packages/fs/tool-fs/src/read-image.ts:9-10,113 (unknown capability refuses before filesystem/attachment work)",
+   "scratchpad/tmp/ag2/protos/third_party__jetski__codeium_common_pb__codeium_common.proto.txt:563,917 (supported_mime_types on ClientModelConfig and ModelFeatures)",
+   "scratchpad/tmp/ag/ui_copy.txt:172,344,1465 ('Selected model does not support this media type', 'PDF file size exceeds 10MB limit')"
+  ],
+  "corrections": "1) 'Presigned direct upload into object storage so no bytes pass through the chat API' is not shown by any cited reference. T3 Code uses signed upload URLs to its own local server, which writes files to disk. DeepSeek stores content-addressed objects on the local filesystem under DSH_HOME. Label this as Verevon design (INF). 2) The claude.ai limits conflict between articles: the upload article gives 500MB per chat file (30MB for project files), but the file-creation/code-execution article gives 30MB per file for uploads and downloads in the sandbox. State both rather than '500MB' alone. 3) The egress tiers are confirmed for claude.ai Team/Enterprise (DOC), with plan-specific defaults: Team defaults to package managers, Enterprise defaults to off. 4) 'Uploaded files mounted read-only at a known path' and 'per-call limit measured in minutes' were not found in the claude.ai articles checked. Mark as INF or remove the attribution to claude.ai. 5) Best-in-class for the store: DeepSeek is backed by in-repo README plus source files (store.ts, file-store.ts), so it could be upgraded from DOC to SRC, but it is single-machine. The T3 Code queue is image-only; generic files follow a different path. 6) The fail-closed parts (DeepSeek read_image, Antigravity per-model supported_mime_types plus refusal copy) are confirmed SRC.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Sandbox data analysis (C-t3-02-027) is DOC-only for all four sources (claude.ai, ChatGPT, Manus, Perplexity). Perplexity Firecracker was not re-verified.",
+   "The claude.ai per-file limit differs by surface (chat 500MB vs code-execution environment 30MB vs project 30MB).",
+   "The Antigravity link-chip feature is a single-source SRC record at medium confidence.",
+   "The presigned object-storage upload path is a design proposal (INF), not reference behavior."
+  ],
+  "confidence": "medium"
+ }
+]

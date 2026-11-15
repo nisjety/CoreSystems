@@ -1,0 +1,662 @@
+{
+  "category": "Acquisition API surface",
+  "items": [
+    {
+      "id": "R-t2-01-01",
+      "title": "Inline scrape with formats[] and one strict, shared ScrapeOptions contract",
+      "summary": "Add formats[], an inline mode, timeout, maxAge and the common page knobs (onlyMainContent, include/exclude tags, headers, location) to POST /v1/scrape so the response carries the requested markdown/html/links/metadata directly, keeping artifact refs for oversized bodies and for non-ZDR persistence. Define these fields once as a ScrapeOptions struct in quarry-core (deny_unknown_fields, validate() returning BadRequest with field paths) that crawl, batch, search hydration and schedules embed, return effectiveOptions and a scrape_id, and add GET /v1/scrape/:id (org-checked, skipped for ZDR).",
+      "whyItMatters": "Every agent web_fetch and every URL-as-query search currently pays a two-call cost (POST /v1/scrape, then GET /v1/artifacts/:id), and inline-only is the natural ZDR path because nothing has to be persisted. One validated options contract lets the Model propose options and Quarry reject bad ones with clear field-level 400s, and every later endpoint (crawl, batch, hydration, monitors) inherits the same knobs instead of growing ad hoc fields.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-001 inline scrape under a per-team semaphore; fc-002 shared zod strictObject)",
+        "others": [
+          "Apify web-fetch / Website Content Crawler (DOC; same format list, run as an Actor)"
+        ],
+        "prevalence": "inline scrape: 2 of 4 sources (Firecrawl, Apify), table-stakes; shared strict options contract: 1 of 4 (Firecrawl), differentiator; scrape-by-id: 1 of 4 (Firecrawl)",
+        "mechanism": "Validate the request against a single options schema; take a per-org concurrency permit with a bounded wait (2/3 of the request timeout); run the pipeline in-process; build the Document with only the requested formats (markdown default, rawHtml only on request) and put scrapeId, status code, final URL and queue time in metadata; cross-field rules (waitFor <= timeout/2, action count and total wait caps, one screenshot format); write a per-job access row {scrapeId, orgId, expiresAt} so GET /scrape/:id can re-serve the result, and write none for ZDR. Caution from the reference: it silently defaults skipTlsVerification to true, so echo effective options and never flip a security default silently."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:131",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:345-375 (ScrapeRequest: url, prev_fingerprint, cache, zdr, privacy, signals, ingest, org_id, render, prefer_http3; no formats/timeout/maxAge)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:398-530",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:1067-1110",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545 (service scopes already allow /v1/artifacts/:id, so the second call is a latency and ZDR problem, not a permission one)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:112",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:28"
+        ],
+        "gap": "Quarry /v1/scrape answers with a NormalizedOutput of artifact refs, so content needs a second GET /v1/artifacts/:id; the request has no formats, timeout, maxAge, onlyMainContent, tag filters, headers, location or mobile fields; the cache only hits when the caller sends prev_fingerprint; each route (scrape, crawl, batch, extract) has its own ad hoc fields; no scrape-id to result lookup."
+      },
+      "approach": "Ingestion Plane. quarry-core: new ScrapeOptions (serde deny_unknown_fields, validate(), JSON Schema via schemars used for OpenAPI and for the Model Plane tool schema). quarry-edge routes.rs scrape handler: serialize requested formats inline up to a size cap and fall back to FormatRef above it; return scrape_id and effectiveOptions; add a URL+options keyed cache with maxAge that is bypassed for ZDR and never crosses orgs; add GET /v1/scrape/:id resolving to the artifact set (not for ZDR). Embed ScrapeOptions in CrawlRequest, BatchRequest and SearchRequest.scrapeOptions in the other items. Model Plane execution-core web_tools.rs switches web_fetch to inline markdown. Roll out with a lenient period that logs unknown keys because gateway callers send extra fields. Optional follow-on: expose the existing ActionRuntime/ActionScript as a declarative actions[] field (no arbitrary JS).",
+      "effort": "M",
+      "dependencies": [
+        "OpenAPI regeneration from the same types (R-t2-01-11)"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-core + quarry-edge); consumer change in Model Plane web_tools",
+      "risks": "Large inline payloads (cap and fall back to artifact refs); cache must never serve across orgs or for ZDR requests; strict rejection breaks existing gateway callers that send extra fields (use a lenient period); resist copying Firecrawl's hidden option normalisation.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-001",
+        "C-t2-01-002",
+        "C-t2-01-003"
+      ]
+    },
+    {
+      "id": "R-t2-01-02",
+      "title": "Public async job API: status, paginated results, errors, cancel/pause/resume, live tail",
+      "summary": "Expose the missing job lifecycle for crawl and batch: GET /v1/crawl/:id (status, completed/total, warnings, expiry, cursor-paged data capped at 100 docs or 10 MiB), GET /v1/crawl/:id/errors (per-URL failures including robots-blocked), GET /v1/crawl/ongoing, DELETE /v1/crawl/:id (cancel) and POST pause/resume, with /v1/batch aliases. Turn /v1/jobs/:id/events into a real live tail that sends a catch-up snapshot first and supports Last-Event-ID.",
+      "whyItMatters": "Users notice immediately when a runaway crawl cannot be stopped or a failed page cannot be explained, and agents need a single poll call. This is also the dependency for webhooks, waiters, resumable timeouts and monitors. The Temporal cancel/pause/resume handlers already exist, so most of the work is route wiring rather than new engine logic.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-010/011 status, errors, ongoing, cancel; fc-012 catchup/document/done stream)",
+        "others": [
+          "Apify (run GET/abort, DOC)"
+        ],
+        "prevalence": "job status/cancel: 2 of 4 sources (Firecrawl, Apify), common; live stream with catch-up: 1 of 4 (Firecrawl)",
+        "mechanism": "GET /crawl/:id returns {status, completed, total, creditsUsed, expiresAt, data[page], next, warnings[]} where the page ends at 100 docs or 10 MiB and the cursor advances by what was actually returned; /errors returns [{url, code, error, requiresAction}] plus robotsBlocked[]; DELETE sends a cancel signal; results expire by TTL. The stream sends {type:'catchup', data: status}, then each finished document, then done, with defined close codes; support Last-Event-ID so reconnects do not lose events (the reference polls once a second server-side and its SDK falls back to polling, so build the tail off durable event history instead)."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293 (route table: no GET/DELETE /v1/crawl/:id, no pause/cancel for jobs; only /v1/schedules/:id/pause|unpause)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:976 (list_job_events)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:1040-1057 (comment: events are drained from control once and the stream closes)",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146 (Pause/Resume/Cancel signal channels plus state and progress query handlers already installed)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:27",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:185"
+        ],
+        "gap": "Quarry has only a /v1/:kind/jobs list and a drain-once events stream; no GET /v1/crawl/:id, no result pagination, no errors route and no public cancel/pause/resume, although the Temporal signal handlers exist. A grep of the orchestrator and control Go services found only the signal definitions, no sender."
+      },
+      "approach": "Ingestion Plane. quarry-edge: add GET/DELETE /v1/crawl/:id (batch alias), POST /v1/crawl/:id/pause|resume, GET /v1/crawl/:id/errors and /ongoing; org-check every route against the job record. The component that sends Temporal signals and reads the QueryState/QueryProgress handlers needs a Temporal client (control or an internal orchestrator endpoint). Build errors from failed-page and robots-denied events (CrawlDenialReason in quarry-core crawl_denial.rs). Make /v1/jobs/:id/events tail the durable event history with a snapshot first and Last-Event-ID, with a per-org cap on open streams. Gateway ingestions/runs.rs and knowledge.rs proxy with the existing org check. ZDR jobs return status only, no stored documents.",
+      "effort": "M",
+      "dependencies": [
+        "Quarry control job store and durable event history",
+        "A Temporal client reachable from the service that serves cancel/pause/resume (INF: none is wired today)"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-edge, quarry-control, quarry-orchestrator)",
+      "risks": "Result retention versus ZDR (status-only for ZDR); long-lived SSE connections need per-org limits; cancel must be idempotent and safe when the workflow already finished.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-008",
+        "C-t2-01-009"
+      ]
+    },
+    {
+      "id": "R-t2-01-03",
+      "title": "Scoped site crawl: include/exclude, sitemap seeding, robots in the frontier, ZDR posture",
+      "summary": "Extend CrawlRequest beyond url/max_pages/max_depth/ingest/zdr with includePaths/excludePaths (linear-time regex with size caps), crawlEntireDomain, allowSubdomains, allowExternalLinks, sitemap skip|include|only, ignoreQueryParameters, delay, maxConcurrency and an embedded scrapeOptions, with the limit clamped to the org's remaining budget. Enforce robots.txt in the crawl frontier (not only in /v1/map), seed from robots Sitemap: lines, and give ZDR orgs a defined crawl posture instead of a hard refusal.",
+      "whyItMatters": "Crawling without scope is the main functional gap against Firecrawl and Apify for knowledge ingestion: users and agents want only the docs section they point at, not a whole domain. Enforcing robots.txt in the crawl path reduces legal and blocking risk, and the ZDR gap currently excludes privacy-sensitive orgs from crawling entirely.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-008 full scoping vocabulary)",
+        "others": [
+          "Apify Website Content Crawler (DOC; stronger on extraction choices than on scoping)"
+        ],
+        "prevalence": "scoped crawl: 2 of 4 sources (Firecrawl, Apify), table-stakes",
+        "mechanism": "CrawlRequest {url, includePaths[], excludePaths[] (regex, optionally matched on the full URL), maxDiscoveryDepth, limit, crawlEntireDomain, allowSubdomains, allowExternalLinks, sitemap skip|include|only, ignoreQueryParameters, delay, maxConcurrency, scrapeOptions, webhook}; reject over 1000 patterns or 2000 chars each; the frontier filters candidates through scope rules, a robots cache, canonicalisation and dedupe; a robots override exists only behind a team flag; limit is clamped to remaining credits."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-560 (CrawlRequest has only url, max_pages, max_depth, ingest, zdr)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:560-668 (refuse_durable_job_under_zdr: crawl and batch are refused for ZDR because run_page runs without a zdr field)",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-516 (Temporal crawl BFS)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/robots_cache.rs (RobotsCache exists but is referenced only inside its own module and tests)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:170-260 (robots is applied only as an allow-filter in /v1/map, via quarry_transform::robots::RobotsTxt)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs:15-16 (RobotsDisallowed denial reason exists)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545 (service principals have no /v1/crawl or /v1/map scope)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:306",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/crawl_preview/quarry.rs:35"
+        ],
+        "gap": "No include/exclude, subdomain/external policy, sitemap mode or scrapeOptions on /v1/crawl; robots.txt is enforced only in /v1/map even though RobotsCache and a RobotsDisallowed denial reason already exist; crawl is refused under ZDR; service tokens cannot start crawls."
+      },
+      "approach": "Ingestion Plane. Extend CrawlRequest in routes.rs and the CrawlJobInput the Go workflow receives (workflows.go:396-516); put scope rules in the frontier (compile with the Rust regex crate to avoid ReDoS, or filter links in the run_page response); consult the existing RobotsCache before enqueue and emit RobotsDisallowed events that the /errors route (R-t2-01-02) returns; seed from robots Sitemap: lines using quarry_transform::sitemap; embed ScrapeOptions from R-t2-01-01; clamp limit to the org budget. ZDR: carry the zdr posture through the orchestrator and /v1/internal/run_page so a ZDR org can crawl with no durable artifacts or events, or keep refusing with a documented contract (Temporal history currently stores URLs, so this needs a design decision). Keep 'Model proposes, Quarry executes': do not add /v1/crawl to service-token scopes; the Model proposes a crawl, the user approves in the UI, and the gateway starts it under the user's token. A robots override must be an org policy set in Control Plane and audited.",
+      "effort": "L",
+      "dependencies": [
+        "R-t2-01-01 ScrapeOptions",
+        "R-t2-01-02 errors and cancel routes",
+        "Control Plane org policy and audit for any robots override",
+        "ZDR design for the durable orchestrator path"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-edge + quarry-orchestrator)",
+      "risks": "Regex DoS (cap pattern count and length, use linear-time engine); robots override must be policy-controlled and audited; durable Temporal history conflicts with ZDR unless redesigned; politeness limits per host must still hold with higher concurrency.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-006"
+      ]
+    },
+    {
+      "id": "R-t2-01-04",
+      "title": "Make structured extraction work: json format with schema and prompt, plus the Model Plane grant",
+      "summary": "Add a {type:'json', schema, prompt} entry to ScrapeOptions.formats that runs after markdown conversion, calls the Model Plane format runner with schema-constrained output, validates the result and returns data.json inline; wire the currently dead prompt field. In parallel, register the quarry-edge to model-gateway audience grant in the Control Plane principal registry and flip the model-invoke/model-stream manifest rows to granted so the call is allowed in production. Multi-URL extraction goes through batch instead of the sequential /v1/extract.",
+      "whyItMatters": "Structured extraction (products, pricing, contacts) is a core AI-first capability and today it does not work in a production-shaped deployment: the prompt is ignored and schema extraction is refused by the token manifest. The same missing grant also keeps answer synthesis, intent classification, page titles, semantic rerank and suggest switched off, so one unblock revives several features.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-023: /extract deprecated in favour of a json format on /scrape plus the agent)",
+        "others": [
+          "Apify (extraction via Actors, not a first-class API)"
+        ],
+        "prevalence": "structured LLM extraction as a built-in API: 1 of 4 sources (Firecrawl), differentiator for scraping APIs",
+        "mechanism": "formats:[{type:'json', schema, prompt}] on scrape: convert the page to markdown, call the LLM with schema-constrained output, validate against the schema, return data.json; multi-page work goes through batch or the agent; the old /extract stays with Deprecation headers pointing to the new shape."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:37-58 (ExtractRequest.prompt is marked dead_code scaffolding; MAX_MAX_URLS 25, markdown cap 20k, sequential)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:184",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:129-188",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json:40-73 (model-invoke, model-stream, model-audio all granted:false; notes cite D16 and QB-T17)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:1-38 (every Model Plane feature is off by default and refused while the manifest row is false; org-bound metered path is DEF-QB-T17-PART2)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:268 (ad hoc extract run forwards only the prompt, no schema)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/products.rs:203"
+        ],
+        "gap": "/v1/extract is sequential with no async job, the prompt is unused, schema extraction is refused because the manifest grants quarry-edge no model-gateway request, and the gateway forwards a prompt but never a schema. What works without a model: always-returned JSON-LD and hydration data."
+      },
+      "approach": "Ingestion Plane quarry-runtime ai_formats.rs and quarry-edge: add the json format to the ScrapeOptions union (R-t2-01-01), implement it through mp_client.rs against the Model Plane (Model Plane owns inference), fold prompt into the schema-guided prompt, treat page content as untrusted in that prompt, and propagate zdr. Control Plane: add the quarry-edge to model-gateway audience to apps/Control Plane/config/plane-service-principals.json and flip model-invoke/model-stream together with it, following the org-bound, metered path (DEF-QB-T17-PART2) so cost lands on the org. Gateway ingestions/runs.rs forwards schema as well as prompt. Keep /v1/extract as a deprecated facade over batch plus the json format.",
+      "effort": "M",
+      "dependencies": [
+        "R-t2-01-01 ScrapeOptions",
+        "Control Plane plane-service-principals grant (D16 / QB-T17)",
+        "Model Plane org-bound metered invoke path (DEF-QB-T17-PART2)",
+        "R-t2-01-06 batch for multi-URL"
+      ],
+      "planeOwner": "Ingestion Plane (with Control Plane grant and Model Plane inference)",
+      "risks": "Inference cost per page (budget it); ZDR must propagate into the Model Plane call; prompt injection from page content into the extraction prompt; schema-valid but wrong output.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "The grant is a tracked deferral: cross-plane-token-requests.json notes (D16, QB-T17) and model_plane_gate.rs (DEF-QB-T17-PART2). The json format and prompt wiring are not planned in anything read."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-017"
+      ]
+    },
+    {
+      "id": "R-t2-01-05",
+      "title": "Unblock hosted browser sessions in production: broker-grant issuance, session TTL reaper, scrape-to-session bridge",
+      "summary": "Build durable BrowserBroker grant issuance in the Model Plane and have the gateway request a grant per browser session and forward the browser bearer to model-gateway and Quarry, so the in-app browser and the AI-run path can open sessions in production. Then enforce an absolute TTL plus an inactivity TTL on Quarry browser leases with a reaper that spares sessions waiting on human approval, and add POST /v1/scrape/:id/session that seeds an agent run from a finished scrape's URL and render settings.",
+      "whyItMatters": "In production-mode Quarry the in-app browser cannot open a session at all because Quarry requires a broker grant and nothing issues one; the Model Plane browser tools are in the same state. That undercuts the core vision of a browser used by both users and AI. TTL enforcement keeps shared Chromium from leaking and makes session cost predictable, and 'open this result in the browser' is a natural next step after a scrape.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-006 sessions with ttl and activityTtl; fc-005 scrape-to-session interact bridge)",
+        "others": [
+          "Aside and Codex in-app browser (local, user-driven; no hosted session API)"
+        ],
+        "prevalence": "hosted browser sessions as an API: 1 of 4 sources (Firecrawl), differentiator",
+        "mechanism": "Session {ttl 30-3600 s, activityTtl 10-3600 s, profile, location, zdr}; a reaper closes a session on either timer and settles billing; live-view and replay URLs; /scrape/:id/interact lazily creates a session by replaying the scrape's URL, waits and actions. Verevon should copy the two timers and the bridge but not the free-form code execution."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:183-198 (production requires browser grants and a validator endpoint)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1377-1414 (allowed_domains come only from the broker grant in governed mode)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2257-2266 (grant revalidated before every action, per baseline)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446 and :1502 (lease ttl_s derived from max_runtime_s, default 120; no reaper or inactivity timer found in this file)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235 (start_ai_run sends grant_id 'session:{id}' and no browser bearer)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1258-1262 (comment: real Model Plane browser-grant issuance is unbuilt)",
+          "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:808-826 (the only AcquireGrant implementation found is inside the #[cfg(test)] module; no production caller in the repo)",
+          "apps/Model Plane/go/services/browser-broker (grants held in memory, per baseline v-browser-app section on BrowserBroker)"
+        ],
+        "gap": "Nothing in the repo issues BrowserBroker grants outside tests, so the gateway facade and the Model Plane browser tools cannot work against production-mode Quarry; broker grants are held in memory and lost on restart; lease TTL is not enforced by a reaper and there is no inactivity TTL; no scrape-id to session bridge. Not runtime-verified."
+      },
+      "approach": "Model Plane: durable BrowserGrant record plus an issuance API (canonical host allowlist up to 32, org/owner scoped, short TTL, persisted instead of in-memory) that the gateway calls on session create; model-gateway already validates a VerifiedBrowserBearer. Frontend gateway browser.rs: obtain the grant, send x-browser-authorization and pass the real grant id in start_ai_run. Ingestion Plane quarry-edge: enforce ttl_s with a reaper and add an activity TTL, excluding sessions awaiting approval; add POST /v1/scrape/:id/session (needs the scrape_id from R-t2-01-01) that creates an agent run seeded with the scrape URL and render hints. Do not add arbitrary code execution: keep one governed action per call with receipts so 'Model proposes, Quarry executes' holds.",
+      "effort": "L",
+      "dependencies": [
+        "R-t2-01-01 scrape_id",
+        "Model Plane BrowserBroker persistence",
+        "Control Plane org policy for host allowlists"
+      ],
+      "planeOwner": "Model Plane (grant issuance) with Ingestion Plane (TTL, bridge) and Frontend gateway",
+      "risks": "Leaked sessions consume shared Chromium (mixed-viewport relaunch issue noted in baseline); TTL changes must not kill sessions awaiting human approval; grant scope must not widen via Spaces (an owner-plane ACL must never be widened).",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 0,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Acknowledged as unbuilt in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1258-1262 (a plan file was not re-read)."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-029"
+      ]
+    },
+    {
+      "id": "R-t2-01-06",
+      "title": "Parallel batch scrape with shared options, idempotent creation and wait-or-resume",
+      "summary": "Make /v1/batch fan out under a concurrency bound (min of maxConcurrency, the org limit and the per-host AIMD scheduler) with shared scrapeOptions, appendToId, an invalid-URL report and the shared status/errors/cancel routes. Accept a client Idempotency-Key on crawl/batch/schedule creation (payload hash, response replay, 409 on key reuse with a different payload) and add a bounded wait_ms that returns a resumable 408 'processing_continues' response with Retry-After instead of failing or duplicating work.",
+      "whyItMatters": "Sequential batches are a visible slowness for ingestion and for agents that want to read N search hits at once. Retries from the gateway or the Model Plane must not double-start crawls, and slow OCR/PDF/browser work should stop failing at gateway timeouts.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-007 batch with maxConcurrency/append/ignoreInvalidURLs; fc-028 processing_continues 408 contract)",
+        "others": [
+          "Apify (run-sync with a wait window, DOC)",
+          "Codex in-app browser (declares bulk content but refuses it)"
+        ],
+        "prevalence": "batch scrape: 2 of 4 sources (Firecrawl, Codex declared only), common; sync-with-wait and resume: 2 of 4 (Apify, Firecrawl), common; idempotency: 1 of 4 and Firecrawl's is a negative example",
+        "mechanism": "POST /batch {urls[], scrapeOptions, maxConcurrency, appendToId?, webhook?} returns a job id and separately lists invalid URLs; status/errors/cancel reuse the crawl controllers. For waiting: key every heavy request by (org, request hash), wait up to the timeout, then return 408 {code:TIMEOUT, details:{state:'processing_continues', jobId, retryAfterSeconds}} with Retry-After so an identical retry re-attaches to the same job. For idempotency, copy the shape not Firecrawl's guard: store (org, route, key) -> {payloadHash, status, responseBody}, replay on match, 409 on mismatch, expire after 24 h."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:134 and :670-726 (batch handoff: urls, ingest, zdr only)",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:359-394 (sequential Temporal batch loop)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:471-474 (edge generates a fresh Idempotency-Key per forwarded control call)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:165-171 (same on schedules)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:386 and :423 (curated batch crawl of up to 200 deduped URLs with SSE progress)"
+        ],
+        "gap": "Batch has no per-batch options, maxConcurrency, append, invalid-URL report or status/cancel route; public crawl/batch do not accept a client idempotency key (the generated key only protects edge-to-control retries); scrape is sync-only and crawl/batch are async-only with no wait option, no processing_continues contract and no re-attach on retry."
+      },
+      "approach": "Ingestion Plane. Orchestrator: turn the BatchWF loop into bounded child activities honouring maxConcurrency and the existing per-host scheduler, accept ScrapeOptions (R-t2-01-01), add appendToId and invalidUrls. Edge: read Idempotency-Key from callers and forward it instead of a random one; control already dedupes on (org_id, key, route), so add payload-hash comparison and response replay and scope strictly by org. Add wait_ms to crawl/batch/extract with in-flight dedupe on (org, request hash, zdr posture) and the 408 resumable envelope; gateway and Model Plane clients honour Retry-After. ZDR jobs cannot keep results for re-attach beyond the request.",
+      "effort": "L",
+      "dependencies": [
+        "R-t2-01-01 ScrapeOptions",
+        "R-t2-01-02 job status route"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-orchestrator, quarry-edge, quarry-control)",
+      "risks": "Parallel fan-out must still respect per-host politeness and org concurrency budgets; request-hash dedupe must include org and ZDR posture so it never crosses tenants; replayed responses must not retain ZDR content.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-005",
+        "C-t2-01-020",
+        "C-t2-01-004"
+      ]
+    },
+    {
+      "id": "R-t2-01-07",
+      "title": "Crawl planning: validate/preview endpoint, Model Plane crawl-plan tool, stronger /v1/map",
+      "summary": "Add POST /v1/crawl/validate (a dry run that returns normalised effective options, violations and an estimated page count), a Model Plane crawl-planning tool that maps up to 50 site URLs, drafts crawl options from a plain-language goal and validates them, and a proposal-review step in the KnowledgeComposer before the crawl starts. Strengthen /v1/map by seeding from robots Sitemap: lines, adding an optional site: search pass through the smart router, reranking candidates through the Data Plane rerank contract, raising the limit and letting the planner call it with a service scope.",
+      "whyItMatters": "This matches the architecture exactly: the Model proposes crawl options, Quarry validates and executes or rejects, and the user sees the proposal for approval. It gives non-technical users a one-sentence way to scope a crawl and gives the planner better discovery on docs sites with weak sitemaps.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-009 params-preview; fc-013 map)",
+        "others": [],
+        "prevalence": "NL crawl planning: 1 of 4 sources (Firecrawl), unique; site map: 1 of 4 (Firecrawl), where Verevon is already at parity",
+        "mechanism": "Map up to 50 URLs of the site to ground the LLM, prompt it with URL structure plus the user goal, produce crawl options, overlay only the fields the caller did not set, re-run the normal validator (including pattern caps), then either return the options as a preview or start the crawl; the ZDR path runs the LLM step outside traces."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:132 and :170-260 (shipped /v1/map with robots allow-filtering)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-668 (no prompt field or validate endpoint on crawl)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545 (service principals cannot call /v1/map)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:521",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:549 (CrawlPagePicker UI)"
+        ],
+        "gap": "No crawl preview or validate endpoint and no Model Plane tool that proposes crawl options; /v1/map caps limit at 1000, does not read robots Sitemap: lines, has no search assist, ranks lexically, and is user-token-only so the Model Plane cannot call it. Map itself is shipped end to end (CrawlPagePicker), so only the planning layer is new."
+      },
+      "approach": "Ingestion Plane: add /v1/crawl/validate reusing the CrawlRequest validator from R-t2-01-03; extend map_routes.rs with robots Sitemap: seeding, an optional site: pass gated by allow_paid_providers, and a Data Plane rerank call (the data:rerank manifest row is already granted) instead of building ranking in Quarry; add a map:read service scope. Model Plane: crawl-planning tool that calls /v1/map, drafts options through the model and calls validate. Frontend: KnowledgeComposer shows scope, limit and sample URLs for approval before the gateway starts the crawl under the user token.",
+      "effort": "M",
+      "dependencies": [
+        "R-t2-01-03 scoped crawl options",
+        "R-t2-01-01 ScrapeOptions",
+        "Data Plane rerank contract"
+      ],
+      "planeOwner": "Ingestion Plane (validate, map) with Model Plane (planner tool) and Frontend Plane (review UI)",
+      "risks": "LLM-drafted regexes can be over-broad, so always show scope and limit before running; site: queries cost paid-provider budget; the planning LLM call must be suppressed from traces for ZDR.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-007",
+        "C-t2-01-010"
+      ]
+    },
+    {
+      "id": "R-t2-01-08",
+      "title": "Tenant-scoped webhooks and generalised monitors",
+      "summary": "Give Quarry's existing webhook dispatcher a tenant model: add org_id and a per-org signing secret to control /v1/webhooks, forward them through the edge with org scoping, and accept a webhook {url, events[], metadata} parameter on crawl/batch/monitor creation (destination checked with the existing security preflight). Then generalise schedules into monitors: multi-target (scrape, crawl, search) watches with trigger/manual run, check history, per-page status same|new|changed|removed|error and optional notification through the Application Plane.",
+      "whyItMatters": "Integrations and the Application Plane need to react to finished crawls and page changes without polling, and price/competitor/doc watching is a common business use. The delivery engine (HMAC, backoff, dead-letter queue, retry route) is already better than Firecrawl's single attempt; what is missing is tenant scoping and the monitor resource on top of it.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-024 Monitor API; fc-025 webhook contract with event filters and metadata echo)",
+        "others": [],
+        "prevalence": "monitors: 1 of 4 sources (Firecrawl), unique; job webhooks: 1 of 4 (Firecrawl), where Verevon's delivery is already stronger",
+        "mechanism": "Monitor {name, schedule{cron|text, tz}, targets[] up to 50, retentionDays, goal, webhook, notification}; each check scrapes the targets, diffs against the previous snapshot, records per-page status, optionally asks an LLM judge whether the change matters to the goal, then notifies; minimum interval 5 minutes; refused for ZDR. Webhook payload {type, id, data, error, metadata} signed sha256=HMAC(body, org secret), private destinations refused."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go:8-10 (control /v1/webhooks CRUD without org_id)",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:376-383",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-34 (HMAC, backoff 1s/5s/30s/5m/1h, 5 attempts, DLQ, retry route)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_webhook.rs:36-60",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/change_webhook.go:52",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1298",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs:270"
+        ],
+        "gap": "Webhook CRUD has no org_id and is not forwarded by the edge, there is no per-job webhook parameter on crawl/batch, and no customer-facing webhook UI; only change_monitor schedules map to a Temporal workflow while scrape/crawl/batch schedules are skipped and trigger/backfill return 501; no multi-target monitor resource with check history and per-page statuses; no goal or judge."
+      },
+      "approach": "Ingestion Plane control (Go): add org_id and per-org secrets to webhooks, scope every read and write by org, forward through the edge, and add the webhook parameter to crawl/batch/monitor creation. Reuse the ChangeMonitor workflow: map scrape/crawl/search schedules to workflows, implement trigger, persist checks and per-page statuses. Application Plane notification-core stays the internal notification path (the change webhook already fans out there). Model Plane supplies the optional goal judge. For ZDR orgs, refuse monitors or keep content hashes only.",
+      "effort": "L",
+      "dependencies": [
+        "R-t2-01-02 job lifecycle",
+        "Temporal client in control",
+        "Application Plane notification-core"
+      ],
+      "planeOwner": "Ingestion Plane (quarry-control, quarry-orchestrator) with Application Plane for notifications",
+      "risks": "SSRF via customer webhook URLs (reuse the security preflight); tenant isolation of signing secrets; retention conflicts with ZDR; notification noise.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-019",
+        "C-t2-01-018"
+      ]
+    },
+    {
+      "id": "R-t2-01-09",
+      "title": "Budgeted web research job contract with run-context cost attribution",
+      "summary": "Package the existing search, scrape and browser-agent steps as one research run in the Model Plane: input {prompt, urls?, output schema?, max cost/credits, effort}, output {status, data, partial, partialSchemaValid, stopReason such as credit_limit_reached, creditsUsed}, with one active run per thread (409 thread_busy plus the running run id). Quarry accepts a signed run-context header {requestId, parentRunId} from the Model Plane so its cost events attach to the parent run and are not billed twice.",
+      "whyItMatters": "A predictable, budgeted research call gives other features, and any future external API user, one contract with partial results and a clear stop reason instead of stitching step-level agent routes together. Accurate per-run cost in the Model Plane cost service depends on Quarry knowing the parent run.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-020 agent job and fc-022 threads; fc-021 trusted internal calls with requestId and shouldBill)",
+        "others": [
+          "Apify (Actor runs with max-charge limits, DOC)"
+        ],
+        "prevalence": "research-agent job API: 1 of 4 sources (Firecrawl), unique; internal service call attribution: 1 of 4 (Firecrawl)",
+        "mechanism": "POST /agent {prompt, urls?, schema?, maxCredits, effort, strictConstrainToURLs, webhook} returns an id; GET returns {status, data, partial, partialSchemaValid, stopReason, creditsUsed, pendingApproval}; a thread rejects a new turn with 409 while a run is active. Internal agent services call the public endpoints with a shared-secret block {requestId, shouldBill} so tool calls are attributed to the parent run; Verevon should use its stronger scoped service tokens plus a signed header rather than one shared secret."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3659-3729",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1273-1667",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2228-2410",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/fleet_routes.rs:219-222 (fleets are in-process only, per baseline)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:369",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:451",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545 (service scopes: scrape, search, extract, artifacts, agent; no map/crawl/answer)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:898-1066"
+        ],
+        "gap": "Model Plane owns sessions/runs and Quarry exposes step-level /v1/agent/runs, but there is no single research-job contract with output schema, budget, stopReason and partial results; propagation of a parent run id into Quarry cost events was not verified; the gateway browser path depends on the grant fix in R-t2-01-05."
+      },
+      "approach": "Model Plane: add a research-run type over the existing sessions/runs with schema validation (using the json format from R-t2-01-04), a budget and partial-result semantics; it calls Quarry search/scrape/agent steps under service tokens. Ingestion Plane: accept a signed run-context header and tag cost events with run id; widen service scopes deliberately (map yes; crawl starts stay approval-gated so 'Model proposes, Quarry executes' holds). Cost service integration records per-run cost.",
+      "effort": "L",
+      "dependencies": [
+        "R-t2-01-05 browser grant issuance",
+        "R-t2-01-04 json format",
+        "Model Plane cost service"
+      ],
+      "planeOwner": "Model Plane (run contract) with Ingestion Plane (run-context attribution)",
+      "risks": "Cost runaway (enforce the budget server-side); schema-valid but wrong outputs; ZDR must hold across every step.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-01-015",
+        "C-t2-01-016"
+      ]
+    },
+    {
+      "id": "R-t2-01-10",
+      "title": "Agent web tools: content-hydrated search, next-step hints, citations and per-URL policy",
+      "summary": "Let /v1/search accept scrapeOptions (bounded top-N, total time budget, shared fan-out) and give the Model Plane web_search tool a with_content flag so one call returns search hits plus page content. Add opt-in hints[] to success responses of scrape/search/map, computed only from local signals (truncated, empty, blocked, SERP URL), extending the existing next_actions field. Add a Model Plane tool-doc registry with a server-side 'docs read' check before high-risk browser tools, and attach stable source ids to tool output so answers cite them, with an org domain allow/deny policy honoured on service-token fetches.",
+      "whyItMatters": "Agents get N pages in one call instead of search plus N fetches, waste fewer turns on blind retries, and use risky browser tools more safely. Org admins can restrict which domains agents fetch and answers stay traceable to sources.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-017 search with scrapeOptions; fc-029 agent_hints) and Codex in-app browser (IAB-001 documentation-read gate)",
+        "others": [
+          "Apify RAG Web Browser (DOC; raw-http vs browser choice, time budget)",
+          "Aside (aside-agent-control 040: network permission hook and citation tags)"
+        ],
+        "prevalence": "search with content: 2 of 4 sources (Firecrawl, Apify), common; hints and doc gating: 2 of 4 (Firecrawl, Codex), differentiator; citations with per-URL permission: 1 of 4 (Aside), unique",
+        "mechanism": "Hydration: run search, over-fetch to survive filtering, scrape the top N concurrently with shared options inside a total time budget, attach formats per result. Hints: opt-in header, rules over locally computed signals with templates under 500 characters, max 32 rules, never raw page text, failure returns the original body. Doc gate: a registry with modes model|included|lookup and a guard that refuses a gated command until the session fetched the required doc id. Aside: tool results carry source ids and a policy hook evaluates {type:'network', url} before each fetch."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:50-160",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_routes.rs:44 and :145 (search-then-fetch answer pipeline, synthesis needs the Model Plane grant)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:24-25 and :46-58 (next_actions exists, only on error paths)",
+          "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:133 and :152 (read-only web_search/web_fetch tools, zdr in request bodies)",
+          "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:254-264",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4184"
+        ],
+        "gap": "/v1/search returns snippets and chunks but cannot attach full scraped content per hit; success responses carry no hints; no doc-read gate for high-risk browser tools; web_search/web_fetch have no org-level per-URL policy at tool level and the citation convention for web_fetch was not verified; /v1/answer synthesis is blocked by the manifest grant (R-t2-01-04)."
+      },
+      "approach": "Ingestion Plane: SearchRequest.scrapeOptions reusing the batch fan-out from R-t2-01-06 and ScrapeOptions from R-t2-01-01, with ZDR and budgets applied to every hydrated fetch; hints[] emitted from local signals in scrape/search/map handlers. Model Plane execution-core web_tools.rs: with_content flag, source ids on tool output, tool-doc registry plus a server-side docs-read check ahead of upload/download/dialog tools (these already need one-shot broker approval grants, so this is additive); org domain policy read from Control Plane and enforced both in the tool and on service-token scrapes, with denials logged.",
+      "effort": "M",
+      "dependencies": [
+        "R-t2-01-01",
+        "R-t2-01-06 fan-out",
+        "R-t2-01-04 grant for /v1/answer",
+        "Control Plane org domain policy"
+      ],
+      "planeOwner": "Model Plane (tools, doc gate, citations) with Ingestion Plane (hydration, hints)",
+      "risks": "Cost amplification (N scrapes per search); prompt injection if hints ever echo page text (never include raw text); over-restrictive domain policies degrade answers; hint drift versus real behaviour.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-012",
+        "C-t2-01-022",
+        "C-t2-01-013"
+      ]
+    },
+    {
+      "id": "R-t2-01-11",
+      "title": "Complete the external contract: full OpenAPI, then an MCP server, then SDK hardening and CLI/skills",
+      "summary": "Generate the Quarry OpenAPI spec from the Rust request/response types with a CI route-coverage check (the checked-in spec lists about 46 paths against roughly 75 edge routes). Then expose a Verevon-hosted MCP server (Streamable HTTP, OAuth) whose tools map onto the same governed action contracts, so every call goes through the existing authority, approval, ZDR and audit path. Last, add waiters and origin pinning to the Rust client used by the gateway and Model Plane, delete or wire the dead SPA quarry-client, and ship installable agent skills or a CLI only if an external API is offered.",
+      "whyItMatters": "Three of four reference sources expose MCP, and it is the AI-first distribution channel for external agents (Claude Code, Codex, Cursor) to use Verevon's web stack without leaking credentials. A complete OpenAPI prevents contract drift that already exists and feeds Model Plane tool schemas; none of this is needed for the in-product experience, which is why it sits after the core API work.",
+      "referenceBestPractice": {
+        "bestSource": "Apify (apify-platform 045/044 hosted Streamable-HTTP MCP with category tool loading and OAuth; 036 full OpenAPI)",
+        "others": [
+          "Aside (local MCP over stdio against the signed-in browser, credentials never leave it)",
+          "Firecrawl (MCP, CLI, SDKs with origin pinning and waiters)"
+        ],
+        "prevalence": "MCP exposure: 3 of 4 sources (Apify, Aside, Firecrawl), table-stakes; OpenAPI: 2 of 4, common; SDKs: 2 of 4, common; CLI and skills: 3 of 4 but DOC/INF-only evidence",
+        "mechanism": "OpenAPI generated from request/response types in CI and failing on route drift, driving SDKs and tool schemas. MCP: Streamable-HTTP endpoint behind OAuth, tool catalog generated from the action contracts, tool groups loaded on demand (?tools=), every call mapped to the same governed path as in-product calls. SDK: start* plus waitFor* with abort-triggered best-effort cancel, fetchAllPages with caps, and rewriting any server-provided next URL onto the configured origin before sending credentials."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml",
+          "apps/Ingestion Plane/Quarry-v2/sdks/typescript/src/apis/index.ts",
+          "apps/Ingestion Plane/Quarry-v2/sdks/python/quarry_client/api/__init__.py",
+          "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md (Quarry MCP explicitly deferred)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:44 and :52 (Verevon consumes MCP servers with OAuth connect; exposes none)",
+          "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:30 (SPA client is dead code, no /api/quarry BFF route)"
+        ],
+        "gap": "OpenAPI covers part of the surface (missing profiles, answer, audio, search verticals, most agent browser routes, fleets); generated TS and Python SDKs are 0.1.0 and unpublished with no waiters or origin pinning; no MCP server exposed; no customer API keys; no CLI or skills."
+      },
+      "approach": "Ingestion Plane: derive OpenAPI from the Rust types (utoipa or schemars) with a CI route-coverage check, and feed JSON Schemas to the Model Plane. Model Plane tool catalog plus Frontend gateway (OAuth, endpoint): host the MCP server over the existing action contracts, with Quarry staying behind the gateway. Control Plane: customer auth and API keys as the prerequisite. Add waiters and origin pinning to the Rust client; delete or wire the SPA client. Skills wrapping MCP tools come after MCP; a CLI only if an external API is offered.",
+      "effort": "L",
+      "dependencies": [
+        "Customer auth/API keys in Control Plane",
+        "R-t2-01-01 and R-t2-01-02 so the spec describes the final shapes"
+      ],
+      "planeOwner": "Ingestion Plane (OpenAPI, SDK) with Model Plane and Frontend gateway (MCP)",
+      "risks": "Authority bypass if MCP calls skip approval gates; ZDR propagation; abuse and rate limits; maintaining several SDKs without external users.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 6,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Deferred, not planned: apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md skip list."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-01-024",
+        "C-t2-01-025",
+        "C-t2-01-026",
+        "C-t2-01-027"
+      ]
+    },
+    {
+      "id": "R-t2-01-12",
+      "title": "Verify file-parse and signed-in document/media export coverage before building anything",
+      "summary": "Check two unknowns. First, whether the Data Plane document import and chat-attachment conversion already give the same HTML/PDF/office/e-book/image to markdown quality as the scrape pipeline; if so close it, if not extend the Data Plane import rather than adding a Quarry /v1/parse route. Second, whether integration-corev2 has Google Drive/Docs/Sheets/Slides export actions and whether Quarry has a YouTube transcript extractor; prefer OAuth provider actions over browser-session export and add a YouTube transcript extractor only if missing.",
+      "whyItMatters": "A single conversion stack keeps markdown quality consistent for chat attachments and ingested web pages, and exporting Google Docs natively beats scraping rendered Docs. Both are probably partly covered by the Data Plane and the Integration Plane already, so the first step is to avoid duplicating work across planes.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (api-surface fc-019 signed upload then parse through the same format stack) and Codex in-app browser (in-app-browser-003 site-specific export via the page session, DOC only)",
+        "others": [],
+        "prevalence": "file parse: 1 of 4 sources (Firecrawl), unique; signed-in export: 1 of 4 (Codex, DOC only), unique",
+        "mechanism": "File parse: POST /parse/upload-url returns an HMAC-signed uploadRef (10-minute TTL, 50 MB cap, org-bound); the client PUTs to object storage; POST /parse {uploadRef, formats} runs the document converters and returns the same Document shape. Export: site adapters keyed by URL pattern call the site's own export endpoints with the session cookies and return an artifact (Verevon should use OAuth provider actions instead, for credential isolation)."
+      },
+      "verevonToday": {
+        "status": "unknown",
+        "evidence": [
+          "No baseline record for either capability.",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293 (no /v1/parse route in the table)"
+        ],
+        "gap": "Unknown whether the Data Plane import pipeline already covers the same formats, and unknown whether integration-corev2 ships Google export actions or Quarry has YouTube transcript extraction; not checked in this audit."
+      },
+      "approach": "Read the Data Plane v2 import and chat-attachment conversion code to compare formats and OCR, and the integration-corev2 provider action list for Google Workspace; then decide per item. Data Plane owns documents; Integration Plane owns provider actions; Quarry adds only a YouTube transcript extractor if absent.",
+      "effort": "M",
+      "dependencies": [
+        "Data Plane import review",
+        "integration-corev2 Google provider"
+      ],
+      "planeOwner": "Data Plane (file parse) and Integration Plane (signed-in export); Ingestion Plane only for a YouTube extractor",
+      "risks": "Duplicating document conversion across planes; using browser sessions for export conflicts with credential isolation.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-01-014",
+        "C-t2-01-030"
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t2-01-031",
+      "reason": "Consent-gated browsing-history query depends on a user-facing browser URL history that Verevon's in-app browser does not have (the 'Nettleserhistorikk' view is only the action timeline); it belongs with the in-app browser category and should be revisited once history ships, then exposed as a bounded, org-scoped, ZDR-aware read tool."
+    },
+    {
+      "cluster": "C-t2-01-033",
+      "reason": "User- or AI-authored free-form page functions (Apify pageFunction, DOC-only evidence) conflict with 'Model proposes, Quarry executes' and the governed action model; the declarative part (routing the existing ActionRuntime/ActionScript into ScrapeOptions.actions, plus saved procedures per crawl) is noted as an optional follow-on in R-t2-01-01."
+    }
+  ],
+  "strengthsToKeep": [
+    "Web search is ahead of every reference: a multi-provider smart router (Tantivy, Stract, SearXNG, Brave, Serper plus Data Plane vectors) with ZDR gating, Tavily-style parameters and image/video/similar/suggest verticals (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:50-160; apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/smart_router.rs:241). Keep it and only add a cheap category-rewrite layer (pdf/github/research) in front.",
+    "Machine-readable error envelope with retry_after_seconds, next_actions and browser-specific codes (ActionUnknown, ChallengeDetected, TargetRepairRequired, CheckpointLost) that Firecrawl lacks (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:11-26; apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-50). Extend next_actions to success paths rather than replacing it; confirm the gateway maps it consistently.",
+    "Webhook delivery engine is stronger than Firecrawl's single 10 s attempt: HMAC signing, 1s/5s/30s/5m/1h backoff, 5 attempts, dead-letter queue and a retry route (apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-34). Only tenant scoping is missing.",
+    "Governed browser execution: one action per call with egress receipts, BrowserBroker grant revalidation before every action, domain allowlists taken only from the grant, and procedures with replay checks (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1377-1414, 2257-2266). Stricter than the code-execution APIs of the references; keep it and do not add free-form code execution.",
+    "Service-principal tokens are deny-by-default and route-scoped (unknown service routes fail closed), stronger than a single shared secret (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545).",
+    "Fail-closed ZDR and Model Plane gating: durable crawl/batch jobs are refused for ZDR callers rather than silently retaining data (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:560-668), and every Model Plane feature is off by default until a granted manifest row exists, with no silent degradation (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:1-38).",
+    "Batch crawling is already ahead of the Codex in-app browser (which declares bulk content fetching but refuses it): curated batch of up to 200 deduped URLs with a page picker and SSE progress (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:306, 386, 423).",
+    "Site map is shipped end to end with robots allow-filtering and a CrawlPagePicker UI (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:170-260; apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:549).",
+    "Scrape pipeline already has security preflight, DNS pinning, per-host AIMD slots and an SSE variant (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:398-530, 1067-1110), and team usage/queue/concurrency endpoints are at parity with Firecrawl (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:836-935)."
+  ]
+}

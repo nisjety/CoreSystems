@@ -1,0 +1,82 @@
+[
+ {
+  "finalId": "F-t3-012",
+  "verdict": "partial",
+  "checked": [
+   "extract/claude/.vite/build/index.chunk-EzXl5k4A.js: LocalSessions forkSession(parentSessionId, forkAtMessageUuid, targetCwd) and detachFromParent",
+   "Claude install ion-dist/i18n/en-US.json: 'Fork with this prompt', 'Forked from {source}', 'Branch to new chat', 'Search chats and sessions...'",
+   "extract/claude/.vite/build/index.chunk-1xGiXs9t.js: [cowork-search] searchCandidates(limit 50, maxSessions 200, includeArchived) and the search_session_transcripts tool description (substring match, case-insensitive; snippets treated as data, not instructions; scope = other CCD session transcripts)",
+   "extract/claude/.vite/build/transcript-search-worker/transcriptSearchWorker.js: streams JSONL via createReadStream/readline; no FTS/sqlite/index library",
+   "REA analyze_javascript_application (directory, summary) on transcript-search-worker: ev_542fc30994fa59b8f99cd00efb9a4a275144c320adafb11e34bd8df079f8c14f, 1 file, 0 request relations, no storage",
+   "C:/dev/hermes-agent/hermes_state_rewind.py:1-25 (carrier-aware rewind; durable transcript is the authority)",
+   "C:/dev/hermes-agent/website/docs/developer-guide/programmatic-integration.md:66-87 (truncate_before_row_id, confirm_truncate/empty/deep, survivor_user_row_ids; calls it a destructive rewrite that archives turns)",
+   "C:/dev/hermes-agent/tools/session_search_tool.py:23-56 (BM25 discover scan limit 300, cron demotion, read cap 2000, lineage dedupe)",
+   "C:/dev/hermes-agent/hermes_state_common.py:298-370,859-862 (external-content FTS5 plus trigram index)",
+   "scratchpad/tmp/t3/src/client/src/components/threadActionMenu.logic.ts (pin, settle, snooze, rename, regenerate-title, mark-unread, archive, delete, copy ids)",
+   "C:/dev/deepseek-harness/packages/context/session-reference/README.md:1-30 (@label to a bounded read-only snapshot as durable untrusted context)",
+   "findings/t3/cmp/*.clusters.json: C-t3-01-008, -009, -027, -028, C-t3-08-015, -016, C-t3-13-011, -015, -043"
+  ],
+  "corrections": "1) Claude desktop search is not an index. The transcript-search-worker scans on-disk JSONL transcripts per query with a case-insensitive substring match, capped at 200 recent sessions. It covers only local Claude Code Desktop (cowork/CCD) sessions, not claude.ai chats. So 'worker-backed index' should read 'worker-backed scan'. Hermes (FTS5 plus trigram, BM25) is the only verified indexed-search reference. 2) Prevalence: 'fork, versions and search are table-stakes (7-9 of 12)' overstates versions. Persisted regenerate/edit versions with a model or effort switch are 4 of 12 (C-t3-01-008), and the model/effort part is DOC-only (ChatGPT, Perplexity). The search counts also disagree across clusters: 7 of 12 in C-01-028, 3 of 12 in C-08-015 and 2 of 12 in C-13-015. Present search as table-stakes as a UI feature, but say that indexed full-text search plus an agent recall tool is verified only in Hermes (SRC), Claude CCD (a scan, SRC) and Cursor (SRC per records). 3) 'Hermes ... shows the mechanism' for versions is wrong. Hermes rewind is a confirmed truncation that archives the cut turns, with no sibling-version tree. The tree with 1/N versions comes from ChatGPT/Perplexity (DOC). Verevon's 'supersede, never delete' design is its own choice, closest to Hermes' archive-on-truncate. 4) The untrusted-snippet framing for the recall tool is verified in Claude (tool description) and DeepSeek (session-reference). It was not found as an explicit framing in Hermes session_search_tool.py.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Claude fork and search are local Claude Code Desktop session features (SRC), not claude.ai consumer chat. claude.ai chat search and branching are DOC.",
+   "Claude search is a substring scan over JSONL, not an FTS index.",
+   "Regenerate with a model/effort override is DOC-only (ChatGPT, Perplexity); the ChatGPT help pages returned HTTP 403 and were not re-verified.",
+   "The Hermes rewind is documented as a destructive rewrite that archives truncated turns; no version tree.",
+   "Search prevalence figures are inconsistent across clusters (7, 3 and 2 of 12)."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-011",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/tmp/codex_rt/codexexe.prose.txt (Codex Plan Mode text: decision-complete <proposed_plan>; 'Do not ask should I proceed'; the user switches out of Plan mode to request implementation)",
+   "scratchpad/tmp/codex_rt/astra_collaboration_modes.txt (request_user_input only when listed in this turn's tools; optional questions only; never for permission)",
+   "scratchpad/tmp/ag2/protos/third_party__jetski__cortex_pb__cortex.proto.txt:42,1788-1812 (AgentMode PLANNING/EXECUTION/VERIFICATION; AskQuestionEntry options/is_multi_select/write_in_response/skipped; AskQuestionInteraction cancelled)",
+   "Claude install ion-dist/assets/v1/c68c4283d-CO0VlQwV.js (claudeai.epitaxy.ask_user_question.viewed/answered/skipped); shared-5/shared-7 hold ask_user_input_rank_sortable and ask_user_input_sheet; en-US.json 'Drag to reorder', 'Select all', 'needs your input'",
+   "extract/manus/frontend/out/_next/static/chunks/*.js: no structured clarifying-question message type; 'ASK_USER' is only an approval-policy enum (ASK_USER/FULL_AUTO)",
+   "https://open.manus.ai/docs/v2/task-lifecycle.md (messageAskUser/cascadeAskUser with question_expectation {options, selection_mode single|multiple}; answered via task.sendMessage)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/cursor/resources/app/out/vs/workbench/workbench.glass.main.js (plan-tray, questionnaire-tray, queue-tray, goal-tray, PromptInputAnchoredTray)",
+   "C:/dev/deepseek-harness/packages/interaction/tool-ask-user/README.md:12-74 (blocking by default; timed mode opt-in; late answers arrive as user messages)",
+   "C:/dev/deepseek-harness/packages/client/ui-user-questions/README.md:12-52 (composer-seat card, countdown, focus pause, Take time, drafts, late replies, plan-review Approve card)",
+   "findings/t3/cmp clusters C-t3-04-024, C-t3-04-029, C-t3-01-013, C-t3-12-025"
+  ],
+  "corrections": "1) Codex is not a model for 'approve-then-continue'. Its Plan Mode tells the model not to ask whether to proceed; the user switches out of Plan mode and asks for implementation in a new turn, which is what Verevon does today. Keep Codex as best-in-class only for the decision-complete plan content. For a plan approval that resumes the same run, cite DeepSeek: its exit_plan_mode review is an ask_user wait with an Approve card, so approving resumes the run (SRC README). The C-t3-04-024 mechanism claim that the run 'then continues automatically' is not supported by the Codex evidence. 2) Manus is mis-attributed for questions. The SRC record (manus-product-ux-127) covers typed confirmation and approval socket messages (touchpoint, cascade workflow, connector re-OAuth, and similar), not clarifying questions. Manus structured questions with options are verified only through its public API docs (messageAskUser with question_expectation, DOC), and the answer goes back as a plain message. Either rephrase as 'Manus (DOC: question_expectation with single/multi options; SRC: typed confirmation messages for approvals)' or name Antigravity (SRC AskQuestion proto) or DeepSeek (SRC/DOC) as best for questions. 3) The 'rank' field in the ask_user schema comes only from Claude (drag-to-rank). Antigravity has options, multi-select, write-in and skip, but no rank.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Codex request_user_input is available only when listed for the turn (flag-gated); async variant per record, from binary strings only.",
+   "Cursor trays live in the workbench.glass bundle (new agent window); questions are gated by flags such as ask_question_all_modes per record.",
+   "DeepSeek timed questions are opt-in (shipped presets use blocking mode); the timed-card behaviour is documented in the package README plus an e2e test.",
+   "Claude ask_user_question is in the epitaxy (Claude Code desktop) surface and is SRC from analytics events, lazy-module ids and i18n strings, not traced logic.",
+   "Manus structured questions are DOC (public API); the Manus SRC evidence is approvals and confirmations only."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-010",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/tmp/claude-ext/pretty/c_CR1LIe8r.js:28-36 (github-mcp-server.exe env: GITHUB_HOST, GITHUB_TOOLSETS, GITHUB_READ_ONLY=1)",
+   "scratchpad/tmp/claude-ext/pretty/c_CH3m0eAL.js (GitHub device-code endpoint /login/device/code; default scope 'repo read:org read:user'; token cache key = sha256(host, clientId, scope))",
+   "scratchpad/tmp/claude-ext/pretty/core.js:16204-16472,37825-37834 (managedMcpServers built-in entries github/microsoft365/websearch with availableInVersion gates; 'built-in servers are not permitted for source' other than admin)",
+   "extract/manus/dist/connectorCompletion.js (PKCE-style connector OAuth completion, 15-minute TTL)",
+   "extract/manus/frontend/out/_next/static/chunks/*.js (enabledConnectorUids, sessionConnectorAccountsMap, selectConnectorAccount, projectEnabledConnectorUids, connectors.v1.* proto message names)",
+   "https://open.manus.ai/docs/v2/connectors.md (explicit list > project defaults > user default enabled connectors; clear_connectors; uninstalled connectors skipped only on reuse, InvalidArgument on override)",
+   "C:/dev/hermes-agent/tools/connectors/contract.py:1-70 (TargetState pending/initiated/connected/skipped/failed/expired; actors user/backend_watcher/clock; SettleReason)",
+   "C:/dev/hermes-agent/tools/connectors/managed.py:1-25 and gateway/config.py:1-40 (hosted tool gateway, authoritative for entitlement)",
+   "scratchpad/tmp/ag2/protos/third_party__jetski__cortex_pb__cortex.proto.txt:1248-1256,3354-3356 (CortexStepWorkspaceAPI {url, http_method, body}; WorkspaceAPIToolConfig.read_only)",
+   "https://help.openai.com/en/articles/11487775-connected-apps-in-chatgpt (HTTP 403, could not re-verify)"
+  ],
+  "corrections": "1) Prevalence 6 of 11 (C-t3-03-016) counts Antigravity on the strength of a generic WorkspaceAPI step (URL, method, body, read_only flag; record quality 2). That is an inference from names, not an OAuth connector catalogue with in-chat connected apps. Drop Antigravity or mark it INF, which gives 5 of 11 (still table-stakes). 2) ChatGPT as overall best is DOC-only and the help page could not be re-fetched (403). Say so, and note that the read/write gating, @mention and admin pre-indexing claims are unverified DOC. 3) The Claude GitHub mechanism (device code, token bound to host/client/scope, read-only and toolset switches) is accurate, but it applies only to admin-managed built-in connectors (managedMcpServers, source must be admin, version-gated). It is not a consumer connector catalogue; present it as the enterprise-policy reference. 4) The Manus 'explicit > project > user default' resolution is verified in the public API docs (DOC), not in desktop SRC. The SRC confirms per-session connector toggles, per-session account selection and project-enabled connectors. 5) The Hermes in-chat connect flow is accurate (typed state machine with actors and settle reasons) but runs through a hosted, entitlement-gated tool gateway.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Claude GitHub/M365 built-ins are admin/enterprise-policy only (managedMcpServers, admin source) and version-gated.",
+   "ChatGPT and Perplexity connector claims are DOC-only; the ChatGPT help page returned 403 on re-check.",
+   "Manus default-resolution order is DOC (public API docs); per-task toggles and account selection are SRC.",
+   "Hermes connectors depend on a hosted gateway that is authoritative for entitlement.",
+   "Antigravity inclusion is name-based inference (WorkspaceAPI step), low confidence."
+  ],
+  "confidence": "medium"
+ }
+]

@@ -1,0 +1,940 @@
+{
+  "category": "Search & discovery",
+  "excluded": [],
+  "clusters": [
+    {
+      "id": "C-t1-04-001",
+      "name": "Permission-aware full-text message search (index + per-hit re-authorization)",
+      "description": "Server-side keyword search over room/channel messages and threads, ranked by relevance, with prefix typeahead, where the index only proposes candidates and the owner of access re-checks every hit; results deep-link to the message in context.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-architecture-030",
+        "buzz-product-049",
+        "teams-shell-and-native-090"
+      ],
+      "bestInClass": {
+        "source": "buzz",
+        "recordIds": [
+          "buzz-architecture-030",
+          "buzz-product-049"
+        ],
+        "why": "Only source with the full mechanism in readable code (SRC, high conf): no separate search service, privacy-sensitive kinds can never match, and search is explicitly not the access boundary. Teams (q4) has the richer service contract (init/suggestions/events/feedback signals, query alteration) but behind Substrate, so it informs the API shape, not the engine."
+      },
+      "mechanism": "Postgres STORED generated tsvector column (simple config) on the message/event table with a GIN index; rows of sensitive kinds produce NULL tsvector so they never match. Every query requires a tenant/community id. Engine fetches candidates in pages of 100 ordered by ts_rank, then refetches each through a scoped fetcher and applies the access predicate per hit (membership, owner gates), so pages can be shorter than the limit. A prefix mode (to_tsquery with :*) serves typeahead. Teams adds: a suggestions endpoint for typeahead, a search-history endpoint, feedback/click 'events' for ranking, and a query-alteration field (spelling correction returned with a reference id). Hits carry a message id so the client opens the thread at that message.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-backend-042",
+          "v-space-ui-039",
+          "v-space-ui-043",
+          "v-space-ui-044"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:39-45",
+          "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:74",
+          "apps/Frontend Plane/verevonv3/src/shared/api/search-client.ts:78-130",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-736",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:200",
+          "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:157-181"
+        ],
+        "gap": "No Space/thread/message search route or index anywhere; gateway search.rs is web/image/video (Quarry) only and conversation search exists only for the support inbox. Supporting pieces a hit needs are also missing: thread deep links (?thread_id=) are generated but SpacePage never reads them, and the thread list has no cursor/paging or jump-to-date, so a hit could not be opened in context.",
+        "strengths": "Reusable authority: the 'room transcript read as the room' route (spaces.rs:2616-2732) already obtains a Control decision and Session Core drops rows newer than the decision's audience revision; that is exactly the per-hit re-authorization predicate a search needs."
+      },
+      "benefit": "Message search is the first thing Slack/Teams users reach for; without it rooms cannot serve as the team's memory and humans cannot find what agents posted. Building it in the plane that owns room posts (Model Plane Session Core, origin=space threads) keeps the no-cross-plane-DB rule and lets ZDR be enforced at index time.",
+      "approach": "In Session Core (Model Plane, owner of room threads) add a generated tsvector + GIN index over message text, NULL for turns stamped zero_data_retention or for privacy-restricted content; expose gRPC SearchSpaceMessages(space_id, query, filters, cursor) that returns candidates filtered by the same audience-revision predicate used by the room transcript read. Gateway route GET /api/v1/spaces/{ref}/search obtains the Control read decision (as for transcript read) and forwards it; never trust client scope. Return {thread_id, message_seq, snippet with highlights, author, ts}. Fix SpacePage to consume ?thread_id=&seq= and add cursor paging to the thread list so hits open in context. Start keyword-only; semantic comes via C-t1-04-007.",
+      "effort": "L",
+      "dependencies": [
+        "Session Core ZDR claim must be acted on (currently decoded but ignored)",
+        "Control room read decision reuse (spaces.rs:2616-2732)",
+        "Thread deep-link consumption and history paging in SpacePage",
+        "Non-owner reply fix if search should cover replies by others"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Indexing content that ZDR forbids persisting; search used as an access boundary (must post-filter); revocation lag because membership_changed is plain NATS and lossy; tsvector 'simple' config gives no stemming for Norwegian/English mixes.",
+      "tier": "priority",
+      "significance": 5,
+      "rationale": "Present in every human-chat reference and absent in Verevon; users notice immediately and C-002/003/004/005/008 all depend on it.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-002",
+      "name": "Search operator grammar (from:, in:, with:, is:, has:, before:/after:/on:)",
+      "description": "Typed modifiers in the search box narrow by sender, conversation, participant, type and date; combinable, with quoted phrases, exclusion and prefix match.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "slack",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-product-050",
+        "slack-product-surface-041",
+        "teams-product-surface-053"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-product-surface-041"
+        ],
+        "why": "Broadest grammar (q5): from/in/with/creator/has/is/before/after/on/during, phrases, minus-exclusion, trailing *. Provenance is DOC only; buzz (q4, SRC) is the re-implementable reference parser and Teams (q5, REA) adds operator discovery hints in autosuggest and server query alteration."
+      },
+      "mechanism": "Client tokenizer (buzz parseSearchOperators): split on whitespace, recognise operator only at token start, leave malformed values (e.g. invalid dates) in the free text, resolve names to ids at the call site (people via roster, rooms via list), convert dates to since/until with Slack-compatible exclusive 'before'. Send structured filters {authors[], spaces[], since, until, is[], has[]} plus residual text to the server; the server applies them as SQL predicates before ranking. Teams shows operator discovery chips in autosuggest (from:, in:, with:, is:).",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-backend-042",
+          "v-space-ui-039"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:39-45"
+        ],
+        "gap": "No message search exists, so no operators. Verevon-specific operators would be needed: in:<space>, from:<person|agent>, is:thread, has:approval, has:run, has:artifact, agent:<name>.",
+        "strengths": ""
+      },
+      "benefit": "Power users and agents (which can emit structured filters directly) get precise recall; agent/run-aware operators would be a Verevon differentiator no reference has.",
+      "approach": "Solid component + pure TS parser in Frontend Plane (port buzz rules), name resolution against the Space roster and org members; send structured filters to the C-001 route; reuse the same filter struct as the agent search tool so humans and agents share one grammar.",
+      "effort": "M",
+      "dependencies": [
+        "C-t1-04-001 message search backend",
+        "Roster/org member lookup for name resolution"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Name resolution must not reveal people the viewer cannot see; date timezone ambiguity.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Expected by Slack/Teams users but only valuable once C-001 exists; cheap to add then.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-003",
+      "name": "Scoped in-conversation search (this room / thread / person) and Ctrl+F routing",
+      "description": "Search limited to the current channel, chat, thread or post, or to everything involving one person, opened by Ctrl/Cmd+F which routes to in-app search instead of the browser's find bar.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "slack",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "teams-product-surface-054",
+        "slack-shell-and-native-109"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-product-surface-054"
+        ],
+        "why": "Most scopes (q5, REA high): channel, chat, community, thread, post and a people-centred mode (files/messages/images with a person), each discoverable from autosuggest with a shortcut hint. Slack's shell routes the native Find command to in-app search (SRC); buzz shows a removable scope chip (SRC)."
+      },
+      "mechanism": "Search state = {query, scope: {kind: space|thread|person|global, id}}; Ctrl/Cmd+F pre-fills scope with the current room or open thread and renders a removable chip (Esc or backspace widens to global). People-centred mode filters by author or participant id. Desktop shells intercept the OS 'find' editing command and dispatch startSearch to the web app.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-ui-038",
+          "v-space-backend-042"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:89-99",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:346-360"
+        ],
+        "gap": "Only a client-side filter over room names and thread titles/previews of the selected room; it never searches message bodies, other rooms, a single thread or a person, and Ctrl+F is not routed to it.",
+        "strengths": "The sidebar filter is a natural entry point to upgrade into a scoped server search."
+      },
+      "benefit": "The most-used search in chat products is 'find in this room'; with C-001 it is a thin scope parameter, and it keeps the Control decision narrow (one Space).",
+      "approach": "Frontend Plane: add scope chip + Ctrl/Cmd+F handler in SpacePage calling the C-001 route with space_id (and thread_id/person filters). Keep the existing sidebar filter for instant title matching and fall through to server results.",
+      "effort": "M",
+      "dependencies": [
+        "C-t1-04-001"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Overriding browser Ctrl+F can annoy users if in-app search is weaker; offer a fallback.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "First user-visible slice of message search; users would notice its absence immediately.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-004",
+      "name": "Typed result domains, filters and recent-search history",
+      "description": "Results grouped into tabs or domains (messages, files by type, people, channels, meetings, canvases, settings) with filters, counts and a list of previous searches.",
+      "prevalence": {
+        "sourcesWith": [
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "slack-product-surface-042",
+        "teams-product-surface-055"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-product-surface-055"
+        ],
+        "why": "Most domains (q4, REA): messages, files with type pickers (Word/Excel/PDF/Loop/image), images, meetings with organiser/attendees/time, people, channels, settings; accessible filter announcements and date presets. Slack (q4, DOC) adds search history and Canvases/Workflows types."
+      },
+      "mechanism": "One query fans out to per-domain resolvers; the response carries hit type and per-domain counts; the UI renders tabs over the same query, with type-specific facets (file type, date range presets such as next 7 days). Search history is a per-user server list (Teams /searchhistory) or local store (buzz useHistorySearchState).",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-039",
+          "v-space-ui-042"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:82-243"
+        ],
+        "gap": "No search results at all, so no domains. The Knowledge tab lists documents/wiki read-only without search or filters. Verevon-native domains (threads, agents, runs, approvals, artifacts, documents) are not searchable.",
+        "strengths": ""
+      },
+      "benefit": "Lets one Space search cover Verevon's distinct objects (runs, artifacts, approvals, documents) that Slack/Teams do not have, making Work and Knowledge tabs findable.",
+      "approach": "Frontend Plane result view with tabs; gateway composes per-domain calls to owner planes (Session Core for messages, Data Plane for documents, Application Plane for activity/runs projections) in parallel and returns {hits, counts, failed[]} (see C-t1-04-006). Keep search history per viewer in browser storage first (no content persisted server-side under ZDR).",
+      "effort": "M",
+      "dependencies": [
+        "C-t1-04-001",
+        "C-t1-04-006 federated fan-out contract"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Gateway fan-out must not become a cross-plane DB join; server-side search history persists query text, which ZDR orgs may forbid.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Valuable once more than one domain is searchable; second wave after C-001/C-003.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-005",
+      "name": "Unified Cmd/Ctrl+K palette: jump to rooms, agents, conversations and actions",
+      "description": "A keyboard overlay that searches conversations plus resources (rooms, agents, skills, schedules, apps, projects) and runs registered commands, with grouped results and keyboard selection.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "qm"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "grokbot-agent-product-071",
+        "qm-product-029"
+      ],
+      "bestInClass": {
+        "source": "qm",
+        "recordIds": [
+          "qm-product-029"
+        ],
+        "why": "q3 SRC high: merges conversation-entry hits (title, author, snippet, seq, archived) with resource hits in parallel, grouped by recency, 150 ms debounce, min length 2. GrokBot (q3) contributes the command-registry pattern (17 command ids with hotkeys: new agent, open skills, focus search, find in chat)."
+      },
+      "mechanism": "Global hotkey registers an overlay; input debounced 150 ms, ignored under 2 chars; two parallel requests (conversation entries, resources) render as groups; Enter navigates or executes. Commands come from a typed registry {id, title, hotkey, run, when} so the palette and shortcuts share one source.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-038"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:11",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/ActionCommand.tsx:1-40",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:256-340"
+        ],
+        "gap": "Cmd/Ctrl+K opens web search; ActionCommand is a per-button component, not a palette; there is no jump-to-room/agent/thread overlay.",
+        "strengths": "A typed action registry with zod schemas, risk and owner plane already exists (14 spaces.* actions) and is the right source for palette commands, gated by the same model-eligibility/human-only rules."
+      },
+      "benefit": "Fast navigation across many rooms and agents is what makes Slack/Teams usable at scale; feeding it from the action registry makes human and agent actions discoverable through one surface.",
+      "approach": "Frontend Plane Solid overlay bound to Cmd/Ctrl+K (move web search to a palette entry or a prefix like '?'); sources: Space list, roster, org agent registry (installations), recent threads, and action-registry commands filtered by the viewer's permissions; message hits from C-001 when available.",
+      "effort": "M",
+      "dependencies": [
+        "Action registry (shipped)",
+        "Org agent registry (v-space-backend-044, shipped)",
+        "C-t1-04-001 for message hits (optional)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Rebinding Cmd+K changes existing web-search muscle memory; palette must not list actions the viewer cannot perform.",
+      "tier": "recommended",
+      "significance": 4,
+      "rationale": "High daily value and mostly front-end work over data Verevon already has.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-006",
+      "name": "Federated search across backends and connected systems with partial-failure reporting",
+      "description": "One search fans out to pluggable backends (internal stores and third-party systems) and reports which sources failed or were limited, so an empty result is distinguishable from a gap.",
+      "prevalence": {
+        "sourcesWith": [
+          "qm",
+          "slack"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "qm-architecture-098",
+        "slack-product-surface-044"
+      ],
+      "bestInClass": {
+        "source": "qm",
+        "recordIds": [
+          "qm-architecture-098"
+        ],
+        "why": "q3 SRC high and re-implementable: SearchBackend {name, search} registry, typed hits (message|conversation|file|page|external) and explicit failed[]/limited[] arrays. Slack (q4) shows the product outcome (Enterprise+ search over Google/Microsoft/Salesforce) but is DOC-only and medium confidence."
+      },
+      "mechanism": "createCoreSearch(backends): run all backends concurrently with a per-backend timeout; collect hits tagged with backend name and type; on error push name to failed[], on truncation to limited[]; return {hits, failed, limited}. UI shows 'some sources unavailable' chips rather than empty results.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-backend-040"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1664-1892",
+          "apps/Data Plane v2/services/retrieval-engine-rs/src/api/mod.rs:573-590"
+        ],
+        "gap": "No federated search surface. Only the Knowledge tab composes multiple sources (documents + wiki via retrieval binding) and already reports per-section gaps; integration-corev2 provider content is not searchable from a Space, and lists are empty in practice because no import writes space_ref.",
+        "strengths": "Per-section gap reporting in the Knowledge tab is the same 'gap, not empty' contract qm uses."
+      },
+      "benefit": "Fits the no-cross-plane-DB rule: the gateway fans out to owner-plane APIs and each returns its own authorized hits, so a cross-plane search never joins databases; connected-provider search makes Spaces an 'ask the whole company' surface.",
+      "approach": "Gateway (Frontend Plane BFF) orchestrator with backends = Session Core messages, Data Plane documents/wiki, integration-corev2 provider search actions (as the asking user, see C-t1-04-009); response contract {hits, failed[], limited[]}; per-backend Control decision; never cache third-party results (ZDR, provider terms).",
+      "effort": "L",
+      "dependencies": [
+        "C-t1-04-001",
+        "integration-corev2 provider search actions",
+        "Space document import writing space_ref"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Latency of the slowest backend; third-party content retention rules (Slack forbids storing results); duplicate ranking across heterogeneous scores.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "Strong later differentiator but needs C-001 and populated Space knowledge first; adopt the failed/limited contract now at low cost.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-007",
+      "name": "AI search answers with citations over workspace content (messages, files, transcripts, connected docs)",
+      "description": "Ask a natural-language question in search and get a generated answer citing channels, files, canvases, clip transcripts or connected documents the asker can access; also 'ask the assistant' on selected message text with prebuilt prompts.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack",
+          "teams"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "slack-product-surface-043",
+        "slack-product-surface-046",
+        "teams-product-surface-056",
+        "buzz-product-053"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-product-surface-043",
+          "slack-product-surface-046"
+        ],
+        "why": "q4 DOC high: answers limited to content the asker can access, cross-content index (files, canvases, clip transcripts, connected Google/Microsoft docs), auto file summaries, AI-added filters. Teams (q4 REA medium) adds channel citations and the select-text 'Ask Copilot' hand-off with prompts (summarise, flag decisions, help me reply). buzz-product-053 is a negative record: buzz has no semantic search or AI answers."
+      },
+      "mechanism": "Question-shaped query triggers retrieval (hybrid keyword + semantic) restricted to the asker's accessible content, top passages go to the model with citation ids, the answer renders with linked citations above normal results; selecting text in a message opens the assistant with a prefilled prompt scoped to that conversation.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-backend-041",
+          "v-space-ui-040",
+          "v-space-backend-040"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:225-280",
+          "apps/Control Plane/user-core/internal/http/server.go:361",
+          "apps/Control Plane/user-core/migrations/019_space_retrieval_effect_policy.up.sql",
+          "apps/Data Plane v2/services/retrieval-engine-rs/src/search/fusion.rs:17"
+        ],
+        "gap": "Grounded room turns (policy-gated retrieval) exist, but retrieval covers Space-bound documents/wiki only, not room messages or agent outputs; there is no answer-in-search surface with citations and no select-text hand-off; Space knowledge is empty in practice.",
+        "strengths": "Verevon is ahead of buzz/qm on retrieval quality: Data Plane retrieval-engine has dense, keyword, graph, rerank and RRF fusion (search/fusion.rs, DEFAULT_RRF_K=60) and a separate retrieval_read_entitled Control bit that degrades to ungrounded on 403. Keep the policy gate and the degrade-not-fail behaviour."
+      },
+      "benefit": "This is where an AI-first product should beat Slack/Teams without an Enterprise+ upsell: rooms answer 'what did we decide?' from messages, documents and agent outputs, with citations that respect owner-plane ACLs and ZDR.",
+      "approach": "Model Plane composes the answer: retrieve from Data Plane (documents) plus Session Core message search (C-001) as two tools, both called with the asker's Control decision; render citations as deep links (thread_id+seq). Add a message action 'Ask agent about this' that opens the composer with the selected text and a scoped prompt. Index agent outputs only where ZDR allows.",
+      "effort": "L",
+      "dependencies": [
+        "C-t1-04-001",
+        "C-t1-04-008 agent history tool",
+        "Space document import (space_ref)",
+        "Thread deep links"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Hallucinated citations; leaking content from a source the asker cannot read through the summary; cost per query.",
+      "tier": "recommended",
+      "significance": 4,
+      "rationale": "Biggest differentiation lever, but builds on C-001; much of the retrieval stack is already shipped.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 0,
+        "DOC": 2,
+        "INF": 1
+      }
+    },
+    {
+      "id": "C-t1-04-008",
+      "name": "Agent-facing conversation-history search tool",
+      "description": "Agents search earlier room/chat transcripts (this conversation, earlier ones, everything) and reopen exact entries, instead of stuffing history into context; also search personal stores such as email or library docs.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "qm"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "qm-product-031",
+        "grokbot-agent-runtime-094",
+        "buzz-product-052",
+        "grokbot-agent-product-072"
+      ],
+      "bestInClass": {
+        "source": "qm",
+        "recordIds": [
+          "qm-product-031"
+        ],
+        "why": "q4 SRC high: sessions.search returns sessionId + entry seq references without widening read access; history tool does all-terms keyword search or reopens one entry by seq, including content compacted out of context. GrokBot (q3) adds explicit scopes (this chat / earlier / everything), a 'trust newest, ask when ambiguous' prompt rule and hybrid/keyword/semantic modes for email search."
+      },
+      "mechanism": "Tool schema search_history{query, scope: this_thread|this_space|all_visible, limit} -> [{thread_id, seq, snippet, author, ts}] and open_entry{thread_id, seq} -> full entry. Backed by the same index as human search, executed with the invoking human's (or room's) read decision; system prompt instructs: prefer newest result, cite seq, ask if two results conflict.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:795",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:230",
+          "apps/Model Plane/rust/crates/mp-contracts/src/tool_arguments.rs:812"
+        ],
+        "gap": "Agents have knowledge_search (capability cap.retrieval.query, Data Plane documents) but no tool to search room/thread history in Session Core; no baseline record covers this, so status is from a grep in this comparison step (SRC) and should be confirmed for Space turns.",
+        "strengths": "knowledge_search already shows the pattern: capability-gated tool with a privacy class (customer_private) and its own system-prompt snippet."
+      },
+      "benefit": "Agents that cooperate in a room need exact recall of earlier decisions and their own past outputs; this is core to 'agents work like a colleague' and cheaper than long contexts.",
+      "approach": "Model Plane execution-core: add search_space_history/open_space_entry tools mapped to a new capability (e.g. cap.space.history.read), calling Session Core SearchSpaceMessages with the turn's Control decision (never an agent-wide grant); respect ZDR by excluding ZDR turns; register the tool in capability_policy and binding allowed_tools.",
+      "effort": "M",
+      "dependencies": [
+        "C-t1-04-001 index in Session Core",
+        "Binding allowed_tools / capability policy",
+        "C-t1-04-009 authority model"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Agent quoting one member's private context into the room; prompt injection from retrieved messages (treat as data).",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Blocks the agent-colleague vision and reuses the C-001 index at small extra cost.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-009",
+      "name": "Agent searches as the requesting human (delegated-authority search)",
+      "description": "When an agent searches on someone's behalf it sees exactly what that person can see, using a per-request token or decision bound to the triggering event, and must not store or re-share results.",
+      "prevalence": {
+        "sourcesWith": [
+          "qm",
+          "slack"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "slack-product-surface-045",
+        "qm-product-030"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-product-surface-045"
+        ],
+        "why": "q5 DOC high: Real-time Search API uses a user token or an action token minted from the triggering event, per-content-type scopes (public/private/mpim/im/files/users), results limited to channels the user can access, guests excluded, contractual no-store/no-train; semantic vs keyword mode switch. qm (q4 SRC) implements the same idea in a harness (mirror vs live Slack search as the asker, never quoting DMs into rooms)."
+      },
+      "mechanism": "Triggering event (mention/DM) mints a short-lived action token bound to {user, channel, event}; search call requires it plus scopes; server filters to that user's access; results are not persisted; private/DM hits may be used to answer the asker privately but not posted to a shared room.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-backend-041"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:225-280",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2732"
+        ],
+        "gap": "Verevon's signed, effect-bound Control decisions already carry subject/Space/audience, and grounded turns use them for document retrieval; there is no equivalent for message-history or connected-provider search, and no rule preventing an agent from quoting a member's private results into the room.",
+        "strengths": "Decision model (Ed25519, 2-minute, audience revision, payload digest) is stronger than Slack's action token; keep it as the only way agents search."
+      },
+      "benefit": "Satisfies 'Space access never widens an owner-plane ACL': a room agent cannot become a side channel to content the asker could not read.",
+      "approach": "Control Plane issues a search decision for the invoking subject per turn; Model Plane passes it to Session Core / Data Plane / integration-corev2 search; add a policy rule in the agent prompt and an output filter that blocks posting hits marked private to a shared Space.",
+      "effort": "M",
+      "dependencies": [
+        "C-t1-04-008",
+        "Control decision type for search"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Ambiguity when several humans trigger one agent run; whose authority applies must be explicit (intersection is safest).",
+      "tier": "recommended",
+      "significance": 4,
+      "rationale": "Design rule for C-008/C-007 rather than a separate feature; cheap because the decision model exists.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-010",
+      "name": "Agent memory recall and search",
+      "description": "Per-scope memory notebook injected into turns with cheap deltas, plus a memory search tool.",
+      "prevalence": {
+        "sourcesWith": [
+          "qm"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "qm-product-032"
+      ],
+      "bestInClass": {
+        "source": "qm",
+        "recordIds": [
+          "qm-product-032"
+        ],
+        "why": "Only record in this category (q3 SRC): tail of the notebook (6,000 chars) injected each turn, deltas after first recall, all-words search; its SPEC's vector claim is not built."
+      },
+      "mechanism": "recallBody = last 6,000 chars of the scope notebook; repeat recalls in one context send only the delta; memory tool filters bullets containing all query words; providers pluggable per scope.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:71",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:77",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:233-236"
+        ],
+        "gap": "Not covered by a baseline record; save_memory/recall_memory tools exist in execution-core (grep in this step). Whether Space room turns offer them and how memory is scoped per Space (audience labels) is unverified.",
+        "strengths": "Per the reference record, Verevon's learned memory (semantic retrieval, Dreaming) is richer than qm's notebook; keep it. Worth borrowing: recall deltas to save tokens and per-scope audience labels."
+      },
+      "benefit": "Already an advantage; Space-scoped memory would let room agents remember team conventions.",
+      "approach": "Keep in Model Plane; add Space scope + audience label to memory writes and the delta-recall optimisation.",
+      "effort": "S",
+      "dependencies": [
+        "Space-scoped memory audience rules"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Memory written in one Space recalled in another Space with a different audience.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon equal or ahead; only small borrowings.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-011",
+      "name": "People directory and people search (org, contacts, external)",
+      "description": "Find people (and agents) by name or email to message, mention, add to a room or call; external users found by email; guest/external tags; contact actions.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 5,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "teams-product-surface-057",
+        "buzz-product-051",
+        "qm-product-033"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-product-surface-057"
+        ],
+        "why": "q4 REA: one picker resolves org directory, saved contacts and external users (by email/SIP only), with guest/external tags and block/call/chat actions. qm (q3 SRC) adds the useful resolution vocabulary for agents (ok/ambiguous/none, not-in-channel, unlinked login)."
+      },
+      "mechanism": "Directory search endpoint (prefix on name/email, ranked by recent interaction) returning {id, kind: person|agent|external, org, tags}; external lookup only by exact email to avoid enumeration; resolver for agents returns ok|ambiguous(candidates)|none(reason).",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-backend-043",
+          "v-space-ui-041"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3019",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1157-1196"
+        ],
+        "gap": "Per-Space roster and org member list exist; there is no searchable directory across the org or across Spaces, no external/guest lookup, no contact actions, and no resolver with agent-readable errors.",
+        "strengths": "Room roster shows person/agent kind and role; humans and agents in one list is already the right model."
+      },
+      "benefit": "Needed for starting DMs/group rooms and adding members (Teams-like team support) and for agents addressing the right human.",
+      "approach": "Control Plane owns identity: add GET /orgs/{id}/directory/search (name/email prefix, people + agents) returning only subjects the caller may see; external lookup by exact email when external access exists; gateway exposes it to pickers and to an agent resolve tool with ok/ambiguous/none results.",
+      "effort": "M",
+      "dependencies": [
+        "DMs/group rooms and guest model (other categories)"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Directory enumeration across orgs; agents resolving to the wrong person.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Table stakes but partially covered; becomes urgent when DMs and external members arrive.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-012",
+      "name": "Room/channel directory: browse and join",
+      "description": "A browsable directory of public rooms (and external connections) users can find and join without an invite.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "slack",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "slack-product-surface-047"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-product-surface-047"
+        ],
+        "why": "q4 DOC medium: directories of people, channels and external connections as navigation destinations, including pending/active Connect relationships. Only DOC evidence in this cluster's member; buzz's open channel directory (SRC, inside buzz-product-051) corroborates."
+      },
+      "mechanism": "Rooms carry visibility (public|private); directory lists public rooms in the org with member count and description; join = self-add membership allowed only for public rooms; external directory lists cross-org connections with status.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2747-2810",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:35-43"
+        ],
+        "gap": "Space listing is member-filtered from the caller's Control index; no public visibility, browse or self-join route (from baseline narratives, not one of the 12 base records).",
+        "strengths": ""
+      },
+      "benefit": "Without discovery, rooms only grow by invite; Slack-style open rooms are how knowledge spreads in a team.",
+      "approach": "Control Plane: add Space visibility (org-public) and a self-join decision that grants exactly room membership (never widening owner-plane ACLs of documents bound to the room, which keep their own checks); gateway browse route; Frontend directory page.",
+      "effort": "M",
+      "dependencies": [
+        "Space visibility model",
+        "Membership change propagation to Session Core (currently lossy NATS)"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Public rooms with bound documents could appear to grant document access; must show that documents remain owner-ACL gated.",
+      "tier": "recommended",
+      "significance": 4,
+      "rationale": "Slack/Teams users expect it; moderate effort in Control.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-013",
+      "name": "Mention and reference candidates scoped by room membership and permission",
+      "description": "The @ and reference menus offer only people, agents and objects the author can address in this conversation type, with ranking.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "qm"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "grokbot-agent-product-166"
+      ],
+      "bestInClass": {
+        "source": "grokbot",
+        "recordIds": [
+          "grokbot-agent-product-166"
+        ],
+        "why": "q3 SRC high: scoping function per conversation type (group = its members; 1:1 = other Bots and groups containing this Bot; hide unadded Team Bots), plus referenceable PRs, skills and MCP items. buzz mentionRanking and qm reach errors corroborate."
+      },
+      "mechanism": "Composer context provides getMentionMembers/getMentionPeople/getNoMentionMembers and reference providers; a pure scoping function computes the candidate id set from conversation type and membership; ranking by recent interaction and prefix match.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-ui-041"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:184-211",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:307-312"
+        ],
+        "gap": "@ lists roster humans and active agents (max 6, prefix match) so it is already room-scoped, but has no ranking, no references to threads/runs/documents, and a picked person is only text (no routing).",
+        "strengths": "Candidates come from the Control roster, so nobody outside the room appears."
+      },
+      "benefit": "Cheap polish that keeps addressing within ACLs and makes referencing threads/runs/documents possible.",
+      "approach": "Frontend Plane: ranking by recency, more than 6 results with scroll, '#' references to threads/documents via C-001/Knowledge APIs; person mention routing belongs to the notifications category.",
+      "effort": "S",
+      "dependencies": [
+        "Mention routing (notifications category)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Low.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Core scoping already right; remaining work is polish.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-014",
+      "name": "Marketplace discovery for plugins and agent templates",
+      "description": "Browse a reviewed marketplace of plugins and public agent templates with categories, featured, popularity and team/official labels; admins approve.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "grokbot-agent-product-073"
+      ],
+      "bestInClass": {
+        "source": "grokbot",
+        "recordIds": [
+          "grokbot-agent-product-073"
+        ],
+        "why": "Only source in this category (q4 SRC high): listing status PENDING_REVIEW|LISTED|DELISTED, plugin lifecycle states, team popularity. Slack/Teams app directories exist (INF, general knowledge) but are not evidenced in this category's records."
+      },
+      "mechanism": "Listing objects with status workflow and review queue; browse API with category/featured/sort; per-team popularity counts; install creates an org-scoped installation subject to admin policy.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-backend-044"
+        ],
+        "evidence": [
+          "apps/Application Plane/convex-core/convex/schema.ts:257-276",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3165-3259",
+          "apps/Application Plane/convex-core/convex/spaceAgents.ts:159-286"
+        ],
+        "gap": "No marketplace or app directory for Spaces; the org-wide agent registry answers presence (which agents are installed where), not discovery of new ones; MCP/plugins are configured org-wide in Settings only.",
+        "strengths": "Org agent registry (installations) is a good backing list for an internal 'agents in this org' catalog."
+      },
+      "benefit": "An internal catalog of org agents/templates helps users discover what agents exist; a public marketplace is a later ecosystem play.",
+      "approach": "Start with an internal org catalog of agent definitions and skills (Control/Application Plane read model over the existing registry) with admin approval; defer public third-party listings.",
+      "effort": "L",
+      "dependencies": [
+        "Plugin/MCP governance",
+        "Agent definition sharing model"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Third-party plugins bypassing ZDR or the Model-proposes/Quarry-executes rule.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Not core to Space search; internal catalog first.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-015",
+      "name": "Discover feed and suggested chats",
+      "description": "A ranked feed of posts from channels the user may care about and suggested chats in the left rail.",
+      "prevalence": {
+        "sourcesWith": [
+          "teams"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "teams-product-surface-058"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-product-surface-058"
+        ],
+        "why": "Only source (q3 REA medium): recency/relevance sort, block-post, suggested chat items."
+      },
+      "mechanism": "Recommendation service ranks posts from accessible channels using engagement signals; user can block posts; suggestions appear in the rail.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No discover or suggestion surface (no baseline record; not checked in code).",
+        "strengths": ""
+      },
+      "benefit": "Marginal for Verevon now; engagement-ranking needs behavioural signals that ZDR orgs may not allow.",
+      "approach": "If ever: Application Plane projection ranking activity from rooms the user belongs to; no cross-room content exposure.",
+      "effort": "L",
+      "dependencies": [
+        "Room directory",
+        "Activity projections"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Signal collection vs ZDR; noise.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Low value for an AI-first work tool at this stage; Teams-only.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 0,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-04-016",
+      "name": "OS-level search index integration and local file search (desktop shell)",
+      "description": "Desktop shells push rooms/messages into the OS search index (Spotlight/Windows Search) and search local files to attach.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack",
+          "teams"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "slack-product-surface-048",
+        "slack-shell-and-native-108",
+        "teams-shell-and-native-091"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-108",
+          "slack-product-surface-048"
+        ],
+        "why": "q3 SRC high: full IPC (availability, add/remove/remove-all items with CoreSpotlight-like attributes) and flag-gated local file search; but availability is hard-coded false on the Windows build. Teams' PIE spotlight module is INF/low confidence."
+      },
+      "mechanism": "Shell IPC addToIndex(items[{identifier, domainIdentifier, title, contentDescription, expirationDate, iconURL}]) / removeFromIndex / removeAllFromIndex, gated by isIndexingAvailable; activation event opens the item in-app.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps"
+        ],
+        "gap": "Verevon v3 is web-only (verevonv3/apps contains gateway, remote-dev and verevon-web; no Electron/Tauri shell found, INF from directory listing), so OS indexing does not apply.",
+        "strengths": ""
+      },
+      "benefit": "Small; and pushing content into an OS index conflicts with ZDR.",
+      "approach": "Skip until a desktop shell exists; then opt-in per org, titles only, never ZDR content.",
+      "effort": "M",
+      "dependencies": [
+        "Desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Content persisted outside Verevon's control on endpoints (ZDR breach).",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "No desktop shell; disabled even in Slack's Windows build; ZDR conflict.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 1
+      }
+    }
+  ]
+}

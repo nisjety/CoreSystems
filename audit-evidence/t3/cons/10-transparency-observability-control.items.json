@@ -1,0 +1,700 @@
+{
+ "category": "Transparency, observability & control",
+ "items": [
+  {
+   "id": "R-t3-10-01",
+   "title": "Approval cause codes, decision provenance and hook-decision visibility",
+   "summary": "Compute a typed ApprovalCause at the point each permission, hook, capability or browser-risk decision is made, and carry it (plus {actor, verdict, cause, rule_id} for automatic allows and denies) in the approval event, the durable run log and the audit record. Render a plain, localised sentence on every approval card and a visible row for every auto-deny, using a shared contract JSON in the zdr-refusals.json style. Emit hook_started/hook_result events so org or user hook rules appear as the named cause.",
+   "whyItMatters": "The approval prompt is where users decide whether to trust an autonomous agent, yet today it only says that a tool requires approval, and automatic denials are invisible. A named cause and a record of who decided (user, system, model, hook, default) makes the authority model legible, answers 'why did the agent stop' without support, and gives the audit trail a structured reason instead of free text.",
+   "referenceBestPractice": {
+    "bestSource": "claude",
+    "others": [
+     "antigravity (AutoRunDecision actor x verdict and a trigger_source on every permission prompt; running-hook indicator and per-step hook results)",
+     "cursor (hook results shown per step)"
+    ],
+    "prevalence": "Cause codes: 2 of 12 sources (Claude, Antigravity); hook visibility: 2 of 12 (Antigravity, Cursor); differentiator",
+    "mechanism": "The permission broker computes a cause code next to the allow/ask/deny decision. A frozen map of about 33 codes to human sentences is shipped to the client and shown on the approval card; about 165 broker events each carry a named reason for every auto-deny. Antigravity additionally stores the deciding actor (user, system, model, default) and the trigger source per prompt. Re-implement as an enum computed inside the gate, serialised in the event, and mapped to localised text client-side from a contract file."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4466-4474",
+     "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:229-260",
+     "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:1-30",
+     "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:230-300",
+     "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json"
+    ],
+    "gap": "SRC: approval_reason_for returns the generic sentence \"tool 'X' requires approval\" except for the consent-to-disclose case; is_risky_tool classifies by substrings of the tool name; the hook engine (PreToolUse/PostToolUse, Allow/Deny/Ask, first match wins) decides silently and no hook event or UI row was found (INF from grep). There is no cause enum, no who-decided record for automatic allow/deny, and no user-visible reason for an auto-denial. Browser actions already have BrowserActionApprovalRequired/BrowserActionDecided events, so the browser path is closer."
+   },
+   "approach": "Model Plane execution-core: add an ApprovalCause enum (posture_ask, org_requires, irreversible_effect, external_mcp_tool, browser_risk_<category>, plan_mode, capability_unattested, consent_to_disclose, budget_exceeded, zdr_blocked, hook_ask, hook_deny, ...) and AutoDecision {actor: user|system|model|hook|default, verdict, cause, rule_id}. Add a cause field to CreateApprovalRequest in the orchestration proto, carry it in approval/tool events and the session-core audit outbox details (codes and rule ids only, no content). Publish approval-causes.json in Model Plane api/contracts, mirrored with a sha256 into verevonv3 src/shared/api/contracts exactly like zdr-refusals.json, with nb/en sentences; the approval card and a Trace row render the sentence. Emit hook_started/hook_result events from the hook engine into the durable run log. Replace the substring risk heuristic by per-capability effect metadata over time.",
+   "effort": "M",
+   "dependencies": [
+    "Capability registry effect metadata (to replace name-substring risk classification)",
+    "R-t3-10-02 audit delivery for decision records",
+    "R-t3-10-03 ledger to show hook and decision rows"
+   ],
+   "planeOwner": "Model Plane (execution-core, session-core) with Frontend Plane contract and approval card",
+   "risks": "A wrong sentence is worse than none, so the cause must be computed where the decision is made, never inferred afterwards. Customer-authored hook rules must not leak rule bodies to other members. Adding a proto field needs the usual contract-gate regeneration.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 1
+   },
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-10-032",
+    "C-t3-10-033"
+   ]
+  },
+  {
+   "id": "R-t3-10-02",
+   "title": "Deploy, replay and harden the AI-action audit trail (hash chain, export, compliance read API)",
+   "summary": "First finish the operational fix: deploy the session-core publisher fix and the requeue function, replay the stuck outbox rows and prove them in audit_events, following postmortem 0002. Then add a per-org append-only hash chain with a verifier to audit-core, a time-range export (CSV/JSON) for admins and a scoped read API for compliance consumers, all metadata-only.",
+   "whyItMatters": "Audit of what the AI did is the base of enterprise trust, and the Trust Center column 'Used by AI?' and the workspace AI activity panel are fed by it. Between 2026-09-04 and 2026-10-01 4,992 AI tool-action events never reached audit-core; the fix is built but not deployed. R-t3-10-09 (analytics and customer export) and R-t3-10-01 (decision records) both depend on a working trail.",
+   "referenceBestPractice": {
+    "bestSource": "claude",
+    "others": [
+     "web-claudeai (180-day admin export with actor, IP and device, content excluded; compliance API)",
+     "web-manus (audit and activity export)"
+    ],
+    "prevalence": "3 of 12 sources; differentiator",
+    "mechanism": "Claude writes a per-session append-only audit.jsonl in which every entry carries an HMAC chained to the previous entry's hash, plus a verifier that reports the first broken entry. The web products add admin export by time range and a compliance API with scoped tokens, with message content excluded. Re-implement in audit-core as prev_hash + HMAC(server key) per org partition, a verify endpoint, and range export."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md:1-10",
+     "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:1-40",
+     "apps/Model Plane/rust/services/session-core/migrations/0043_audit_outbox_requeue.sql",
+     "apps/Control Plane/audit-core/internal/api/api.go:106-116",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx:218-240",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:1554"
+    ],
+    "gap": "SRC/DOC: the postmortem (dated 2026-10-06) states the broker side is fixed and deployed but the publisher fix, requeue function and metrics are built and not deployed, and the 4,992 stuck rows are not replayed (commit b9ed9197 landed the fix in the repo on 2026-10-08; whether it is deployed now is not visible from the repo). audit-core mounts only list/ingest audit and usage routes; no HMAC or hash chain exists in audit events (HMAC is only in service auth), and there is no export window, verifier or compliance API. The Trust Center shows 'Telemetry pending' when no events flow."
+   },
+   "approach": "Step 1 (ops, no new code): deploy b9ed9197, run requeue_session_audit_terminal and the reservation re-arm per the runbook, then re-read audit_events counts and broker durables; the postmortem says old-build reservation rows are deleted 7 days after publication, so the re-arm is time-boxed and some rows may already be gone. Step 2: audit-core adds prev_hash and an HMAC (key from the secret store, with key id for rotation) per org partition inside the insert transaction, a verify job (GET /v1/audit/verify), and GET /v1/audit/export?from&to&format. Step 3: scoped read tokens issued by Control Plane for a compliance API; admin export button beside the audit link in WorkspaceSettingsPage. Keep events content-free (data_category and zdr flag only, as the publisher already prefixes).",
+   "effort": "M",
+   "dependencies": [
+    "NATS stream manifest deployment (nats-provisioner)",
+    "Secret store for chain key",
+    "ZDR resolver (events stay content-free)"
+   ],
+   "planeOwner": "Control Plane (audit-core) with Model Plane (session-core publisher) for step 1",
+   "risks": "Replay deadlines (outbox row retention) may already have removed some rows; chain key management and rotation; a hash chain over idempotent re-ingest must not fork (the existing unique indexes on source producer/event id already prevent double counting); content must stay out of audit under ZDR.",
+   "tier": "priority",
+   "significance": 5,
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 4,
+    "INF": 0
+   },
+   "alreadyPlanned": {
+    "is": true,
+    "where": "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md (deploy and replay runbook only; hash chain, export and compliance API are not planned)"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-10-034"
+   ]
+  },
+  {
+   "id": "R-t3-10-03",
+   "title": "Trajectory ledger with exact model-visible request capture and timing waterfall",
+   "summary": "Add a complete second view of every run next to the chat: a virtualised, grouped ledger (turn, step, request, tool call, sub-call) with a per-record inspector (raw record, payload, result, tool schema, request options, system prompt in effect, usage, timing) and an Inspect action on each chat tool card. Back it with request_snapshot events written at the model call site (parameters, adapter defaults, content-addressed system-prompt and tool-catalogue blobs, auxiliary calls labelled by purpose) and step-level timing events drawn as a waterfall that shows 'unavailable' instead of estimates.",
+   "whyItMatters": "DeepSeek's 'maximum information, very transparent' is an explicit Verevon reference, and long Do-mode and browser runs cannot be explained from a flat event list. This is the strongest single transparency gap: users, support and engineers cannot see what the model was actually sent, which also blocks replay tests (R-t3-10-11) and trustworthy audit.",
+   "referenceBestPractice": {
+    "bestSource": "deepseek",
+    "others": [
+     "antigravity (DEBUG/FULL verbosity stream, queue and hook/approval time in timing)",
+     "codexagent (debug prompt-input dump)",
+     "t3code (native and canonical provider streams logged side by side)",
+     "cursor (copyable request ids)"
+    ],
+    "prevalence": "Ledger: 2 of 12 (differentiator); request capture: 4 of 12 (common); timing waterfall: 3 of 12 (differentiator)",
+    "mechanism": "DeepSeek keeps the invariant 'model-visible implies logged': one append-only per-session log; a request header event {config, adapterDefaults, tools} is appended only when it differs from the previous one; the system prompt is a diffable event; auxiliary requests are logged before dispatch. The ledger is a projection grouped by turn, step and request with request numbers and cumulative usage, 13 inspector tabs, and an Inspect action on each chat tool card. The waterfall is drawn from recorded timestamps only, with time-to-first-token split from decoding and in-flight records showing only a start marker."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1271-1466",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:571-720",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:159",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:268-296",
+     "apps/Model Plane/rust/services/model-gateway/src/turn_timing.rs:1-12",
+     "apps/Model Plane/rust/services/inference-core/src/provider/timing.rs:1-8"
+    ],
+    "gap": "The Trace tab is a flat durable run-event list capped at 5,000 with proof and receipts. There is no turn/step/request grouping, no inspector tabs, no Inspect link from a tool card. The context inspector (GET /v1/threads/:id/context, GetContextAssembly) shows assembled segments and token counts, but no per-request snapshot of effective parameters, the exact system prompt or the tool catalogue is persisted or served, and auxiliary calls (title, follow-ups, verification pass) are not shown as requests. Timing is per turn (turn_timing phases plus provider intervals), not per step or tool; no copyable trace/request id was found in the chat UI (INF from grep)."
+   },
+   "approach": "Deliver in three slices. (1) Projection and UI: session-core exposes GET /v1/runs/:id/trajectory that groups stored events by turn, step and request (browser actions grouped by action_id); verevonv3 upgrades the Trace tab to a virtualised grouped ledger with an inspector drawer, and tool-presentation carries the event id so tool cards get Inspect. (2) Request capture: at the model-gateway/execution-core call site write request_snapshot events to session-core (provider, model, effort, params, adapter default flags, tool schema list) only when changed, with system prompt and tool catalogue stored as hash-addressed blobs in MinIO (deduplicated), and purpose-labelled auxiliary calls; under ZDR persist only hashes and parameter metadata and render 'not retained (ZDR)'. Decide which Verevon persona/policy prompt text is shown versus hashed. (3) Timing: emit step_timing {step_id, queued_at, started_at, first_token_at, ended_at} from the existing OTEL spans (including approval wait and hooks), expose trace id on usage, draw the waterfall strip, add a copy-trace-id action. Owner-only access as today; never widen Space ACLs.",
+   "effort": "XL",
+   "dependencies": [
+    "session-core event schema and event ids on tool presentation",
+    "MinIO artifact store",
+    "ZDR resolver",
+    "R-t3-10-07 lifecycle events (retry and compaction rows appear in the ledger)"
+   ],
+   "planeOwner": "Model Plane (session-core, model-gateway, execution-core) and Frontend Plane (Trace tab)",
+   "risks": "Prompt and payload tabs can expose tenant secrets or other users' content in shared Spaces, so they stay owner-only with redaction and no ACL widening; ZDR must propagate (no prompt content persisted); persona/policy prompt IP visibility needs a decision; storage growth and virtualisation for very large runs; clock skew across services must never be papered over by synthesised timings.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 21,
+    "DOC": 2,
+    "INF": 1
+   },
+   "alreadyPlanned": {
+    "is": false,
+    "where": "Context inspector is shipped (harness-adoption-execution-plan.md ~line 818); no plan found for the trajectory ledger or request snapshots"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-10-001",
+    "C-t3-10-006",
+    "C-t3-10-002"
+   ]
+  },
+  {
+   "id": "R-t3-10-04",
+   "title": "Live run-cost meter, pre-run estimate and allowance/cap warnings",
+   "summary": "Emit cumulative usage_progress events (tokens, cost_usd or null with cost_basis) after every provider call and metered tool charge, show a live meter in the Work panel and Agent Run Console, warn at 80 percent of the run or org ceiling and show a labelled estimate on the plan-approval card. Surface the allowance that already exists (org allowances page) as a composer chip, add a personal view, and add an org monthly spend cap with alert thresholds via notifications.",
+   "whyItMatters": "Long autonomous runs are where cost surprises happen; Manus shows credits per request and a pre-run estimate. Verevon enforces per-run ceilings server-side, so a run that crosses one just stops with no earlier warning. The data already exists in cost-core, and the 80 percent warning is a recorded decision (OD19).",
+   "referenceBestPractice": {
+    "bestSource": "manus",
+    "others": [
+     "web-perplexity (running counter; monthly cap, auto-refill thresholds, stated draw order)",
+     "claude (allowance windows, extra usage)",
+     "web-claudeai (Settings > Usage)",
+     "t3code (per-provider usage over time)"
+    ],
+    "prevalence": "Live meter and estimate: 2 of 12 (differentiator); allowance page: 7 of 12 (table-stakes); caps and alerts: 1 of 12 (unique, DOC only)",
+    "mechanism": "Manus records credits consumed per reply, shows 'this request will consume about N credits' before long operations, keeps a credit history ledger and pre-checks balance per metered tool. Re-implement as a usage_progress event after every provider call and tool charge, pre-run estimates from plan steps times historical cost per step type labelled as estimates, and a balance pre-check before metered calls. Manus's own docs warn agent-given estimates are unreliable, so show ranges."
+   },
+   "verevonToday": {
+    "status": "planned",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:48",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:268-286",
+     "apps/Frontend Plane/verevonv3/src/features/insights/components/BillingAllowancesSection.tsx:1-46",
+     "apps/Frontend Plane/verevonv3/src/shared/api/org-quota-client.ts:20-31",
+     "apps/Model Plane/go/services/cost-core/internal/server/server.go:134-149"
+    ],
+    "gap": "SRC: ChatEvent has only an end-of-turn Usage event (no running-spend event), no live meter exists, no pre-run estimate on the plan card, and the parity audit lists the live credit meter as not built. Allowance data exists at org level (Insights page shows included, carried over, used, remaining, period dates, expiry and history) and org quotas hold per-run cost and token ceilings with a reset period, but there is no composer chip, no 80 percent warning, no personal remaining view and no org monthly cap with alert thresholds."
+   },
+   "approach": "Model Plane model-gateway: add a usage_progress ChatEvent {tokens_in, tokens_out, cost_usd|null, cost_basis, budget_fraction|null} emitted after each provider call and metered tool charge, priced through the cost-core catalogue (subscription routes show 'included', never zero spend). cost-core adds budget reservation for long runs and returns the remaining fraction. Frontend: meter in ChatLiveRunPanel and AgentRunConsole, warning chip at 80 percent (OD19), estimate range on the plan card computed from historical per-step cost. Control Plane billing-core/org quotas: add a monthly spend cap and alert thresholds; Application Plane notification at thresholds. Regenerate the SSE taxonomy so the new event has a declared consumer.",
+   "effort": "L",
+   "dependencies": [
+    "cost-core price catalogue and run budgets",
+    "Control Plane billing-core plan model (may not be final)",
+    "SSE taxonomy gate (scripts/gen-sse-event-taxonomy.py)"
+   ],
+   "planeOwner": "Model Plane (model-gateway, cost-core) with Control Plane (quotas) and Frontend Plane (meter, chip)",
+   "risks": "Estimates can mislead (Manus documents this), so label them and show ranges; numbers must not disagree with billing; subscription routes need token or quota based display; the credit and cap model is product-specific and the cap-and-alerts slice is DOC-only (Perplexity).",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 5,
+    "INF": 0
+   },
+   "alreadyPlanned": {
+    "is": true,
+    "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:48 (live credit meter, I16, warn at 80 percent per OD19)"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-10-010",
+    "C-t3-10-009",
+    "C-t3-10-011"
+   ]
+  },
+  {
+   "id": "R-t3-10-05",
+   "title": "Scrubbable computer-use replay with per-action briefs",
+   "summary": "Build a replay scrubber over the existing durable browser events: each proposed action (BrowserActionDispatched), its decision (BrowserActionDecided or approval) and its observation screenshot form a timeline point; dragging re-renders the screen from the stored frame, shows a one-line action brief (type, URL, reason), compresses idle gaps and offers Play and Jump to live. Replays stay owner-only; sharing goes through Space ACLs.",
+   "whyItMatters": "Manus-style computer use is a core Verevon vision and users must be able to see and review what the agent did on their behalf, after the fact as well as live. The Model-proposes, Quarry-executes split gives Verevon a cleaner audit basis than Manus, but today the evidence is a list of screenshots, not a replay.",
+   "referenceBestPractice": {
+    "bestSource": "manus",
+    "others": [],
+    "prevalence": "1 of 12 sources; unique",
+    "mechanism": "A timeline slider is built from toolUsed events (browser, terminal, editor, search, MCP); idle gaps are compressed (gaps up to 3 h kept, up to 24 h scaled by 0.3, longer clamped to 5 min, 10 s minimum); dragging re-renders the panel from the event at that point; Play and Jump to live follow the latest event. A pointer overlay shows a short brief for each action, and a recording vignette is excluded from capture."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:106-133",
+     "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:2046-2095",
+     "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:122-300",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:722-1000"
+    ],
+    "gap": "SRC: the Run Console already shows a Quarry screenshot per browser observation (by reference, absent on ZDR runs), and Model Plane already emits dispatched, decided, approval-required and observation events linked by action_id with screenshot_ref. Missing: a scrubbable timeline that re-renders the screen at any past action, action-brief overlay, play and jump-to-live, gap compression, shareable replay. Frames are per observation, not per executed-action receipt from Quarry (not verified whether Quarry returns one). Human takeover of the live browser is absent (covered by the computer-environment category)."
+   },
+   "approach": "Frontend Plane: AgentReplayScrubber component fed by the durable browser events already in the run log, one point per action_id (dispatched, decision, observation with screenshotRef via /api/v1/chat/browser-artifacts/:id), Manus-style gap compression, brief overlay from action_type, url and reason, Jump to live. Model Plane: guarantee each dispatched action gets a terminal event (observed, rejected by Quarry, denied, cancelled) with an explicit 'no frame (ZDR)' marker so the timeline has no silent holes; link the Quarry execution receipt id when Quarry returns one (Quarry executes or rejects, Model only proposes). Sharing through Space ACLs without widening owner-plane ACLs; ZDR runs persist no frames and replay degrades to briefs only.",
+   "effort": "M",
+   "dependencies": [
+    "Quarry action receipts (verify)",
+    "R-t3-10-03 ledger for event ids",
+    "Browser artifact read path /api/v1/chat/browser-artifacts"
+   ],
+   "planeOwner": "Frontend Plane (scrubber) with Model Plane (execution-core browser events) and Ingestion Plane/Quarry (receipts, frames)",
+   "risks": "Screenshots can capture sensitive pages, so ZDR must prevent persistence and credential fields need masking at capture; frame storage cost and retention; if Quarry per-action receipts and frames must be added the effort grows to L.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 1,
+    "INF": 0
+   },
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-10-042"
+   ]
+  },
+  {
+   "id": "R-t3-10-06",
+   "title": "Learning ledger: what Verevon learned, with undo and rollback",
+   "summary": "Give the learning loop a visible, reversible history. Slice 1 projects the existing non-destructive memory lineage (supersedes_id, is_latest, lineage markers) into a 'What Verevon learned' timeline with undo. Slice 2 adds a skill revision ledger {actor, run_id, before_hash, after_hash} with hash-addressed blobs, a fail-closed rollback RPC, a reuse counter, and an Application Plane notification 'Verevon learned X' with an undo link.",
+   "whyItMatters": "Hermes (the reference for 'learns and tailors itself to its user') makes learning auditable: every mutation is recorded, rollback fails closed, and users see a learning timeline. Verevon's loop writes memories and skills in the background, so without a ledger the user cannot see, trust or undo it, which is a governance risk as well as a UX gap.",
+   "referenceBestPractice": {
+    "bestSource": "hermes",
+    "others": [],
+    "prevalence": "1 of 12 sources; unique",
+    "mechanism": "A JSONL mutation ledger with a row per change {actor, entity, before_hash, after_hash, run_id}; sha256-deduplicated blobs hold before and after copies; rollback restores the before blob after first snapshotting current state and fails closed if that safety capture fails; the ledger is bounded; a learning-journey view lists mutations with edit and delete; background review usage is tagged and a reuse_after_patch signal is logged on next load."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/session-core/migrations/0037_agent_memory_lineage.sql",
+     "apps/Model Plane/rust/services/session-core/migrations/0039_memory_user_control.sql",
+     "apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs",
+     "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go:1-30",
+     "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md:286"
+    ],
+    "gap": "SRC: memory writes already keep history (EXTEND and SUPERSEDE insert a new row and flip is_latest on the old one, with lineage markers in source_links), memory view/correct/forget and recall disclosure ship, and the skill learning loop runs after RUN_COMPLETED with quarantine on dissatisfaction. Missing: a user-facing learned timeline, one-click undo of a memory supersede, any before/after revision history for skills, rollback, a 'learned X' notification and a reuse signal; skill retirement and rollback is planned at lowest priority. DOC (2026-09-17) recorded only 24 agent_memory rows and 0 agent_skills rows after about 10 days, so skill output volume should be re-checked before sequencing."
+   },
+   "approach": "Model Plane session-core: (1) a read API that lists memory lineage chains per user and an undo RPC that, in one transaction, restores the superseded row as latest and marks the newer one non-current, honouring forgotten_memory_ids. (2) skill_revisions table with content-hash blobs in the object store, actor (user, background_review, operator), run_id, before_hash and after_hash; rollback RPC snapshots current state first and refuses on failure; reuse counter incremented when MatchSkills surfaces a learned skill. Frontend: a Learned page (or Memory tab section) with timeline, diff and undo. Application Plane: notification 'Verevon learned X' linking to the entry. Forgetting or erasure must also purge ledger blobs.",
+   "effort": "M",
+   "dependencies": [
+    "Skill learning loop (v-modelplane-115)",
+    "Object store for blobs",
+    "Application Plane notifications"
+   ],
+   "planeOwner": "Model Plane (session-core, capability-core) with Frontend Plane and Application Plane",
+   "risks": "Ledger must honour erasure and ZDR (no learning artifacts from ZDR runs in the ledger); user versus org skill scopes must not leak; low current skill volume means start with the memory slice that has data.",
+   "tier": "priority",
+   "significance": 4,
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 2,
+    "INF": 0
+   },
+   "alreadyPlanned": {
+    "is": true,
+    "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md:286 (skill-retirement/rollback, lowest priority, flag/log-only first)"
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-10-043"
+   ]
+  },
+  {
+   "id": "R-t3-10-07",
+   "title": "Typed run lifecycle events and status cues: retry, turn end, compaction, context-change source chips, thread status, connector incidents",
+   "summary": "Add the missing lifecycle events to the ChatEvent taxonomy and render them: retry_scheduled {attempt, delay_ms, code}, a typed turn_end {reason} (including an explicit 'outcome unknown' result for interrupted tool calls), a compaction marker {items_condensed, tokens_before, tokens_after, summary_ref}, and context_change rows (skill attached, pin, reattach_context, memory recall, trigger kind such as schedule, watcher, webhook, subagent). Derive one thread status with fixed precedence and an unseen-completion dot from the typed end reason, and keep a bounded per-connector incident ring with normalised reasons.",
+   "whyItMatters": "Today retries and compaction happen silently, so users see a stall or a changed context with no explanation, and runs started by schedules or watchers do not say why they started. These are cheap, highly visible trust wins that also give the trajectory ledger (R-t3-10-03) its rows.",
+   "referenceBestPractice": {
+    "bestSource": "deepseek",
+    "others": [
+     "hermes (hel-018 deterministic 'recalled N memories' line from the host)",
+     "t3code (t3u-021 status resolver with precedence, rollup and unseen completion; t3u-053 slow-request toast)",
+     "claude (last 10 incidents per built-in MCP server with normalised reason and redacted stderr tail)"
+    ],
+    "prevalence": "Retries and end reasons: 1 of 12 (unique); compaction marker: 1 of 12 (unique); message source: 2 of 12 (differentiator); status pills: 1 of 12 (unique); connector incidents: 2 of 12 (differentiator)",
+    "mechanism": "DeepSeek appends a retry event before waiting (honouring Retry-After), writes a terminal turn event with a typed reason (completed, aborted with cause, blocked, error, max-tokens, crash-interrupted, forked), uses stable error codes with cause chains, and synthesises explicit error results for unanswered tool calls so the model re-checks state. Compaction emits a CompactionItem with the shadowed item and token counts plus the summary node. Every persisted message carries a typed source {kind, form, label}; context injections emit host-authored notice events rendered as one-line rows."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:144-470",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:372-384",
+     "apps/Model Plane/rust/services/model-gateway/src/compaction.rs",
+     "apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:535",
+     "apps/Model Plane/go/services/capability-core/cmd/main.go:251",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:681"
+    ],
+    "gap": "SRC (variant list read): the ChatEvent enum has Stopped {reason}, Error {code, message, retryable}, Usage, TurnTiming, MemoryRecall and others, but no retry, compaction or context-change variant, so tool-call retries (up to 3) and compaction are invisible; typed failure presentation and continue-after-stop already exist on the client. Memory recall is disclosed with provenance, but no user-visible source kind per message, no trigger chips for scheduled or watcher runs, and no rows for skill attach, pins or reattach_context were found (skills unknown). Thread history shows run status chips and the Work panel shows 'needs you', but an attention rollup and unseen-completion indicator were not verified. Capability-core has health attestation that fails closed, but no per-connector incident history is visible to users and no slow-request indicator was found."
+   },
+   "approach": "Model Plane model-gateway/inference-core/execution-core: add retry_scheduled, turn_end, compaction and context_change variants to ChatEvent, reuse the trust-class provenance as the message source vocabulary, and regenerate the SSE taxonomy (scripts/gen-sse-event-taxonomy.py, sse-taxonomy workflow) so the producer/consumer coverage gate forces a Frontend consumer; persist them in the durable log so the ledger shows them. Under ZDR the compaction summary text must not persist beyond the turn (counts only). Frontend: a collapsed 'waiting to retry' row, a divider marker with expandable summary, a trigger chip on turn headers, and a status resolver (needs you, running, failed, completed-unseen, idle) with sidebar rollup using completedAt versus last-visited. capability-core: bounded incident ring per MCP/integration with a normalised reason taxonomy and redacted stderr tail, shown on the integrations page.",
+   "effort": "M",
+   "dependencies": [
+    "SSE taxonomy gate",
+    "session-core event schema",
+    "R-t3-10-03 ledger (consumer of these rows)"
+   ],
+   "planeOwner": "Model Plane (model-gateway, execution-core, capability-core) with Frontend Plane",
+   "risks": "Event noise on flaky providers (collapse repeated retries, keep context rows collapsed by default); stderr tails and incident text may hold secrets and must be redacted; ZDR summary persistence.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 13,
+    "DOC": 1,
+    "INF": 2
+   },
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-10-037",
+    "C-t3-10-038",
+    "C-t3-10-007",
+    "C-t3-10-040",
+    "C-t3-10-019"
+   ]
+  },
+  {
+   "id": "R-t3-10-08",
+   "title": "Readable activity: narration templates, reasoning summaries, research history, per-turn Changes card and output provenance",
+   "summary": "Make the Work panel and chat tell users in plain language what the agent did and what changed. Add per-action, per-state narration templates (nb/en) in the capability and integration action metadata, provider-neutral collapsed reasoning summaries, a retained research activity history with the approved plan, a per-turn 'Changes' card aggregated from receipts, artifact revisions and memory writes, author-kind (human or AI) on document revisions, and a 'how this was computed' footer with source query and fetch time on data-derived charts.",
+   "whyItMatters": "A business audience cannot read raw tool names and arguments; Codex narrates each connector action in a sentence and ChatGPT keeps reasoning and research steps inspectable after the fact. Verevon already has intent-based tool presentation, receipts with effect classes and artifact diffs, so most of this is wiring those into one readable account of a turn.",
+   "referenceBestPractice": {
+    "bestSource": "codexagent",
+    "others": [
+     "web-chatgpt (reasoning summaries and adjustable upfront plan; activity history and sources kept with the report)",
+     "web-perplexity (sources read and learnings shown live)",
+     "deepseek (per-turn changed-files card from private snapshots)",
+     "web-claudeai (edit attribution in artifacts; show-the-query chart metadata)"
+    ],
+    "prevalence": "Narration 1 of 12 (unique); reasoning visibility 1 of 12 (unique, DOC only); research history 2 of 12 (differentiator, DOC only); per-turn changes 1 of 12 (unique); attribution and query provenance 1 of 12 each (DOC only)",
+    "mechanism": "Codex keeps about 900 localisable templates keyed connector.tool.state (active, completed, withContext, withName, withRecipient) with slots filled from arguments and results, plus a command parser that maps shell to a small set of semantic verbs; raw args stay one click away. ChatGPT normalises provider reasoning into summary items collapsed by default. DeepSeek snapshots state at turn start and end and renders a changed-files card with drill-down; for Verevon the equivalent is a business-effects card."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts:38-159",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.tsx",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:147-149",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:3206",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:325-330",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:428-429",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx"
+    ],
+    "gap": "Tool presentation derives an intent icon and label but has no per-connector, per-state sentence templates (the verb/object/outcome activity grammar is planned, not built). reasoning_delta is emitted only when a provider emits reasoning (Anthropic thinking, Codex) with no provider-neutral summary. Deep research and a read versus not-read Sources panel ship, but whether the approved plan and step activity stay viewable after completion was not verified. Receipts with effect class, artifact revision diffs and the proof bundle exist, but there is no single per-turn Changes card spanning artifacts, documents, provider actions and memory writes. Artifacts have a version stepper and diff; human versus AI attribution in Application Plane documents and query/source/fetched_at on charts were not found (SRC grep of ChatChart.tsx)."
+   },
+   "approach": "Sequence by cost. (a) Frontend plus inference-core: request reasoning summaries from providers that offer them and map to reasoning_delta; render collapsed by default on all surfaces including Terra (OD19). (b) Frontend: research activity section in the Sources/Trace panel from existing durable step events, and persist the approved plan with the report artifact. (c) Model Plane capability registry and integration-corev2 action metadata carry nb/en templates per action and state with typed slots; execution events carry filled slots; Frontend renders them in tool cards, Work panel and Space activity; add a coverage test that every model-executable action has templates. (d) Frontend Changes card aggregating receipts, artifact revisions and memory writes per turn (Model Plane adds memory-write and provider-action receipts where missing). (e) Application Plane: author kind and actor on revisions with a badge; attach query, source and fetched_at from retrieval metadata to chart artifacts with a footer.",
+   "effort": "L",
+   "dependencies": [
+    "capability registry metadata and integration-corev2 action catalogue",
+    "provider adapters for reasoning summaries",
+    "durable step events",
+    "Data Plane retrieval metadata (for chart provenance)"
+   ],
+   "planeOwner": "Frontend Plane with Model Plane (capability registry, inference-core), Ingestion Plane (action metadata) and Application Plane (revision author kind)",
+   "risks": "Template drift from real behaviour (a generated coverage test mitigates); slots must not leak content into ZDR-blocked surfaces; some providers return encrypted or redacted reasoning and ZDR providers may not allow summaries; the Changes card must not show effects in documents the viewer cannot access; queries on charts can reveal schema details and owner-plane ACLs apply.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 6,
+    "INF": 1
+   },
+   "alreadyPlanned": {
+    "is": true,
+    "where": "Activity grammar planned per the chat/agents baseline (path not verified); collapsed reasoning summaries per OD19 in apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-10-004",
+    "C-t3-10-028",
+    "C-t3-10-029",
+    "C-t3-10-039",
+    "C-t3-10-045",
+    "C-t3-10-046"
+   ]
+  },
+  {
+   "id": "R-t3-10-09",
+   "title": "Org analytics and customer-owned telemetry export under a closed telemetry contract",
+   "summary": "Phase A: define a content-free telemetry contract (allowed event names, closed enums, count buckets) in the Model Plane that every exporter must pass. Phase B: extend the existing Insights usage pages with agent-run outcome analytics (success, approvals, tool friction), CSV/API export and a read-only analytics capability the assistant can call. Phase C: per-org export destinations in Control Plane (OTLP over HTTP/protobuf, webhook) with metadata only by default and content-capture categories that fail closed and are force-disabled under ZDR.",
+   "whyItMatters": "Enterprise buyers expect to see usage and route AI activity to their own SIEM and collectors, and every comparable product offers it. Verevon has operator-only Prometheus and OTEL today, so customers cannot get their own data; a closed contract keeps the export safe under Zero-Data-Retention.",
+   "referenceBestPractice": {
+    "bestSource": "claude",
+    "others": [
+     "web-claudeai (wca-089 export and analytics)",
+     "manus (mau-086 metadata-only streams with optional full-payload tiers)",
+     "cursor (cloud agent run lists and analytics)",
+     "web-chatgpt (conversational personal analytics, workspace exports)",
+     "hermes (hel-081 closed enums and count buckets, opt-in, recorder never raises)",
+     "codexagent",
+     "deepseek"
+    ],
+    "prevalence": "Customer telemetry export 5 of 12 (common); workspace analytics 5 of 12 (common); closed-vocabulary telemetry 1 of 12 (unique)",
+    "mechanism": "Claude's org policy holds the endpoint, protocol, headers (or a headers-helper script), resource attributes, trace toggle and content-capture categories (user prompts, assistant responses, tool details, tool content, raw API bodies) that fail closed to none; headers are encrypted at rest and an exporter batches OTLP with retries. Hermes maps raw values to closed enums and count buckets, makes recording a no-op unless enabled, never raises into callers, and tests that no free text reaches exported events."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/gateway_metrics.rs:1-4",
+     "apps/Model Plane/rust/services/inference-core/src/metered.rs:1-8",
+     "apps/Model Plane/rust/services/model-gateway/src/security_events.rs",
+     "apps/Control Plane/audit-core/internal/api/api.go:106-116",
+     "apps/Frontend Plane/verevonv3/src/features/insights/components/UserUsageSection.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/insights/components/UsageAnalyticsSection.tsx",
+     "apps/Model Plane/go/services/cost-core/internal/server/server.go:134-149"
+    ],
+    "gap": "SRC: cost analytics by user and entries exist (Insights page, cost dashboard) and audit-core has a usage summary route; the metered decorator gives every inference RPC metrics, and security events are hash-only. Missing: agent-run outcome analytics, feature adoption, any export, an analytics tool usable from chat, per-org export destinations, content-capture categories, SIEM or OTLP push, and an enforced closed-vocabulary contract (an mp-telemetry style contract crate was not found; not verified). No OTLP references were found in the SPA (grep)."
+   },
+   "approach": "Model Plane: a telemetry contract module (generated into Rust and Go, with a CI test that exported attributes stay within it; ZDR posture strips anything beyond the contract) plus a local-only debug plane. Control Plane audit-core and cost-core: daily rollups per org, member and model, plus run outcome counts; CSV/JSON export; read-only analytics capability registered in the Model Plane tool catalogue; Frontend admin analytics page with export (respect works-council and per-member privacy expectations in Norway). Control Plane: per-org export destinations (OTLP HTTP/protobuf, webhook), headers held in the secret store, metadata-only events by default, content categories opt-in and force-disabled when the org or request is ZDR, fed from the session-core audit outbox once delivery is fixed.",
+   "effort": "XL",
+   "dependencies": [
+    "R-t3-10-02 audit delivery and export",
+    "ZDR resolver",
+    "Secret store for export headers",
+    "cost-core ledger"
+   ],
+   "planeOwner": "Control Plane (audit-core, org settings) with Model Plane (telemetry contract, cost-core) and Frontend Plane (admin analytics)",
+   "risks": "Content export conflicts with ZDR and Space ACLs: exported content must never exceed what the owner plane allows; per-member analytics have privacy implications; over-restricting the contract can hide useful signals; export headers are secrets.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 5,
+    "INF": 1
+   },
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-10-012",
+    "C-t3-10-013",
+    "C-t3-10-016"
+   ]
+  },
+  {
+   "id": "R-t3-10-10",
+   "title": "Policy and data-flow transparency: effective-policy origin view and declared egress catalogue",
+   "summary": "Show the effective value of approval posture, ZDR, privacy tier, model routing and budgets for a Space or thread together with the layer that set it (org, workspace, Space, user, server default). Declare every outbound destination once per plane (destination, data classes, owning feature, ZDR behaviour, toggle) in an egress catalogue that drives the gateway CSP, a generated Trust Center 'what leaves the platform' table and a CI check that fails on undeclared hosts.",
+   "whyItMatters": "Verevon's privacy positioning rests on ZDR, residency and one-way-tightening policy, but users and admins cannot see why a setting has its value or exactly which providers receive which data. This makes the authority model auditable and cheap to explain to buyers.",
+   "referenceBestPractice": {
+    "bestSource": "claude",
+    "others": [
+     "deepseek (--dump-config shows each field's origin and which layers patched it, warns when a patch matches nothing; plugin inventory with live phase)",
+     "web-chatgpt (what goes to search and app partners)",
+     "antigravity",
+     "t3code",
+     "codexagent"
+    ],
+    "prevalence": "Data-flow and egress disclosure 4 of 12 (common); effective configuration provenance 3 of 12 (differentiator)",
+    "mechanism": "Claude uses one declarative catalogue listing each destination with its disabling policy toggle, the process that contacts it, the required CSP directive and redirects; it generates the CSP, firewall allow-lists, admin toggles and local 503 fallbacks. DeepSeek applies configuration layers cumulatively, snapshots after each and compares per field to attribute origin and patchedBy."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/profile.rs",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:20-40",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-118",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx:175-300",
+     "apps/Frontend Plane/verevonv3/src/features/router-policy"
+    ],
+    "gap": "SRC: per-answer served-by provenance (provider, residency, strongest substantiated privacy tier), server-resolved one-way-tightening posture, a router-policy admin and a Trust Center with connected-app permissions, retention and workspace AI activity all exist. Missing: a view of effective policy values with their originating layer, a single declared egress catalogue per plane, a generated disclosure of what is sent to LLM providers, Quarry targets and integration providers, and any telemetry consent switch (SPA grep)."
+   },
+   "approach": "Model Plane profile resolver returns {field, value, origin, patched_by[]} for posture, ZDR, privacy tier, routing and budgets (hiding other tenants' and admin-only details from members); Frontend Settings gets an 'Effective policy' panel per Space and thread. Support Plane tooling: egress.yaml per plane generating gateway CSP and a Trust Center disclosure table, plus a CI check against outbound client hosts; Control Plane exposes the org toggles. Reuse the approval cause taxonomy (R-t3-10-01) for the 'why' wording.",
+   "effort": "M",
+   "dependencies": [
+    "R-t3-10-01 approval cause taxonomy",
+    "privacy tiers and ZDR attestation",
+    "CI outbound-host scan"
+   ],
+   "planeOwner": "Model Plane (profile resolver) with Support Plane (egress catalogue tooling), Control Plane (org toggles) and Frontend Plane (Trust Center)",
+   "risks": "Catalogue drift unless CI enforces it; the view must not reveal other tenants' or admin-only policy details; a disclosure page is a public claim, so it must be generated from the catalogue and not hand-edited.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 2,
+    "INF": 1
+   },
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": false,
+   "coversClusters": [
+    "C-t3-10-020",
+    "C-t3-10-017"
+   ]
+  },
+  {
+   "id": "R-t3-10-11",
+   "title": "CI quality gates: recorded-session replay, eval release gates, generated catalogues and user-path budgets",
+   "summary": "Add a replay inference provider that serves recorded completions so committed session logs can be replayed through model-gateway in CI with volatile ids tokenised and every SSE or prompt change forced to update a scenario. Make eval-lab a required stage for prompt and tool-schema changes with an A/B runner and a learning-loop outcome eval, generate the tool and capability catalogue with a freshness gate and a 'Model Experience' README lint, and add Playwright user-path budgets.",
+   "whyItMatters": "Transparency features only stay true if regressions are caught: this prevents silent prompt, schema and event drift and the doc rot recorded in the stale-doc register. It is invisible to users but protects every other item in this category.",
+   "referenceBestPractice": {
+    "bestSource": "deepseek",
+    "others": [
+     "hermes (compaction scored by what a fresh model can still answer; A/B runs with seeded data and programmatic oracles; 36 eval directories)",
+     "antigravity",
+     "cursor"
+    ],
+    "prevalence": "Replay tests 2 of 12; behavioural evals 3 of 12 (differentiator); generated docs 1 of 12; user-path budgets 1 of 12 (unique)",
+    "mechanism": "DeepSeek commits 600 session logs across 227 scenarios and replays them through shipped profiles with an llm-replay provider, tokenises volatile ids, and requires every model- or user-visible change to update a scenario in the same PR; 60+ generation gates regenerate catalogues and fail on diff, and a lint checks each package README for a Model Experience section. Hermes A/B-tests one changed prompt or schema file with seeded data and programmatic oracles."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Model Plane/docs/decisions/ledger.md",
+     ".github/workflows/eval-lab.yml",
+     "apps/Model Plane/scripts/gen-sse-event-taxonomy.py",
+     ".github/workflows/sse-taxonomy.yml",
+     "apps/Frontend Plane/verevonv3/playwright.config.ts"
+    ],
+    "gap": "SRC: a compaction-recall eval harness ships, and eval-lab CI runs only the credential-free selftest (live evals are deliberately not run in CI); only the SSE event taxonomy is generated and freshness-gated. No committed replay corpus, no replay provider, no A/B methodology for prompt or schema changes, no outcome eval for the skill learning loop, no generated tool/capability or config catalogue, no Model Experience lint, and no user-path performance budgets were found (budgets not verified)."
+   },
+   "approach": "Model Plane inference-core: a replay provider serving recorded completions; snapshot tests over session-core event logs with typed id tokens; fixtures built only from synthetic or consented data, never ZDR or customer data. eval-lab-py: scheduled live evals plus a required CI stage when prompt or tool-schema files change; add an A/B runner and a learning-loop eval (task success with versus without learned skills). Support Plane: extend the taxonomy generator pattern to the capability catalogue and config, and add a CI lint for a Model Experience README section on model-touching crates. Frontend: Playwright budgets for open-thread, open-Trace and stream-while-typing, scaled by a calibration benchmark.",
+   "effort": "L",
+   "dependencies": [
+    "R-t3-10-03 request capture (to record replayable sessions)",
+    "eval-lab-py",
+    "CI capacity"
+   ],
+   "planeOwner": "Model Plane (inference-core, eval-lab-py) with Support Plane (generators, lint) and Frontend Plane (budgets)",
+   "risks": "Fixture maintenance cost; live eval cost and flaky oracles; CI friction (start with Model Plane crates); fixtures must exclude ZDR and customer data.",
+   "tier": "recommended",
+   "significance": 3,
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 12,
+    "DOC": 1,
+    "INF": 1
+   },
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-10-023",
+    "C-t3-10-024",
+    "C-t3-10-021",
+    "C-t3-10-025"
+   ]
+  },
+  {
+   "id": "R-t3-10-12",
+   "title": "Per-thread run export, report-a-problem bundle, public event API and customer policy hook",
+   "summary": "Long-tail data-out and hook-in surfaces on the same event model: a per-thread export job (events, artifacts, receipts, manifest), a web 'Report a problem' dialog that attaches run id, trace id and scrubbed client errors with per-item consent, a versioned public SSE event API with API-key auth and thin TS/Python clients, and an optional org-configured policy webhook as one more fail-closed gate before inference and tool-result ingestion.",
+   "whyItMatters": "Developers, support and enterprise admins need to take data out and plug policy in without scraping the UI. Each piece is small once the ledger and audit trail exist, but none of them blocks the chat vision.",
+   "referenceBestPractice": {
+    "bestSource": "claude",
+    "others": [
+     "deepseek (raw session tree ZIP; session.event JSON-RPC notifications and Python SDK)",
+     "codexagent (feedback id; data can stay local)",
+     "hermes (doctor registry with fail-closed redaction)",
+     "web-claudeai (customer-hosted inference policy hooks, allow/deny only, beta)"
+    ],
+    "prevalence": "Export 3 of 12 (differentiator); support bundles 6 of 12 (common, desktop-centric); raw event stream 1 of 12 (unique); customer policy hook 1 of 12 (unique, DOC only)",
+    "mechanism": "Claude's diagnostic bundle is a registry of collectors {id, label, description, defaultChecked, collect} listed with per-section consent and source-side log scrubbing, uploaded with a correlation id shown to the user; its data export is a zip with a manifest and an audited submission event. Policy hooks are a synchronous webhook with timeout and a fail policy per org, with decisions logged."
+   },
+   "verevonToday": {
+    "status": "partial",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/PrivacyDataSection.tsx:22-35",
+     "apps/Control Plane/user-core/internal/http/gdpr_handlers.go",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:144",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:10154"
+    ],
+    "gap": "SRC: GDPR Art. 15 export (user-core) and answer export to Word, Excel, PowerPoint and PDF exist; chat export is partial and trajectory export is a stub; there is no per-thread raw run export. The SSE taxonomy is typed with Last-Event-Id resume but has no documented public API or SDK (not verified). No report-a-problem flow was found under features/support (those are support-inbox pages; status unknown). No customer policy webhook exists in the gate chain (INF)."
+   },
+   "approach": "Model Plane session-core: background export job per thread (events, artifacts, receipts, manifest, audit record), honouring ZDR (nothing retained to export) and Space ACLs. Frontend: Report-a-problem dialog listing attachable items with per-item consent, posting to support with a report id. Model Plane: publish the SSE taxonomy as a versioned public API with API keys from Control Plane. Optional: org policy webhook gate with timeout and fail-closed option, decisions to audit, blocked under ZDR unless the customer endpoint is attested.",
+   "effort": "M",
+   "dependencies": [
+    "R-t3-10-02 audit trail",
+    "R-t3-10-03 trace ids",
+    "Control Plane API keys"
+   ],
+   "planeOwner": "Model Plane (session-core, model-gateway) with Frontend Plane and Control Plane (API keys, org config)",
+   "risks": "Exports must not include content from documents the user cannot read in the owner plane; API stability commitments; policy webhook latency, availability and sending content off-platform (disclose and block under ZDR); bundles must attach no content under ZDR.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 4,
+    "INF": 1
+   },
+   "alreadyPlanned": {
+    "is": false,
+    "where": ""
+   },
+   "needsVerification": true,
+   "coversClusters": [
+    "C-t3-10-026",
+    "C-t3-10-018",
+    "C-t3-10-027",
+    "C-t3-10-036"
+   ]
+  }
+ ],
+ "dropped": [
+  {
+   "cluster": "C-t3-10-015",
+   "reason": "Internal product-analytics event taxonomy and rollout exposure events: no user-facing transparency value, status unknown with no baseline record and low confidence; revisit only after the closed-vocabulary telemetry contract and a consent switch exist (R-t3-10-09, R-t3-10-10)."
+  },
+  {
+   "cluster": "C-t3-10-035",
+   "reason": "Account security history and active sessions is an identity and account-settings feature (Control Plane auth) outside chat and agent transparency, supported by a single DOC-only source (ChatGPT web); belongs on the Control Plane identity roadmap."
+  }
+ ],
+ "strengthsToKeep": [
+  "Per-turn usage keeps cost null when unknown and carries cost_basis and confidence, with subscription turns marked as usage not spend (apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:268-286).",
+  "Context inspector is itemised by segment with real BPE token counts, level with Cursor and Hermes (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:571-720; GET /v1/threads/:thread_id/context at apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:159).",
+  "Served-by provenance stamps provider, residency and the strongest substantiated privacy tier per answer, from server values only, which goes beyond a model label (apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:20-40).",
+  "Tool-call cards and the Work log are at parity (intent, hit count, truncation, args, output, diff) with presentation recomputed and never persisted (apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts:38-159).",
+  "Browser runs already split Model-proposes from Quarry-executes with per-action risk-classified approvals and dispatched, decided and observation events linked by action_id, plus ZDR-aware screenshot references (apps/Model Plane/rust/services/execution-core/src/browser_events.rs:122-300; apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:106-133).",
+  "Run history, subagent lineage and the Agent Run Console with proof bundles and receipts give a cleaner audit basis than reference products (apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx).",
+  "Memory is non-destructive and user-controllable: recall disclosure with three-state provenance, correct and forget, and supersede lineage that never overwrites history (apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs; apps/Model Plane/rust/services/session-core/migrations/0037_agent_memory_lineage.sql).",
+  "Trust Center shows per-connected-app permissions, retention and 'Used by AI?', and says 'Telemetry pending' rather than claiming an empty history when audit delivery is down (apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx:218-300).",
+  "Insights shows org allowances (included, carried over, used, remaining, expiry, history) and per-user usage by cost basis with an honest 'some details unavailable' state (apps/Frontend Plane/verevonv3/src/features/insights/components/BillingAllowancesSection.tsx; UserUsageSection.tsx).",
+  "Editable plan with confirm gate and graduated confidence with a verification pass are unique to Verevon (apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:314-345).",
+  "Typed, localisable refusal catalogue pinned by sha256 and mirrored into the SPA is the pattern to reuse for approval causes (apps/Model Plane/api/contracts/zdr-refusals.json; apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json).",
+  "Engineering honesty is built in: a decision ledger and postmortems with candid status lines, and an SSE taxonomy generated and freshness-gated in CI with producer and consumer coverage (apps/Model Plane/docs/decisions/ledger.md; apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md; apps/Model Plane/scripts/gen-sse-event-taxonomy.py).",
+  "Metered decorator on every inference RPC and hash-only security events give operators metrics without content (apps/Model Plane/rust/services/inference-core/src/metered.rs:1-8; apps/Model Plane/rust/services/model-gateway/src/security_events.rs)."
+ ]
+}

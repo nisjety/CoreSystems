@@ -1,0 +1,2387 @@
+{
+ "category": "Multimodal & creation",
+ "generated": "2026-10-13",
+ "sources": [
+  "antigravity",
+  "claude",
+  "codexagent",
+  "cursor",
+  "deepseek",
+  "manus",
+  "t3code",
+  "web-chatgpt",
+  "web-claudeai",
+  "web-manus",
+  "web-perplexity"
+ ],
+ "recordsTotal": 107,
+ "excluded": [],
+ "clusters": [
+  {
+   "id": "C-t3-02-001",
+   "name": "Multi-format file attachments with published limits and out-of-context processing",
+   "description": "Upload documents, spreadsheets, decks, images (and on some products audio/video) into a chat turn, with documented per-file, per-message and storage limits; large files are processed in a sandbox or by retrieval rather than pasted into context, and PDFs are tiered into visual pages plus text.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt",
+     "web-claudeai",
+     "web-manus",
+     "claude"
+    ],
+    "n": 4,
+    "of": 11,
+    "cls": "table-stakes",
+    "note": "Same-vendor pairs counted separately: claude+web-claudeai (distinct vendors: 3). Class adjusted to table-stakes: all web benchmarks or most products ship it, and related records sit in sibling clusters of this category."
+   },
+   "members": [
+    "web-chatgpt-web-product-026",
+    "web-claudeai-web-product-018",
+    "web-manus-web-product-020",
+    "claude-runtime-architecture-003"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-018",
+     "claude-runtime-architecture-003"
+    ],
+    "why": "claude.ai publishes the clearest tiering (500 MB per file, 20 files, PDF visual analysis up to 100 pages and text-only to 1,000 pages) and the desktop build shows the mechanism: a document funnel converts files in a scratch root with PDF extraction in a child process. ChatGPT (web-chatgpt-026) has larger quotas and visual PDF retrieval but only for Enterprise. Both q4; claude.ai pairs DOC limits with SRC mechanism."
+   },
+   "mechanism": "Presigned direct upload into object storage (no bytes through the chat API); a conversion worker per file type (PDF text + page rasters, DOCX/PPTX/XLSX to Markdown, HTML/EPUB/RTF to text) running in an isolated process with a timeout; the turn carries references, and the model gets (a) page images for the first N PDF pages when the routed model accepts images, (b) extracted text up to a token budget, (c) the remainder reachable via retrieval or the sandbox. Limits are enforced server-side and stated in the UI.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-036",
+     "v-planned-decisions-024",
+     "v-chat-agents-ui-037",
+     "v-planned-decisions-028",
+     "v-modelplane-034",
+     "v-modelplane-029"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts:6-43",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:14-40",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2081-2118"
+    ],
+    "gap": "Caps are 1 MB per file, 60k characters per file and 120k per turn (peers: 30-512 MB). Documents are text-extracted only (no page images for vision models, no OCR for scanned PDFs: H9 planned). The durable upload route to Data Plane documents-api exists but uploadChatDocument has zero callers, so nothing large can be processed out of context. No audio/video types.",
+    "strengths": "Extraction goes through imports-core behind the gateway, so parsing is already off the browser and governed; Azure Document Intelligence and OCR adapters exist in inference-core."
+   },
+   "benefit": "Business users attach real files (multi-MB PDFs, workbooks, decks); a 1 MB cap fails on the first serious document and makes every downstream creation feature look broken. Out-of-context processing also lowers token cost.",
+   "approach": "Wire the existing stub: browser gets a presigned URL from the gateway, uploads to Data Plane object storage, Data Plane extracts (imports-core) and returns a document id; Model Plane receives ids, applies per-route budgets (text budget, N page images if the route supports images), and stages the file into the sandbox for anything larger. Under ZDR use an ephemeral inline path whose bytes are dropped after the turn and never indexed. Ship local OCR (H9) for image-only PDFs.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-02-002 durable attachment store",
+    "C-t3-02-003 capability gating",
+    "Data Plane documents-api upload route",
+    "sandbox staging (H6)"
+   ],
+   "planeOwner": "Data Plane",
+   "risks": "Storage cost and retention: uploads must follow org retention and ZDR (refuse persistence under ZDR). Parser crashes and zip bombs need process isolation and decompression limits. Cross-plane rule: Model Plane must read via Data Plane APIs, never its DB.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Blocks the attach-and-create loop that every reference treats as basic; most of the plumbing exists, so the gain per effort is high.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-002",
+   "name": "Background upload queue and content-addressed attachment store",
+   "description": "Attachments upload in the background with retries, are normalised client-side (HEIC conversion, downscale to the wire cap), stored once by content hash, and referenced by id in session events; per-route normalised variants are cached.",
+   "prevalence": {
+    "sourcesWith": [
+     "t3code",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": ""
+   },
+   "members": [
+    "t3code-architecture-052",
+    "t3code-ui-and-multimodel-033",
+    "deepseek-harness-architecture-122",
+    "deepseek-transparency-and-customization-153"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-122",
+     "t3code-ui-and-multimodel-033"
+    ],
+    "why": "DeepSeek harness (q4, DOC) has the cleanest storage model: content-addressed objects verified on read, dedup across display names, per-route image variants addressed by variantId so encoder changes only re-address future variants, and events that carry references only. T3 Code (q4, SRC) has the best client side: a 3-at-a-time upload queue with 5-minute timeouts, HEIC decode and iterative compression to a 10 MB cap."
+   },
+   "mechanism": "Client: queue per environment (concurrency 3), per-attachment upload state, HEIC conversion in a lazy chunk, step down dimensions/quality until under the cap, a draft rail with progress and retry, and a drop overlay that states limits. Server: upload returns a sha256 id; object path = hash; metadata row {id, mime, bytes, display names[]}; variants keyed (attachment id, route, encoder version); session events store {attachment_id, variant_id} only, never URLs or base64.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [
+     "v-chat-agents-ui-037",
+     "v-chat-agents-ui-036"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2081-2118",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:43-109",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts:6-43"
+    ],
+    "gap": "Images go inline as base64 in the turn body; the durable upload client has no callers; no dedup, no per-route variants, no client HEIC/compression, no upload queue. MinIO backs Model Plane output artifacts but not inputs.",
+    "strengths": "A gateway route and a Data Plane target already exist."
+   },
+   "benefit": "Stable prompt prefixes (cheaper cache hits), no repeated base64 in event logs, reliable large uploads, and one reference that every plane resolves under its own ACL.",
+   "approach": "Data Plane owns the blob store (content-addressed, org-scoped, retention policy); Frontend Plane adds the queue and normaliser in Solid; Model Plane stores only attachment ids in session events and requests route variants from Data Plane. Under ZDR keep bytes in memory or a short-TTL scratch object deleted at turn end.",
+   "effort": "M",
+   "dependencies": [
+    "Data Plane object storage",
+    "retention policy service"
+   ],
+   "planeOwner": "Data Plane",
+   "risks": "Content-addressing across tenants can leak existence via dedup; scope hashes per org. Retention deletion must cascade to variants.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Foundation for C-t3-02-001 and image editing; invisible to users but removes a class of failures.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-003",
+   "name": "Model-capability gating of media inputs (fail closed before send)",
+   "description": "Each routed model declares the input modalities and MIME types it accepts; the composer refuses or flags attachments the selected model cannot take, and tools that produce images refuse before doing I/O when the route cannot see images.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": ""
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-016",
+    "deepseek-harness-architecture-161"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-161",
+     "antigravity-agent-ux-and-gemini-016"
+    ],
+    "why": "DeepSeek read_image (q3, SRC) fails closed on unknown capability before any filesystem I/O and keeps errors recoverable; Antigravity (q4, SRC) applies the same idea in the UI with a per-model supported_mime_types table so the send button refuses unsupported media. Together they cover tool and composer."
+   },
+   "mechanism": "Model catalogue entry: {input_modalities:[text,image,pdf,audio,video], supported_mime_types[], max_bytes per type}. Composer checks the active route before upload and shows why; the gateway re-checks and returns a typed refusal instead of silently stripping; tools that return images check route.input_modalities first and refuse with a recoverable tool error.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-021",
+     "v-modelplane-026"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/vision.rs:1-6",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5778",
+     "v-chat-agents-ui baseline row 'BYO ChatGPT subscription' (tools, images and attachments stripped on that route)"
+    ],
+    "gap": "On the user-owned ChatGPT subscription route the body is stripped of images and attachments without a composer-level refusal; vision is a one-shot AnalyzeImage call that replaces the normal pipeline for that turn instead of passing image parts to a vision-capable chat model. No per-model MIME table in the catalogue.",
+    "strengths": "Verevon already has typed, localisable refusal codes (ZDR, subscription, capability) and a privacy-tier floor; the refusal channel exists."
+   },
+   "benefit": "Prevents silent data loss (the user believes the model saw the file), matches Verevon's honesty contracts, and makes multi-model routing safe for media.",
+   "approach": "Add modality and MIME fields to the Model Plane catalogue; expose them through the gateway; the Solid composer disables send with a reason; model-gateway emits a typed refusal (reuse mp-contracts refusal codes) rather than stripping. Replace the one-shot AnalyzeImage branch with image parts on vision-capable routes.",
+   "effort": "S",
+   "dependencies": [
+    "model catalogue",
+    "typed refusal codes"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Catalogue drift when providers change capabilities; keep a test per route.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Small change that fixes silent stripping on the only live-testable route and is a prerequisite for real multi-turn vision.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-004",
+   "name": "Audio and video uploads transcribed into searchable documents",
+   "description": "Recordings uploaded to chat are transcribed (with speaker labels on some products), chunked when long, summarised, and made searchable as documents.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt",
+     "web-perplexity"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": "Supported only by DOC/INF records."
+   },
+   "members": [
+    "web-chatgpt-web-product-027",
+    "web-perplexity-web-product-024"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-024",
+     "web-chatgpt-web-product-027"
+    ],
+    "why": "Perplexity (q4, DOC) treats audio/video as files with transcription and speaker labels that become searchable; ChatGPT (q3, DOC) documents formats and 512 MB limits but admits speaker identification is unreliable. Both are documentation only."
+   },
+   "mechanism": "Upload to object storage, transcode to 16 kHz mono, chunk by silence into segments under the STT limit, transcribe with diarisation, stitch with timestamps, store the transcript as a document linked to the media, then index for retrieval.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-modelplane-030"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:419-428",
+     "apps/Model Plane/rust/services/inference-core/src/provider/speech.rs"
+    ],
+    "gap": "An STT API exists with an 8 MiB audio cap; no baseline record shows long-file chunking or audio/video as an ingestible document type. To check: Data Plane ingestion (imports-core) for audio MIME handling and whether doc_indexed_consumer accepts transcripts.",
+    "strengths": "Governed STT through model-gateway already exists."
+   },
+   "benefit": "Meeting recordings, voice notes and training videos become knowledge without a separate tool.",
+   "approach": "Data Plane ingestion job calls Model Plane STT per chunk (Data Plane owns orchestration and storage, Model Plane owns inference); transcripts stored as documents with media back-references; ZDR orgs are refused persistence.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-02-001",
+    "C-t3-02-002"
+   ],
+   "planeOwner": "Data Plane",
+   "risks": "Cost of long audio; personal data in recordings (consent, retention).",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Useful for business knowledge but off the critical chat/agent path; supported by DOC records only.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-005",
+   "name": "Video and screen-recording understanding",
+   "description": "Users attach a video or screen recording and the model analyses it, typically via a provider that accepts video natively (Gemini).",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": ""
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-019",
+    "cursor-ai-features-106"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-019",
+     "cursor-ai-features-106"
+    ],
+    "why": "Antigravity (q3, SRC) has video as a typed Media part with duration and an in-app recorder; Cursor (q3, SRC) routes video analysis to a dedicated Gemini subagent. Neither is deep; Antigravity's typed part is the shape to copy."
+   },
+   "mechanism": "Media part {mime_type, blobref, duration_seconds, thumbnail}; reject clips under 1 s; route the turn (or a subagent call) to a video-capable model; return text findings into the main loop.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-048"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:43"
+    ],
+    "gap": "No video understanding; no Gemini provider in inference-core.",
+    "strengths": ""
+   },
+   "benefit": "Bug-report recordings, training clips and site videos could be analysed once a Gemini route exists.",
+   "approach": "Add a Gemini provider in inference-core first; then a video_analyze subagent tool that takes a Data Plane attachment id, gated by C-t3-02-003.",
+   "effort": "M",
+   "dependencies": [
+    "Gemini provider route",
+    "C-t3-02-002",
+    "C-t3-02-003"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Large media cost; EU residency of the video provider.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Low demand in Verevon's business chat today and blocked on a new provider.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-006",
+   "name": "Screen and camera capture into chat",
+   "description": "Capture a screenshot (or a multi-page camera scan on mobile) straight into the composer; desktop apps add a global capture hotkey.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "common",
+    "note": "Class adjusted to common: a basic feature most products have even though few records in this category capture it."
+   },
+   "members": [
+    "manus-computer-control-architecture-076",
+    "web-chatgpt-web-product-038"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-076",
+     "web-chatgpt-web-product-038"
+    ],
+    "why": "Manus desktop (q3, SRC) reuses one native helper for global capture and dictation with a foreground handshake before paste; ChatGPT mobile (q3, DOC) scans multiple pages into one PDF. Both need native shells."
+   },
+   "mechanism": "Web: getDisplayMedia single frame to a PNG attachment. Desktop: global shortcut, OS screen-recording permission check, pending-capture queue consumed by the app. Mobile: camera multi-page scan merged into one PDF.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-040"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1913-1945"
+    ],
+    "gap": "No global hotkey or mobile scan (no desktop or mobile shell); continuous screen share absent.",
+    "strengths": "One-shot screenshot capture in the browser equals what a web product can do."
+   },
+   "benefit": "Already covered for the web surface.",
+   "approach": "Keep; revisit only if a desktop or mobile shell is built.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None for the current scope.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is equal for a web app; native capture needs a shell Verevon does not have.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-007",
+   "name": "Cloud-file links resolved into titled context chips",
+   "description": "Pasting a Drive/Docs/Sheets/Slides link turns it into a titled chip the agent can read; if access is denied it stays plain text.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-021"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-021"
+    ],
+    "why": "Only source; q3 SRC with title-resolution timeouts and graceful fallback on denied access."
+   },
+   "mechanism": "Composer detects provider URL patterns, asks the connector to resolve title and access with a short timeout, renders a chip carrying {provider, file_id}; on 403 or timeout leaves text; the turn passes file ids to the connector read tool.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-039"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:175-181",
+     "apps/Frontend Plane/verevonv3/src/shared/api/integrations-client.ts:1"
+    ],
+    "gap": "Connector pickers exist (OneDrive, Gmail, Outlook, Drive, calendars) but pasted links are not resolved; connectors not live-proven.",
+    "strengths": "Picker-based attach already exists."
+   },
+   "benefit": "Fewer clicks for the most common way people share files, while honouring owner ACLs.",
+   "approach": "Gateway endpoint asks integration-corev2 to resolve a URL to {title, access} with the user's own token; chip in the Solid composer; read via the existing connector tool. Unresolved links stay text, so access never widens.",
+   "effort": "S",
+   "dependencies": [
+    "integration-corev2 Drive/OneDrive read"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Leaking file titles when the user lacks access; resolve with the user's token only.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Pleasant detail; pickers already cover the need.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-008",
+   "name": "Streaming dictation into the composer",
+   "description": "Speech is captured in the browser and streamed to a speech service; partial and final transcripts appear live; some products clean filler words and self-corrections into one prompt, and one dictation contract serves the composer, overlays and generated artifacts.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "claude",
+     "cursor",
+     "web-chatgpt",
+     "manus",
+     "web-manus"
+    ],
+    "n": 6,
+    "of": 11,
+    "cls": "table-stakes",
+    "note": "Same-vendor pairs counted separately: manus+web-manus (distinct vendors: 5)."
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-017",
+    "antigravity-architecture-092",
+    "claude-product-ux-037",
+    "claude-runtime-architecture-002",
+    "cursor-ai-features-105",
+    "web-chatgpt-web-product-031",
+    "manus-product-ux-037",
+    "web-manus-web-product-018"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-037",
+     "claude-runtime-architecture-002",
+     "antigravity-agent-ux-and-gemini-017"
+    ],
+    "why": "Claude desktop (q4, SRC) has one streaming contract (state machine idle/starting/listening/finishing, partial and final text, 15-minute cap) used by composer, Quick Entry and artifacts, with a short-lived streaming credential and a CSP that allows only the speech endpoint. Antigravity (q4, SRC) adds the concrete audio path (AudioWorklet to 16 kHz PCM, 40 ms chunks) and a context-aware cleanup pass."
+   },
+   "mechanism": "AudioWorklet downsamples mic audio to 16 kHz PCM and posts ~40 ms frames; the page asks the backend for a short-lived speech credential (or uses a backend WebSocket proxy); frames stream and partial/final events come back; a finishing state flushes; an optional cleanup prompt (cheap model, conversation context) rewrites the final transcript before it lands in the draft; hard cap on session length.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-045",
+     "v-modelplane-030",
+     "v-planned-decisions-018"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts:57-77",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs:46-78",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:419-428"
+    ],
+    "gap": "Dictation is one governed call per utterance (record, upload, transcribe) with no live partials, no cleanup pass, and an 8 MiB audio cap; no live microphone proof (DOC).",
+    "strengths": "Governed STT through model-gateway (cost, audit, tenancy), 10 dictation languages, blocked in temporary chat as ZDR requires."
+   },
+   "benefit": "Live partials make dictation feel instant; a cleanup pass makes spoken prompts usable without editing.",
+   "approach": "Model Plane: a streaming STT endpoint in model-gateway that proxies the WebSocket (keys never reach the browser, cost still metered) or mints a short-lived scoped token; Frontend: AudioWorklet capture and a state machine shared by composer and voice mode; optional cleanup through the normal governed loop.",
+   "effort": "M",
+   "dependencies": [
+    "streaming STT provider (Azure Speech or a transcribe model)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Direct browser-to-provider streaming bypasses gateway metering unless proxied; ZDR must keep refusing.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "The table-stakes capability exists; the upgrade is quality, not a missing feature.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-009",
+   "name": "On-device speech recognition with integrity-pinned models",
+   "description": "Optional local STT that never sends audio to a server; model files download only after explicit user preparation, from a user-selectable origin, verified by size and SHA-256.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "deepseek-transparency-and-customization-155"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-155"
+    ],
+    "why": "Only source; q4 SRC with sherpa-onnx SenseVoice plus Silero VAD, disclosed download sizes and no silent input-device fallback."
+   },
+   "mechanism": "Lazy-download a quantised STT model (about 240 MB INT8), verify size and hash before load, run VAD plus recognition on CPU (in a browser: WASM in a Worker), insert text into the draft; recordings never leave the device.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-045"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/audio-client.ts:57-77"
+    ],
+    "gap": "Only server STT; voice is refused under ZDR and blocked in temporary chat, so ZDR users have no voice input.",
+    "strengths": ""
+   },
+   "benefit": "Gives ZDR and temporary-chat users dictation with no retention question, matching Verevon's ZDR posture.",
+   "approach": "Frontend Plane: optional WASM STT (whisper.cpp or sherpa-onnx WASM) in a Web Worker, models served from Verevon's CDN with pinned hashes; enable where the server path is refused.",
+   "effort": "M",
+   "dependencies": [
+    "CDN hosting of model files",
+    "browser performance budget"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Large downloads and weak CPUs; Norwegian accuracy of small models must be tested.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Strong ZDR fit but a small audience until ZDR providers are attested.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-010",
+   "name": "Turn-based voice mode with selectable voices, cues and tools",
+   "description": "Hands-free or push-to-talk spoken conversation on the same session, using the same tools and context, with preset voices, sound cues for state changes and an approval-needed chime.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-claudeai",
+     "web-perplexity"
+    ],
+    "n": 3,
+    "of": 11,
+    "cls": "common",
+    "note": "Same-vendor pairs counted separately: claude+web-claudeai (distinct vendors: 2)."
+   },
+   "members": [
+    "claude-product-ux-036",
+    "web-claudeai-web-product-027",
+    "web-perplexity-web-product-029"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-036",
+     "web-claudeai-web-product-027"
+    ],
+    "why": "Claude (q4, SRC) has the most complete UX: enter/exit/disconnect/tool-approval sound cues, five preset voices, offline and mic-failure recovery; claude.ai (DOC) confirms tools and context carry across text and voice."
+   },
+   "mechanism": "Voice is an overlay on the text session: STT fills the composer, the normal governed turn runs (tools included), TTS speaks the reply through an audio sink worklet; short sound effects mark state changes and pending approvals.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-046",
+     "v-planned-decisions-018"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx:40-60",
+     "apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts:6-26"
+    ],
+    "gap": "No voice choice in the UI, no sound cues or approval chime, no browser-voice fallback; no live mic proof (DOC).",
+    "strengths": "Push-to-talk voice goes through the normal composer and governed loop, so tools, audit and cost apply; Norwegian default voice."
+   },
+   "benefit": "Parity on the core; cues and voice choice are polish.",
+   "approach": "Keep the overlay design; add a voice selector from the Azure voice list and three cue sounds (start, stop, approval needed).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None notable.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon matches the reference design (shared session, governed tools); remaining items are small polish.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-011",
+   "name": "Read-aloud of replies and inline audio snippets",
+   "description": "Per-message text-to-speech with play/pause/complete tracking and clear failure messages; some answers embed playable audio (pronunciation).",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "common",
+    "note": "Class adjusted to common: a basic feature most products have even though few records in this category capture it."
+   },
+   "members": [
+    "claude-product-ux-038",
+    "web-chatgpt-web-product-039"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-038",
+     "web-chatgpt-web-product-039"
+    ],
+    "why": "Claude (q3, SRC) has explicit degraded states; ChatGPT (q3, DOC) embeds pronunciation audio inline."
+   },
+   "mechanism": "A message action calls TTS, streams audio to an audio element, tracks started/toggled/completed, and shows typed errors (unsupported browser, slow load, sign-in).",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-chat-agents-ui-046",
+     "v-modelplane-030"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/speech-client.ts:6-26",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3683"
+    ],
+    "gap": "No browser speechSynthesis fallback when governed TTS is unavailable; no inline audio component in answers.",
+    "strengths": "Governed Azure TTS with a Norwegian default voice and per-message read aloud."
+   },
+   "benefit": "Parity.",
+   "approach": "Keep; optionally add a browser fallback outside ZDR-sensitive contexts.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 1,
+   "rationale": "Already shipped at reference level.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-012",
+   "name": "Realtime full-duplex voice that delegates work to the agent",
+   "description": "A low-latency realtime model talks with the user (barge-in, simultaneous listen and speak) and hands real work to the main governed agent through one delegation tool; text, images and tools stay in the same thread.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": ""
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-083",
+    "web-chatgpt-web-product-030"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-083",
+     "web-chatgpt-web-product-030"
+    ],
+    "why": "Codex (q4, SRC) shows a governable design: the realtime front agent only speaks and calls a background-agent tool that passes the user's words unchanged, steers a running task or queues the next one, plus a silence tool, over WebRTC or WebSocket. ChatGPT Live (q5, DOC) sets the UX bar (inside normal chat, escalates to a reasoning model, no spoken approvals) but documents no mechanism."
+   },
+   "mechanism": "Browser opens WebRTC to a realtime model using a short-lived session secret minted by the backend; the realtime model has exactly two tools (delegate(text, mode new|steer|queue) and stay_silent); delegate posts into the governed agent loop of the same thread; transcript and agent events stream into the timeline; the realtime model narrates results.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-047",
+     "v-modelplane-031",
+     "v-planned-decisions-019",
+     "v-modelplane-032"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:448-450",
+     "apps/Model Plane/rust/services/inference-core/src/provider/realtime.rs",
+     "apps/Model Plane/go/services/bridge-core/internal/voice/pipeline.go:1-25"
+    ],
+    "gap": "Only a realtime session mint exists (no browser WebRTC integration); the bridge-core STT-LLM-TTS pipeline is interfaces only; the owner parked duplex voice (OD19) and ZDR voice is refused.",
+    "strengths": "The session broker exists, so secret minting is done."
+   },
+   "benefit": "A delegation-only front agent keeps every action inside the governed loop (approvals, audit, cost), which addresses the governance concern behind the park decision.",
+   "approach": "If un-parked: the realtime model gets no side-effect tools; delegate() calls model-gateway's normal turn API; approvals stay on screen (no spoken approvals). Frontend Plane WebRTC client; Model Plane broker and delegation endpoint.",
+   "effort": "L",
+   "dependencies": [
+    "owner decision OD19",
+    "realtime provider in an EU region",
+    "ZDR attestation for audio"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cost per minute, latency in EU regions, accidental spoken consent; audio retention under ZDR.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "A differentiator users notice, but an explicit owner decision parks it; record the delegation pattern as the safe way to revisit.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-013",
+   "name": "Image generation with model choice and typed results",
+   "description": "Generate images from a prompt inside chat or agent runs, with a selectable or auto-picked model, typed result items (revised prompt, saved path, transparency), surfaced usage limits, per-run concurrency limits and abuse screening.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor",
+     "web-perplexity",
+     "web-manus"
+    ],
+    "n": 4,
+    "of": 11,
+    "cls": "table-stakes",
+    "note": "Class adjusted to table-stakes: all web benchmarks or most products ship it, and related records sit in sibling clusters of this category."
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-109",
+    "cursor-harness-architecture-118",
+    "web-perplexity-web-product-025",
+    "web-manus-web-product-016",
+    "codexagent-plugins-and-extensibility-099"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-109",
+     "cursor-harness-architecture-118"
+    ],
+    "why": "Codex (q4, SRC) makes image generation a replaceable system skill with a typed ImageGenerationItem and a rule never to fall back silently to a weaker model; Cursor (q3, SRC) adds the operational guards (concurrency limit 2 per run, suspicious-keyword check, model restriction, metrics). Perplexity (DOC) shows multi-provider choice with a Default auto-pick."
+   },
+   "mechanism": "Tool generate_image{prompt, size/aspect, model?, transparent?, reference_ids?} -> provider adapter -> result {artifact_id, revised_prompt, model, transparent, failure?}; per-run semaphore; prompt screened before dispatch; model fallback needs user confirmation; limits surfaced as a typed event.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-027",
+     "v-chat-agents-ui-041",
+     "v-planned-decisions-020"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5958",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6200",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:417",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:477-485"
+    ],
+    "gap": "Built (gpt-image-1 / dall-e-3, image artifact with preview and download) but never run live; unavailable on the ChatGPT subscription route; one provider family, no model picker, no revised-prompt surfacing; no evidence of a per-run concurrency limit or prompt screen (check the generate_image path in sse.rs).",
+    "strengths": "Images already land as artifacts in the Output panel with download, through the governed gateway with cost metering."
+   },
+   "benefit": "Image creation is expected in any general assistant; live proof plus a second provider brings Verevon to parity.",
+   "approach": "Model Plane: put generate_image behind a provider-neutral tool contract with typed results, add a newer OpenAI image model and a Gemini image adapter, a semaphore per run and a prompt screen; live-prove on the paid route; Frontend: model selector in image mode and revised-prompt disclosure.",
+   "effort": "M",
+   "dependencies": [
+    "paid provider route for live testing",
+    "C-t3-02-015 provenance (optional)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Content policy and commercial-use terms per provider; cost spikes from agent loops.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Code exists; the gap is proof, provider breadth and guards rather than a rebuild.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-014",
+   "name": "Image editing: region marks, reference images and canvas tools",
+   "description": "Edit an existing or generated image by marking regions with instructions, combining reference images, or using canvas operations (layers, crop, upscale, background removal, in-image text edits).",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "manus",
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 4,
+    "of": 11,
+    "cls": "common",
+    "note": "Same-vendor pairs counted separately: manus+web-manus (distinct vendors: 3)."
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-018",
+    "manus-product-ux-026",
+    "web-chatgpt-web-product-028",
+    "web-manus-web-product-013",
+    "web-chatgpt-web-product-029"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-026",
+     "web-manus-web-product-013",
+     "web-chatgpt-web-product-028",
+     "antigravity-agent-ux-and-gemini-018"
+    ],
+    "why": "Manus (q4, SRC + DOC) has the most complete shipped mechanism: a Konva canvas with CanvasService RPCs (UpsertCanvas, Upscale, RemoveBackground), select-from-canvas references and a Mark tool with per-region instructions. ChatGPT Images (q5, DOC) sets the UX bar for region selection and templates but is documentation only. Antigravity gives the minimal tool contract (image_paths for edit/combine)."
+   },
+   "mechanism": "Tool edit_image{base_artifact_id, reference_ids[], regions[{mask or bbox, instruction}], prompt} -> provider edit endpoint (mask inpainting or multi-image edit) -> new artifact version linked to the base; the canvas UI draws marks as masks and sends them with per-region text; separate server jobs for upscale and background removal.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-028",
+     "v-chat-agents-ui-041"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:417-419"
+    ],
+    "gap": "Only generate, analyze and OCR exist; no edit or mask endpoint, no reference-image input, no canvas marking UI. Artifacts are read-only to users.",
+    "strengths": "Artifact versioning (version stepper, show changes) can hold edit lineage."
+   },
+   "benefit": "Iterating on an image ('change the background, keep the logo') is the normal second step after generation; without it image mode is a dead end.",
+   "approach": "Model Plane: add /v1/ai/images/edit in inference-core (OpenAI image edit with mask; Gemini image edit when routed) and extend generate_image with reference artifact ids; Frontend Plane: a simple mark tool over the image preview (rectangle and brush to mask, per-region note), output as a new artifact version. Upscale and background removal later.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-02-013",
+    "C-t3-02-002"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Editing user-uploaded photos of people (likeness, consent); keep provider safety filters.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Common across sources and a known Verevon gap; the backend contract is small and the canvas can start minimal.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-015",
+   "name": "Content credentials and authorship labels on generated files",
+   "description": "Stamp agent-made files with C2PA provenance (who or what authored them) and show 'by the assistant / by you' labels.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "claude-product-ux-042"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-042"
+    ],
+    "why": "Only explicit source; q4 SRC (an 8.2 MB Rust/WASM module with the c2pa crate, lopdf, mp4 and x509 parsing, plus authorship label strings); medium confidence on how it is used. ChatGPT also mentions C2PA metadata on images (web-chatgpt-028, DOC)."
+   },
+   "mechanism": "At creation or export, build a C2PA manifest (generator, model, timestamp, actions) and sign it with a service certificate; embed into PNG/JPEG/PDF/MP4; the UI reads the manifest to show authorship; verification can run client-side in WASM.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "SRC grep c2pa|C2PA over apps/Model Plane (*.rs,*.go,*.toml,*.md): no matches (2026-10-13)"
+    ],
+    "gap": "No provenance stamping of generated images or documents.",
+    "strengths": "Verevon already has strong provenance contracts for answers (citations, source validation); extending them to files fits."
+   },
+   "benefit": "Machine-readable marking of AI-generated media is expected for EU deployments (INF: EU AI Act transparency duties for synthetic content) and is a governance differentiator for B2B buyers.",
+   "approach": "Model Plane (Rust): sign artifacts in model-gateway's artifact writer with the c2pa crate using a per-deployment certificate held as a Control Plane secret; Frontend shows an authorship badge; signing needs no persistence, so it also works under ZDR.",
+   "effort": "M",
+   "dependencies": [
+    "certificate management in Control Plane"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Certificate lifecycle; metadata stripped by downstream tools; the regulatory reading is INF.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Single-source but cheap in Rust and aligned with Verevon's governance positioning.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-016",
+   "name": "Video generation with quality and cost choices",
+   "description": "Prompt-to-video (optionally from a start image) with modes for explicit controls versus agent-chosen style, speed versus detail, and a mid-run pause to choose standard or premium quality.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-perplexity",
+     "web-manus"
+    ],
+    "n": 3,
+    "of": 11,
+    "cls": "common",
+    "note": "Same-vendor pairs counted separately: manus+web-manus (distinct vendors: 2)."
+   },
+   "members": [
+    "manus-product-ux-024",
+    "web-perplexity-web-product-026",
+    "web-manus-web-product-102"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-024",
+     "web-manus-web-product-102",
+     "web-perplexity-web-product-026"
+    ],
+    "why": "Manus (q4, SRC) has Classic versus Alchemy modes and a mid-run standard/premium confirmation that exposes cost; Perplexity (q3, DOC) offers a plain 8-second clip."
+   },
+   "mechanism": "Async job tool video_generate{prompt, start_image?, ratio, length, quality} -> provider job -> poll -> artifact; before dispatch an approval card shows cost per quality tier.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-033",
+     "v-planned-decisions-022",
+     "v-chat-agents-ui-048"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:451-457",
+     "apps/Model Plane/rust/services/inference-core/src/provider/video.rs"
+    ],
+    "gap": "Sora jobs exist as an API only; no chat or agent tool, no UI, no smoke coverage.",
+    "strengths": "Job plumbing and cost metering exist in Model Plane."
+   },
+   "benefit": "Marketing and training content; low demand among current Verevon users.",
+   "approach": "Expose the existing Sora job as an async agent tool with a cost-confirmation approval and a video artifact type in the Output panel.",
+   "effort": "M",
+   "dependencies": [
+    "approval cards",
+    "video artifact renderer"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "High cost per call; provider availability in the EU.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Plumbing exists but demand is low; do it after documents and images.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-017",
+   "name": "Editable video timelines and code-generated motion",
+   "description": "Agent and user edit one timeline project (trim, split, subtitles, transitions, audio layers) through the same operations, or animations are built as code and rendered to MP4.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-manus",
+     "web-claudeai"
+    ],
+    "n": 3,
+    "of": 11,
+    "cls": "common",
+    "note": "Same-vendor pairs counted separately: manus+web-manus (distinct vendors: 2). Supported only by DOC/INF records."
+   },
+   "members": [
+    "manus-product-ux-025",
+    "web-manus-web-product-014",
+    "web-claudeai-web-product-026"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-025",
+     "web-manus-web-product-014"
+    ],
+    "why": "Manus Video Editor (q4, DOC) exposes 14 MCP tools over a schema-versioned timeline that the human edits too; Claude Motion (q3, DOC) is code-to-MP4."
+   },
+   "mechanism": "A timeline project document with typed operations; agent tools and the UI both apply operations; export renders with FFmpeg.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-048"
+    ],
+    "evidence": [],
+    "gap": "No video editing.",
+    "strengths": ""
+   },
+   "benefit": "Out of Verevon's scope; the transferable idea (agent and human edit one project through shared operation schemas) belongs to documents and decks (C-t3-02-021, C-t3-02-024).",
+   "approach": "Do not build; reuse the shared-operations pattern for documents and decks.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "n/a",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Verevon is a business AI workspace, not a media studio.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-018",
+   "name": "Generative audio: music, sound effects, podcasts and voice cloning",
+   "description": "Generate narration, music, sound effects and podcast-style audio, often through a bring-your-own-account connector.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-manus"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": "Same-vendor pairs counted separately: manus+web-manus (distinct vendors: 1)."
+   },
+   "members": [
+    "manus-product-ux-027",
+    "web-manus-web-product-019"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-027",
+     "web-manus-web-product-019"
+    ],
+    "why": "Manus (q3, SRC) ships an ElevenLabs service; the web docs show the BYO-account connector pattern where billing stays with the provider."
+   },
+   "mechanism": "OAuth connector to the audio provider; tools return audio files into the session as artifacts.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-030"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:419-428"
+    ],
+    "gap": "Only TTS; no music or sound effects.",
+    "strengths": "TTS exists."
+   },
+   "benefit": "Low for Verevon's customers.",
+   "approach": "Skip; if ever needed, add it as an integration-corev2 connector rather than a Model Plane model.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Voice-cloning abuse.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "No Verevon workflow needs it.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-019",
+   "name": "Meeting capture and automatic minutes",
+   "description": "Record online or in-person meetings (desktop or mobile) or pull recordings through Zoom, then produce summaries, attendees and action items that feed follow-up work; audio may be deleted once notes are ready.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-chatgpt",
+     "web-manus"
+    ],
+    "n": 3,
+    "of": 11,
+    "cls": "common",
+    "note": "Same-vendor pairs counted separately: manus+web-manus (distinct vendors: 2)."
+   },
+   "members": [
+    "manus-product-ux-035",
+    "web-chatgpt-web-product-037",
+    "web-manus-web-product-017",
+    "web-manus-web-product-092"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-037",
+     "manus-product-ux-035",
+     "web-manus-web-product-017"
+    ],
+    "why": "ChatGPT Meetings (q4, DOC) has the strongest privacy design (no bot, notes private by default, audio deleted after notes, one-click start of an action item); Manus (q3, SRC) shows the recording state machine and the constraint that browsers cannot capture meeting audio."
+   },
+   "mechanism": "Native recorder or meeting-platform connector -> transcript -> summarisation with action-item extraction -> page or document with linked tasks; raw audio deleted after processing.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "SRC grep meeting.?(minutes|transcript|record) over apps (*.rs,*.go,*.ts,*.tsx): no matches (2026-10-13)"
+    ],
+    "gap": "No meeting capture.",
+    "strengths": ""
+   },
+   "benefit": "Meetings to tasks or tickets would feed Verevon's inbox and task features, but needs a native app or Teams/Zoom transcript connectors.",
+   "approach": "If pursued: pull Teams/Zoom transcripts through integration-corev2 (no recording), summarise in Model Plane, write tasks via governed actions.",
+   "effort": "L",
+   "dependencies": [
+    "Teams/Zoom transcript connectors",
+    "C-t3-02-004"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Consent and recording law; personal-data retention.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Valuable but outside the chat/agent core and needs connectors or native apps.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-020",
+   "name": "Office document creation through skills and a sandbox, with verification",
+   "description": "The agent creates and edits Word, Excel, PowerPoint and PDF files with bundled file-type skills running in a code sandbox, then reopens and structurally checks (and optionally renders) the result before delivering a finished file.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek",
+     "web-claudeai",
+     "web-chatgpt",
+     "web-perplexity"
+    ],
+    "n": 5,
+    "of": 11,
+    "cls": "table-stakes",
+    "note": "Same-vendor pairs counted separately: claude+web-claudeai (distinct vendors: 4). Class adjusted to table-stakes: all web benchmarks or most products ship it, and related records sit in sibling clusters of this category."
+   },
+   "members": [
+    "claude-product-ux-040",
+    "deepseek-harness-architecture-080",
+    "web-claudeai-web-product-021",
+    "web-chatgpt-web-product-033",
+    "web-perplexity-web-product-027"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-080",
+     "claude-product-ux-040",
+     "web-claudeai-web-product-021"
+    ],
+    "why": "Claude (q4, SRC) proves the product shape: always-on docx/pptx/xlsx/pdf skills plus a per-user sandbox with egress tiers (claude.ai, q5 DOC: working Excel formulas, large files processed in the sandbox out of context). DeepSeek (q3, DOC) adds the missing quality step: a shared structural checker for DOCX/PPTX/XLSX and a LibreOffice Kit sidecar to render pages, convert to PDF and recalculate workbooks. The combination is best in class."
+   },
+   "mechanism": "Skill per file type (instructions + helper library + examples) injected when the request names a format; the sandbox has python-docx/python-pptx/openpyxl/reportlab and LibreOffice headless; after writing, the agent runs a checker (zip and XML schema validity, relationships, formula recalculation, slide count) and renders page thumbnails it can look at; only then is the file returned as a typed artifact with a preview. Egress policy per org (off, package managers, allowlist).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-043",
+     "v-modelplane-037",
+     "v-chat-agents-ui-042",
+     "v-modelplane-036",
+     "v-planned-decisions-027"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4356-4358",
+     "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-34",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2748-2790"
+    ],
+    "gap": "Office files come only from ad-hoc code_interpreter scripts (about 30 s, no network, attachments not staged into the sandbox: H6 planned); no file-type skills, no structural check or render-and-look step, no LibreOffice in the image, no edit-in-place of an existing file (G6 planned behind OD14), no live proof of Office outputs (DOC).",
+    "strengths": "Hermetic bwrap sandbox with scrubbed output and files returned as artifacts and download cards; Verevon's source-bound drafting review (numbers, dates, word counts) can check document content, which no reference does."
+   },
+   "benefit": "The agent page must end in deliverables, not chat text; reports, workbooks and memos are the main business output Verevon users ask for.",
+   "approach": "Model Plane: ship docx/xlsx/pptx/pdf skills through the existing skills mechanism (capability-core), add LibreOffice headless and a checker script to the execution-core image, raise the timeout for document jobs, stage Data Plane attachments into the workspace (H6), and return files as typed artifacts; reuse source_validation on the extracted text before delivery. Under ZDR run in an ephemeral workspace with no artifact persistence.",
+   "effort": "L",
+   "dependencies": [
+    "sandbox staging of attachments (H6)",
+    "longer sandbox time budget",
+    "C-t3-02-025 previews"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Sandbox image size and cold start; formula and layout fidelity; LibreOffice CVEs (keep it inside bwrap with no network).",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Present in five of eleven sources and expected by every business user; Verevon has the sandbox, so the missing pieces are skills, toolchain and verification.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-021",
+   "name": "Slide deck pipeline with per-slide lifecycle, present mode and native PPTX",
+   "description": "Decks are built by a dedicated slides tool that owns a manifest, generates slide by slide (native editable PPTX, HTML slides or image slides), refuses delivery until every slide validates, and offers per-page edit/regenerate, speaker notes, design-system restyle, a presenter view and PPTX/PDF export with data-backed charts.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-manus",
+     "claude",
+     "web-claudeai"
+    ],
+    "n": 4,
+    "of": 11,
+    "cls": "common",
+    "note": "Same-vendor pairs counted separately: claude+web-claudeai, manus+web-manus (distinct vendors: 2)."
+   },
+   "members": [
+    "manus-product-ux-022",
+    "manus-product-ux-023",
+    "web-manus-web-product-012",
+    "claude-product-ux-149",
+    "web-claudeai-web-product-023"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-022",
+     "manus-product-ux-023",
+     "web-manus-web-product-012"
+    ],
+    "why": "Manus Slides (q5, DOC + q4 SRC) is the most complete: an MCP slides server (init, generate, organise, attach, template, present) with a tool-owned project.json, per-slide states, XML validation hooks and a present gate, plus a UI for per-page edit, layout refresh, speaker notes and a presenter window, and PPT mode with editable chart data. Claude (claude-149, q4) adds the design-system restyle and authorship labels."
+   },
+   "mechanism": "Deck manifest {deck_id, template_id, slides[{id, state: planned|edit_pending|authored|valid, layout, content, notes}]} owned by the tool (never hand-edited); the agent outlines, then fills slides one at a time; each write runs validation (PPTX XML validity, text overflow measured in a headless renderer); present/export is refused until all slides are valid; per-slide operations (regenerate, refresh layout, notes) address slide ids; charts embed their data table so they stay editable in PowerPoint.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-026",
+     "v-chat-agents-ui-043"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4357",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/index.ts:1-60"
+    ],
+    "gap": "Only browser-side PPTX export of text and code_interpreter python-pptx scripts; no deck model, no themes or images, no per-slide edit, no present mode, no charts in Office exports (H4 not built). Designed deck path H8 is planned for Wave 5 (DOC).",
+    "strengths": "Deep research already produces cited document artifacts that are a natural deck source; the Output panel can host a deck preview."
+   },
+   "benefit": "Decks are a top use case in Manus and a frequent business request; a reliable research-to-deck flow is visible immediately.",
+   "approach": "Model Plane: a slides tool family over a deck manifest stored as a versioned artifact, generating PPTX with python-pptx in the sandbox from template masters (see C-t3-02-022) and validating each slide; Frontend Plane: a slide strip with per-slide actions and a fullscreen present mode; export reuses the artifact. Application Plane later for collaborative editing.",
+   "effort": "L",
+   "dependencies": [
+    "C-t3-02-020",
+    "C-t3-02-022 templates",
+    "C-t3-02-013 images for slides"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Layout quality is hard to verify automatically; keep a render-and-look step. Scope creep into a full editor.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "High user visibility and a Wave 5 item already; Verevon's research strength makes it a short path to a standout feature.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-022",
+   "name": "Artifact template library and visual style picker",
+   "description": "Reusable document, slide and spreadsheet styles packaged as skills with a reference file and preview; before creating, the agent shows matching template thumbnails, lets the user pick or upload a reference, and can save that reference as a new shareable template.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-089",
+    "codexagent-plugins-and-extensibility-090",
+    "codexagent-plugins-and-extensibility-092"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-089",
+     "codexagent-plugins-and-extensibility-090",
+     "codexagent-plugins-and-extensibility-092"
+    ],
+    "why": "Only source (q4 SRC, high confidence): a strict skill-folder convention (artifact-template-<slug> with SKILL.md, artifact-template.json {kind, reference, preview}), a picker MCP server whose choose tool uses form elicitation with thumbnails and returns selected|uploaded|declined, and a gallery with view/edit/share/uninstall."
+   },
+   "mechanism": "Template = skill folder {SKILL.md instructions, manifest {kind document|presentation|spreadsheet, reference asset, preview image}}; list_templates(kind, request) ranks candidates; choose_template elicits a choice from up to ten thumbnails or a .docx/.pptx/.xlsx upload; an uploaded reference can be saved with a validated name; the creation skill then follows the chosen template's instructions and reference file.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "SRC grep artifact.?template|slide.?template|deck.?template over apps (*.rs,*.go,*.ts,*.tsx): no matches (2026-10-13)"
+    ],
+    "gap": "No template library or style picker; skills exist (capability-core CRUD, learned skills) but none are template-shaped.",
+    "strengths": "A skills mechanism with versioned injection and learning already exists, so templates can ride on it."
+   },
+   "benefit": "Org branding on every generated deck and report (customers such as Aquatiq have strict brand rules); 'save my file as a template' turns one upload into lasting value.",
+   "approach": "Model Plane capability-core: a template skill kind with a reference asset stored in Data Plane and scoped to org or Space (Space access never widens the owner ACL); an elicitation-style picker card in the Frontend; document and deck skills read the chosen template.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-02-020",
+    "C-t3-02-021",
+    "elicitation or choice card in chat"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Template sprawl; licensing of uploaded reference files.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Unique to one source but cheap on top of existing skills and directly useful for branded business output.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-023",
+   "name": "Design canvas with organisation design systems",
+   "description": "A canvas for visual work (prototypes, one-pagers, decks) with artboards, direct manipulation and inline comments, constrained by an organisation design system (tokens and components) that outputs are validated against; exports to PPTX/PDF/HTML.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-claudeai"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": "Same-vendor pairs counted separately: claude+web-claudeai (distinct vendors: 1)."
+   },
+   "members": [
+    "claude-product-ux-039",
+    "web-claudeai-web-product-024"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-039",
+     "web-claudeai-web-product-024"
+    ],
+    "why": "Claude Design (q4, SRC + DOC) is the only implementation: design systems imported from code, files or Figma and reused by any chat, with a self-check of output against the system before showing it."
+   },
+   "mechanism": "Design-system artifact {tokens, components, rules}; generation prompts include it; a validator checks colours, fonts and spacing against tokens before display; canvas artboards hold layered HTML; export via print-to-PDF and PPTX conversion.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-050"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/studio/components/StudioPage.tsx:1",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs:1-35"
+    ],
+    "gap": "Studio is a social-campaign canvas with an in-memory gateway store; not an AI generation surface and no design-system object.",
+    "strengths": "A canvas UI with undo/redo and device previews exists to build on."
+   },
+   "benefit": "Brand-constrained output; mostly covered more cheaply by templates (C-t3-02-022).",
+   "approach": "Defer the canvas; fold design-system tokens into templates and the deck pipeline first. Persist Studio state in Application Plane before any AI work.",
+   "effort": "XL",
+   "dependencies": [
+    "C-t3-02-022"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Large surface; overlaps an IDE-like design tool Verevon is not.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Single vendor; the valuable part (brand tokens) is reachable through templates.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-024",
+   "name": "Collaborative editable documents with AI edits in comments",
+   "description": "Generated documents are living, editable files: real-time multi-user editing (CRDT), comments with mentions where mentioning the AI makes the edit and replies in-thread, per-person and AI attribution, version history and export.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-claudeai"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": "Same-vendor pairs counted separately: claude+web-claudeai (distinct vendors: 1)."
+   },
+   "members": [
+    "claude-product-ux-041",
+    "web-claudeai-web-product-022"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-041",
+     "web-claudeai-web-product-022"
+    ],
+    "why": "Claude (q4, SRC) ships the engine Verevon could reuse directly: a Rust-to-WASM module with yrs (Yjs-compatible CRDT) and pulldown-cmark exposing apply_update, apply_op, splice and import_html; claude.ai Docs (q4, DOC) shows the product: @AI in comments acting with the requester's permissions."
+   },
+   "mechanism": "Markdown document model in a yrs CRDT shared by server (Rust) and browser (WASM); structural ops (table cells, fences, HTML import) map to CRDT updates; the AI edits by emitting ops attributed to the requesting user; comments anchor to CRDT positions; versions are snapshots of the doc state; export renders Markdown to DOCX/PDF.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-043",
+     "v-planned-decisions-027"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:88-600",
+     "v-chat-agents-ui baseline row 'Editing artifacts by hand: absent' (no textarea/contenteditable in ChatArtifactPanel.tsx)"
+    ],
+    "gap": "Artifacts are read-only to users: no editor, no selection-scoped edit, no restore; revisions come only from the model (I17 and G6 planned). No collaborative document object.",
+    "strengths": "Artifacts already have versions and diffs; Application Plane already owns realtime collaborative projections; the stack is Rust, so yrs can run in both gateway and browser."
+   },
+   "benefit": "Users can fix a sentence without re-prompting, and teams can co-edit agent output; this is the difference between a chat answer and a work product.",
+   "approach": "Phase 1 (Frontend + Model Plane): make document artifacts editable (Markdown editor, selection-scoped 'edit with AI', restore version). Phase 2 (Application Plane): yrs-backed collaborative documents with comments, AI edits as attributed ops, persisted in Data Plane; ACL from the owning Space, never widened.",
+   "effort": "XL",
+   "dependencies": [
+    "Application Plane realtime projections",
+    "Data Plane document storage"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "CRDT and Markdown round-trip fidelity; permission model for AI edits; ZDR documents cannot persist.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Phase 1 is medium effort and users would notice immediately; phase 2 is large and should follow demand.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-025",
+   "name": "In-app file previewers with format registry and size limits",
+   "description": "Generated and attached files open in a preview tab: Office documents, spreadsheets (CSV/XLSX/ODS), PDF, Markdown, code and archives, through a renderer registry keyed by extension with explicit loading modes and size caps that refuse rather than truncate.",
+   "prevalence": {
+    "sourcesWith": [
+     "deepseek",
+     "manus"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": ""
+   },
+   "members": [
+    "deepseek-transparency-and-customization-149",
+    "manus-product-ux-028"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-transparency-and-customization-149",
+     "manus-product-ux-028"
+    ],
+    "why": "DeepSeek (q4, DOC) has the cleanest design: a register-by-extension API with loading modes (text pages, complete bytes, renderer), a host byte cap that rejects oversize files, a PDF raster pixel cap and local Office-to-PDF conversion; Manus (q4, SRC) shows the breadth and honest unsupported/size messages."
+   },
+   "mechanism": "previews.register({id, extensions, binaryExtensions, priority, loading}) -> the panel picks the highest-priority renderer; text loads in pages, binaries load complete under a cap; DOCX/PPTX convert to PDF (server LibreOffice or WASM) and render with pdf.js; XLSX renders as a grid with sheet tabs; unknown types fall back to a download card with a reason.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-042"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:88-600",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2748-2790"
+    ],
+    "gap": "The Output panel renders Markdown, code, sandboxed HTML, images and PDFs; generated DOCX/XLSX/PPTX are download cards only with no preview, and there is no renderer registry.",
+    "strengths": "Sandboxed HTML (srcdoc without same-origin), version stepper and diff view already exist."
+   },
+   "benefit": "Users can check a generated workbook or deck without downloading it, which is needed for C-t3-02-020 and C-t3-02-021 to feel finished.",
+   "approach": "Frontend Plane: a renderer registry in the Output panel; XLSX grid via SheetJS; DOCX/PPTX previews via PDF conversion produced by the sandbox (LibreOffice) next to the original file; enforce byte and pixel caps.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-02-020 LibreOffice in sandbox"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Third-party parsers on untrusted files in the browser; keep them in a worker.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Completes the document pipeline at moderate cost.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-026",
+   "name": "Artifact export and delivery formats",
+   "description": "Artifacts and answers can be copied as an image, downloaded, saved as Markdown, printed to PDF or converted to DOCX/PPTX, with size fallbacks; APIs can request delivery formats.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-manus"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "common",
+    "note": "Class adjusted to common: a basic feature most products have even though few records in this category capture it."
+   },
+   "members": [
+    "claude-product-ux-147",
+    "web-manus-web-product-022"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-147",
+     "web-manus-web-product-022"
+    ],
+    "why": "Claude (q4, SRC) has the fullest action set (copy as image, download, Markdown with a size guard, print to PDF, export feedback); Manus (q3, DOC) exposes formats as an API parameter."
+   },
+   "mechanism": "Per-artifact export menu; HTML rendered to PNG for copy-as-image; PDF via a print pipeline; Markdown to DOCX via OOXML builder; size guard points to the file when content is too large to copy.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-modelplane-037"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/index.ts:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:621-624",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:253-256"
+    ],
+    "gap": "No images, charts or math inside Office exports (H4 not built); PDF goes through the print dialog (H3 planned); no copy-as-image; no server export API.",
+    "strengths": "Word, Excel and PowerPoint are built in the browser by pure OOXML builders with no network call, which suits ZDR and temporary chat; artifacts export too."
+   },
+   "benefit": "Parity on the basics; network-free export is an advantage.",
+   "approach": "Keep; add charts and images to OOXML exports (H4) and direct PDF (H3) when convenient.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is equal or ahead (client-only export); remaining items are already planned.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-027",
+   "name": "Sandboxed data analysis on uploaded files",
+   "description": "The model writes and runs Python in an isolated sandbox to clean, analyse, chart and model data from CSV and spreadsheets, with charts and tables in an expandable, downloadable view.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt",
+     "web-claudeai",
+     "web-manus",
+     "web-perplexity"
+    ],
+    "n": 4,
+    "of": 11,
+    "cls": "table-stakes",
+    "note": "Class adjusted to table-stakes: all web benchmarks or most products ship it, and related records sit in sibling clusters of this category. Supported only by DOC/INF records."
+   },
+   "members": [
+    "web-chatgpt-web-product-032",
+    "web-claudeai-web-product-028",
+    "web-manus-web-product-021",
+    "web-perplexity-web-product-030"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-028",
+     "web-chatgpt-web-product-032"
+    ],
+    "why": "claude.ai (q4, DOC) and ChatGPT (q4, DOC) are equivalent: a per-user container with pandas, numpy and matplotlib, files mounted from the conversation, and an expandable chart/table viewer; claude.ai documents the org-level egress tiers (off, package managers, allowlist, all). Perplexity uses Firecracker microVMs (DOC). All records are documentation only."
+   },
+   "mechanism": "Per-conversation sandbox session (stateful across calls), uploaded files mounted read-only at a known path, preinstalled data libraries, time limit per call measured in minutes, egress policy per org, outputs (PNG charts, CSV, XLSX) returned as artifacts and rendered in an expandable viewer.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-044",
+     "v-modelplane-036"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-34",
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:79-82",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2554-2617"
+    ],
+    "gap": "Each call is a fresh hermetic workspace with about a 30 s timeout and no network; chat attachments are not staged into the sandbox (H6 planned), so the model cannot analyse the user's uploaded spreadsheet directly; no state between calls.",
+    "strengths": "bwrap with a read-only rootfs, no network, output scrubbing and size caps is a stronger isolation posture than most references document; outputs already become artifacts; accessible SVG charts render in chat."
+   },
+   "benefit": "Analysing the user's own spreadsheet is one of the most common business requests; today it fails at the first step.",
+   "approach": "Model Plane execution-core: stage Data Plane attachments into the workspace (read-only), allow a per-thread session workspace (reuse sandbox-manager leases and CAS manifests) with minute-level budgets, keep networkless by default with org-configurable package-mirror egress; return outputs as artifacts. ZDR: ephemeral workspace destroyed at turn end.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-02-001",
+    "sandbox-manager leases"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Longer runs raise cost and abuse risk; keep quotas per org in cost-core.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Table-stakes across the web benchmarks and the foundation for C-t3-02-020; most infrastructure (leases, workspaces) exists.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-028",
+   "name": "Stateful notebooks with cell read, edit and execute",
+   "description": "The agent reads, edits and runs cells of a Jupyter notebook, restarts the kernel, and receives per-cell text and image outputs; the notebook persists as an artifact.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-020"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-020"
+    ],
+    "why": "Only source; q4 SRC with typed steps (ReadNotebook, EditNotebook insert/replace/delete, ExecuteNotebook with stop_on_error and restart_kernel) and per-cell status and outputs."
+   },
+   "mechanism": "Notebook artifact (.ipynb) in a sandbox workspace with a kernel process; tools address cells by id or index; execute returns per-cell status, truncated text and image blobs; restart clears state.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-036",
+     "v-chat-agents-ui-044"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-34"
+    ],
+    "gap": "The code interpreter is stateless per call with no persisted cells.",
+    "strengths": ""
+   },
+   "benefit": "Durable, re-runnable analyses for power users.",
+   "approach": "After C-t3-02-027 adds session workspaces, expose a notebook artifact and cell tools in execution-core; render read-only in the Output panel.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-02-027 session workspaces"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Long-lived kernels cost money; idle timeouts needed.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Single IDE-adjacent source; Verevon is not an IDE.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-029",
+   "name": "Chart rendering with a chart-type catalogue",
+   "description": "Data answers render as charts; some products offer a large catalogue (Sankey, sunburst, treemap, candlestick, Gantt) and a picker for preferred chart types.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "manus-product-ux-029"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-029"
+    ],
+    "why": "Only source; q3 SRC: ECharts with a 'select up to N chart types' picker."
+   },
+   "mechanism": "Model emits a chart spec; the client renders with a chart library; the user can constrain preferred chart types.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-planned-decisions-025"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx:1-15",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatTableTools.tsx",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-chart/spec.ts:1-20",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-chart/svg-export.ts"
+    ],
+    "gap": "Smaller catalogue than ECharts; no chart-type preference. Note: baseline record v-planned-decisions-025 says partial from a stale DOC; the v-chat-agents-ui narrative verifies ChatChart.tsx in code.",
+    "strengths": "Chart fences and 'view this table as a chart' render one accessible SVG (role=img, data table, keyboard navigation, never colour alone), bad specs never throw, SVG export: ahead of the reference on accessibility and robustness."
+   },
+   "benefit": "Keep the accessible renderer; extend types only on demand.",
+   "approach": "Keep; add chart types behind the same accessible spec when users ask.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "None.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is ahead on accessibility; the catalogue gap is cosmetic.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-030",
+   "name": "Data-connected dashboards with visible queries",
+   "description": "Ask for a dashboard; the assistant writes a query per chart against a warehouse or connected app; every chart shows its query and last refresh time.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-claudeai"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": "Supported only by DOC/INF records."
+   },
+   "members": [
+    "web-claudeai-web-product-025"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-025"
+    ],
+    "why": "Only source; q4 DOC: per-chart SQL transparency over Redshift/BigQuery/Snowflake/Databricks and apps like Salesforce."
+   },
+   "mechanism": "Dashboard artifact = list of {chart spec, query, connector, refreshed_at}; refresh re-runs queries with the viewer's connector credentials; the query is displayed with each chart.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. To check: whether get_statistics / result_query tools or a Data Plane dashboard feature can bind charts to stored queries, and whether the Reports page can hold refreshable charts.",
+    "strengths": ""
+   },
+   "benefit": "Fits Verevon's transparency goal (show the query like it shows sources); useful for operations data.",
+   "approach": "Data Plane owns query execution and connectors; Model Plane writes the query; Frontend renders a dashboard artifact with visible queries and refresh, using the viewer's own permissions.",
+   "effort": "L",
+   "dependencies": [
+    "Data Plane query service",
+    "C-t3-02-029"
+   ],
+   "planeOwner": "Data Plane",
+   "risks": "Query cost and permissions; stale data shown as current.",
+   "tier": "nice-to-have",
+   "significance": 3,
+   "rationale": "Strong transparency fit but single-source DOC and depends on data connectors.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-031",
+   "name": "Inline interactive visuals and widgets that send follow-up prompts",
+   "description": "The assistant renders interactive HTML/SVG visuals or curated widgets (charts with sliders, flashcards, quizzes, math modules) inline in the conversation; clicking inside a visual sends a follow-up prompt; used instead of image generation for diagrams.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-claudeai",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": "Supported only by DOC/INF records."
+   },
+   "members": [
+    "web-claudeai-web-product-020",
+    "web-claudeai-web-product-019",
+    "web-chatgpt-web-product-036"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-020",
+     "web-claudeai-web-product-019",
+     "web-chatgpt-web-product-036"
+    ],
+    "why": "claude.ai (q4, DOC) has the general mechanism: model-written HTML widgets inline, full-screen, and a widget-to-chat prompt bridge; ChatGPT (q4, DOC) has the curated-widget approach (flashcards saved to a library, 70+ interactive modules)."
+   },
+   "mechanism": "The model writes HTML/SVG into a sandboxed iframe inline in the message; the iframe gets a narrow postMessage bridge (sendPrompt(text), resize) validated by the host; widgets are ephemeral unless saved as an artifact; curated widgets are typed components the model invokes with JSON props.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx:1-15",
+     "SRC grep postMessage|sendPrompt in src/features/chat: no matches (2026-10-13)"
+    ],
+    "gap": "Generated HTML renders in the Output panel (sandboxed srcdoc iframe), not inline, and has no bridge back to the chat; charts are inline but not interactive beyond keyboard data reading; no curated widget library.",
+    "strengths": "The security posture is right: srcdoc iframe with allow-scripts and no same-origin."
+   },
+   "benefit": "Explorable answers (what-if sliders on a cost estimate, clickable diagrams) and a click-to-ask loop with low friction.",
+   "approach": "Frontend Plane: inline widget node in the chat-nodes registry using the existing sandboxed iframe; a host-validated postMessage bridge with only sendPrompt and resize, rate-limited and shown as a user turn; Model Plane: format guidance for when to emit a widget.",
+   "effort": "M",
+   "dependencies": [
+    "chat-nodes registry"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Prompt injection through widget-sent prompts; show them as visible user turns and never auto-approve actions.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Two strong sources, moderate effort, and it reuses Verevon's existing sandbox.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-032",
+   "name": "Point-and-annotate visual feedback on previews and images",
+   "description": "The user picks elements, marks regions, draws strokes or requests concrete style changes on a rendered preview or image; a screenshot plus structured element context is sent to the agent as one prompt.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": ""
+   },
+   "members": [
+    "claude-product-ux-043",
+    "t3code-ui-and-multimodel-073"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-073",
+     "claude-product-ux-043"
+    ],
+    "why": "T3 Code (q4, SRC) has the clearest payload: PreviewAnnotation {elements[], regions[], strokes[], styleChanges[{property, previousValue, value}], screenshot} rendered into a tagged prompt plus an image attachment, with per-target counts in the composer; Claude (q4, SRC) has the same for images and previews with element context (HTML, styles, selector)."
+   },
+   "mechanism": "An overlay on the preview iframe captures picks (element selector, outer HTML excerpt, computed styles), rectangles and strokes; a screenshot is taken; the composer shows an annotation card; on send the host builds a structured block (targets and requested changes) and attaches the screenshot so a vision model sees both.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [],
+    "evidence": [
+     "v-chat-agents-ui baseline: I17 canvas highlight-to-edit planned in Wave 5 (CHAT_GAP_CLOSURE_PLAN_2026-10-01.md)"
+    ],
+    "gap": "No annotation of artifacts, images or HTML previews today; artifacts are read-only.",
+    "strengths": ""
+   },
+   "benefit": "Precise feedback on generated HTML pages, charts, images and slides without describing locations in words; pairs with image editing (C-t3-02-014) and decks.",
+   "approach": "Frontend Plane: an annotation overlay on Output panel previews (HTML, image, PDF page, slide) producing a typed annotation part; Model Plane: accept the part and render it into the prompt with the screenshot. Same mark primitive as image editing.",
+   "effort": "M",
+   "dependencies": [
+    "C-t3-02-003 vision routing",
+    "C-t3-02-014 mark tool"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Screenshots may capture sensitive data; respect ZDR (no persistence of the screenshot).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Differentiator across two strong SRC sources; shares its primitive with image editing.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-033",
+   "name": "Recorded walkthroughs of agent browser sessions as proof of work",
+   "description": "The agent (or user) records the agent's browser session to video and captures screenshots, attaching a walkthrough to the final answer as evidence of what was done.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "t3code"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": ""
+   },
+   "members": [
+    "cursor-ai-features-107",
+    "t3code-ui-and-multimodel-100"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-100",
+     "cursor-ai-features-107"
+    ],
+    "why": "T3 Code (q4, SRC) gives the mechanism: canvas.captureStream(12 fps) into MediaRecorder at 4 Mbps (MP4 H.264 or WebM), one active recording at a time with typed errors, and agent tools to start/stop recording and snapshot; Cursor (q4, SRC) makes it a habit by telling cloud agents to attach a walkthrough video."
+   },
+   "mechanism": "Browser runtime streams frames; a recorder encodes at a low frame rate; recording start/stop are agent tools; the file is stored as a run artifact and linked from the final answer and the run timeline.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:1-15",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:425-450"
+    ],
+    "gap": "The live run panel shows browser evidence and screenshots of a watched run; chat turns cannot drive a browser yet; no recorded video artifact.",
+    "strengths": "Proof bundles and a run timeline exist on the Agent Run Console; browser actions already flow Model proposes / Quarry executes."
+   },
+   "benefit": "A short video of what the agent did on a site is persuasive evidence for approvals and audits and fits Verevon's proof-bundle story.",
+   "approach": "Ingestion Plane (Quarry, which executes browser actions) records the session it controls and emits frames or an encoded clip; Model Plane stores it as a run artifact referenced in the proof bundle; Frontend plays it in the run timeline. ZDR: no recording, or in-memory only.",
+   "effort": "M",
+   "dependencies": [
+    "Quarry browser session API",
+    "run artifact storage"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Recordings capture personal data on third-party sites; retention and redaction policy needed.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Strengthens Verevon's transparency and proof story with moderate effort; respects the Quarry-executes rule.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-034",
+   "name": "Web and app builder with hosting, publishing and backend add-ons",
+   "description": "One entry point builds websites, apps, extensions, games and bots from a description; sites get a preview sandbox, private or public publishing, hosting modes, custom domains, rollback, GitHub sync, SEO checks, design import from Figma or URLs, and backend add-ons (database, storage, auth, payments) with row-level approval of data changes.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus",
+     "web-chatgpt",
+     "web-perplexity",
+     "codexagent",
+     "web-manus"
+    ],
+    "n": 5,
+    "of": 11,
+    "cls": "common",
+    "note": "Same-vendor pairs counted separately: manus+web-manus (distinct vendors: 4)."
+   },
+   "members": [
+    "manus-product-ux-030",
+    "manus-product-ux-031",
+    "manus-product-ux-032",
+    "manus-product-ux-033",
+    "manus-product-ux-034",
+    "web-chatgpt-web-product-034",
+    "web-perplexity-web-product-031",
+    "codexagent-plugins-and-extensibility-093",
+    "web-manus-web-product-015"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-030",
+     "manus-product-ux-031",
+     "manus-product-ux-032",
+     "web-chatgpt-web-product-034",
+     "codexagent-plugins-and-extensibility-093"
+    ],
+    "why": "Manus (q4, SRC) is the broadest (Studio types, Autoscale vs Reserved hosting, domains, rollback, add-ons with a claim-your-sandbox step for payments); ChatGPT Sites (q4, DOC) documents the runtime (D1, R2, secrets, versions, scheduled refresh); Codex Sites (q3, SRC) contributes the diff-style database-change approval."
+   },
+   "mechanism": "Generated project in a sandbox with a preview URL; publish creates a versioned deployment on a managed runtime; visibility and domains are attached to the deployment; data mutations from the agent show a before/after approval.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-519"
+    ],
+    "gap": "Verevon previews generated HTML in a sandboxed iframe only; no build, hosting, publishing or share links.",
+    "strengths": "Sandboxed HTML preview exists; governed approval cards exist for provider writes."
+   },
+   "benefit": "Out of scope: Verevon is not a builder or host. Two patterns transfer: ACL-scoped artifact publishing (never widening the Space ACL) and row-level before/after approvals for governed provider writes.",
+   "approach": "Do not build a site builder. Reuse the before/after approval pattern in governed actions and consider ACL-scoped read-only artifact links in the sharing category.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Application Plane",
+   "risks": "Hosting liability, abuse, payments.",
+   "tier": "skip",
+   "significance": 2,
+   "rationale": "Does not fit Verevon's product; the two transferable patterns are noted for other categories.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 3,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-035",
+   "name": "Research runs that end in deliverables",
+   "description": "Deep research and pro search can directly produce presentations, spreadsheets, dashboards and sites, so research and deliverable happen in one flow.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-perplexity"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": "Supported only by DOC/INF records."
+   },
+   "members": [
+    "web-perplexity-web-product-028"
+   ],
+   "bestInClass": {
+    "source": "web-perplexity",
+    "recordIds": [
+     "web-perplexity-web-product-028"
+    ],
+    "why": "Only source; q4 DOC: research hands off to asset-generation skills."
+   },
+   "mechanism": "The research run produces a structured, cited report; a follow-on creation step (deck, sheet, doc skill) takes the report artifact as input and keeps citations in notes or footnotes.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-planned-decisions-026"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4361-4383",
+     "v-modelplane baseline row 'Deep research (in-gateway)': cited report emitted as a document artifact"
+    ],
+    "gap": "Deep research emits a cited document artifact, but there is no hand-off into deck or sheet creation (research-to-deck is partial: PPTX export only).",
+    "strengths": "Verevon's deep research only numbers pages it actually read and has a mandatory 'could not be verified' section: stronger grounding than the references."
+   },
+   "benefit": "'Research X and give me a deck' becomes one request with citations carried into the deliverable.",
+   "approach": "Model Plane: after deep research, offer or auto-chain the document/deck skill with the report artifact as input; carry citation ids into speaker notes or footnotes.",
+   "effort": "S",
+   "dependencies": [
+    "C-t3-02-020",
+    "C-t3-02-021"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Citation loss during reformatting; keep source validation on the output.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap once the deck and document pipelines exist and plays to a Verevon strength.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-036",
+   "name": "Office add-ins and sensitivity-label document policies",
+   "description": "The assistant works inside Word, Excel, PowerPoint and Outlook through add-ins; admins restrict add-in actions by Microsoft sensitivity label (equals, starts with, any, none) with allow/deny effects.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 11,
+    "cls": "differentiator",
+    "note": ""
+   },
+   "members": [
+    "claude-product-ux-044",
+    "web-chatgpt-web-product-035"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-044",
+     "web-chatgpt-web-product-035"
+    ],
+    "why": "Claude (q4, SRC) adds the governance layer (label-aware policies for opened vs uploaded files); ChatGPT (q4, DOC) has broader add-in coverage including Google Sheets."
+   },
+   "mechanism": "Office add-in sidebar authenticates to the assistant; host tools get_context/run operate on the open document; a policy engine evaluates the document's sensitivity label before each action.",
+   "verevon": {
+    "status": "planned",
+    "baselineIds": [
+     "v-planned-decisions-027"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:63"
+    ],
+    "gap": "No add-ins; editing existing Excel/PowerPoint in place and saving back to OneDrive/Drive is planned behind owner decision OD14.",
+    "strengths": ""
+   },
+   "benefit": "Meets Microsoft-centric customers where they work; label-aware policies are a governance pattern Verevon should mirror for Data Plane documents regardless of add-ins.",
+   "approach": "Later: an Office add-in calling the Verevon gateway with the user's session; first adopt sensitivity-label checks in Data Plane document access via integration-corev2 Graph metadata.",
+   "effort": "L",
+   "dependencies": [
+    "OD14 write-posture decision",
+    "Microsoft Graph integration"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Marketplace review and support burden.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Not core to the chat/agent pages; the label-policy idea is the part worth taking early.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-037",
+   "name": "Document translation as a document operation",
+   "description": "Translate a document or artifact into a chosen language with explicit states (not ready, too slow, unsupported language, translation updated).",
+   "prevalence": {
+    "sourcesWith": [
+     "claude"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "claude-product-ux-148"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-148"
+    ],
+    "why": "Only source; q3 SRC with readiness and language checks and a translation tool cell."
+   },
+   "mechanism": "An artifact action calls a translation service, stores the translation as a linked version, and refreshes it when the source changes.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-modelplane-035",
+     "v-planned-decisions-023"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:429-447",
+     "apps/Model Plane/rust/services/inference-core/src/provider/translation.rs"
+    ],
+    "gap": "Azure Translator with LLM fallback exists as an API; no translate action on artifacts or documents was found in the baseline (check ChatArtifactPanel for a translate action).",
+    "strengths": "Translation adapter with an LLM fallback already exists; Norwegian-first customers."
+   },
+   "benefit": "Norwegian/English documents for multilingual customers with one click.",
+   "approach": "Add a 'translate' artifact action that calls the existing translation route and stores the result as a new version.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Formatting loss in Markdown and Office files.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Cheap win on an existing adapter, but users can also ask in chat.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-038",
+   "name": "LaTeX compilation with an engine ladder",
+   "description": "Compile LaTeX with a bundled lightweight engine first, a detected system TeX second, and a managed install last, with a doctor skill that diagnoses the machine.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "codexagent-plugins-and-extensibility-098"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-plugins-and-extensibility-098"
+    ],
+    "why": "Only source; q4 SRC (Tectonic first, TeX Live or MacTeX second, managed TeX Live install last, plus a doctor skill)."
+   },
+   "mechanism": "compile script picks the cheapest engine that can build the project; a doctor reports missing packages; a heavy toolchain is installed only when needed.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-036"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-34"
+    ],
+    "gap": "No LaTeX toolchain in the sandbox image (INF: not verified in the image manifest).",
+    "strengths": ""
+   },
+   "benefit": "Niche for Verevon; the engine-ladder pattern is useful for any heavy toolchain in sandbox images (LibreOffice, fonts).",
+   "approach": "Only if requested: ship Tectonic in the sandbox image; apply the ladder idea to LibreOffice for C-t3-02-020.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Image size.",
+   "tier": "nice-to-have",
+   "significance": 1,
+   "rationale": "Low demand among Verevon's users.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-039",
+   "name": "Image results inside web answers",
+   "description": "Web-search answers can include images from search results with source links.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-claudeai"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": "Supported only by DOC/INF records."
+   },
+   "members": [
+    "web-claudeai-web-product-029"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-029"
+    ],
+    "why": "Only source in this category; q3 DOC (Bing image results inside the web search tool)."
+   },
+   "mechanism": "The web search tool returns image results with source URLs; the client renders a small image strip with attribution.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:39-45",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx"
+    ],
+    "gap": "Quarry image and video search routes exist on the dashboard answer search, not in /chat answers.",
+    "strengths": "Quarry already serves image search."
+   },
+   "benefit": "Visual answers for product or place questions.",
+   "approach": "Expose Quarry image results to the chat web_search tool and render an attributed strip.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Copyright of displayed images; show source links and thumbnails only.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Small, existing plumbing; low priority.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-02-040",
+   "name": "Agent telephony: phone numbers, calls and SMS with per-use permission",
+   "description": "An agent gets a virtual phone number to place and receive calls and texts, with a permission prompt for each outbound call or SMS and listed call history and recordings.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus"
+    ],
+    "n": 1,
+    "of": 11,
+    "cls": "unique",
+    "note": ""
+   },
+   "members": [
+    "manus-product-ux-036"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-product-ux-036"
+    ],
+    "why": "Only source; q4 SRC (TelecomService with 45 RPCs, per-country plans, per-use permission prompts)."
+   },
+   "mechanism": "Telecom provider integration; each outbound action is an approval; recordings stored with retention limits.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No telephony; Channel Plane is docs-only.",
+    "strengths": ""
+   },
+   "benefit": "Belongs to the future Channel Plane, not chat creation.",
+   "approach": "Skip here; revisit with the Channel Plane.",
+   "effort": "XL",
+   "dependencies": [
+    "Channel Plane"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Regulatory (telecom, recording consent).",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Out of category and out of current architecture (Channel Plane is docs-only).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

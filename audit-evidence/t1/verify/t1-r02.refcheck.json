@@ -1,0 +1,111 @@
+[
+ {
+  "finalId": "F-t1-022",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/crates/buzz-relay/src/handlers/channel_authz.rs:59-175 (is_sole_owner, decide_self_departure, decide_put_user)",
+   "C:/dev/buzz/crates/buzz-core/src/channel.rs:102-140 (MemberRole, is_elevated = Owner|Admin)",
+   "C:/dev/buzz/crates/buzz-db/src/store/channel_members.rs:36-48,495-505 (advisory membership lock, transactional check-then-insert)",
+   "C:/dev/buzz/NOSTR.md:56 (kind 9002: name/about owner/admin, topic/purpose any member)",
+   "C:/dev/buzz/schema/tables/public/channels.sql:33-48 (ttl_seconds, ttl_deadline, expiry index)",
+   "C:/dev/buzz/crates/buzz-db/src/store/channel.rs:772-800 (reap_expired_ephemeral_channels) and crates/buzz-relay/src/main.rs:1153 (reaper loop)",
+   "C:/dev/buzz/desktop/src-tauri/src/commands/channels.rs:23-42,388-460 (STARTER_CHANNELS, deterministic UUID, ensure_starter_channels Tauri command)",
+   "C:/dev/buzz/desktop/src/features/onboarding/hooks.ts:88-92 and welcomeKickoff.ts:1-40 (client-side onboarding, startManagedAgent)",
+   "records teams-product-surface-035 (DOC/REA 30-day restore), slack-product-surface-019 (DOC), qm-product-016, qm-product-027"
+  ],
+  "corrections": "1) Buzz has no 'actor rank >= target rank' rule: is_elevated() is Owner|Admin, so an Admin may grant Owner; elevated grants on ADD are checked only in private channels (role CHANGES of existing members are checked on every visibility). Say 'elevated roles (owner/admin) can only be granted or changed by an owner/admin; the sole owner cannot be demoted, removed or leave'. 2) The TOCTOU guard is a per-channel Postgres advisory lock held across the transactional check-then-write, not a 'membership-revision check'. 3) Starter rooms and the welcome agent are client-orchestrated in the Buzz desktop app during onboarding (Tauri command ensure_starter_channels creates-or-joins #general/#welcome-everyone; the kickoff starts locally managed agents), not a server-side 'on member join' hook; present server-side ensure_starter_rooms(org)+auto-join as Verevon's design, not as what Buzz does. 4) room.state {active, archived, deleted(restore_until)} is a synthesis: Buzz has archive/unarchive/delete and TTL auto-archive; the restore window comes from Teams (DOC, 30 days). 5) Lifecycle prevalence 2 of 5 (buzz, teams) undercounts: Slack supports archive, rename and topic (public product behaviour, INF/DOC; not captured in a record), so at least 3 of 5.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Slack role set is DOC-only (help center), not REA",
+   "Teams 30-day restore is DOC (Learn limits note) plus locale-string REA",
+   "Buzz onboarding/starter rooms are desktop-client choreography; the Buzz doc itself lists open failure classes",
+   "TTL rooms (sliding deadline + reaper) are SRC-confirmed and Buzz-unique"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-006",
+  "verdict": "partial",
+  "checked": [
+   "records teams-product-surface-034 (DOC Learn policy precedence), slack-product-surface-029 (DOC), teams-product-surface-133 (DOC+REA)",
+   "extract/grokbot/dist/electron-main/proto.cjs: GetSandAccessStatusResponse fields and enum SandAccessBlockReason (NONE, TEAM_PRIVACY_MODE, TEAM_SETUP_REQUIRED, TEAM_ACCESS_REQUIRED, NOT_OFFERED, FREE_TRIAL_AVAILABLE, PAYWALL_INDIVIDUAL/TEAM_MEMBER/TEAM_ADMIN)",
+   "extract/grokbot/dist/renderer/assets/index.eager-app-CY939ORZ.js (reason list, cause mapper E4, web onboarding URL hand-off)",
+   "extract/slack/dist/preload.bundle.js (_enforced: Object.keys(itPolicy)) and main.bundle.cjs (slackDefaults < itDefaults < userChoices < itPolicy)",
+   "C:/dev/qm/docs/admin-model-verification.md:1-14 (verify-and-enable, fingerprint, unverified models unavailable)",
+   "C:/dev/qm/src/ratelimit/rate-limiter.ts (fixed window keyed by principalId) and src/core/orchestrator.ts:469,684",
+   "C:/dev/qm/plugins/admin/README.md:13-31,69-71 (mutations and content reads audited); grep for bulk jobs in qm src/api/routes/admin and plugins/admin/ui found none",
+   "record buzz-product-156 (crates/buzz-auth/src/rate_limit.rs: Redis fixed-window tiers human/agent)",
+   "Teams main-locale-en-us-23ba9acb36586a4b.js.gz and teams-and-channels-locale-en-us-*.js.gz (messages_onlyChannelModeratorsCanPost, channel_dashboard_moderation_*)"
+  ],
+  "corrections": "1) Rate limits: neither reference uses token buckets keyed by org, principal and action. Buzz is a Redis fixed-window limiter with tiers by principal kind (human 60/min, agent 120/300/600) and its own comment says a token bucket would be smoother; QM is a fixed window keyed only by principalId. Rephrase as 'per-principal fixed-window limits with separate human and agent tiers (Buzz)'; token buckets keyed by org+principal+action is a Verevon proposal (INF). 2) 'Bulk actions as jobs with per-item status' is GrokBot (StartBulkTeamMemberSandBoxOperation, item states QUEUED..FAILED), not QM; no QM bulk-job code was found. 3) Slack 'locked settings' are desktop-shell IT-managed client settings (registry, macOS managed prefs, /etc file), not workspace or channel governance; the web app receives a list of enforced keys (_enforced), not a per-key source tag, and lock-with-explanation rendering lives in the remote web app and was not observed. 4) GrokBot: access status returns a state plus one of ~10 typed block reasons and many flags (purchase channel, privacy disclaimer, paywall offers); 'one UI component per reason' is not verified and several reasons hand off to a web onboarding URL. 5) Prevalence undercounts: posting rules are at least 2 of 5 (Slack DOC + Teams REA channel moderation, 'Only channel moderators can post'); app/agent allowlisting is at least 3 of 5 (Teams, QM models, Slack admin app approval incl. MCP). 6) The prevalence text is internally inconsistent on flags ('2 of 5' vs '4 of 5'); use 4 of 5 (buzz, grokbot, slack, teams) for flags/remote config.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Teams policy precedence, packages and batch assignment are DOC-only (Learn); propagation delay of hours is documented",
+   "Slack admin app approval and posting permissions are DOC-only",
+   "Slack and Teams admin-locked settings are OS/desktop-client policy plumbing, a weak analogue for Space governance",
+   "QM posture tiers and model verification probe are SRC-confirmed and QM-unique",
+   "GrokBot remote configs are Statsig experiments; outcomes unknown",
+   "Teams Labs/Insider/Public preview are opt-in programmes (REA strings + DOC); Teams channel agent itself requires public preview per DOC"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-016",
+  "verdict": "confirmed",
+  "checked": [
+   "C:/dev/buzz/schema/tables/public/channels.sql:32-46 (participant_hash, unique (community_id, participant_hash))",
+   "C:/dev/buzz/crates/buzz-db/src/store/dm.rs:50-60,358-380 (compute_participant_hash = sha256 over sorted, deduped pubkeys; open_dm returns existing or creates)",
+   "C:/dev/buzz/crates/buzz-relay/src/handlers/command_executor.rs:470-520 (9-participant cap; adding a member opens a NEW DM because DM sets are immutable)",
+   "C:/dev/buzz/crates/buzz-relay/src/handlers/side_effects.rs:3633-3651 (per-viewer hidden-DM snapshot, owner-only) and desktop/src/features/channels/hiddenDmResurfaceCoordinator.ts",
+   "C:/dev/qm/src/resolution/resolution-service.ts:15-23 (conversationScope: dm->personal(actor), group->group:<ref>, else channel:<ref>)",
+   "Teams main-locale-en-us-23ba9acb36586a4b.js.gz: chat_history_dont_include_chat_history, chat_history_include_chat_history_from_x_days, chat_history_include_chat_history, tmp_messages_addMemberSystemMessage*ShareHistory*, chat_history_access"
+  ],
+  "corrections": "Minor: in Buzz, un-hiding on new activity is driven by the desktop client re-issuing the open-DM command (which clears hidden_at server-side), plus a server-side unhide for moderation notices; it is not an automatic server projection rule. Add that Buzz DM participant sets are immutable: 'adding' someone creates a different DM with no history, the opposite of Teams' add-with-history choice.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Teams history choice is REA from locale strings (plus DOC limits: 250 per chat); Teams also requires full history access to add an agent to a chat",
+   "Buzz DMs are server-managed channels, not end-to-end encrypted",
+   "QM DMs come through Slack; QM ScopeId is a string 'kind:ref' encoding, copy the semantics not the encoding"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-015",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/crates/buzz-db/src/store/event.rs:2014-2075 (insert_canvas_head_checked: transaction + advisory canvas lock + SELECT head + compare; statuses Duplicate, RevisionMismatch, RevisionMissing, SupersedeFailed)",
+   "records buzz-product-119, buzz-product-120, buzz-architecture-090 (CanvasHistoryPanel diff/restore, plain Textarea editor)",
+   "extract/grokbot/dist/electron-main/proto.cjs: ReadGrokBotGroupChatCanvasRequest {group_chat_id, store_id, canvas_id} -> {render_bundle_gzip, data_json}; WriteCanvasArgs {contents, canvas_id?, title?}; AcquireAgentStoreFileLockRequest/Response {lock_token, ttl_seconds, expires_at_ms}; FENCED appears only in SandBoxStoreManifestCommitStatus",
+   "records slack-product-surface-100 (DOC), teams-product-surface-113 (REA locale + DOC)"
+  ],
+  "corrections": "1) Buzz CAS is not a single 'INSERT ... WHERE current_head = expected_head': it is a write transaction that takes a per-channel advisory lock, reads the head, compares it with the expected revision and only then inserts; same semantics, different mechanism. 2) 'The losing text stays in history' is overstated: a rejected save is rolled back and not stored; only accepted (later superseded) revisions remain in history. 3) GrokBot room canvases are written by agents through a WriteCanvas tool (full contents, no expected revision) and read by humans as a rendered bundle; human co-authoring is not evidenced. The lock/renew/release and tombstone/undelete RPCs belong to the agent file store, not room canvases, and locks return a lease lock_token with TTL; calling them 'fencing tokens' is an over-reach (FENCED is a sandbox manifest commit status). 4) 'CRDT co-edit' for Slack and Teams is inference: Slack's sync engine is undocumented in the evidence and Teams Loop uses the Fluid Framework (ordered ops); say 'real-time co-editing'. 'Block-anchored comments' for Slack is not in the cited evidence (comments behave like thread replies with resolve). 5) Teams evidence is meeting/chat notes (Loop), a weak analogue of a room canvas.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Slack canvas is DOC-only; channel canvases were retired in favour of a canvas tab (2025); free plan one canvas per conversation",
+   "Teams notes are REA from locale strings plus DOC",
+   "GrokBot canvases: agent-written, human read-only as far as observed (SRC proto names)",
+   "Write-safety 2 of 5 holds only if GrokBot agent-store locks count; for room canvases specifically Buzz is the only one with CAS"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-013",
+  "verdict": "partial",
+  "checked": [
+   "https://docs.slack.dev/messaging/working-with-files (3 steps: getUploadURLExternal -> HTTP POST bytes -> completeUploadExternal; files scanned for malware before available; no size limits stated)",
+   "C:/dev/buzz/crates/buzz-relay/src/api/media.rs:381-392,500-515,681-700 (relay-membership gate for upload and read; image thumbnail pipeline inline in upload path)",
+   "C:/dev/buzz/crates/buzz-media/src/validation.rs:503-520 (structural metadata-free validation; clients strip, relay rejects)",
+   "C:/dev/qm/src/files/file-artifact-store.ts:15-31 (FileArtifact: ownerScopeId, createdBy, createdInScope?, sha256 nullable)",
+   "records grokbot-agent-product-140 (refusal enum TOO_LARGE, AGENT_FULL, UNSUPPORTED_TYPE...), teams-product-surface-111 (DOC+REA SharePoint/OneDrive), buzz-architecture-093 (snapshot storage accounting)"
+  ],
+  "corrections": "1) 'Reads are by id with a room ACL check' is not what Buzz does: media reads are gated by relay/community membership (NIP-43), not channel membership; the Buzz record itself notes a media read-authorization gap. Present room-ACL-gated reads as Verevon's requirement. 2) The sentence attributing async thumbnails and off-path quota counting to Teams is misattributed: off-path storage accounting (Postgres snapshot by buzz-admin) is Buzz; Buzz thumbnails are produced in the upload pipeline, and no evidence of asynchronous thumbnailing was found in any source. 3) Malware scanning is Slack-only and DOC-only. 4) Presigned direct-to-storage upload is Slack/QM/GrokBot; Buzz uploads go through the relay (Blossom PUT), and Slack's step 2 is an HTTP POST. 5) The step-3 pipeline (scan + sha256 + metadata strip + thumbnail + blurhash) is a composite of several sources, not one reference's flow; label it as the recommended synthesis.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Slack upload pipeline and malware scan: DOC-only",
+   "Teams file storage model: DOC (Learn limits) + REA locale strings; channel = SharePoint folder, chat = OneDrive",
+   "GrokBot attachments are for bot conversations, with two size tiers; maxStagedAttachments value not located",
+   "QM FileArtifact has no expiry or byte reclamation (its own SECURITY.md)"
+  ],
+  "confidence": "high"
+ }
+]

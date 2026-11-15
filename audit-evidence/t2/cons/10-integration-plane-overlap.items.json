@@ -1,0 +1,473 @@
+{
+  "category": "Integration-plane overlap",
+  "items": [
+    {
+      "id": "R-t2-10-01",
+      "title": "Connector-to-browser secret bridge: fill_secret and email-OTP delivered by the Quarry executor, never through the model",
+      "summary": "Add model-proposable fill_secret / fill_otp browser actions that carry only an opaque secret reference. The Quarry executor resolves the value at fill time through the Integration Plane, after a one-time user approval and under strict origin/field preconditions, and the model only ever receives a status. First slice is email OTP: a new integration-corev2 action (for example mail.otp.read) over the user's connected Gmail or Outlook returns only the extracted code; stored passwords/vault secrets follow as a second phase.",
+      "whyItMatters": "Today an agent that reaches a login or \"enter the code we emailed you\" wall must either stop or have the user paste the secret into chat (the existing Type/TypeRef actions carry plaintext text in the model-proposed payload). Closing this lets agents finish authenticated web tasks on sites with no API connector while secrets stay out of model context, which is the core promise of a governed AI browser and the one place where integration-corev2 and Quarry should meet. It fits the authority split: Model proposes, Quarry executes, Integration Plane holds the secret.",
+      "referenceBestPractice": {
+        "bestSource": "Codex in-app browser (browserAuth.request with otpHandle, browser_email_otp elicitation, broker-socket credential binding)",
+        "others": [
+          "Apify connector proxy injects credentials server-side for API calls only (adjacent pattern, not browser)",
+          "Aside connector proxy (API-side credential injection, adjacent)"
+        ],
+        "prevalence": "1 of 4 sources for the browser-page variant (Codex only); unique. The API-side injection variant is in 2 of 4.",
+        "mechanism": "Model calls browserAuth.request(otpHandle) on a tab. Runtime proceeds only if: origin is https; frame origin equals top origin; exactly one required non-password input; no options/QR; credential-observation gate on; conversation id bound; otherwise status 'unavailable'. It then raises a user elicitation (kind browser_email_otp, requires user input, not auto-approvable by a guardian) saying the model cannot see the code and the user may type it instead. On approval the host (not the model runtime) fetches the code from the mail connector over a local broker socket (versioned credential binding) and types it through a native input path; the model receives only a status. Note Codex restricts this to non-password fields."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md:1106-1127 (DOC plan: fill_secret with vault:// secretRef resolved at executor boundary)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:639-720 (AgentAction has Type/TypeRef/FrameTypeRef/TypeSemantic with plaintext text; no secret-reference variant)",
+          "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:32-36 (allowedSensitiveActions is only respond_dialog, upload_ref, download_ref; no secret-fill scope)",
+          "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62-69 (grant Store is an in-memory map)",
+          "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1315 (internal short-lived token lease route, raw OAuth access token)",
+          "apps/Ingestion Plane/integration-corev2/internal/config/config.go:347 (default token-lease consumer allow-list does not include quarry)",
+          "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:254-256,431-434 (Microsoft mail.read and Gmail gmail.read capabilities exist, so an OTP read is feasible)",
+          "apps/Model Plane/rust/services/execution-core/src/grpc.rs:190-215 and model-gateway/src/browser_run.rs:136-160 (grants are only validated; no non-test caller of AcquireGrant found by grep)"
+        ],
+        "gap": "Code-absent. No path lets a Quarry browser run use a connector token, mailbox OTP or vault secret; authenticated web access is either OAuth API actions (integration-corev2) or browser profile cookies (Quarry) and the two never meet. Missing: a secret-reference action in the Quarry contract, executor-side resolution against IC, a sensitive grant scope for it, origin/field preconditions, value-level redaction of the filled field from observations/receipts/artifacts (only URL redaction in egress records was found, chromiumoxide.rs:1053), and the approval card. Also, no production caller issues BrowserBroker grants and the grant store is in memory."
+      },
+      "approach": "Ingestion Plane owns execution; Model Plane owns the approval. (1) Quarry contracts (quarry-core contracts.rs AgentAction plus the Go pkg/quarrycontracts mirror): add FillSecretRef { snapshot_id, generation, ref_id, secret_ref } and FillOtpRef; secret_ref is an opaque handle such as secret://connection/<id>/mail-otp, never a value. (2) browser-broker: add a fill_secret entry to allowedSensitiveActions and issue it through CreateScopedSensitiveApproval as a single-use child of the run grant, bound to one origin, one frame and one secret_ref with a short TTL, only after a user approval event routed by Model Plane/Conversation. (3) integration-corev2: add a dedicated mail.otp.read action (sender/age/pattern filters, returns the code only, write-attested user context, audited through the existing outbox) so Quarry never holds a mailbox OAuth token; do not just add quarry to INTEGRATION_TOKEN_LEASE_CONSUMERS. Add the Quarry-to-IC row to the cross-plane service-token manifest. (4) Quarry executor: precondition checks (https, frame origin == top origin == grant origin, exactly one visible required non-password input for OTP, no QR/options), fill via CDP Input.insertText, mask the field in screenshots/DOM snapshots, receipts carry a boolean only, nothing persisted under ZDR. (5) Frontend: elicitation card naming origin and connection, stating the model cannot see the value, and offering \"I will type it myself\". Ship OTP first; passwords/vault secrets only after the redaction and prompt-injection defences are proven.",
+      "effort": "L",
+      "dependencies": [
+        "Production issuance of BrowserBroker grants (AcquireGrant has no non-test caller and the store is in-memory) - likely covered by another category",
+        "Quarry value-level redaction pipeline for observations, receipts and artifacts",
+        "Cross-plane manifest row Quarry -> integration-corev2",
+        "New IC mail.otp.read action for Gmail and Outlook connections",
+        "Model Plane approval/elicitation event and frontend approval card"
+      ],
+      "planeOwner": "Ingestion Plane (Quarry executor + integration-corev2 action), with Model Plane (approval, BrowserBroker grant)",
+      "risks": "Secret exfiltration through a phishing page, injected iframe or weak origin matching; OTP requested by a page the agent was lured to; accidental logging in receipts, screenshots or artifacts; ZDR violations if a value persists; prompt-injection that tricks the model into proposing fill_secret on the wrong origin (so approval must show origin and connection and be single-use). Quarry has no prompt-injection defences yet per the comparator.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md section 19.1 (fill_secret with vault:// secretRef); no code"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-10-001"
+      ]
+    },
+    {
+      "id": "R-t2-10-02",
+      "title": "Make Quarry outbound webhooks tenant-scoped, SSRF-guarded and customer-facing",
+      "summary": "Before webhooks are exposed to tenants: add org_id to Webhook and WebhookDelivery and fan events out only to the owning org's webhooks; replace the plain Go http.Client in the dispatcher with an egress-guarded client (HTTPS only, single-resolution vetted dial, redirects refused). Then expose webhook CRUD and a delivery-log listing through quarry-edge with org-scoped JWT auth, add a per-request webhook {url, events, metadata} on crawl/batch/agent submissions, wildcard event filters, a write-only rotating secret, and ids-only payloads under ZDR.",
+      "whyItMatters": "Customers and Verevon's own Application Plane need to react to crawl, batch and agent completion without polling; Firecrawl and Apify both have it, so it is async-job parity for the web platform. The current delivery engine is good but is not safe to open to tenants: every active webhook receives every event and the delivery client will follow redirects to private addresses.",
+      "referenceBestPractice": {
+        "bestSource": "Apify (webhooks with rich event vocabulary, payload/header templates, ad-hoc per-run webhooks)",
+        "others": [
+          "Firecrawl (SSRF refusal of private targets, wildcard event filters, delivery logs; single attempt, no retry)"
+        ],
+        "prevalence": "2 of 4 sources (both web platforms); common",
+        "mechanism": "Webhook {url, secret, eventTypes[], payloadTemplate, headersTemplate, org scope}; on an event render the template with {eventType, eventData, resource, createdAt}; sign the body with timestamped HMAC-SHA256; deliver through an SSRF-guarded client (no private IPs, DNS pinning, no redirects); retry with backoff into a DLQ; log each attempt for the tenant. Ad-hoc webhooks can also be attached to a single run."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-33 (backoff 1s..1h, max 5 attempts, DLQ)",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:107-123 (timestamped HMAC, X-Quarry-Signature t=,v1=)",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:40-41 and cmd/control/main.go:197 (nil client defaults to plain http.Client{Timeout:30s}; no CheckRedirect or address vetting)",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:376-383 (Webhook has Events filter but no org_id; Secret carries a json tag, so generic CRUD likely echoes it (INF))",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:615-645 (fanoutWebhooks lists up to 1000 webhooks across all orgs and queues the full event JSON for each match; pkg/quarrycontracts/event.go:53 Event has no org field)",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go:8-10 (generic mountSimple CRUD at /v1/webhooks)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_webhook.rs:23 (only the inbound change-webhook route is exposed at the edge; no webhook CRUD found there)",
+          "apps/Ingestion Plane/integration-corev2/internal/egress/guard.go:208 (ResolveAndVet / SafeClient pattern already exists in Go in the same plane); apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs (Rust equivalent)"
+        ],
+        "gap": "Delivery mechanics (retry, DLQ, timestamped signature) are ahead of Firecrawl, but webhooks are internal-only and not tenant-safe: no org_id, cross-org fan-out with full payloads, no per-request webhook, no templates, no delivery log API, and no SSRF/redirect guard on the delivery client. The latent issues become real the moment tenants can register URLs."
+      },
+      "approach": "Ingestion Plane, quarry-control (Go) plus quarry-edge (Rust). (1) Store: add org_id to Webhook and WebhookDelivery (migration in store/pg), resolve an event's org from its job_id (or add org_id to the Event envelope) and filter fan-out by org. (2) Dispatcher: build the client with the resolve-once vetted dial from integration-corev2/internal/egress (extract to a shared Go module or port) or the Model Plane safe_mcp_http_client rules; HTTPS only, forbidden ranges, CheckRedirect returns ErrUseLastResponse. Make Secret write-only and add rotation. (3) Edge: org-scoped CRUD (/v1/webhooks) and GET /v1/webhook-deliveries, plus a per-request webhook field on crawl, batch and agent requests; wildcard filters already work. (4) Optional payloadTemplate later. (5) ZDR orgs: payload is ids and status only. Matches the ROADMAP Phase 9 item \"crawl errors/status/webhook parity\".",
+      "effort": "M",
+      "dependencies": [
+        "Edge org scoping for control resources",
+        "Public async job lifecycle (status/cancel routes) so webhooks have something to report",
+        "Shared Go egress guard (extract from integration-corev2 or port)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "SSRF to internal services (cloud metadata, other planes) if the guard is skipped; cross-tenant event leakage if fan-out is not org-filtered; payload content under ZDR; secret rotation and replay windows. Ship the guard and org filter before any tenant-facing route.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:58-62 (Phase 9 crawl errors/status/webhook parity); tenant scoping and SSRF guard not mentioned"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-10-005"
+      ]
+    },
+    {
+      "id": "R-t2-10-03",
+      "title": "Domain-matched provider capability hints: serve the action catalog from integration-corev2 and surface it when the agent browses a provider site",
+      "summary": "Make integration-corev2 publish a versioned, machine-readable operation catalog (provider, operation, isWrite, params schema, provider domains) and have Model Plane load it instead of the hard-coded CATALOG. When a Quarry observation lands on a host that maps to a provider the org has connected, offer that provider's matching read/write actions for the next step (or a \"connect this provider\" suggestion card when no connection exists) instead of brittle UI clicking. Cap the hint to a few operations to avoid tool-list bloat.",
+      "whyItMatters": "When the agent is on a GitHub, Meta, LinkedIn, Google or Shopify page it can switch to a governed API action: faster, cheaper, auditable, with approvals and idempotency already in place and no sensitive browser grant. It directly reduces browser load and risk and ties the two planes together at low cost.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (scrape/search returns provider tools matched by domain or semantic query; one execute endpoint)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Firecrawl only); unique",
+        "mechanism": "Catalog entries {provider, capability, description, inputSchema, price, domains[]}; discovery matches the URL host to a provider (or does semantic search over descriptions) and returns data.tools with matchedBy domain|semantic and matchedUrls; execution is a single endpoint taking [{provider, capability, options}] with a caller request id; limited to 24 tools in a 10 s budget, three detail levels, and refused under ZDR because it calls an external exchange. Verevon keeps discovery internal so ZDR is unaffected."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:60-75 (hard-coded curated CATALOG of operations; comment warns that too many near-duplicate tool names degrade selection)",
+          "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:257-263 (list_provider_actions lists the run org's live connections, tenant-scoped)",
+          "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:68-86 (Provider struct has Capabilities and Bundles but no domains field)",
+          "apps/Ingestion Plane/integration-corev2/internal/api/server.go:376,514 (per-connection capabilities and discovery routes)",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:123 (scrape output carries final_url)"
+        ],
+        "gap": "The agent sees a static curated operation list for connections the org already has. There is no domain-to-provider matching from browsed URLs, no input schemas in an IC-served catalog (operations are string switch arms, so no declarative registry exists), and no suggestion to connect a provider when the agent browses its site."
+      },
+      "approach": "Ingestion Plane (integration-corev2) + Model Plane (execution-core). IC: add Domains []string to providers.Provider and a declarative operation registry in internal/actions (name, isWrite, params schema) that the Execute switch and a new GET /internal/catalog endpoint both read; version it. Model Plane execution-core: replace CATALOG with a cached IC catalog fetch per org, and add a host-to-provider matcher run on each browser observation (canonical registrable domain from the observation URL). Inject at most N matching operations as a \"provider hint\" in the next step, marking writes as approval-gated, or emit a connect-provider suggestion. Execution keeps using the existing named-operation path (execute_provider_action) with approvals, so no new write surface.",
+      "effort": "M",
+      "dependencies": [
+        "IC declarative operation registry and catalog endpoint with schemas",
+        "Browser observations carrying the canonical URL/host to Model Plane (verify per step event)",
+        "Model Plane tool-selection budget so hints do not flood the prompt"
+      ],
+      "planeOwner": "Model Plane (with an Ingestion Plane catalog endpoint)",
+      "risks": "Tool-list bloat degrading model choice (the CATALOG comment already warns); stale or wrong domain mappings pointing the agent at the wrong provider; showing connect suggestions for providers the org's policy disallows.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-10-009"
+      ]
+    },
+    {
+      "id": "R-t2-10-04",
+      "title": "Expose Quarry and read-only connector actions to external agents through an MCP front with audience-bound OAuth and a privacy-minimised tool-call log",
+      "summary": "Build an MCP server front (Frontend Plane gateway domain or a dedicated edge service, not inside Quarry) that publishes search, scrape, map, extract, crawl-status and read-only provider actions to customers' own agents (Claude Code, Codex, Cursor). Authenticate with OAuth from Control Plane auth-core (resource indicators, audience-bound tokens, protected-resource metadata, introspection cached by token hash), translate calls to Quarry edge and IC with a short-lived purpose-tagged service token, and write one metadata-only audit row per call. Writes stay behind an in-product approval. As a standalone first step, classify MCP tool data categories at registration instead of 'unclassified'.",
+      "whyItMatters": "Gives Verevon the developer-ecosystem parity both Firecrawl and Apify have, and lets customers use Verevon's governed web layer and connectors from their own agents with ZDR and audit intact. The audit companion also improves admin visibility of agent MCP usage today.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (hosted MCP with OAuth introspection and audience binding; delegated short-lived HMAC credential; per-call tool log)",
+        "others": [
+          "Apify (one-command MCP install into about 12 coding agents, framework wrappers for LangChain, OpenAI Agents SDK, CrewAI)"
+        ],
+        "prevalence": "2 of 4 sources (both web platforms) for MCP exposure; per-call audit log in 1 of 4; common",
+        "mechanism": "The MCP service advertises protected-resource metadata in WWW-Authenticate, introspects the OAuth token (active, exp, aud == the MCP resource, credential_purpose) with a cache keyed by token hash that is isolated from outages. To call the core API it mints a short-lived signed credential {v, aud core, purpose, subject, iat, exp} (exp <= 120 s, iat skew <= 30 s) verified with a constant-time HMAC; the user token is never forwarded. Each call POSTs one row (tool, client, auth type, status, error class, request id) to an internal ingest; the team view omits objective/job id fields and ZDR teams get 202 with nothing stored."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1-20 (registry proxy to Model Plane MCP-server registry only)",
+          "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:30,112-113 (MCP server explicitly deferred: Verevon is the client; revisit only if third-party agent access becomes a goal)",
+          "apps/Control Plane/auth-core/src/auth/auth.ts:1066-1100 (Better Auth oidcProvider with optional dynamic client registration, behind OIDC_PROVIDER_ENABLED)",
+          "apps/Model Plane/rust/services/model-gateway/src/audit.rs:1-22 (reserve-before-execute audit outbox; MCP tools classed unclassified)",
+          "apps/Ingestion Plane/integration-corev2/internal/api/audit_outbox.go:46-48 (durable audit outbox to Audit Core for connection.action.* events)"
+        ],
+        "gap": "No MCP server, CLI, skills or framework wrappers for Quarry or IC, and no audience-bound token validation for external agent clients. Verevon consumes MCP (hardened client) but does not expose it. Tool-call audit exists internally but MCP calls are 'unclassified' and no team-readable, privacy-minimised tool-call view was found (Audit Core not inspected)."
+      },
+      "approach": "Frontend Plane gateway (Rust) or a new small edge service owns the MCP front; Control Plane auth-core is the authorization server (reuse the existing oidcProvider, enable DCR for MCP clients, add resource-indicator audience binding and an introspection endpoint; verify what the plugin already supports). Calls go to Quarry edge and IC with a short-lived, purpose-tagged service token from the cross-plane manifest, scoped to org and user. Tool set mirrors execution-core read tools (search, scrape, map, extract, crawl status, list_provider_actions, read actions); write actions create a pending approval in the product and return its id, never executing without in-product approval; browser control is explicitly out of scope until grants and approvals work for external callers. Audit: emit one tool.call event per invocation (tool, client id, auth type, status, error class, request id, no arguments or objective) through the existing outbox to Audit Core with a team query view; ZDR records metadata only. Phase 0 (S): classify MCP tool data categories at capability-core registration. Later: a CLI, skills and framework wrappers once request shapes stabilise.",
+      "effort": "L",
+      "dependencies": [
+        "Owner decision to reverse the OSS_PARITY_BACKLOG deferral (third-party agent access becomes a goal)",
+        "Auth-core OAuth server with resource indicators/introspection (existing oidcProvider; scope of support to confirm)",
+        "Stable Quarry request shapes and a public async job lifecycle",
+        "Audit Core view for tool-call events"
+      ],
+      "planeOwner": "Frontend Plane (MCP front) with Control Plane (OAuth, audit view)",
+      "risks": "Bypassing Model Plane approvals if writes are exposed; quota and abuse from external clients; ZDR propagation to clients outside Verevon; token replay across resources if audience is not enforced; logging arguments would leak intent and break ZDR; a second path into Quarry that skips the Model-proposes/Quarry-executes rule if browser actions are ever exposed.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": "Explicitly deferred (OSS_PARITY_BACKLOG.md:30,112-113); not on the roadmap"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-10-007",
+        "C-t2-10-008"
+      ]
+    },
+    {
+      "id": "R-t2-10-05",
+      "title": "Slack as an agent entry point and alert destination on the existing Integration/Conversation transport",
+      "summary": "Slack inbound and outbound already work as an Inbox channel. Extend that transport in two small ways: (a) handle app_mention and slash-command events by creating a Model Plane run through conversation-core, with sender-to-Verevon-principal pairing and channel content labelled as untrusted; (b) add a Slack destination to notification-core that posts through the existing IC Slack send operation so Quarry change-monitor and run alerts can land in a channel. Add double opt-in and unsubscribe only if non-member email recipients are ever allowed.",
+      "whyItMatters": "Meets users where they work: starting a governed web-research or monitoring task from Slack, and getting change alerts in a channel, are common asks. The signed-intake, normalisation and reply plumbing is already built, so the marginal cost is mostly identity pairing and policy.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (Slack app: OAuth install with encrypted bot token, signature-verified commands/events, ack within 3 s then async work, chat.postMessage replies) plus its monitor alert destinations (webhook, Slack, up to 25 email recipients with double opt-in and unsubscribe tokens)",
+        "others": [
+          "Aside (more channels; channel-origin requests labelled untrusted; sender pairing required)"
+        ],
+        "prevalence": "2 of 4 sources for chat entry points (differentiator); 1 of 4 for consented alert destinations (unique)",
+        "mechanism": "OAuth install stores an encrypted bot token per workspace; /commands and /events endpoints verify the Slack signing secret and timestamp, ack within 3 s and enqueue the work; replies go to a stored channel id. Aside treats unpaired senders as untrusted context. For alerts, recipient rows carry pending|confirmed|unsubscribed with 256-bit tokens and public confirm/unsubscribe routes; only confirmed recipients get alerts; diffs are optional."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/integration-corev2/internal/api/server.go:980-1000 (POST /api/v1/webhooks/:provider with signature verification and Slack url_verification challenge echo)",
+          "apps/Ingestion Plane/integration-corev2/internal/api/server.go:2548-2578 (Slack v0 HMAC signature check with 300 s replay window)",
+          "apps/Application Plane/conversation-core/conversation-core-go/internal/consumers/webhook_received_consumer.go:624-690 (Slack event_callback messages normalised into Inbox events; bot and subtype events skipped; thread refs kept for replies)",
+          "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:97-300 (slack and discord providers)",
+          "apps/Application Plane/notification-core/internal/feed/types.go:15-20 (channels in_app, email, sms, push; no slack)",
+          "apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md (Channel Plane is docs-only, aimed at external visitor/commerce channels)"
+        ],
+        "gap": "Slack message events become Inbox conversations, but nothing turns an app_mention or slash command into an agent run, no Slack-user-to-principal pairing was found in the code paths read (not an exhaustive search), and notification-core has no Slack destination or external-recipient consent flow. The earlier comparator spot check reported no Slack signature handling; grep shows it exists in IC."
+      },
+      "approach": "Application Plane. conversation-core: extend normalizeSlackWebhookPayload to recognise app_mention and slash-command payloads (IC intake already verifies signatures and acks fast by publishing to NATS), look up the Slack user in a pairing table (Control Plane identity link) and, when paired, start a run via the existing Application-to-Model path under that principal's authority; unpaired senders stay inbox-only. Tag content as untrusted channel input. Replies use the IC Slack send operation. notification-core: add a slack channel type that calls the IC Slack write action (no tokens held in notification-core) with org-level channel config, ids-only text under ZDR. Do not wait for Channel Plane: it targets external deployed-agent channels, not internal Slack use.",
+      "effort": "M",
+      "dependencies": [
+        "Slack-user to Verevon-principal pairing in Control Plane",
+        "IC Slack chat.postMessage send operation reachable from notification-core (conversation-core already uses a send operation)",
+        "Decision on Application Plane vs future Channel Plane ownership"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Prompt injection from other channel members; identity spoofing or unpaired senders acting with another user's authority; Space ACL widening if channel members are not Verevon principals; spam and consent problems if external email recipients are added without opt-in; ZDR (no diffs in alert text).",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-10-004",
+        "C-t2-10-012"
+      ]
+    },
+    {
+      "id": "R-t2-10-06",
+      "title": "Quarry SDK call-and-wait helper and a first no-code connector (n8n node)",
+      "summary": "Add hand-written ergonomics on top of the OpenAPI-generated TypeScript and Python Quarry SDKs: a call-and-wait helper (submit crawl/batch/agent run, poll or subscribe, return results) and typed result iterators. Once outbound webhooks are tenant-safe, publish an n8n community node (self-hostable, open source) wrapping start-run, wait and fetch-results; Zapier and Make only if demand appears.",
+      "whyItMatters": "Distribution channel for the public Quarry API and cheap parity with Apify's run-and-chain pattern. It matters less for an AI-first product whose own agents orchestrate work, so it is a go-to-market item, not a core capability.",
+      "referenceBestPractice": {
+        "bestSource": "Apify (official Make, Zapier, n8n, Gumloop apps plus an SDK call() helper that blocks until the run ends)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Apify only; DOC records only); unique",
+        "mechanism": "Published connector apps per platform wrap the REST API (start run, poll/wait, fetch dataset items); the SDK call() helper starts a run, waits for completion and returns, enabling chained runs."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/sdks/typescript/src/apis (OpenAPI-generated clients: ScrapeApi, CrawlApi, BatchApi, AgentApi, SchedulesApi, ...)",
+          "apps/Ingestion Plane/Quarry-v2/sdks/python/quarry_client (generated Python client)",
+          "apps/Ingestion Plane/Quarry-v2/docs/TRANSPORT.md:22 (n8n named only as a reason to favour OpenAPI)",
+          "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:58-62 (Phase 9 lists SDK ergonomics)"
+        ],
+        "gap": "Generated SDKs exist; no hand-written wait/poll helper was found in sdks/typescript/src (only generated runtime.ts) and no Zapier/Make/n8n artefacts exist in the repo."
+      },
+      "approach": "Ingestion Plane, Quarry-v2 sdks/. Add a thin non-generated layer (kept outside the regenerated folders so sdks/generate.sh does not overwrite it) with startAndWait(kind, request, {timeout, onEvent}) using job status/events routes. Later, an n8n node package in a new repo folder calling the edge API with an API key; no plane changes.",
+      "effort": "M",
+      "dependencies": [
+        "Stable public async job lifecycle and org-scoped webhooks (R-t2-10-02)",
+        "Stable Quarry request shapes"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "API surface lock-in before Quarry request shapes stabilise; maintenance of third-party app listings.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 3,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Quarry-v2/docs/ROADMAP.md:58-62 (Phase 9 SDK ergonomics) covers the helper only; no connector apps planned"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-10-006"
+      ]
+    },
+    {
+      "id": "R-t2-10-07",
+      "title": "Render MCP App (ui://) resources in an opaque-origin sandbox, and retire the permissive web-view iframe",
+      "summary": "Support interactive UI returned by MCP servers: Frontend Plane renders MCP App resources in an opaque-origin iframe served from a separate sandbox origin with a strict CSP and scheme allow-list, with a postMessage bridge that proxies tool calls through the gateway to Model Plane approvals. In the same change, delete or constrain the unused WebPageViewer iframe that combines allow-scripts with allow-same-origin.",
+      "whyItMatters": "Lets integration results (forms, pickers, dashboards from MCP servers) appear inline and be operated safely, and removes a latent client-side security hazard. It is emerging and not a parity blocker.",
+      "referenceBestPractice": {
+        "bestSource": "Codex in-app browser (MCP App guest view on a dedicated sandbox origin, only about/blob/data/https/wss allowed, permission requests denied, agent limited to locator actions)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Codex only); unique",
+        "mechanism": "Render MCP App resources in a guest view on a separate sandbox origin; a session request filter allows only safe schemes; permission requests are denied; attach requests are queued with expiry; the agent drives the view through accessibility locators, never raw script."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:495-518 (model-generated HTML in srcdoc iframe with sandbox=\"allow-scripts\" and deliberately no allow-same-origin, referrerpolicy no-referrer)",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx:147-192 (WebPageViewer: iframe src is a result URL with allow-scripts and allow-same-origin; grep finds no importer, so it appears unused)",
+          "grep for ui://, resourceUri and the mcp-app mime type across Model Plane services and verevonv3 src/apps found no match"
+        ],
+        "gap": "Chat artifacts are correctly sandboxed, but there is no MCP Apps rendering, no postMessage tool bridge and no agent operation of rendered widgets. WebPageViewer would load third-party pages directly in the user's browser with same-origin retained and no URL scheme check if it were ever wired in, which also bypasses Quarry's egress, ZDR and SSRF controls."
+      },
+      "approach": "Frontend Plane. Add an McpAppFrame component next to ChatArtifactPanel using the same sandbox=\"allow-scripts\" opaque-origin pattern, served from a separate sandbox domain with CSP (no network except an allow-list), and a postMessage bridge that sends tool-call requests to the gateway, which routes them to Model Plane (approvals apply). Needs Model Plane MCP gateway support to pass ui:// resources through. Remove WebPageViewer or replace it with the Quarry-backed remote browser view.",
+      "effort": "M",
+      "dependencies": [
+        "Model Plane MCP gateway/runtime support for UI resources in tool results",
+        "A separate sandbox origin/domain and CSP"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Sandbox escape if allow-scripts and allow-same-origin are ever combined on same-origin content; phishing UI inside widgets; widgets triggering tool calls that skip approvals.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-10-015"
+      ]
+    },
+    {
+      "id": "R-t2-10-08",
+      "title": "Evaluate driving the user's own signed-in browser through an attested extension executor (design spike only)",
+      "summary": "Write an ADR and prototype scope for an extension plus native-host bridge that lets the user's own Chrome/Edge profile act as a Quarry executor kind. To keep the Model-proposes/Quarry-executes rule, the extension would only run actions that Quarry has already validated against a BrowserBroker grant and would return receipts to Quarry; it must not take instructions from the Model Plane or the SPA directly. Do not start implementation until the connector-to-browser bridge and Quarry profile login hand-off have shipped.",
+      "whyItMatters": "Users want agents to use sites where they are already signed in, without re-authentication. It is an alternative to R-t2-10-01 for authenticated access, but it weakens the server-side containment that makes ZDR, egress proof and grants enforceable.",
+      "referenceBestPractice": {
+        "bestSource": "Codex browser plugin (Chrome extension plus Rust native messaging host bridged to the app server)",
+        "others": [
+          "Aside (the product itself is the user's browser)"
+        ],
+        "prevalence": "1 of 4 sources for the extension and native-host pattern (Codex only); unique",
+        "mechanism": "Extension to native host over stdin/stdout; native host to app server over a local WebSocket or named pipe; the manifest pins extension ids and required protocol versions with explicit update-required errors; tab-context assets are written in bounded chunks."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:204-261,384-428 (browser sessions and tabs are all remote Quarry sessions via the gateway)",
+          "CLAUDE.md gateway rule: the browser never sees CDP endpoints, Quarry tokens or provider secrets",
+          "findings/t2/v-browser-app.baseline.md section 7 (extensions absent)"
+        ],
+        "gap": "No extension or native host; all browsing is a remote leased Chromium in Quarry. This is deliberate and enforces ZDR, egress control and grants server-side."
+      },
+      "approach": "Frontend Plane (extension, distribution) plus Ingestion Plane (a new executor kind registered with Quarry) plus Model Plane (BrowserBroker grant). Start with an ADR; a prototype would register the extension as a lease provider attested by a device key, with egress proof and ZDR weaker than remote Chromium and clearly labelled.",
+      "effort": "XL",
+      "dependencies": [
+        "Production BrowserBroker grant issuance",
+        "R-t2-10-01 (secret bridge) and Quarry profile login hand-off, to measure how much of the need they already meet",
+        "Extension distribution channel"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Exposes the user's full signed-in profile to agent actions; hard to audit; conflicts with Quarry executes and with ZDR/egress guarantees; extension permissions and store review burden.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-10-017"
+      ]
+    },
+    {
+      "id": "R-t2-10-09",
+      "title": "Browser-session and tab references in the chat composer",
+      "summary": "Add a mention token for a live browser session or tab (for example verevon://browser-session/<id>/tab/<id>?title&url) to the chat composer. Model Plane resolves it server-side through a Quarry session ownership check on org and actor, validates the title and URL against the live tab, and never treats the mention as a grant.",
+      "whyItMatters": "Lets users point the agent at the exact page they are looking at in the in-app browser. Small UX win.",
+      "referenceBestPractice": {
+        "bestSource": "Codex browser plugin (plugin://browser mention=tab-v1 with browserId, tabId, title, url, validated against the live tab)",
+        "others": [],
+        "prevalence": "1 of 4 sources (Codex only, from bundled docs); unique",
+        "mechanism": "The mention carries browserId, tabId, title and url; the resolver selects the matching browser or profile and checks that the snapshot title and URL still match the live tab before use."
+      },
+      "verevonToday": {
+        "status": "unknown",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:384-428 (session tabs list/select/close routes exist, so session and tab ids are addressable)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:25-45 (existing @-mention covers roster people and agents; documented rule that a mention never grants)"
+        ],
+        "gap": "No baseline record. The Space composer mention list covers people and agents, not browser sessions; whether the main chat composer can reference a live browser session or tab was not found."
+      },
+      "approach": "Frontend Plane composer adds the token; the gateway resolves it server-side (org plus actor ownership of the Quarry session) before anything reaches Model Plane, reusing the pattern in SpaceRoomComposer where mentions are re-resolved server-side and never grant access.",
+      "effort": "S",
+      "dependencies": [
+        "Live session ownership API exposed through the gateway"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Referencing another actor's session would widen the ACL; ownership must be checked server-side and stale tab ids rejected.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-10-018"
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t2-10-014",
+      "reason": "Speculative: it only matters once Verevon hosts first-party previews that users open inside the remote Quarry browser; no such surface was found (Studio Plane is a composition plane, chat artifacts render client-side). Revisit when one exists, and check residency propagation into Quarry session placement under the browser-session category instead."
+    }
+  ],
+  "strengthsToKeep": [
+    "Idempotent, receipted provider writes (ahead of Firecrawl): idempotency key required, request SHA-256 conflict detection, signed user attestation, executing/completed/unknown receipts inside an audit transaction with outbox to Audit Core (apps/Ingestion Plane/integration-corev2/internal/api/server.go:3093-3300, internal/api/audit_outbox.go:46, internal/attestation/verifier.go).",
+    "MCP client hardening (ahead of Aside): public HTTPS only, redirects refused, DNS pinned on every dial, OAuth discovery/DCR/token hops re-validated, 15-minute DNS revalidation with quarantine, mandatory exact tool allow-list (apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:426-465, mcp_oauth.rs:110-163, apps/Model Plane/go/services/capability-core/internal/api/mcp_dns_revalidator.go:14-30).",
+    "Credential-injecting connector proxy for agents: AES-GCM token vault, short-lived internal token broker, named whitelisted operations only (raw proxy returns 410), write actions approval-gated (apps/Ingestion Plane/integration-corev2/internal/crypto/vault.go:16-20, internal/api/server.go:1315, apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:14).",
+    "Webhook delivery mechanics are ahead of Firecrawl: five attempts with backoff to a DLQ and timestamped HMAC signatures (apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-33,107-123); only tenancy and SSRF need work (R-t2-10-02).",
+    "Signed Slack intake with replay window, immediate ack and NATS hand-off to conversation-core is the same ack-then-async pattern Firecrawl uses (apps/Ingestion Plane/integration-corev2/internal/api/server.go:980-1000,2548-2578; apps/Application Plane/conversation-core/conversation-core-go/internal/consumers/webhook_received_consumer.go).",
+    "Knowledge sinks go only through the Data Plane ingest contract with tenant isolation; do not copy Firecrawl's cross-tenant shared index (apps/Ingestion Plane/integration-corev2/internal/handoff/dataplane.go:92-182).",
+    "SCIM provisioning exists; never adopt Firecrawl's secret-in-URL admin gate (apps/Ingestion Plane/integration-corev2/internal/api/server.go:1133-1208).",
+    "Chat artifact preview uses an opaque-origin sandbox (allow-scripts without allow-same-origin) with the rationale documented in code (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:495-518)."
+  ]
+}

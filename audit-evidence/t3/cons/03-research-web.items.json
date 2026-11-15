@@ -1,0 +1,674 @@
+{
+  "category": "Research & web",
+  "items": [
+    {
+      "id": "R-t3-03-01",
+      "title": "Deep research: clarifying questions, editable plan and mid-run steering",
+      "summary": "Split run_deep_research into a plan phase and a run phase. The plan phase ends with a plan_proposed event carrying the sub-queries (max 9), an optional allowed-domain scope and, for broad questions, one to three clarifying questions. The user edits or approves it (or turns on auto-start), then the run phase executes the approved plan, streams interim findings per sub-query, and accepts an added question or refocus while it runs.",
+      "whyItMatters": "Plan editing stops wasted multi-minute paid runs, gives the user authority over scope and sites before any egress, and delivers the transparency goal that the DeepSeek harness sets for Verevon. It is the difference users see first when they compare Verevon research with ChatGPT and Perplexity.",
+      "referenceBestPractice": {
+        "bestSource": "ChatGPT deep research (web-chatgpt, DOC)",
+        "others": [
+          "Perplexity advanced research (web-perplexity, DOC): interim key findings and a streamed editable report",
+          "Claude research (claude-product-ux-075, SRC): explicit 'research plan created' state",
+          "Manus start card (SRC): an 'Always auto-start' opt-out, a pattern to reuse for plan approval"
+        ],
+        "prevalence": "3 of 11 sources; differentiator",
+        "mechanism": "Run state machine: clarify (optional, only when the query is broad) -> plan_proposed (structured sub-questions plus allowed or prioritised domains) -> user edits or accepts -> running, emitting source-reading and finding events -> a follow-up or changed site list injected mid-run re-plans the remaining steps -> report streamed incrementally. ChatGPT lets the user interrupt to refocus or restrict sources (Sites > Manage sites)."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:2539-2550",
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:2809",
+          "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:307-322",
+          "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:353-360",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9998",
+          "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1120-1126"
+        ],
+        "gap": "SRC: the plan is shown as one checklist row per sub-query and the Kilder tab fills before synthesis, but the run starts immediately. plan_proposed exists only for Do-mode plan runs (sse.rs:9998); queued_input is delivered at tool-round boundaries of the agent loop, which the deep research pipeline does not have. No clarifying questions, no approve or edit step, no per-run site scope, no interim findings, no add-a-question while running."
+      },
+      "approach": "Model Plane (model-gateway): refactor run_deep_research (deep_research.rs:2413) into plan() and execute(plan). Use a two-request flow so no stream is held open: request 1 ends after emitting plan_proposed with a plan_id, sub-queries and domain scope (and clarifying questions as a typed list); request 2 carries the approved or edited plan, which the server re-validates against the existing caps (max 9 sub-queries, domain list syntax) and never trusts beyond them. Echo the plan statelessly so nothing is persisted under ZDR. Check a mid-run queued_input at phase boundaries (INF: a new delivery point, the pipeline has no tool rounds) and add the question as an extra sub-query. Emit a finding event per finished sub-query. Frontend: editable plan card and interim-findings list in the Work tab of the live run panel, an add-a-question input, and an auto-start setting that skips the approval. Reuse plan-gate semantics from apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-wave2-specs-2026-09-28/plan-gate.md.",
+      "effort": "M",
+      "dependencies": [
+        "Shares the deep_research.rs refactor with R-t3-03-02 (build the plan/run split first)",
+        "Route decision: deep_research is rejected on the ChatGPT subscription (Terra) route (apps/Model Plane/rust/services/model-gateway/src/normalize.rs:312), so live proof needs a permitted route"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "An extra round trip adds friction, so approval must be skippable (auto-start). Client-supplied plans are untrusted input and must be re-clamped server-side. Mid-run injection of text must pass the same screening as other queued input. Live proof is blocked on the subscription route until the owner decides how deep research may be tested (the gap closure plan, line 67, says live tests run only on Terra).",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-03-007"
+      ]
+    },
+    {
+      "id": "R-t3-03-02",
+      "title": "Deep research v2: gap-driven second pass, claim ledger and knowledge sources in one cited report",
+      "summary": "Extend deep_research.rs from one pass to two. After pass 1, extract a claim-to-source ledger from the pages actually read, run a gap and conflict prompt that issues up to N targeted follow-up queries and reads the best new pages with longer evidence windows, and stop when new sources add few new claims or the budget is hit. Add Data Plane v2 retrieval (and, once R-t3-03-04 lands, read-only connector reads) as extra source origins so one report cites web, knowledge and connector sources, keeping the read-only-numbering and 'Kunne ikke verifiseres' invariants.",
+      "whyItMatters": "Research is a headline use case that buyers compare directly with Perplexity, ChatGPT and Claude. A targeted second pass is the visible quality jump, and web plus the organisation's own knowledge in one cited report is where the Data Plane moat shows and the references cannot follow.",
+      "referenceBestPractice": {
+        "bestSource": "Codex deep-research skill (codexagent-plugins-and-extensibility-097, DOC) for method; Perplexity (web-perplexity-web-product-034, DOC) for scale",
+        "others": [
+          "ChatGPT deep research (DOC)",
+          "Claude research (DOC)",
+          "Manus wide research (SRC) for breadth"
+        ],
+        "prevalence": "5 of 11 sources; common (reference evidence is DOC-only)",
+        "mechanism": "Loop: plan sub-questions -> pass 1 broad search and read -> extract claims into a claim-to-source ledger -> identify gaps and conflicts -> pass 2 targeted queries -> stop when new sources add little (diminishing-returns test) or the budget is hit -> synthesise from the ledger only, labelling inference -> render and check the artifact. Corpus = web + uploaded files + read-only connector actions. Source hierarchy and conflict handling are explicit."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:1-48",
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:131",
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:174",
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:240-246",
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:2413",
+          "apps/Model Plane/rust/services/model-gateway/src/normalize.rs:312"
+        ],
+        "gap": "SRC: one pass (plan up to 9 sub-queries, concurrent search, read of 16 pages, one synthesis with [n] citations, mandatory 'Kunne ikke verifiseres' section, document artifact, wall clock bound). No ledger, no gap or conflict round, no stop test. Each page contributes only DEFAULT_PAGE_CHARS = 4,000 characters (ceiling 20,000). Grep of deep_research.rs finds no knowledge_search or connector call (checked 2026-10-14), so it is web-only. The module doc says it deliberately dies with the stream and does not use Temporal. The subscription route refuses deep_research."
+      },
+      "approach": "Model Plane (model-gateway, deep_research.rs): after the read phase, run a ledger-extraction inference over the read passages (structured JSON: claim, source number, quote span), then a gap or conflict inference that returns at most N follow-up queries (reuse the existing search and read helpers and caps; add DEEP_RESEARCH_PASS2_* env knobs clamped like the others). Stop test: skip pass 2 when pass 1 had no gaps or when pass-2 sources add fewer than K new ledger claims. Synthesis reads from the ledger. Add a knowledge origin by calling the same Data Plane v2 retrieval that knowledge_search uses (tool_loop.rs:3375 area) under the turn's source scope (Auto, KnowledgeOnly, WebOnly), numbering knowledge sources only when their text was actually retrieved. Add a connector origin only after R-t3-03-04. Use longer page windows in pass 2 via the chunked reader from R-t3-03-05. Only move to the existing orchestrator-core DeepTask workflow if the run must outlive the stream.",
+      "effort": "L",
+      "dependencies": [
+        "R-t3-03-01 (plan and run split)",
+        "R-t3-03-05 (read_page chunks for pass 2)",
+        "Data Plane v2 retrieval",
+        "R-t3-03-04 for the connector origin",
+        "orchestrator-core DeepTask workflow (optional, apps/Model Plane/go/services/orchestrator-core/cmd/workflows/deep_task.go)",
+        "Route decision for live proof (the subscription route refuses deep_research)"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Longer runs raise cost (synthesis input tokens are the dominant cost per the module doc) so every new pass needs a cap. ZDR must block persisting the ledger. Knowledge and connector content in a report must respect owner-plane ACLs (Space access never widens them) and carry untrusted or personal trust classes. Do not weaken the honesty invariants: unread sources stay uncitable.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-03-006"
+      ]
+    },
+    {
+      "id": "R-t3-03-03",
+      "title": "Wide research: user entry point, honest estimate and spend gate, per-item retry, replay after reload",
+      "summary": "Give the existing subagent.research_fan_out engine a product surface. Add a 'Bred forskning' control with item-count presets, a start card that states the expected scale before anything is spawned (items x rounds x minutes, plus cost on metered routes), a status grid of per-item cards with retry for failed or refused items, a mid-run progress and spend check after the first N items (Continue or Wrap up now), and durable per-item results so the grid survives a reload. Under ZDR the grid stays live-only.",
+      "whyItMatters": "Wide research is Manus's signature feature and serves Verevon's B2B lists (suppliers, competitors, leads). The engine is already paid for; without an entry point, a cost statement and retry it is unusable and unsafe, and a cost gate fits Verevon's honest-cost stance.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (manus-product-ux-038 SRC UX, web-manus-web-product-023 DOC architecture)",
+        "others": [
+          "Manus web (DOC): plan limits on concurrency and task count"
+        ],
+        "prevalence": "2 of 11 sources (both Manus); differentiator",
+        "mechanism": "Controller decomposes into independent items -> estimate a cost range from per-item budget x item count -> start card with Start or 'Always auto-start' -> spawn up to K concurrent isolated sub-runs, each in its own context -> stream per-item status into a 3-column grid with replay link and retry -> after the first N items compute actual spend and show a Skip or Continue card -> 'Wrap up now' -> controller merges structured per-item results. Sub-agents never talk to each other."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs:1-60",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2331",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.tsx:1-30",
+          "apps/Model Plane/deploy/docker-compose.yml:1063-1074",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-wave2-specs-2026-09-28/wide-research.md:20-26",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:180",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:447-449"
+        ],
+        "gap": "SRC: engine exists (one tool call, N parallel items, structured per-item results merged in order, kill switch WIDE_RESEARCH_FAN_OUT_ENABLED, default concurrency 4) and live cards by batchId exist. Missing: a composer entry point (planned C6), a pre-run estimate and accept gate, a mid-run spend check, per-item retry, durable replay (cards come back empty after reload, planned C7), and scale (default 4 rounds and 2 subagents on the subscription route; 12/24/48 presets wait on owner decision OD7). Do mode only. DOC: on the subscription route cost-core meters nothing (CostBasis::Subscription), so a USD budget is a no-op there."
+      },
+      "approach": "Model Plane execution-core: add an estimate step before spawning that is computed from item count, round budget and observed per-item p50 time, and expressed in items, rounds and minutes (USD only when the route is metered, via a run-scoped cost-core check such as the planned cost_guard.rs). Emit an awaiting-approval style start card that the user can set to 'always auto-start', and after the first N completed items emit a progress and spend card with Continue or Wrap up now. Persist the batch and per-item results in session-core so replay works after reload, and add a retry action per item that re-spawns only that child (research-only toolset, C8). Long batches run through the existing WideResearch Temporal workflow (apps/Model Plane/go/services/orchestrator-core/cmd/workflows/wide_research.go). Frontend: 'Bred forskning' control, estimate card, grid with retry, spend card. Under ZDR skip persistence and degrade to a live-only grid.",
+      "effort": "L",
+      "dependencies": [
+        "C3, C4, C5, C6, C7, C8 (planned in the gap closure plan)",
+        "cost-core run-scoped budget (ledger GetRunUsage, GET /api/v1/cost/run)",
+        "session-core persistence",
+        "orchestrator-core WideResearch workflow",
+        "C9 credential lifetime for long runs",
+        "Owner decision OD7"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Spend blowouts and provider rate limits at scale. OD7 recommends no confirm gate in v1; the estimate card should therefore default to informational for small runs and gate only above an org-set size. Credential lifetime caps wide research at about 6 to 8 items on Terra without C9. ZDR forbids durable replay.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 3,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md rows C3, C4, C5, C6, C7, C8, C9 and decision OD7 (line 447); apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-wave2-specs-2026-09-28/wide-research.md section 2.2 (cost_guard.rs). The estimate card, mid-run spend check and per-item retry are not in the plan."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-03-008"
+      ]
+    },
+    {
+      "id": "R-t3-03-04",
+      "title": "Connected apps in chat: finish the Model Plane read path, Ask-mode reads, @-mention scoping and connector citations",
+      "summary": "The Ingestion Plane already exposes real read operations (mail search and get-by-id, calendar windows, Drive search and file content). Close the Model Plane half. Update the execution-core agent catalogue to the real operations and add the planned read-only provider tool that does not stall on approval, then expose the same reads in plain Ask mode through a model-gateway tool behind the source-scope filter. Add @connector mention and a per-turn account chip, and cite connector content in the Sources panel with origin=connector.",
+      "whyItMatters": "Research over the user's own mail, files and calendar is a baseline expectation (ChatGPT, Claude, Manus, Perplexity and Antigravity all offer it) and is where enterprise value sits. Today it works only in Do mode, which is not the default surface.",
+      "referenceBestPractice": {
+        "bestSource": "ChatGPT connectors (web-chatgpt-web-product-043, DOC) for breadth and read vs write gating; Manus (manus-product-ux-041, SRC) for per-task toggles and account defaults",
+        "others": [
+          "Claude connectors (SRC)",
+          "Manus web (DOC)",
+          "Perplexity (DOC)",
+          "Antigravity (SRC)"
+        ],
+        "prevalence": "6 of 11 sources; table-stakes",
+        "mechanism": "Connector registry (OAuth per user, optionally per org) -> per-connector action catalogue tagged read or write -> per-task enablement and account selection resolved explicit > project > user default -> agent calls actions, writes need approval -> an @mention narrows the turn to one connector."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:208-300",
+          "apps/Ingestion Plane/integration-corev2/internal/actions/mail_read.go",
+          "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:8-40",
+          "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:73-135",
+          "apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:1-30",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3588-3696",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:160-164",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:268"
+        ],
+        "gap": "SRC (checked 2026-10-14, and corrects the earlier baseline): integration-corev2 now implements mail.messages with search, folder and paging, mail.messages.get, gmail.messages.get, drive.files with search, drive.file.content and windowed calendar reads. execution-core's agent-facing catalogue still describes the old shapes (Gmail ids only, Drive root only) and lists none of the get or content operations. INF: the planned read-only provider tool (F6, flag PROVIDER_READ_TOOL_ENABLED) is not in code or compose. Provider tools remain Do-mode only (list_provider_actions and execute_provider_action). Plain chat reads only in-app Verevon data. No @mention scoping, no per-task account selection, no connector citations."
+      },
+      "approach": "Model Plane execution-core: refresh the CatalogOp entries (integration_tools.rs) to the real read operations with their params, add the F6 read-only tool, and treat connector content as untrusted and personal (planned F8: trust class, durable redaction, ZDR refusal). Model Plane model-gateway: add an Ask-mode tool (planned F12, currently parked as optional) that calls integration-corev2 read operations with the user's own connection, restricted to owner-only personal connections, returning bounded excerpts with origin=connector so the Sources panel shows them. Frontend: @connector mention in the composer and a per-turn account chip with default resolution explicit > project > user. Keep writes out of this item (see R-t3-03-08).",
+      "effort": "L",
+      "dependencies": [
+        "F2 to F4 (largely present in integration-corev2)",
+        "F6 and F8 (planned)",
+        "F11b ownership of synced mail",
+        "Control Plane connection ownership",
+        "R-t3-03-02 to cite connector sources in deep research"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Personal data exposure in shared Spaces (Space access never widens owner-plane ACLs). ZDR propagation for connector content. Prompt injection through mail bodies and file text. Token lifetime on long runs. The uncommitted working tree may already contain parts of F6.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 4,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md rows F2 to F4, F6, F8, F9, F10, F11b; row F12 (Ask-mode reads) is parked as optional. @mention scoping and connector citations are not in the plan."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-03-016"
+      ]
+    },
+    {
+      "id": "R-t3-03-05",
+      "title": "Web reading upgrade: chunked long-page reader and a batched, reference-id web tool",
+      "summary": "Stop cutting fetched pages at 4,000 characters. When a page is longer, return an outline plus the first chunk and a reference id, and add read_page(ref, chunk) and find_in_page(ref, query) that work over the cached full text with no new egress. In the same change let web_search take queries:[..] (max 4, deduplicated, concurrent) and return one merged, capped, de-duplicated list with stable reference ids and a standing cite instruction. Keep the SSRF boundary in Quarry, injection screening of the full text before any cut, the relevance gate, and the separate vertical tools.",
+      "whyItMatters": "B2B users research long primary sources (annual reports, regulations, tenders, PDFs) that chat currently cuts at 4,000 characters and deep research reads at 4,000 characters per page. Reference ids make citations exact (the cited page is the page the model opened), and batching cuts tool rounds and latency in Ask-mode research. Fetch safety itself is already ahead of the references.",
+      "referenceBestPractice": {
+        "bestSource": "DeepSeek harness (deepseek-harness-architecture-081 safe fetch, deepseek-harness-architecture-160 batched search; SRC) for the blueprint; Codex (codexagent-agent-runtime-and-models-084, SRC) for typed operations and reference ids",
+        "others": [
+          "Antigravity (SRC): outline-then-chunk reader (VIEW_CONTENT_CHUNK) and a permission step for non-allowlisted URLs"
+        ],
+        "prevalence": "2 of 11 sources for batched operations (Codex, DeepSeek) and 2 of 11 for chunked or hardened fetch (Antigravity, DeepSeek); differentiator",
+        "mechanism": "Fetch: resolve and vet the host, pin the vetted addresses, stop on cross-origin redirects, decode text-like types, sanitise, convert to bounded markdown labelled untrusted; when long, store the full text, return an outline plus chunk 1 and expose view_chunk(n). Search: validate 1 to 4 non-blank queries, collapse duplicates, run concurrently under one abort signal, interleave round-robin by rank, drop repeated URLs, cap at 8, then format title-url-snippet lines with an untrusted-content prefix and a closing instruction to cite these URLs. Results get stable reference ids so open, click and find act on an id, not a raw URL."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:126",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2874",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2987-3055",
+          "apps/Model Plane/rust/services/model-gateway/src/quarry.rs:193-228",
+          "apps/Model Plane/rust/services/model-gateway/src/grounding.rs:438",
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:174",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs:1-60",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs:1-18"
+        ],
+        "gap": "SRC: web_search takes one query per call (query, intent, limit); multi-query concurrency exists only inside deep research. fetch_url takes a raw URL and truncates at MAX_FETCH_CHARS = 4,000 with no outline or continuation. There are no result reference ids and no open, click, find-in-page or PDF-page operations. SSRF vetting (Quarry dns_guard.rs), full-text injection screening before truncation, and a JS-page escalation to the browser driver are already shipped and ahead of DeepSeek and Antigravity."
+      },
+      "approach": "Model Plane model-gateway. Reuse the existing result-handle store (tool_result_handles.rs, section 23.6: tenant-keyed, 900 s TTL, no handle created under ZDR) with a new text-page kind that supports offset or chunk paging and an outline, instead of building a second cache. fetch_url keeps its current screening (assess_external_payload on the complete text) and, when the body exceeds MAX_FETCH_CHARS, parks the full text and returns the outline, chunk 1 and a handle. Add read_page(handle, chunk) and find_in_page(handle, query) (INF: select_passages in grounding.rs:438 can serve find_in_page and the default chunk). Under ZDR use a turn-scoped in-memory cache dropped at turn end (INF: that is not retention past the turn). web_search accepts queries:[..], fans out to the Quarry client concurrently as deep research already does, merges round-robin, dedupes with the existing canonical URL key, caps, and tags each hit with a reference id used by fetch_url and the citation events. Keep Norwegian vertical tools as separate tools. Pairs with planned F7 (paged file text) so attachments and pages share one paging contract.",
+      "effort": "L",
+      "dependencies": [
+        "tool_result_handles.rs text-page kind",
+        "Quarry-v2 scrape_readable artifact references",
+        "citation_anchors.rs",
+        "Planned F7 paged file text (shares the paging contract)"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Every chunk must keep untrusted provenance and be screened (the handle store notes that untrusted content must be assessed before parking). Handles expire after 900 s and do not exist under ZDR. Wider fan-out raises paid-provider cost, so respect allow_paid_providers and per-org quota. Tool results are re-sent each round, so chunk size must stay bounded.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 0,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-03-002",
+        "C-t3-03-003"
+      ]
+    },
+    {
+      "id": "R-t3-03-06",
+      "title": "Web access governance and provider transparency: org web policy, domain rules, cached-only mode, 'searched via' disclosure",
+      "summary": "Add an org web policy owned by Control Plane (web on or off, allowed and blocked domains for search and fetch, allowed paid providers, cached-only mode, optional provider pin) that capability-core puts in the capability bearer and model-gateway enforces at dispatch for web_search and fetch_url next to the existing source-scope prune, with Quarry re-checking at execution. Make routing visible: Quarry returns its router decision (provider and reason), the Sources panel shows 'Searched via X', and a Settings or Trust page lists each upstream provider, what query data leaves, retention, and crawl behaviour. Per-domain consent for unknown domains is a prompt on Do runs only.",
+      "whyItMatters": "Enterprise admins, Verevon's buyers, need to restrict where agents read from and to see where queries go. A cached-only mode (served from Quarry's own index with no live third-party egress, INF) supports ZDR claims, and visible provider choice matches the transparency goal set by the DeepSeek harness.",
+      "referenceBestPractice": {
+        "bestSource": "Claude (claude-product-ux-076 and claude-runtime-architecture-004, SRC): org capability switch, per-surface preference, provider or custom URL, per-domain fetch consent with an admin-skippable preflight, egress allow-lists",
+        "others": [
+          "Codex (SRC): disabled, cached or live search modes with location hints",
+          "Cursor (SRC): hooks and classifier coverage on web calls",
+          "DeepSeek (SRC): named search provider with explicit selection states and per-provider limits",
+          "Perplexity and ChatGPT (DOC): published robots.txt and partner-sharing statements"
+        ],
+        "prevalence": "3 of 11 sources for governance (Claude, Codex, Cursor); 1 of 11 each for the provider seam (DeepSeek) and data-handling disclosure (Perplexity); differentiator",
+        "mechanism": "Capability flag per org and surface, so the tool is offered only when on. Fetch runs a domain preflight, asks the user once per unknown domain (allow once or always), persists the grant, and admins can pre-approve. Web calls pass through the same pre and post tool hooks as shell and MCP. Provider resolution is explicit: configured and available uses it, configured and missing is a typed error, none configured and exactly one usable uses it, else ambiguous. Each provider exports a limits and cost descriptor shown in settings."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4268-4300",
+          "apps/Model Plane/rust/services/model-gateway/src/normalize.rs:58-62",
+          "apps/Model Plane/rust/services/model-gateway/src/quarry.rs:200-262",
+          "apps/Model Plane/rust/services/model-gateway/src/quarry.rs:855-870",
+          "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:135-193",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/robots_cache.rs",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs"
+        ],
+        "gap": "SRC: shipped are an explicit per-turn web toggle enforced server-side, source-scope pruning with a source_scope_applied receipt, paid providers gated by tier and retention (allow_paid_providers always serialised), and per-hit provider attribution. Missing: an org-level domain allow or block list for fetch_url and search (include and exclude domains exist only as model-authored per-call options), per-domain user consent, a cached-only mode, admin choice of provider, a visible router decision (Quarry's SmartSearchRouter picks among tantivy_local, SearXNG, Brave, Tavily, Bing and Google and the intent hint is dropped), and any customer-facing statement of crawl policy or upstream data sharing. Domain policy exists only for browser runs (broker grant allowed_domains)."
+      },
+      "approach": "Control Plane owns the org web policy setting. capability-core mints it into the capability bearer. model-gateway enforces it where the scope prune already runs and re-checks at dispatch; Quarry-v2 re-validates domain rules on execution (keeps 'Model proposes, Quarry executes'). Cached-only mode restricts SmartSearchRouter to local or self-hosted providers (INF) and blocks live fetches outside the index. Extend the search reply with provider and reason, forward it in the tool_result and grounding events, and render 'Searched via X' in the Sources panel. Unknown-domain consent on Do runs reuses the awaiting_approval HITL card. Publish a Trust page section from a verified provider table (provider, data sent, retention) only after checking it against the actual Quarry behaviour including robots_cache.rs and crawl_denial.rs.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane org settings",
+        "capability-core bearer claims",
+        "Quarry-v2 SearchOptions include and exclude domains and SmartSearchRouter",
+        "Verification of crawl and robots behaviour before any public statement"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Per-domain prompts cause approval fatigue, so default to admin policy and prompt only for unknown domains on Do runs. Do not leak provider keys or internal routing heuristics to clients. A published data-handling statement must match real behaviour. Cached-only mode lowers answer freshness, so surface that in the answer.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 2,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-03-004",
+        "C-t3-03-005",
+        "C-t3-03-027"
+      ]
+    },
+    {
+      "id": "R-t3-03-07",
+      "title": "Agent browser as a research reader: real grants, read-only browsing in chat, live view and take-over, per-host read and act consent",
+      "summary": "Finish the already planned hosted-browser path so the agent can read JavaScript-heavy or logged-in sources, and add what the plan lacks: a read-only browser objective usable from Ask mode and as a deep research fallback for pages that plain fetch cannot read, a per-host consent model that separates 'always allow reads on this host' from actions, an admin default site policy with a local-network warning, and a take-over card for CAPTCHA or MFA that pauses the agent and hands control to the human. Execution stays in Quarry-v2; no client extension.",
+      "whyItMatters": "Deep research documents that 'found six sources' often means 'read two' because many pages are JavaScript-rendered. An agent browser closes that gap, and Manus and Claude both ship browsing with a live view. Verevon's broker-validated grant model is already stronger than the references, so finishing it is high leverage.",
+      "referenceBestPractice": {
+        "bestSource": "Manus web (web-manus-web-product-024 and -025, DOC) for live view and take-over; Claude (claude-product-ux-079, SRC) for the consent model",
+        "others": [
+          "Claude (SRC): default site policy, allow and block lists, local-network warning"
+        ],
+        "prevalence": "2 of 11 sources; differentiator",
+        "mechanism": "Browser session owned by an execution service. The model proposes actions, the executor applies them and streams frames. A take-over request pauses the agent, transfers input to the user, then resumes with a fresh observation. Consent is per host with separate read and act grants, once versus always, an admin default policy, and a warning for local-network hostnames."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:639-644",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3099-3175",
+          "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:135-193",
+          "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:1-8",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1258-1262",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:121-124",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:186-187",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:267"
+        ],
+        "gap": "SRC: model-proposes and Quarry-executes browser control exists with risk classes, cookie-use HITL and pause or resume, and the manual hosted browser with frames, tabs and human or agent control is shipped. But browser_agent is excluded from the inline chat loop (inline_tool_allowed), and the BFF sends an interim grant_id of the form session:{id} while real grant issuance is documented as unbuilt, so the gateway's broker validation fails closed for agent runs (INF from the two reads). Take-over from the chat panel is planned. Read versus act consent per host is not evidenced."
+      },
+      "approach": "Ingestion Plane (Quarry-v2 and the browser broker) plus Model Plane. Land the planned E1 and E2 (BFF mints the real broker bearer, model-gateway issues a run-bound grant with a broker-owned domain policy), E9 and E10 (chat bridge, live view and take-over from the live run panel), and E12 (model-initiated browser_agent in Do runs). New work: allow a read-only browser objective in Ask mode behind the web toggle (a distinct tool with no click-to-submit or typing on non-allowed hosts), let deep research call it for pages whose scrape_readable returned nothing (scrape_readable already escalates once to the browser driver), and add separate read and act grants per host with an admin default policy.",
+      "effort": "L",
+      "dependencies": [
+        "E1, E2, E4, E9, E10, E12 (planned)",
+        "browser-broker grant issuance",
+        "Quarry-v2 agent lane",
+        "R-t3-03-02 for the deep research fallback"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Per-page cost and latency. Logged-in sessions raise data-handling and ZDR questions. CAPTCHA solving must stay with the human. Overlaps the computer-use category, so one owner should build the shared parts. Read-only mode must be enforced by the executor, not by the model's own restraint.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md rows E1, E2, E4, E9, E10, E11, E12. Read-only Ask-mode browsing, the deep research fallback and per-host read versus act consent are not in the plan."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-03-010"
+      ]
+    },
+    {
+      "id": "R-t3-03-08",
+      "title": "Connectors: in-chat suggestion cards with resumable connect, and editable write confirmation with per-tool policy",
+      "summary": "Two parts on top of the connector read path. (a) A suggest_connector built-in tool that returns an opt-in card from the integration-corev2 provider catalogue (reason and use_when) when a task needs an app that is not connected; Connect starts OAuth and stores a connect intent (conversation id and pending step) in the gateway session so the turn resumes after the callback. Never auto-connect, never rank by payment. (b) Classify every provider action read or write in the catalogue (CatalogOp.is_write already exists), add per-tool policy levels (always ask, ask once per session, always allow for reads, blocked) in capability-core, and show an editable preview card for mail drafts and calendar events before the write; the executor applies the confirmed payload exactly.",
+      "whyItMatters": "Suggestion cards cut setup friction and grow connector adoption without breaking the grant model, since the user still completes OAuth. Editable write cards keep the authority model explicit and are the difference between a trusted and a feared 'send on my behalf'.",
+      "referenceBestPractice": {
+        "bestSource": "Claude (claude-product-ux-077 and -150, claude-product-ux-078, SRC) for suggestion registry, connect intents and four-level tool policy; Manus (SRC) for editable email-draft and calendar-event cards",
+        "others": [
+          "Antigravity (SRC)",
+          "Claude.ai web (DOC): memory-tailored, several options when several fit, no sponsored ranking, never transacts without confirmation",
+          "Manus web (DOC)"
+        ],
+        "prevalence": "4 of 11 sources for suggestions (common); 2 of 11 for write policy and cards (differentiator)",
+        "mechanism": "The model has search_registry and suggest_connectors tools and emits a card (connector id, reason). The connect intent survives the login redirect and the turn continues with the new tool. Each connector tool is pre-classified from read-only and destructive annotations; a per-user or per-org policy store has scopes once, session and persistent; on a write the runtime emits a structured editable preview, the user edits and confirms, and the executor applies exactly the confirmed payload."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:73-135",
+          "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:766-840",
+          "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60",
+          "apps/Frontend Plane/verevonv3/src/shared/api/chat-actions-client.ts:20-61",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:241-248",
+          "grep suggest_connector in apps/Model Plane/rust and verevonv3/src: no hits (INF)"
+        ],
+        "gap": "Suggestions: absent (no tool or card, slash commands only list connectors, no resumable connect intent). Writes: SRC corrects the earlier baseline. Provider writes already exist in execution-core's catalogue as is_write entries (mail.send, gmail.send, message.send, pages.post and others) and run through the Do-mode capability-policy, hook, permission and HITL pipeline with an exact-effect descriptor and postcondition check. Not built: calendar, Drive, workbook and Sheets write operations (planned G7), editable per-action preview cards, plain-chat write proposals (planned G13), and user-visible per-tool policy levels."
+      },
+      "approach": "Model Plane: add suggest_connector as a read-only inline tool that reads the provider catalogue descriptions (add a use_when line per provider in integration-corev2). Frontend: suggestion card with Connect, and a connect-intent record in the gateway session resumed after the OAuth callback. Execution-core: classify catalogue operations read or write (extend CatalogOp with destructive and idempotent hints), store per-tool policy in capability-core, and emit an editable awaiting_approval payload (draft fields, event time and zone) that the approval outbox applies as the exact confirmed effect. Frontend: mail-draft and calendar-event card components. Align with planned G8 (always-ask, effect summaries), G9 (human-click apply path) and G13 (proposal cards).",
+      "effort": "L",
+      "dependencies": [
+        "R-t3-03-04 (connectors must read in chat first)",
+        "G7 to G10 and G13 (planned write chain)",
+        "integration-corev2 provider catalogue descriptions",
+        "capability-core policy store"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Suggestion spam, so keep it opt-in and rate-limited. Approval fatigue versus silent writes: default writes to always-ask. Editable cards must not let the edited payload exceed the originally approved scope.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md rows G7, G8, G9, G10, G13, G14 cover write operations, always-ask and calendar or sheet proposal cards. Suggestion cards, connect-intent resume, per-tool policy levels and the mail-draft card are not in the plan."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-03-017",
+        "C-t3-03-018"
+      ]
+    },
+    {
+      "id": "R-t3-03-09",
+      "title": "Research deliverables: cited-passage source viewer, finished export and a provenance record on reports",
+      "summary": "Make research output shareable and auditable. (1) Clicking a citation opens the source beside the chat at the cited passage: knowledge sources open the Data Plane v2 document, web sources open the stored fetched text with the passage highlighted. This needs a source-side locator on each citation (document id plus passage span); the current start and end offsets locate the claim in the answer, not the passage in the source. (2) Finish the planned direct PDF (H3), native charts in Office exports (H4) and report-to-deck (H8), plus Markdown export. (3) Attach a provenance record to each report artifact (sources read, unread leads, tools, model, time, ZDR posture).",
+      "whyItMatters": "B2B users forward research to colleagues and need to check claims against sources. A viewer that opens at the cited passage and an exportable report with a provenance record make Verevon's already stronger source honesty visible and support audit needs.",
+      "referenceBestPractice": {
+        "bestSource": "ChatGPT connected-file viewing (web-chatgpt-web-product-154, DOC): files open beside the chat and citations return to the source",
+        "others": [
+          "Claude Science (web-claudeai-web-product-034, DOC): versioned artifacts with provenance records"
+        ],
+        "prevalence": "2 of 11 sources; differentiator (all reference evidence DOC-only)",
+        "mechanism": "A document viewer pane keyed by source id. Citations carry a source locator (file id plus offset), so a click opens the document at the cited passage. Artifacts are versioned with a provenance record of inputs, tools and sources."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:2128",
+          "apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs:100-115",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3375-3420",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:356-538",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:205-206",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:218",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:249"
+        ],
+        "gap": "SRC: deep research emits a document artifact and citations carry claim ids and offsets, but citation_anchors.rs anchors the marker in the answer text (claim segments), not the passage in the source, so there is no source-side locator yet. Knowledge candidates carry document_id and passage text (truncated to 600 characters), which is the raw material. Direct PDF without the print dialog (H3), charts in Office exports (H4) and report-to-deck (H8) are planned. A cited-passage viewer and artifact provenance records are not evidenced (INF, check the Sources panel cards)."
+      },
+      "approach": "Model Plane: carry a source locator on knowledge citations (document_id plus chunk or span id from the Data Plane v2 candidate) and a stored passage reference on web citations (grounding.rs select_passages output). Frontend Plane: a document pane that opens a Data Plane v2 document at the anchored span, reusing the artifact panel; for web, a pane that shows the fetched text kept for the turn. Model Plane: add a provenance record (sources read, unread leads, tool calls, model, timestamp) to report artifacts. Complete H3, H4 and H8 as planned and add a Markdown export. Persisted artifacts and stored passages must degrade under ZDR.",
+      "effort": "M",
+      "dependencies": [
+        "Data Plane v2 document reads",
+        "H3, H4, H8 export work (planned)",
+        "I6 citation chips bind by number (planned)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Persisted artifacts and stored passages must degrade under ZDR. A locator that points at stale or deleted documents needs a graceful error. Knowledge documents opened beside chat must honour the viewer's owner-plane ACL.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 2,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md rows H3, H4, H8 (export) and I6 (citation chips). The cited-passage viewer, source-side locator and provenance records are not in the plan."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-03-025"
+      ]
+    },
+    {
+      "id": "R-t3-03-10",
+      "title": "Model Council: parallel multi-model answers with a disagreement synthesis",
+      "summary": "Add a council mode in which the gateway fans the same question out to N catalogue models through inference-core, then runs a synthesiser call that lists agreement, disagreement and unique contributions, shown side by side. Show the expected cost first, reusing the estimate card from R-t3-03-03.",
+      "whyItMatters": "Multi-model use is a stated Verevon goal (the T3 Code reference) and disagreement surfacing supports the transparency and confidence story. It is distinctive but N-fold in cost, so it comes after the core research gaps.",
+      "referenceBestPractice": {
+        "bestSource": "Perplexity Model Council (web-perplexity-web-product-038, DOC)",
+        "others": [],
+        "prevalence": "1 of 11 sources; unique (DOC only)",
+        "mechanism": "Fan out the same prompt to N models concurrently (3 on the web, 2 to 8 in Computer, per-model thinking toggles), collect answers, run a separate synthesiser model that compares claims as agree, disagree or unique, and render columns plus a synthesis."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "grep model.?council in apps/Model Plane/rust and apps/Frontend Plane/verevonv3/src: only demo fixtures (INF from grep)"
+        ],
+        "gap": "No multi-model fan-out answer mode. Verevon already has a model picker and inference-core routing that could serve it."
+      },
+      "approach": "Model Plane model-gateway: a council run type that calls inference-core for N models in parallel (bounded concurrency), then a synthesis inference; stream per-model answers into per-model panels. Cost estimate first. Frontend: side-by-side view in the chat turn. Under ZDR only models on ZDR-attested routes may join the council.",
+      "effort": "M",
+      "dependencies": [
+        "inference-core multi-provider routing",
+        "cost estimate card (R-t3-03-03)"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "N-fold cost; ZDR must hold for every council member; subscription-route rate limits (a single seat is shared across the org) make wide fan-out risky.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 0,
+        "DOC": 1,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-03-023"
+      ]
+    },
+    {
+      "id": "R-t3-03-11",
+      "title": "Grow the corpus from research: arm promote-on-use safely and add a data-source catalogue with use_when and cost hints",
+      "summary": "(a) promote_on_use.rs counts grounded fetches per (org, user, url) and promotes pages the agent keeps relying on into Data Plane v2, but it is off by default, dry-run first, keeps an in-memory counter, and is called only from the execution-core agent loop. Before arming it: mint a per-user token so promoted documents are owned by the user, make the counter durable, count citations rather than fetches, keep ZDR off, keep untrusted provenance, and add a 'promoted from web' badge on the Knowledge page. (b) Give Verevon's data tools (Brreg, SSB, Yr, shipping, traffic, news) a catalogue entry with use_when and cost hints that the model reads, as the base for later licensed Nordic sources.",
+      "whyItMatters": "Research done once becomes reusable organisation knowledge, which feeds the Data Plane moat. A catalogue helps the model choose the right data tool and is the schema needed before any licensed premium source can be added.",
+      "referenceBestPractice": {
+        "bestSource": "Antigravity knowledge items (antigravity-agent-ux-and-gemini-023, SRC) for distillation limits; Manus data-source catalogue (manus-product-ux-044, SRC) for the use_when and billing_hint schema",
+        "others": [
+          "Perplexity finance vertical and premium sources (web-perplexity-web-product-039 and -042, DOC)"
+        ],
+        "prevalence": "1 of 11 for knowledge items (unique); 3 of 11 for vertical data sources (differentiator)",
+        "mechanism": "A background step every K turns writes bounded knowledge items with references and a retrieval step inserts the top items into later prompts. A catalogue of data APIs carries description, use_when and billing hint; calls go through a proxy that holds partner keys, results are cited like web sources and charged per call."
+      },
+      "verevonToday": {
+        "status": "stub",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs:1-60",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:786",
+          "apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+          "apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:1-12",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4346-4373"
+        ],
+        "gap": "SRC: promote_on_use is a complete no-op unless PROMOTE_ON_USE_ENABLED is set, dry-run unless PROMOTE_ON_USE_EXECUTE is set, uses a process-local counter, would attribute documents to the service principal today, and counts fetches rather than citations (its own doc lists these refinements as required before arming). It is not set in the deploy files I grepped. Norwegian public-data tools are shipped but have no catalogue schema; weather covers 10 cities and SSB only population (from the earlier baseline). No licensed premium sources."
+      },
+      "approach": "Model Plane execution-core: implement the two refinements named in promote_on_use.rs (per-user token minted through data-plane or Quarry so owner=user and visibility=private; durable per-org counter; citation-based signal) and wire the call site in the chat loop only after that. Data Plane: mark promoted documents with web provenance and untrusted trust class. Frontend: a 'promoted from web' badge and an undo on the Knowledge page. Model Plane: add use_when and cost_hint fields to the tool descriptions of the Norwegian data tools. Licensed sources follow only after a commercial decision, behind integration-corev2 with per-call cost in cost-core.",
+      "effort": "M",
+      "dependencies": [
+        "Data Plane v2 ingest",
+        "per-user service token for Quarry ingest",
+        "memory category work (session-core dreaming)",
+        "commercial licences for premium data"
+      ],
+      "planeOwner": "Data Plane",
+      "risks": "Promoting web content imports injected text or stale facts, so keep untrusted provenance on promoted documents. Must be off under ZDR. Licence terms may restrict caching.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 5,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "promote-on-use is 'Phase 8' in apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs module doc, with two refinements listed as required before arming (not scheduled in the gap closure plan)."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-03-014",
+        "C-t3-03-020"
+      ]
+    },
+    {
+      "id": "R-t3-03-12",
+      "title": "Connector event subscriptions: wake a session when a connected app emits an event",
+      "summary": "Let a conversation or scheduled run subscribe to normalised provider events (for example a new message in a channel or mailbox). integration-corev2 owns provider webhooks and emits normalised events; a subscription record binds an event filter to a session; an event starts a read-only-by-default scheduled run with the event as input, under the unattended owner identity planned for scheduled runs.",
+      "whyItMatters": "Enables reactive agents that monitor a mailbox or channel and fits scheduled-run work. It is strong but not core to research, and it depends on the unattended identity work.",
+      "referenceBestPractice": {
+        "bestSource": "ChatGPT MCP Events (web-chatgpt-web-product-044, DOC)",
+        "others": [],
+        "prevalence": "1 of 11 sources; unique (DOC only)",
+        "mechanism": "The server declares an events capability, the client subscribes with a callback URL and signing secret, the provider posts signed webhooks (Standard Webhooks HMAC, 256 KiB cap), the receiver verifies, batches events and starts a task run in the bound conversation."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs:1-12"
+        ],
+        "gap": "run_watchers only notifies a user when a run finishes. integration-corev2 handles inbound webhooks for its own sync, but no subscription contract wakes a Model Plane session on an app event (INF from grep)."
+      },
+      "approach": "Ingestion Plane integration-corev2: expose normalised event streams from provider webhooks it already receives. Application Plane or capability-core: hold subscriptions bound to a user, connection and filter. Model Plane: start a ScheduledRun-like Temporal run with the event as input under the unattended identity (planned D10 and D11), read-only by default, with ZDR handling.",
+      "effort": "L",
+      "dependencies": [
+        "D10 and D11 unattended identity and guards (planned)",
+        "integration-corev2 webhooks",
+        "orchestrator-core ScheduledRun workflow"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Unattended runs triggered by external events are a prompt-injection vector: read-only defaults, event content treated as untrusted, per-subscription quotas and a cadence floor.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-03-019"
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t3-03-013",
+      "reason": "Inline web images are consumer polish with low value for the B2B core, current Verevon status is unknown (chat renderer shows no web image blocks by grep) and image URLs are an exfiltration channel that would need a gateway image proxy first. Revisit only if user research asks for it."
+    },
+    {
+      "cluster": "C-t3-03-024",
+      "reason": "Search-as-code rests on vendor-reported numbers (DOC only, low confidence) and the batched multi-query web tool in R-t3-03-05 attacks the same tool-round overhead without bypassing per-call governance and injection screening. Revisit if tool-round overhead still dominates after R-t3-03-05."
+    }
+  ],
+  "strengthsToKeep": [
+    "Grounded answers: web_search through Quarry-v2 with a time-sensitivity heuristic that forces search, fetch-then-answer grounding on pages that were actually read, a relevance gate that drops off-topic hits before they can be cited, and citations tied to claim segments and persisted (apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2874, grounding.rs:438, relevance.rs:541, citation_anchors.rs:100-115). Ahead of every reference.",
+    "Deep research honesty invariants: only pages actually read get citation numbers, unread sources are listed as uncitable, a coverage note is stated, a mandatory 'Kunne ikke verifiseres' section is always present, and every phase degrades instead of failing the turn (apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:1-48). Keep these invariants in any v2 work.",
+    "Source scope enforced on the server: Auto, KnowledgeOnly, WebOnly and conversation-only are applied by pruning tool buckets, re-checked at dispatch, and confirmed with a source_scope_applied receipt (apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4268-4300, normalize.rs:58-62). Stricter than a client filter.",
+    "Sources panel separates sources that were read from leads that were not, splits knowledge from web cards, shows a grounding overview and a low-confidence flag, and a retrieval notice says when an answer cannot be grounded (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:356-538). Richer than Manus and T3 Code.",
+    "SSRF and fetch safety sit in the executing plane: Quarry-v2 resolves, vets and pins addresses, and the gateway screens the complete fetched text for prompt injection before truncation; JS-rendered pages escalate to the browser driver (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs:1-18, apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2987-3055). Matches 'Model proposes, Quarry executes'.",
+    "Paid search egress is gated by tier and retention with allow_paid_providers always serialised, and per-hit provider attribution makes outbound traffic auditable (apps/Model Plane/rust/services/model-gateway/src/quarry.rs:200-262).",
+    "Data Plane v2 knowledge tools (knowledge_search, graph, wiki, contradictions, document list) with suggested_next_tools honoured, the project's stated moat (apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3375-3534).",
+    "Norwegian public-data tools (Brreg, SSB, Yr weather, shipping, traffic, news) are a local differentiator none of the references have (apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:1-12, tool_loop.rs:4346-4373).",
+    "Search and research mode ladder (Auto, Raskt svar, Dyp research, plus Ask and Do) with automatic routing already does what Claude only documents (apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:356-405).",
+    "Authority model: Do-mode capability policy, hook, permission and HITL pipeline with exact-effect approval descriptors and postcondition checks, owner-only personal connections, and broker-validated browser grants with exact domain policies (apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:766-840, model-gateway/src/browser_run.rs:135-193). Stronger than the references."
+  ]
+}

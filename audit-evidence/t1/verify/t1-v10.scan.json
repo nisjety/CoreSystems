@@ -1,0 +1,783 @@
+[
+  {
+    "finalId": "F-t1-077",
+    "title": "Compliance export, custodian legal hold, information barriers and audited admin break-glass",
+    "searches": [
+      "rg -i 'legal[ _-]?hold|litigation[ _-]?hold|legalHold|legal_hold' over C:/dev/CoresSystem (hits: Space deletion only)",
+      "rg -i 'break[ _-]?glass|breakglass|break_glass' over repo (hits: Data Plane quickwit admin, Model capability-core token)",
+      "rg -i 'information[ _-]?barrier|info[ _-]?barrier' over repo (0 matches)",
+      "rg -i 'e-?discovery|custodian|compliance[ _-]?(export|officer|search|hold|principal)' over repo (docs only)",
+      "rg -i 'impersonat' in Frontend src and gateway, Control, Model, Application (negative controls only)",
+      "rg -i 'hibernat|admin.*(kill|snapshot)|ForceKill' in sandbox-manager, Model rust, proto, api (0 admin RPCs)",
+      "rg -i 'export' in gateway domains, convex-core, user-core (privacy export; no room export)",
+      "rg 'ExportTrajectories|export_trajectories' in Model Plane (org-scoped trajectory export RPC)",
+      "rg -i 'audit[_ -]?(on[_ -]?)?read|compliance[_ -]?principal|shared[_ -]?read' in Control, Frontend, Application"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/022_space_deletion_authority.up.sql",
+        "line": 14,
+        "why": "space_legal_holds table: Control-only hold that blocks Space deletion.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/023_space_deletion_operator_audit.up.sql",
+        "line": 18,
+        "why": "Operator audit events for legal_hold_applied and legal_hold_released.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/deletion_authorization.go",
+        "line": 28,
+        "why": "LegalHold type: Control-only retention fence with reference validation.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 219,
+        "why": "Deletion authorization queries space_legal_holds and records blocked_legal_hold.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+        "line": 282,
+        "why": "ApplyLegalHold persists the retention fence for a canonical Space.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/server.go",
+        "line": 348,
+        "why": "PUT and DELETE /spaces/:space_ref/legal-hold, policy-writer gated.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/spaces.go",
+        "line": 410,
+        "why": "applySpaceLegalHold handler, reached through internal service auth.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts",
+        "line": 27,
+        "why": "blocked_legal_hold has no outgoing transitions; Space deletion honours holds.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts",
+        "line": 97,
+        "why": "Client types expose legal-hold outcome for Space deletion authorization.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/decision.go",
+        "line": 154,
+        "why": "SignDecision: Ed25519-signed authority decision; reusable for signed compliance grants.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/shared_thread_read_decision.go",
+        "line": 147,
+        "why": "Control-issued, deny-by-default shared read decision for Space threads.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/service_auth.go",
+        "line": 283,
+        "why": "Audit-read delegation check: exact tenant, expiry and replay protection.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/audit-client.ts",
+        "line": 4,
+        "why": "Frontend audit read client for the Trust Center surface.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx",
+        "line": 47,
+        "why": "Trust Center consumes the audit read API; no export action found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/privacy.rs",
+        "line": 1,
+        "why": "Self-service GDPR export and erase; target is always the session user.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/gateway.proto",
+        "line": 136,
+        "why": "ExportTrajectories RPC: org-scoped JSONL export by time window.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/trajectory.rs",
+        "line": 253,
+        "why": "handle_export_trajectories: org-scoped, size-capped; no hold or audit logic.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go",
+        "line": 204,
+        "why": "SnapshotSandbox is the only snapshot primitive; no admin hibernate or kill RPC.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go",
+        "line": 193,
+        "why": "ReleaseLease kills the lease background processes via the registry (holder path).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/process/store.go",
+        "line": 99,
+        "why": "SignalKill exists in the background-process registry; no admin caller found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/auth.rs",
+        "line": 344,
+        "why": "Negative control: run-action scope is explicitly not a user-impersonation or transcript API.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 759,
+        "why": "Planned owner-plane purge and export receipts; ingress is future work per comment.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/consumers/interactive_retention_consumer.go",
+        "line": 35,
+        "why": "Org-level retention consumer purges conversation drafts; no hold exemption in path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/docs/compliance/retention-schedule.md",
+        "line": 34,
+        "why": "Audit events kept 365 days with legal-hold exceptions; sweep marked TBC.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/studio-core/studio.md",
+        "line": 174,
+        "why": "Studio doc names legal hold and compliance exports as intent, not built.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md",
+        "line": 417,
+        "why": "Roadmap lists tamper-evident retention, SIEM export and legal hold as goals.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-093",
+    "title": "Multi-org and external collaboration horizon: org archive and transfer, shared cross-org rooms, managed external chat connections",
+    "searches": [
+      "rg -i 'archiv' in Control Plane org-core, user-core, auth-core, gateway orgs.rs, Frontend settings (0 org-archive matches)",
+      "rg -i 'transfer[_ -]?(pending|owner|ownership)|owner[_ -]?transfer' in Control, Frontend, Application (owner transfer deferred)",
+      "rg -i 'org_link|shared_room|cross[_-]?org|host_org|guest_org|linked_org|parent_org' in Control, Frontend, Application",
+      "rg -i 'guest' in org-core internal and Frontend features/spaces (0 matches)",
+      "rg -i 'external[_ -]?(participant|banner|marker|guest|audience|org|user)|consent pane' in Frontend, gateway, convex (only externalOrgId naming)",
+      "rg -i 'org[_ -]?group|billing[_ -]?consolidation|host[_ -]?organization' in auth-core and Frontend src (no product UI)",
+      "rg -i 'WABA|whatsapp|messenger' in Ingestion integration-corev2 internal, non-test",
+      "rg -i 'status.*(active|deleted|archived)|RestoreOrganization' in org-core internal",
+      "Read Channel Plane docs vision.md and meeting-intelligence.md (docs-only status confirmed)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/migrations/028_org_group_grants.sql",
+        "line": 10,
+        "why": "org_group table anchored to one host organization; grouping axis above org.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/db/schema.ts",
+        "line": 167,
+        "why": "Drizzle org_group table; named org_group, not account, by design.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/org-group-grant.controller.ts",
+        "line": 134,
+        "why": "Internal POST grant route for org-group billing consolidation; no product UI.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/billing-core/migrations/0008_billing_group.up.sql",
+        "line": 14,
+        "why": "billing_group_memberships maps org to host_org_id with a not-self constraint.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/billing-core/internal/billing/billing_group.go",
+        "line": 23,
+        "why": "BillingGroup: org inherits its plan from a host org via mirrored grant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/org/deletion_ledger.go",
+        "line": 190,
+        "why": "RestoreOrganization sets status back to active; soft-delete and restore only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/migrations/001_init.up.sql",
+        "line": 8,
+        "why": "organizations.status defaults to 'active'; no archived or transfer state.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs",
+        "line": 428,
+        "why": "Owner transfer deferred: 'owner transfer uses a separate flow', not built.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+        "line": 804,
+        "why": "UI says owner transfer needs a separate explicit contract; none found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/OrgDeletionDangerZone.tsx",
+        "line": 1,
+        "why": "Org deletion UI exists; no archive or transfer counterpart found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spacePresence.ts",
+        "line": 166,
+        "why": "Comment: cross-org rows treated as impossible; code assumes single-org Space rows.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/session/access.ts",
+        "line": 30,
+        "why": "Gate for cross-org operator surfaces such as all-users views, not customer org links.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go",
+        "line": 111,
+        "why": "WhatsApp is a provider in the integration catalog; external chat account link.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/webhookorg/resolver.go",
+        "line": 4,
+        "why": "Meta Page, Instagram and WhatsApp account-wide callbacks resolved to orgs.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/vision.md",
+        "line": 5,
+        "why": "Channel Plane is the future external-facing runtime; docs only, not built.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-094",
+    "title": "Assurance long tail: hash-chained audit, formal decision model, supply-chain gates, EU-posture pinning, credential expiry states",
+    "searches": [
+      "rg -i 'prev_hash|entry_hash|hash[_ -]?chain|previous_hash|chain_head' in Control audit-core (0 matches; payload_hash only)",
+      "rg -i 'payload_hash|hash|chain' in audit-core/internal/store/schema.sql",
+      "rg --files for *.tla, *.cfg, *.als, *.spthy, *.pcal across apps (0 files)",
+      "rg -i 'PlusCal|TLA+|TLC|Tamarin|Alloy' across apps (only model-name false positives)",
+      "rg -i 'cargo[- ]deny|govulncheck|cargo-audit|cooldown|cosign|sigstore|slsa' in .github (govulncheck and cargo-audit only)",
+      "rg -i 'minimumReleaseAge' in Frontend Plane excluding node_modules (exclude list only)",
+      "rg -i 'cosign|sigstore|provenance|attest|image digest' in Model Plane/scripts (attestation of gates, not image signing)",
+      "rg -i 'data_residency|residency|provider region|eu only' in Control Plane and Model Plane",
+      "rg -i 'EU_AZURE_REGIONS|reject_non_eu|AZURE_OPENAI_REGION' in inference-core src",
+      "rg -i 'expir|reauth|revoked' in Frontend src/features/agents and integration-corev2 (no credential expiry states)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/store/schema.sql",
+        "line": 32,
+        "why": "payload_hash per event only; no prev_hash or entry_hash chain.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/decision.go",
+        "line": 154,
+        "why": "SignDecision: Ed25519 signing key infrastructure a signed checkpoint could reuse.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/org-core/migrations/002_add_enterprise_fields.up.sql",
+        "line": 33,
+        "why": "data_residency text column ('us','eu','asia') on org; no routing found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/authority.go",
+        "line": 153,
+        "why": "Residency string bound into Space policy and decisions (also line 196).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+        "line": 1020,
+        "why": "EU_AZURE_REGIONS allowlist: deployment-level, global, not per-org pinning.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+        "line": 327,
+        "why": "Embedding region deny-by-default: non-EU rejected before network call unless opt-in.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+        "line": 207,
+        "why": "reject_non_eu_embedding_region runs before any embedding network call.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+        "line": 548,
+        "why": "Residency classify: Eu needs positive region evidence from config (539-562).",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/config.rs",
+        "line": 260,
+        "why": "AZURE_OPENAI_REGION read once from env: one region per process, not per org.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx",
+        "line": 109,
+        "why": "'revoked' installation status label; no expiry or warning state.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/store/types.go",
+        "line": 64,
+        "why": "accessTokenExpiresAt stored per connection; no credential lifecycle state machine.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/.github/workflows/quarry-v2-ci.yml",
+        "line": 233,
+        "why": "cargo audit --deny warnings in CI; four advisories ignored (comment line 19).",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/.github/workflows/quarry-v2-ci.yml",
+        "line": 239,
+        "why": "govulncheck job; report-only per comment at line 106.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/.github/workflows/verevonv3-security.yml",
+        "line": 51,
+        "why": "pnpm audit --audit-level=high for the Frontend; no release-age gate.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/pnpm-workspace.yaml",
+        "line": 6,
+        "why": "minimumReleaseAgeExclude list only; no minimumReleaseAge cooldown value found.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/.github/dependabot.yml",
+        "line": 3,
+        "why": "Dependabot config present; no cooldown setting found.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md",
+        "line": 1979,
+        "why": "S3.4 credential grants plan covers expiry and revocation; planned, not built.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-078",
+    "title": "Perceived-latency observability: W3C traceparent on every send and stream, and performance budgets under simulated agent load",
+    "searches": [
+      "rg -i 'traceparent|tracestate|W3C' in verevonv3/src non-test (0 matches)",
+      "rg -i 'traceparent|opentelemetry|TraceLayer' in gateway/src (tower-http TraceLayer only)",
+      "rg -i 'traceparent|opentelemetry|TraceContext' in Control, Application, Model Plane (Go OTel metrics only; no traceparent)",
+      "rg -i 'enter_epoch|composed_at|perceived|enter_to_ack|first_frame|resync' in verevonv3/src (0 timing events)",
+      "rg -i 'PerformanceObserver|PerformanceEventTiming|interactionId|performance.mark|web-vitals' in verevonv3 (0 matches)",
+      "rg -i 'first[_ ]?token|ttft|timing|latency' in shared/api/chat-client.ts (server turn_timing)",
+      "rg -i 'latency|perf|flood|simulated|budget' in verevonv3/tests (13 files)",
+      "rg -i 'budget|toBeLessThan' in verevonv3/tests/e2e",
+      "rg -i 'Prometheus|histogram|track_metrics' in gateway/src/observability.rs",
+      "Read verevonv3 playwright.config.ts project list (no perf or flood project)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 363,
+        "why": "Server-side turn timing type: outcome, first-token and phases; not client latency.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "line": 1645,
+        "why": "Handles gateway turn_timing event; server timing only, no enter or ack marks.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+        "line": 164,
+        "why": "tower-http TraceLayer on HTTP requests; local spans, no W3C propagation.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+        "line": 194,
+        "why": "make_http_trace_span records method, uri and version only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/observability.rs",
+        "line": 23,
+        "why": "Prometheus request counter and histogram middleware for the gateway.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/tests/e2e/product-phase-timing.ts",
+        "line": 1,
+        "why": "Q14 phase timing from browser performance.now stamps on stream reads (test-only).",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/tests/product-phase-timing.test.ts",
+        "line": 1,
+        "why": "Unit tests named for the product phase-timing module; test-only.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/tests/e2e/product-latency.spec.ts",
+        "line": 5,
+        "why": "Q08 latency microbenchmark: one attachment-grounded chat turn, not a budget.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/tests/e2e/product-code-interpreter.spec.ts",
+        "line": 64,
+        "why": "TURN_BODY_BUDGET_MS: 200 s per-case deadline, not a latency budget.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/tests/e2e/agentic-subscription.spec.ts",
+        "line": 124,
+        "why": "TERRA_BODY_BUDGET_MS probe deadline; test-side, not a latency budget.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/playwright.config.ts",
+        "line": 82,
+        "why": "Playwright projects: e2e, chat, product-readiness; no perf or flood project.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/telemetry/metrics.go",
+        "line": 5,
+        "why": "Go services import OpenTelemetry metrics; no traces or traceparent propagation.",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-084",
+    "title": "Meeting recording to governed object storage with a state machine, a mandatory recording indicator and expiry (defer behind transcripts)",
+    "searches": [
+      "rg -i 'MediaRecorder|getDisplayMedia|recordingState|isRecording|RecordingIndicator' in verevonv3/src (dictation recorder and screen capture only)",
+      "rg -i 'webrtc|livekit|mediasoup|janus|RTCPeerConnection|SFU' in verevonv3/src and convex-core (0 product hits; apps-wide run timed out, narrowed)",
+      "rg -i 'egress|SFU|meeting_record|call_record' across apps excluding generated and lock files (no call-media pipeline)",
+      "rg -i 'minio|object[_ -]?store|expire' in Data Plane v2 services (CAS MinIO bucket)",
+      "rg -i 'meeting|transcript' in Channel Plane docs and Frontend features/spaces",
+      "rg -i 'retention|expiresAt|purge|receipt' in Application convex-core and Control audit-core (receipts and purge consumers)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts",
+        "line": 55,
+        "why": "MediaRecorder wrapper for dictation audio; not meeting or call capture.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts",
+        "line": 351,
+        "why": "getUserMedia microphone capture for dictation with echo and noise constraints.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+        "line": 1919,
+        "why": "getDisplayMedia screen capture in the composer; not a recording pipeline.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx",
+        "line": 47,
+        "why": "'Meeting Scribe' template summarises conversation into minutes; no recording.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/embedding-engine-rs/src/cas_store.rs",
+        "line": 4,
+        "why": "Content-addressed MinIO bucket for document page PNGs with GDPR erasure; not call media.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts",
+        "line": 17,
+        "why": "Per-plane deletion receipt states; reusable pattern for expiry receipts.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/consumers/interactive_retention_consumer.go",
+        "line": 35,
+        "why": "Org-level retention consumer purges conversation drafts; expiry-job analogue.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/meeting-intelligence.md",
+        "line": 46,
+        "why": "Raw AV in access-controlled MinIO planned; MVP stores uploaded files only.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Channel Plane/docs/meeting-intelligence.md",
+        "line": 61,
+        "why": "Join-and-record meeting capture bot is a planned future Channel Plane connector.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t1-086",
+    "title": "Call polish and operability: call-health feedback, browser audio and video processing, in-tab push-to-talk and mute keys, wake lock and busy guard, call sounds and Join notifications",
+    "searches": [
+      "rg -i 'getStats|RTCStats|callHealth|reason[_ -]?code' in verevonv3/src (0 matches)",
+      "rg -i 'wakeLock|beforeunload|busyReason|busy[_ -]?guard' in verevonv3/src (0 matches)",
+      "rg -i 'push[_ -]?to[_ -]?talk|PTT|tap[_ -]?to[_ -]?talk|keyup|keydown|hotkey|shortcut' in features/voice",
+      "rg -i 'noiseSuppression|echoCancellation|autoGainControl|new Audio|ringtone|chime' in verevonv3/src",
+      "rg -i 'new Notification|registerProtocolHandler|PushManager|serviceWorker|requestPermission' in verevonv3/src (demo guard only)",
+      "rg -i 'reason[_ ]?code|feedback.*(reason|rating)' in Application convex-core (run rating, no reason codes)",
+      "rg -i 'keep[_ -]?awake|wake[_ -]?lock|NoSleep' across apps (no product hits; remote-core test helper is unrelated)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts",
+        "line": 36,
+        "why": "VOICE_AUDIO_CONSTRAINTS enables echo, noise and gain control for dictation.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx",
+        "line": 57,
+        "why": "Voice mode is tap-to-talk with review; no push-to-talk key handling.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx",
+        "line": 512,
+        "why": "Dialog-level keydown handler only; no global or held push-to-talk binding.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/speech-playback.ts",
+        "line": 98,
+        "why": "Audio element for speech playback; not call sounds or ringtones.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/demo/product-demo/guard.ts",
+        "line": 240,
+        "why": "Demo guard blocks serviceWorker; no production service worker found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/agentRuns.ts",
+        "line": 155,
+        "why": "rate mutation sets good, acceptable or poor on an agent run; reusable for feedback.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 444,
+        "why": "Run rating schema with free-form note; no reason-code field.",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-088",
+    "title": "Versioned publish lifecycle for agent-built apps and shared agent definitions",
+    "searches": [
+      "rg -i 'rollback|current_version|publish_version|revision_id|PUBLISHED|NOT_SHARED' in verevonv3/src (operating-map versions; label-only blueprints)",
+      "rg -i 'publish|version|rollback' in gateway studio.rs (ephemeral canvas, no publish)",
+      "rg -i 'publish|rollback|version|manifest|bundle|deploy' in Application studio-core (doc only)",
+      "rg -i 'agent_definition|published_(revision|version)|draft_(revision|version)|pinned' in Model Plane rust services (0 matches)",
+      "rg -i 'publish|draft' in verevonv3/src/features/agents (Draft, Published, Rollback labels only)",
+      "rg -i 'published_at|publish_version|current_version_id|rollback' in Data Plane v2 (wiki versions and proposals)",
+      "rg -i 'DeployProvider|resolveEndpoint|appVersion|app_version' across apps (only embedding deployment configs; no app deploy provider)",
+      "rg -i 'agent[_ ]?registry|shared agent|agent definition' in Model Plane rust (profile.rs comment only)",
+      "rg -i 'publish[_ ]?job|publishJob' in Application social-core and convex-core (governed social publish jobs)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/operating-map-client.ts",
+        "line": 113,
+        "why": "Knowledge operating map: currentVersion pointer plus proposals; a versioned-publish analogue.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/lib/verevon-agent-blueprints.tsx",
+        "line": 337,
+        "why": "Draft, Published and Rollback are label-only copy; no revision model behind them.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/studio.rs",
+        "line": 35,
+        "why": "Studio persistence is 'ephemeral'; no publish, versioning or hosting.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/agents.ts",
+        "line": 78,
+        "why": "agents.update mutation: mutable definition record, no revision history.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts",
+        "line": 606,
+        "why": "spaceAgentBindings points at agentId with no revision pin.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts",
+        "line": 12,
+        "why": "Binding presents an agent definition as a Space participant; no versions.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/social-core/internal/social/types.go",
+        "line": 79,
+        "why": "PostApprovalStatus: human approval gate before governed publish.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Application Plane/social-core/internal/social/governed_publisher.go",
+        "line": 30,
+        "why": "GovernedPublisher.Publish runs a publish job through an action executor.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/infra/postgres/init.sql",
+        "line": 314,
+        "why": "wiki_page_versions table with published_at: versioned publish for wiki pages.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/infra/postgres/init.sql",
+        "line": 439,
+        "why": "wiki_proposals table with status: propose, review, publish flow for wiki.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/retrieval-engine-rs/src/search/wiki.rs",
+        "line": 20,
+        "why": "Retrieval reads only wiki pages with page_status 'published'.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 546,
+        "why": "Wiki proposal review route; propose and review endpoints exist.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/dataplane.rs",
+        "line": 290,
+        "why": "wiki_version_value serialises version status and published_at.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/profile.rs",
+        "line": 3,
+        "why": "Operator profile decided on the Convex agent definition; no revisions.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md",
+        "line": 38,
+        "why": "ADR: Application Plane owns cross-Space agent registry; no draft or publish model.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Studio Plane/README.md",
+        "line": 43,
+        "why": "Studio Plane lists versioned composite contracts as future work.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t1-090",
+    "title": "Shell-only conveniences: quick composer, global hotkey and push-to-talk, window state, close guard",
+    "searches": [
+      "rg -i 'tauri|globalShortcut|alwaysOnTop|frameless|trayIcon|registerProtocolHandler|electron' in verevonv3 excluding lockfiles, dist, public (0 hits; no src-tauri)",
+      "rg -i 'mini[ _-]?composer|quick[ _-]?composer|global[ _-]?hotkey|window[ _-]?state|always on top' in verevonv3/src (0 matches)",
+      "rg -i 'beforeunload|unsaved|unsent|leave this page' in verevonv3/src/features/spaces (0 matches)",
+      "rg -i 'desktop shell' in verevonv3/src (CSS zoom comments only)",
+      "rg -i 'start_ai_run|run_action' in gateway domains (run-start route)",
+      "rg -i 'keydown|keyup|push[_ -]?to[_ -]?talk' in features/voice (in-tab only)",
+      "Read verevonv3 index.html head (plain web entry, no native shell metadata)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 406,
+        "why": "start_ai_run POST route: durable AI run start, a likely quick-composer target.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/voice/VoiceModeDialog.tsx",
+        "line": 512,
+        "why": "In-tab keydown handler only; no global shortcut or key-up push-to-talk.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/styles/global.css",
+        "line": 26759,
+        "why": "'Desktop shell' here means CSS zoom in the web app, not a native shell.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+        "line": 3508,
+        "why": "Desktop-shell comment refers to CSS zoom scaling; no native window.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/index.html",
+        "line": 1,
+        "why": "Plain web HTML entry; no native shell, tray or window metadata.",
+        "kind": "code"
+      }
+    ],
+    "impression": "absent"
+  }
+]

@@ -1,0 +1,1880 @@
+[
+  {
+    "id": "hermes-learning-and-memory-001",
+    "category": "Memory, learning & personalization",
+    "name": "Bounded curated memory files (MEMORY.md + USER.md)",
+    "what": "The agent keeps two small, human-readable stores: environment and lesson notes (MEMORY.md, 2,200 chars) and a user profile (USER.md, 1,375 chars). Both ride in every session with a usage meter so the model knows how full they are.",
+    "how": "File-backed MemoryStore in tools/memory_tool_store.py. Entries are joined by a section-sign delimiter and budgeted in characters (model independent). _render_block emits a header such as \"MEMORY (your personal notes) [67% - 1,474/2,200 chars]\". Files live under get_hermes_home()/memories (profile scoped). The flags memory_enabled and user_profile_enabled change both the advertised tool schema (dynamic_schema_overrides) and the guidance text, so the model is never told about a store it cannot write.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:22-25",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:544",
+      "C:/dev/hermes-agent/tools/memory_tool.py:430",
+      "C:/dev/hermes-agent/tools/memory_tool.py:448",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:11-20"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon memory is unbounded Postgres rows with semantic recall; a tiny always-injected, hard-budgeted \"core profile\" block would be a cheap complement that needs no retrieval round trip.",
+    "notes": "Quality 4: the hard budget forces curation and is easy to reason about, but 2.2k+1.4k chars is very small and there is no per-user or per-space scoping (one profile = one user). Peer comparison (from the audit-3 peer inventories, which list names more than mechanisms): Claude desktop/Cowork exposes read/write/list/delete/reset memory RPCs plus Space memory and CLAUDE.md; Codex shows memory modes, summaries, consolidation, versions and import; Antigravity has CortexMemory with GLOBAL/LOCAL/PROJECT scopes and a Brain; DeepSeek harness has no built-in long-term memory; T3 Code none. None reports a hard character budget or an in-prompt usage meter."
+  },
+  {
+    "id": "hermes-learning-and-memory-002",
+    "category": "Memory, learning & personalization",
+    "name": "Frozen-snapshot memory injection (prefix-cache safe)",
+    "what": "Memory is captured into the system prompt once at session start. Writes during the session hit disk immediately and are returned in tool results, but the prompt does not change until the next session or the next compaction rebuild.",
+    "how": "MemoryStore.load_from_disk fills _system_prompt_snapshot; format_for_system_prompt returns that frozen copy. invalidate_system_prompt (called after compression) clears the cached prompt and calls load_from_disk again so the rebuilt prompt picks up this session writes. AGENTS.md states that reloading memories mid-conversation is a cost bug with compression as the single exception.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:187",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:524-528",
+      "C:/dev/hermes-agent/agent/system_prompt.py:808-828",
+      "C:/dev/hermes-agent/AGENTS.md:18-23",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:57"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon sets Anthropic cache_control breakpoints on tools, system and history; keeping the memory block byte-stable per thread and refreshing it only at compaction would protect that cache.",
+    "notes": "Trade-off: a fact saved mid-session is not visible to the same session via the prompt (docs advise /new at natural boundaries). The tool result still echoes the write so the model is not blind."
+  },
+  {
+    "id": "hermes-learning-and-memory-003",
+    "category": "Memory, learning & personalization",
+    "name": "Atomic batch memory operations checked against the final budget",
+    "what": "One memory call can remove or shorten stale entries and add a new one together, even when the add alone would overflow. Either every operation applies or nothing does.",
+    "how": "The memory tool accepts an operations array (add / replace / remove). MemoryStore._batch works on a copy under the file lock, applies each op, and checks the character limit only on the final state; any malformed or unmatched op or an over-limit result writes nothing. Replace always means \"whole entry becomes this content\" (old_text only locates the entry), and the response reports what was overwritten (replaced_entries / removed_entries) so loss is never silent. A batch that would empty a previously non-empty store is refused.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:472-527",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:503",
+      "C:/dev/hermes-agent/tools/memory_tool.py:346-420"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon save_memory writes single rows; a transactional batch with final-state budget validation is the pattern to copy if a bounded profile or a consolidation tool is added.",
+    "notes": "Quality 5: removes the classic LLM failure loop (add rejected, model retries blindly). Issue tags in comments (#117952, #103419, #97316) show it was hardened against real incidents."
+  },
+  {
+    "id": "hermes-learning-and-memory-004",
+    "category": "Memory, learning & personalization",
+    "name": "Self-healing error payloads and a per-turn failure cap for memory writes",
+    "what": "When a memory write fails the tool tells the model exactly how to fix it (closest matching entries, current entries, how many chars to free). After three consecutive failures in one turn it returns a terminal result so a failed memory side effect can never block the user reply.",
+    "how": "No-match errors return closest_entries scored by word overlap (>=0.3). Over-budget errors on a single op return current_entries; batch aborts deliberately omit the inventory so retries do not grow context. Successful writes are terminal (\"done\": true, \"do not repeat\") and omit the entry list to stop the model from \"finding more to fix\". _consolidation_failure counts failures and resets on success and at turn start. FAILURE_CLASS ContextVar records a closed failure class for metrics only (never shown to the model).",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:104-120",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:150-176",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:529-541",
+      "C:/dev/hermes-agent/tools/memory_tool.py:214-240"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Directly reusable for any Verevon tool the model must call repeatedly (memory, skills, artifacts): error payloads that carry the repair hint and a hard retry cap.",
+    "notes": "This is tool-ergonomics engineering driven by observed model behaviour (small models loop). Cheap to port to Rust as structured error enums."
+  },
+  {
+    "id": "hermes-learning-and-memory-005",
+    "category": "Memory, learning & personalization",
+    "name": "Typography-tolerant, exact-first entry matching",
+    "what": "The model locates an entry to replace or remove with a short substring. Matching tolerates curly versus straight quotes, dash variants and re-wrapped whitespace, and a whole-entry exact match always wins over substring matches.",
+    "how": "_find_unique_match tries whole-entry equality, then byte-exact substrings, then a folded form (_normalize_for_match maps quote and dash variants, collapses whitespace, turns a literal backslash-n into a space) and refuses if distinct entries match (ambiguous) or if the needle has no alphanumerics.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:66-103"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Low-cost robustness for any edit-by-substring tool the Verevon agent exposes (artifacts, notes).",
+    "notes": "Small but typical of the repo: every tool is hardened against how models actually re-emit text."
+  },
+  {
+    "id": "hermes-learning-and-memory-006",
+    "category": "Memory, learning & personalization",
+    "name": "Integrity guards: file lock, atomic rename, drift detection, refuse-to-wipe",
+    "what": "Concurrent writers, hand edits and unreadable files cannot corrupt or silently erase memory. If free-form text was appended outside the tool, the write is refused and a timestamped backup is saved.",
+    "how": "_file_lock uses fcntl.flock (msvcrt on Windows) on a separate .lock file opened O_NOFOLLOW with 0600. _mutate re-reads from disk under the lock, writes via atomic temp-file rename. _detect_external_drift flags an entry larger than the whole-store limit and writes MEMORY.md.bak.<ts>. An existing-but-unreadable file aborts the write instead of being treated as empty. utf-8-sig strips Notepad BOMs. Load-time over-limit files are warned about, never truncated.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:222-265",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:303-337",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:591-606",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:44-56"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon is DB-first so locking differs, but the invariants (never treat an unreadable store as empty, never truncate user memory, snapshot before refusing) apply to any import/edit path.",
+    "notes": "Files-on-disk design buys portability and human editability but costs multi-writer safety; the doc explicitly warns never to share one home between two agent processes."
+  },
+  {
+    "id": "hermes-learning-and-memory-007",
+    "category": "Safety, permissions & governance",
+    "name": "Prompt-injection scan on memory at write time and load time",
+    "what": "Entries are scanned for injection and exfiltration patterns before they are accepted, because memory is injected into every future prompt. Existing entries are re-scanned on load; a poisoned entry is replaced by a [BLOCKED] marker in the prompt snapshot while the raw text stays visible to the user for removal.",
+    "how": "tools/threat_patterns.py holds one shared (regex, id, scope) library with cumulative scopes all < context < strict, a 65,536-char scan cap and bounded filler to avoid regex backtracking. MemoryStore.add/replace/_batch call the strict scope; load_from_disk sanitizes only the snapshot copy. The same library guards context files, tool results and cron prompts.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/threat_patterns.py:1-60",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:28-31",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:187-205",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:213-216"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon recently gained a model-callable save_memory; the baseline already notes the laundering risk \"must be designed in\" when writes exist, and write-time plus load-time scanning is a ready recipe.",
+    "notes": "Regex scanning is advisory (bypassable) but is layered with approval gating and provenance. Patterns deliberately anchor on C2 vocabulary rather than bossy English to avoid false positives."
+  },
+  {
+    "id": "hermes-learning-and-memory-008",
+    "category": "Safety, permissions & governance",
+    "name": "Write-approval gate with staged, entry-pinned memory writes",
+    "what": "Users can require approval for every memory write. Outside the interactive CLI (messaging, scripts, background review) writes are staged and reviewed with /memory pending, approve and reject. Approval applies to exactly the entry the reviewer saw.",
+    "how": "tools/write_approval.py evaluates memory.write_approval and persists staged payloads under HERMES_HOME/pending/memory/<id>.json. _pin_matched_entries records the full matched entry on each staged replace/remove; apply_memory_pending replays only if that exact entry still exists, otherwise it refuses and leaves the record pending. A staged record created before pinning existed is refused as unverifiable. Approval output lists the full text of every entry overwritten or removed.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/write_approval.py:1-80",
+      "C:/dev/hermes-agent/tools/memory_tool.py:64-100",
+      "C:/dev/hermes-agent/tools/memory_tool.py:326-343",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:311-345"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Consent-first learning fits Verevon governance (ZDR, Space authority); staged proposals with pinned targets would let org admins gate agent-written memory and skills.",
+    "notes": "None of the peer inventories (Claude desktop, Codex, Cursor, Antigravity, DeepSeek, T3 Code) reports staged approval or entry pinning for memory writes; absence in shipped-binary inventories is weak evidence because server-side behaviour is invisible. Gate is a single boolean, default off."
+  },
+  {
+    "id": "hermes-learning-and-memory-009",
+    "category": "Memory, learning & personalization",
+    "name": "Fail-closed unattended deletes for the background reviewer",
+    "what": "The post-turn review fork may add memory entries but may never replace or remove them unattended. Such operations are converted into staged proposals the user can approve later, even when the global approval gate is off.",
+    "how": "_background_delete_gate runs before the write gate. If is_unattended_review() is true and the payload contains replace/remove ops (single or inside a batch), the op is pinned and staged via write_approval.stage_write with a \"background review consolidation\" summary and the tool returns staged:true. Staging failure falls back to a plain denial. Explicit /refine reviews are marked attended and keep the full operation set.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/memory_tool.py:162-212",
+      "C:/dev/hermes-agent/tools/skill_provenance.py:25-44"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon sessionreview currently upserts skills autonomously; an add-only autonomy tier with human-approved destructive changes is a safer default for org data.",
+    "notes": "Reason recorded in comments (#105921): the fork summary is never published back, so a plain denial would silently drop consolidation requests; staging gives them a surfacing path."
+  },
+  {
+    "id": "hermes-learning-and-memory-010",
+    "category": "Memory, learning & personalization",
+    "name": "Declarative-not-imperative memory style and skills-first routing doctrine",
+    "what": "The prompt tells the model to store memory as declarative facts (\"User prefers concise responses\"), not instructions to itself, and to put task knowledge in skills so memory stays small and always-relevant.",
+    "how": "build_memory_guidance composes the frame, a \"Skills come first\" routing paragraph and the exception rule; MEMORY_SCHEMA description adds WHEN / IF FULL / TARGETS / SKIP lists (skip trivial facts, easily rediscovered facts, raw dumps, task progress, completed-work logs). Guidance adapts when only one store is enabled or skill_manage is unavailable.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/prompt_builder.py:192-232",
+      "C:/dev/hermes-agent/tools/memory_tool.py:346-372"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon Dreaming extraction could adopt the \"facts not directives\" rule to prevent stored phrases being re-read as commands in later sessions.",
+    "notes": "Imperative phrasing re-read as a directive is a real memory-poisoning/over-obedience mode; the rule is cheap and portable."
+  },
+  {
+    "id": "hermes-learning-and-memory-011",
+    "category": "Memory, learning & personalization",
+    "name": "Memory versus skill routing: who-the-user-is vs how-to-do-this-task",
+    "what": "Learning is split into two stores with an explicit one-fact-one-place rule: USER.md for who the user is, MEMORY.md for environment facts, and skills for procedures and the user preferences that govern a class of task.",
+    "how": "_MEMORY_ROUTING_BLOCK is shared by the memory-only and combined review prompts. It forbids writing a fact to both stores. The skill review prompts state that a user complaint about how a task was handled belongs in the SKILL.md that governs the task, with USER.md only for cross-cutting preferences no skill owns.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:362-384",
+      "C:/dev/hermes-agent/agent/background_review.py:440-510",
+      "C:/dev/hermes-agent/agent/background_review.py:511-563"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon has both agent_memory and agent_skills but no stated routing rule; encoding one prevents the duplicated-preference bloat Hermes documents (#30220).",
+    "notes": "This split (declarative profile vs procedural skill with user preferences embedded) is the core intellectual contribution of the Hermes learning loop."
+  },
+  {
+    "id": "hermes-learning-and-memory-012",
+    "category": "Memory, learning & personalization",
+    "name": "MemoryProvider lifecycle contract (about 20 hooks, one external provider)",
+    "what": "External memory backends plug into one ABC that covers the full turn and session lifecycle: initialize, static prompt block, prefetch, queued prefetch, per-turn sync, session end, session switch, pre-compress, delegation observation, mirrored memory writes and backup paths.",
+    "how": "agent/memory_provider.py defines MemoryProvider (is_available, initialize(session_id, hermes_home, platform, agent_context, ...), system_prompt_block, prefetch, queue_prefetch, recall_status, sync_turn(user, assistant, messages, turn_author), get_tool_schemas, handle_tool_call, on_turn_start, identity_signature, on_session_end, on_session_switch(reset, rewound), on_pre_compress, on_delegation, get_config_schema, save_config, on_memory_write, backup_paths). MemoryManager keeps the built-in provider first plus at most one external one, rejects tools that shadow reserved core tool names, and swallows per-provider failures.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_provider.py:84-206",
+      "C:/dev/hermes-agent/agent/memory_manager.py:391-500"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Earlier Verevon docs (7.9) already list these hooks as the remaining gap; the new detail here is the identity_signature, session-switch(rewound) and agent_context semantics that real multi-surface use required.",
+    "notes": "Covered at a high level by claude-hermes-deepseek.md; deeper items found here: identity_signature cache busting, turn_author for shared sessions, backup_paths for hermes backup."
+  },
+  {
+    "id": "hermes-learning-and-memory-013",
+    "category": "Memory, learning & personalization",
+    "name": "Non-blocking, bounded recall with queued prefetch and serialized sync worker",
+    "what": "Recall never stalls a turn: external prefetch has an 8 second ceiling on a daemon thread, a stuck provider is skipped until it returns, a prefetch is queued after each turn for the next one, and all writes go through one serialized background worker.",
+    "how": "MemoryManager._prefetch_provider runs provider.prefetch on a context-bound thread and joins with _EXTERNAL_PREFETCH_TIMEOUT_S (8.0). queue_prefetch_all and sync_all submit to a one-worker DaemonThreadPoolExecutor via _submit_background, tagging futures with a durability class (write or prefetch) so shutdown_all drains FIFO within 5 s and reports abandoned counts; flush_pending proves drain with a sentinel task. spawn_context_thread copies ContextVars so profile and secret scope survive thread hops.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_manager.py:34-35",
+      "C:/dev/hermes-agent/agent/memory_manager.py:522-566",
+      "C:/dev/hermes-agent/agent/memory_manager.py:581-600",
+      "C:/dev/hermes-agent/agent/memory_manager.py:631-700",
+      "C:/dev/hermes-agent/agent/memory_provider.py:21-35"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon memory_prefetch already bounds recall at 400 ms and skips trivial prompts; speculative prefetch for turn N+1 and drain accounting on shutdown are the missing pieces.",
+    "notes": "Provider-side writes are explicitly never inline: sync_turn may block for minutes."
+  },
+  {
+    "id": "hermes-learning-and-memory-014",
+    "category": "Memory, learning & personalization",
+    "name": "Trivial-prompt recall gate and skill-scaffold stripping",
+    "what": "Recall is skipped for empty input, slash commands and bare acknowledgements, and when a skill body was expanded into the message only the user own instruction is sent to memory providers.",
+    "how": "TRIVIAL_PROMPT_RE is anchored and followed only by whitespace/punctuation so \"k8s\" or \"note\" do not match while \"thanks :)\" does. is_trivial_prompt gates prefetch_all in turn_context._memory_turn_start_and_prefetch; MemoryManager._strip_skill_scaffolding uses extract_user_instruction_from_skill_message.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_provider.py:66-82",
+      "C:/dev/hermes-agent/agent/memory_manager.py:511-521",
+      "C:/dev/hermes-agent/agent/turn_context.py:902-931"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Already ported into Verevon memory_prefetch.rs (with Norwegian words); skill-scaffold stripping is a small addition for Do mode where skills are injected.",
+    "notes": "Multimodal turns are flattened to text first (image-only is trivial) to avoid recall on empty strings."
+  },
+  {
+    "id": "hermes-learning-and-memory-015",
+    "category": "Memory, learning & personalization",
+    "name": "Fenced memory-context block with duplicate suppression and streaming scrubber",
+    "what": "Recalled memory is wrapped in a <memory-context> block with a system note that it is reference data, not new user input. Providers cannot smuggle their own fences, repeated bullets are dropped, and echoed tags are scrubbed from streamed output.",
+    "how": "build_memory_context_block sanitizes provider output (strips fence tags and internal notes), drops byte-identical self-contained bullets within a section via _drop_repeated_recall_lines (continuation-bearing bullets are never dropped), and wraps the result. StreamingContextScrubber removes partial or echoed tags across stream chunk boundaries. Output may spill to a file with head/tail preview above a ceiling (default 10x hook spill, at least 100k chars) unless prefetch_spill_enabled.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_manager.py:173-189",
+      "C:/dev/hermes-agent/agent/memory_manager.py:233-325",
+      "C:/dev/hermes-agent/agent/memory_manager.py:326-390",
+      "C:/dev/hermes-agent/tools/hook_output_spill.py:64"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The earlier Verevon doc concluded the scrubber \"does not transfer\" because Verevon injects an untagged system message; if memory moves to a fenced user-turn block (see api_content sidecar record) the scrubber becomes relevant again.",
+    "notes": "Duplicate suppression matters economically: the composed block is replayed verbatim every later turn while that row stays in context."
+  },
+  {
+    "id": "hermes-learning-and-memory-016",
+    "category": "Agent runtime",
+    "name": "api_content sidecar: ephemeral context injected at API time, replayed byte-identically",
+    "what": "Per-turn context (memory recall, plugin context) is appended to the user message only on the wire. The exact bytes sent are persisted as a sidecar so later turns replay the same prefix and the prompt cache survives, while the stored transcript stays clean.",
+    "how": "compose_user_api_content builds content plus the fenced memory block and plugin_user_context; _stamp_api_content_sidecar writes the sidecar (messages.api_content column) with durable-row backfill; build_api_messages substitutes the sidecar into content on every historical row so the prefix is byte-stable. Compaction paths call drop_stale_api_content when a row is rewritten.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/turn_context.py:106-150",
+      "C:/dev/hermes-agent/agent/turn_context.py:933-1000",
+      "C:/dev/hermes-agent/agent/turn_context.py:1236-1290",
+      "C:/dev/hermes-agent/hermes_state_common.py:449-480"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon injects \"Relevant memory:\" as a system message per request; storing the injected bytes per turn and replaying them would keep Anthropic and OpenAI prefix caches warm across turns.",
+    "notes": "Not reported in any peer inventory (inventories are weak evidence for internals). It resolves the tension between per-turn recall and prefix caching without freezing recall."
+  },
+  {
+    "id": "hermes-learning-and-memory-017",
+    "category": "Safety, permissions & governance",
+    "name": "Egress redaction on everything handed to memory providers",
+    "what": "Every payload leaving for a memory provider (turns, recall queries, transcripts, pre-compress evidence, mirrored writes, delegation results, provider tool arguments) is secret-scrubbed first, even when log redaction is off.",
+    "how": "_redact_for_provider walks dicts, lists, tuples and multimodal parts (data: URLs pass through), applies redact_for_egress, then learns the masked tokens and masks them everywhere else in the same hand-off. The scrub fails closed and never mutates caller objects. Applied in sync_all, prefetch_all, queue_prefetch_all, on_session_end, on_pre_compress, on_memory_write and on_delegation.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_manager.py:190-232",
+      "C:/dev/hermes-agent/agent/memory_manager.py:599-630",
+      "C:/dev/hermes-agent/agent/memory_manager.py:807-845",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory-providers.md:43"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon sends turns to letta-bridge and agentmemory; a single egress-redaction chokepoint with learned-token propagation would harden that boundary and aligns with ZDR/privacy posture.",
+    "notes": "Motivated by issue #115104 (providers archive whatever they are handed)."
+  },
+  {
+    "id": "hermes-learning-and-memory-018",
+    "category": "Transparency, observability & control",
+    "name": "Deterministic recall indicator emitted by the host",
+    "what": "When recalled memory is injected the user sees a status line (for example \"recalled 3 memories\") that comes from the host, not from the model, so memory use is visible even if the model stays silent.",
+    "how": "Providers implement recall_status() returning RecallStatus(provider_label, count, glyph) for the last prefetch only; MemoryManager.describe_recall renders it and turn_context emits it through _emit_status right after prefetch_all.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_provider.py:53-62",
+      "C:/dev/hermes-agent/agent/memory_manager.py:568-580",
+      "C:/dev/hermes-agent/agent/turn_context.py:922-930"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already emits a memory_recall SSE event and projects told-versus-inferred provenance; Hermes adds nothing missing here except the rule that the count must reflect only the latest prefetch.",
+    "notes": "Included for completeness; Verevon is at parity or ahead (provenance labels)."
+  },
+  {
+    "id": "hermes-learning-and-memory-019",
+    "category": "Memory, learning & personalization",
+    "name": "Memory write mirroring with provenance metadata",
+    "what": "Built-in memory writes are mirrored to the active external provider only after they commit, with provenance (origin, session, platform, previous content) so the external store can reconcile edits and deletions.",
+    "how": "notify_memory_tool_write gates on a committed success (staged or failed writes are ignored), expands batches per operation, takes previous_content only from the committed store result, and calls on_memory_write with metadata built by build_memory_write_metadata (write_origin, execution_context, session_id, parent_session_id, platform, tool_call_id). The manager adapts to legacy, positional or keyword provider signatures.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_manager.py:846-923",
+      "C:/dev/hermes-agent/agent/background_review.py:736-752",
+      "C:/dev/hermes-agent/agent/memory_provider.py:194-206"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon dual-writes agent_memory and letta-bridge; the \"mirror only after commit, with previous content\" rule avoids tier drift on replace and delete.",
+    "notes": "Metadata is also redacted before egress."
+  },
+  {
+    "id": "hermes-learning-and-memory-020",
+    "category": "Memory, learning & personalization",
+    "name": "Fail-closed pre-compress checkpoint contract (API v2)",
+    "what": "Before compaction drops turns, a provider can durably extract evidence from them. In strict mode a provider failure aborts compaction so the uncompressed transcript is kept.",
+    "how": "PRE_COMPRESS_CHECKPOINT_API_VERSION = 2. MemoryManager.on_pre_compress passes redacted raw messages to v1 providers and a host-normalized evidence list to v2 providers; with require_checkpoint=True at least one v2 provider must succeed or the exception propagates. Provider text returned is merged into the summary prompt. Providers advertise the version via pre_compress_checkpoint_api_version.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_provider.py:35-40",
+      "C:/dev/hermes-agent/agent/memory_manager.py:795-845",
+      "C:/dev/hermes-agent/agent/memory_provider.py:176-180"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon on_pre_compress is best-effort (hook 1 of 6 per the earlier doc); a v2 fail-closed mode would stop compaction from silently losing facts when the memory tier is down.",
+    "notes": "Versioned capability negotiation by attribute keeps old plugins working."
+  },
+  {
+    "id": "hermes-learning-and-memory-021",
+    "category": "Memory, learning & personalization",
+    "name": "Session-boundary commit ordering (end then switch as one serialized task)",
+    "what": "When a user starts a new session, extraction of the old transcript and rebinding of provider state happen in strict order on the single worker so the old transcript is never attributed to the new session.",
+    "how": "MemoryManager.commit_session_boundary_async submits one task that calls on_session_end(snapshot) then on_session_switch(new_session_id, parent_session_id, reset=True). The CLI /new path delivers the context-engine on_session_end synchronously (cheap, ordering sensitive) and queues the provider half, so /new never blocks on an LLM call (#16454).",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/memory_manager.py:742-793",
+      "C:/dev/hermes-agent/hermes_cli/cli_session_mixin.py:459-500"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon end-of-run learning events (RUN_COMPLETED to sessionreview) face the same attribution race on thread switch or branch; serialize extraction before rebinding.",
+    "notes": "A bug-driven design (ad-hoc thread raced the inline switch)."
+  },
+  {
+    "id": "hermes-learning-and-memory-022",
+    "category": "Safety, permissions & governance",
+    "name": "Memory write authority limited to the primary agent",
+    "what": "Subagents, cron jobs and flush contexts cannot write shared memory; only the primary agent can. Delegation results are observed parent-side.",
+    "how": "DELEGATE_BLOCKED_TOOLS includes memory (\"no writes to shared MEMORY.md\"). initialize() receives agent_context in (primary, subagent, cron, flush) and providers skip writes for non-primary contexts. MemoryManager.on_delegation gives the parent provider (task, result, child_session_id).",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/delegate_tool_toolsets.py:14-20",
+      "C:/dev/hermes-agent/agent/memory_provider.py:104-112",
+      "C:/dev/hermes-agent/agent/memory_manager.py:924-930",
+      "C:/dev/hermes-agent/agent/agent_init.py:1266"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Matches Verevon rule that save_memory is refused in plan mode and for subagents; adds the cron and flush contexts and the parent-side delegation observation hook.",
+    "notes": "Note a doc/code mismatch for cron: cron/AGENTS.md says cron sessions pass skip_memory=True but cron/scheduler.py:2494 passes skip_memory=False (see cron record)."
+  },
+  {
+    "id": "hermes-learning-and-memory-023",
+    "category": "Tools, plugins & extensibility",
+    "name": "External memory providers live in a plugin catalog, not in core",
+    "what": "Only ByteRover and RetainDB still ship bundled (both scheduled to leave core on 2026-10-15). Honcho, Hindsight, Mem0, Supermemory, OpenViking, Holographic and others install from a pinned-SHA plugin catalog and keep the same provider names, config and data.",
+    "how": "plugins/memory contains only byterover/, retaindb/, config_schema.py and query_rewrite.py. hermes update and first agent start install the catalog plugin for any profile whose memory.provider names it (security.allow_lazy_installs gates this). Data and config stay per profile ($HERMES_HOME/<provider>/...).",
+    "evidence": [
+      "C:/dev/hermes-agent/plugins/memory/__init__.py",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory-providers.md:795-841",
+      "C:/dev/hermes-agent/agent/memory_provider.py:44-50"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Supports the existing ledger decision not to build a memory-adapter registry for a single implementation, while showing the ABC surface to target if a second backend appears.",
+    "notes": "Corrects the scout and earlier docs: \"8 pluggable memory backends\" is true only of the ecosystem, not of core code. The doc says RetainDB/ByteRover standalone repos are unmaintained."
+  },
+  {
+    "id": "hermes-learning-and-memory-024",
+    "category": "Memory, learning & personalization",
+    "name": "Honcho dialectic user model (external provider)",
+    "what": "The only true long-horizon user-modelling option in the ecosystem: Honcho builds a representation and peer card of the user across sessions and answers dialectic questions about them, injected as two layers each turn.",
+    "how": "Per docs: base layer (session summary + user representation + peer card, refreshed every contextCadence turns) plus a dialectic supplement from an LLM peer.chat() call (dialecticCadence, dialecticDepth 1-3 with cold or warm prompts, then self-audit, then reconciliation; reasoning level scales with query length up to reasoningLevelCap). Peers map one user peer and one AI peer per Hermes profile in a shared workspace; observation modes directional or unified; gateway identity mapping via userPeerAliases/pinUserPeer/runtimePeerPrefix; five tools (honcho_profile, honcho_search, honcho_context, honcho_reasoning, honcho_conclude). Not bundled: maintained by Plastic Labs and installed from the catalog.",
+    "evidence": [
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory-providers.md:47-172",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/honcho.md",
+      "C:/dev/hermes-agent/plugin-catalog/honcho.yaml"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon Dreaming plus provenance covers fact extraction but not a synthesized user representation; the peer-card and cadence-knob idea (cost versus depth controlled independently) is worth evaluating.",
+    "notes": "External repository code was not inspected; behaviour is from Hermes docs only. The README \"Honcho dialectic user modeling\" claim is therefore an ecosystem capability, not core."
+  },
+  {
+    "id": "hermes-learning-and-memory-025",
+    "category": "Memory, learning & personalization",
+    "name": "Holographic fact store with trust scoring (external)",
+    "what": "A local SQLite fact store with FTS5, optional algebraic (HRR) compositional queries, contradiction detection, and trust scores trained by helpful/unhelpful feedback on recalled facts.",
+    "how": "Per docs: tools fact_store (add, search, probe, related, reason, contradict, update, remove, list) and fact_feedback; trust starts at 0.5 with asymmetric updates (+0.05 helpful, -0.10 unhelpful); HRR via optional NumPy. Maintained out of tree (itpartypattaya) and installed from the catalog.",
+    "evidence": [
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory-providers.md:552-606",
+      "C:/dev/hermes-agent/plugin-catalog/"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon already quarantines skills with a Wilson bound from implicit feedback; the same feedback-to-trust loop applied to individual memory facts (with contradiction detection) is a natural extension.",
+    "notes": "Docs only; not verified in code."
+  },
+  {
+    "id": "hermes-learning-and-memory-026",
+    "category": "Memory, learning & personalization",
+    "name": "Hindsight knowledge-graph memory and reflect synthesis (external)",
+    "what": "Entity-resolving knowledge graph memory with multi-strategy recall and a reflect tool that synthesizes an answer across memories; full turns including tool calls are auto-retained with session-level document tracking.",
+    "how": "Per docs: modes cloud, local_embedded, local_external; tools hindsight_retain / hindsight_recall / hindsight_reflect; recall_budget low/mid/high; memory_mode hybrid/context/tools; retain tags and source metadata. Installed from the catalog (vectorize-io).",
+    "evidence": [
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory-providers.md:485-551"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Reference for a Data-plane graph-backed memory tier; the recall_budget control maps to Verevon latency tiers.",
+    "notes": "Docs only."
+  },
+  {
+    "id": "hermes-learning-and-memory-027",
+    "category": "Memory, learning & personalization",
+    "name": "Other provider ideas: tiered loading, server-side extraction, delta compression, pre-compression extraction",
+    "what": "The remaining providers each contribute one mechanism: OpenViking (filesystem hierarchy and tiered loading), Mem0 (server-side LLM extraction), RetainDB (hybrid vector + BM25 + rerank, 7 memory types, delta compression), ByteRover (hierarchical knowledge tree with fuzzy-text then LLM-driven search, extraction before compression), Supermemory (context fencing, session graph ingest), Memori (tool-aware structured recall).",
+    "how": "Bundled code for ByteRover (brv CLI wrapper, tools brv_query/brv_curate/brv_status) and RetainDB (REST client, tools retaindb_profile/search/context/remember/forget with type + importance) is small (282 and 492 lines). The rest are catalog entries described only in docs.",
+    "evidence": [
+      "C:/dev/hermes-agent/plugins/memory/byterover/README.md",
+      "C:/dev/hermes-agent/plugins/memory/retaindb/README.md",
+      "C:/dev/hermes-agent/plugins/memory/retaindb/__init__.py",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory-providers.md:295-484",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory-providers.md:607-794"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Low direct value; useful as a menu of retrieval strategies if Verevon letta-bridge needs a second tier (typed memories with importance, tiered loading).",
+    "notes": "Only ByteRover and RetainDB were read at code level and both are thin wrappers."
+  },
+  {
+    "id": "hermes-learning-and-memory-028",
+    "category": "Memory, learning & personalization",
+    "name": "LLM memory-query rewrite with injection hardening",
+    "what": "The latest user message can be rewritten into one concise retrieval question about the user before it hits a memory backend, improving recall for pronoun-heavy or follow-up messages.",
+    "how": "plugins/memory/query_rewrite.py exposes rewrite_memory_query for any provider (task key memory_query_rewrite under auxiliary.* in config). The latest message is capped (4,000 chars, head plus tail) and sent as a JSON string labelled data only, with temperature 0 and max_tokens 96. _normalize_rewrite then rejects the result (returning an empty string so the original query is used) unless it is a single sentence of at most 320 chars that starts with a question word, mentions user-memory vocabulary (user, previous, preference, history...) and does not match an instruction-leak regex.",
+    "evidence": [
+      "C:/dev/hermes-agent/plugins/memory/query_rewrite.py:1-117"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A cheap pre-step for Verevon fetch_chat_memory_context against letta-bridge, especially for Norwegian follow-ups; keep the same untrusted-input and leak filters.",
+    "notes": "Adds one small aux-model call per recalled turn; Hermes makes it opt-in per provider."
+  },
+  {
+    "id": "hermes-learning-and-memory-029",
+    "category": "Platform architecture",
+    "name": "SQLite session store with lineage, per-model usage and deduplicated system prompts",
+    "what": "All CLI, gateway, cron and subagent conversations are stored in one SQLite database (WAL, schema v31) with parent/child session lineage, per-message flags for compaction state, per-model usage rows and a system_prompts table keyed by hash.",
+    "how": "hermes_state_common.SCHEMA_SQL defines sessions (source, parent_session_id, end_reason, token and cost counters, compression cooldown/streak columns, pinned/archived/hidden, title and title_source), messages (role, content, tool_calls, reasoning columns, active, compacted, _compressed_summary, api_content, message_uid, absorbed_message_uids), system_prompts(hash, prompt) so identical prompts are stored once, session_model_usage keyed by (session, model, billing, task), compression_locks and session_turn_leases. SessionDB is a facade over 34 topic modules (schema, search, repair, portability, read pool, lock owners, rewind).",
+    "evidence": [
+      "C:/dev/hermes-agent/hermes_state_common.py:283",
+      "C:/dev/hermes-agent/hermes_state_common.py:372-480",
+      "C:/dev/hermes-agent/hermes_state_common.py:482-503",
+      "C:/dev/hermes-agent/hermes_state_common.py:568-582",
+      "C:/dev/hermes-agent/website/docs/developer-guide/session-storage.md:146-270"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon session-core already owns threads/runs/events in Postgres; the system-prompt dedup table, lineage-by-end_reason and per-task usage rows (task=background_review) are concrete schema ideas.",
+    "notes": "Quality 4: very thorough (repair, WAL conversion, FTS rebuild), but a single local SQLite per profile is not a multi-tenant design."
+  },
+  {
+    "id": "hermes-learning-and-memory-030",
+    "category": "Memory, learning & personalization",
+    "name": "FTS5 session search: lineage-deduped discovery with adaptive hydration",
+    "what": "The agent can recall past conversations by keyword. Discovery returns the top matching sessions (deduplicated by lineage root), fully hydrating only the best hit and returning just the anchor message for lower hits.",
+    "how": "session_search._discover calls db.search_messages (FTS5 BM25 rank, role filter user/assistant by default, 300-row scan limit) then dedupes by lineage root via _resolve_lineage. Current-lineage hits are skipped unless the transcript has left live context (compaction rotation, /new reset, or an archived in-place compacted row). Subagent, kanban and tool sessions are hidden; cron sessions are demoted below interactive ones to avoid \"recall blindness\" (#19434). A title match is prepended. Options: sort newest/oldest bias, after/before ISO or relative bounds (7d/24h/2w), exclude_session_ids (cap 20), profile for read-only cross-profile reads. Every hit carries an @session:<profile>/<id> link the model is told to emit verbatim.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/session_search_tool.py:23-56",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:354-433",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:276-330",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:651-700"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "The Verevon baseline marks session search over past chats as absent (planned I12); this is a complete, battle-tested design to port to Postgres full-text plus pg_trgm, including cron demotion and lineage handling.",
+    "notes": "Quality 5: addresses lineage splits, compaction, resets, cron noise and token cost together. Peer comparison: the DeepSeek harness also has an FTS5 session-query provider and read-only session_search/session_trace tools (model-facing tools are marked experimental there), so the idea is not unique; Hermes differs by making it a default tool with cron demotion, adaptive hydration and compaction-aware lineage."
+  },
+  {
+    "id": "hermes-learning-and-memory-031",
+    "category": "Memory, learning & personalization",
+    "name": "Four-shape session_search tool with no LLM calls (inventory correction)",
+    "what": "One tool handles discovery (query), scroll (session_id + around_message_id), read (session_id alone) and browse (no args). Results are real stored messages, bounded in size, with no summarization model involved.",
+    "how": "Mode is inferred from arguments in _dispatch. Scroll returns a window of 1-20 messages (default 5) around an anchor; read caps content per message at 2,000 chars and returns head/tail; discovery bookends are capped; browse lists recent sessions with metadata only. The schema text was dieted from 1,570 to 695 tokens per call and A/B tested; response hints carry the usage teaching instead.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/session_search_tool.py:1-9",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:40-45",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:531-580",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:577-640",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:217-244",
+      "C:/dev/hermes-agent/evals/session_search_schema/README.md:1-12"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Zero model cost per recall and bounded output make this attractive for Verevon recall_conversations; the scroll shape fixes \"found the session but not the detail\".",
+    "notes": "The scout inventory (and older Hermes docs) say session search uses LLM summarisation. Current code and docs say explicitly \"no LLM, no truncation\": treat the inventory line as stale."
+  },
+  {
+    "id": "hermes-learning-and-memory-032",
+    "category": "Platform architecture",
+    "name": "FTS storage engineering: external-content index, trigram, CJK and resumable rebuild",
+    "what": "Search stays fast and robust on large histories and in Chinese/Japanese/Korean: tool output is only indexed up to 8,192 chars, a trigram index serves substring queries, an optional CJK bigram tokenizer handles short CJK terms, and index rebuilds are incremental and restartable.",
+    "how": "FTS_SQL creates messages_fts as an external-content FTS5 table over a view (messages_fts_src) that truncates role=tool content; triggers are guarded by rebuild high-water and progress markers in state_meta. FTS_TRIGRAM_SQL covers all sources except cron and subagent. native/fts5_cjk builds an optional cjk_unicode61 tokenizer extension (unicode61 plus CJK character bigrams, Lucene CJKAnalyzer semantics, installed to ~/.hermes/lib) that backs a separate messages_fts_cjk index so 1-2 character Korean/Chinese/Japanese terms avoid full-table LIKE scans. search_messages sanitizes FTS5 syntax, retries with an OR-relaxed query, and falls back to compiled LIKE queries when needed. fts_rebuild_step, optimize_fts_storage and repair tooling run in the background.",
+    "evidence": [
+      "C:/dev/hermes-agent/hermes_state_common.py:306-330",
+      "C:/dev/hermes-agent/hermes_state_common.py:773-830",
+      "C:/dev/hermes-agent/hermes_state_common.py:880-905",
+      "C:/dev/hermes-agent/hermes_state_search.py:818-900",
+      "C:/dev/hermes-agent/hermes_state_search.py:1063-1230",
+      "C:/dev/hermes-agent/native/fts5_cjk/README.md:1-20",
+      "C:/dev/hermes-agent/tests/hermes_state/test_fts_cjk_bigram.py"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Capping indexed tool output and excluding automation sources from the trigram index are cost levers worth copying; Norwegian-first Verevon needs the same stemming/trigram fallback decisions.",
+    "notes": "Heavy operational machinery (10+ FTS test files) shows the maintenance burden of self-hosted FTS."
+  },
+  {
+    "id": "hermes-learning-and-memory-033",
+    "category": "Memory, learning & personalization",
+    "name": "Compaction preserves searchable history (archive rows, never delete)",
+    "what": "When context is compacted, original rows stay in the database as archived (active=0, compacted=1) or in the parent session of a compression split, so session_search can still find details the model no longer has in context.",
+    "how": "Compression either rotates to a child session (parent end_reason=compression, lineage walked by _resolve_to_parent) or archives rows in place. session_search treats hits from compression-ended predecessors, /new-reset predecessors and archived in-place rows as eligible even though they share the current lineage root, and excludes compaction summaries from bookends. conversation_compression_archive tracks exactly which durable rows a compaction absorbed.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/session_search_tool.py:107-125",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:380-415",
+      "C:/dev/hermes-agent/agent/conversation_compression_archive.py:1-40",
+      "C:/dev/hermes-agent/hermes_state_common.py:449-480"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon compaction persists a summary and offers reattach_context; adding a searchable archive of shed turns closes the loop between compaction and recall.",
+    "notes": "This coupling (compaction output is recoverable through search) is the strongest \"memory efficiency\" idea in the repo."
+  },
+  {
+    "id": "hermes-learning-and-memory-034",
+    "category": "Chat experience",
+    "name": "Two-stage session titles with provenance ordering",
+    "what": "A deterministic title is written instantly before the model is called; a small model upgrades it afterwards; a user-typed name always wins.",
+    "how": "title_generator.py runs stage 1 (deterministic, cannot fail) and a stage 2 JSON-constrained cheap-tier call with thinking off on a tracked daemon thread. Storage keeps title_source and enforces derived < llm < user precedence; stage 2 only replaces stage 1.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/title_generator.py:1-30",
+      "C:/dev/hermes-agent/hermes_state_titles.py",
+      "C:/dev/hermes-agent/hermes_state_common.py:382-448"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has a presentation override (title) per thread; adding a title_source precedence prevents LLM retitling from clobbering manual renames.",
+    "notes": "Aux usage is billed to the session and joined before process exit."
+  },
+  {
+    "id": "hermes-learning-and-memory-035",
+    "category": "Memory, learning & personalization",
+    "name": "Foreign-session import and cross-profile read-only recall",
+    "what": "Existing Claude Code and Codex CLI sessions can be imported into Hermes history, and sessions in another profile can be read read-only, so past work becomes searchable context.",
+    "how": "hermes_cli/foreign_sessions.py discovers and parses foreign JSONL stores read-only, strips injected wrapper tags (system-reminder, environment_context, ...), merges turns to satisfy role alternation and derives titles. session_search accepts a profile argument and resolves @session:<profile>/<id> links through _resolve_profile_db.",
+    "evidence": [
+      "C:/dev/hermes-agent/hermes_cli/foreign_sessions.py:1-60",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:434-478",
+      "C:/dev/hermes-agent/website/docs/user-guide/sessions.md:804-845"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Import from Claude/ChatGPT exports is a switching-cost reducer and a way to seed memory and search for new Verevon users.",
+    "notes": "Import mechanics read at header level only."
+  },
+  {
+    "id": "hermes-learning-and-memory-036",
+    "category": "Memory, learning & personalization",
+    "name": "Session boundaries as the memory design assumption (and its limitation)",
+    "what": "Docs state that the whole memory system is built around session end: MEMORY.md/USER.md carry essentials forward and session_search fills gaps. Gateway chats are one continuous session with no automatic reset, so users are told to run /new at natural boundaries.",
+    "how": "Gateway sessions no longer reset on idle or daily timers (core ignores legacy session_reset settings); context compression and hygiene guards keep long sessions workable; memory snapshot is refreshed only on /new, restart or compaction.",
+    "evidence": [
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:59-66",
+      "C:/dev/hermes-agent/website/docs/user-guide/sessions.md:967-1005"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon web chat has explicit threads, so boundaries exist naturally; the lesson is to refresh memory at thread start and at compaction rather than per turn.",
+    "notes": "Limitation: a weeks-long messaging session never sees its own new memories in the prompt; this relies on user hygiene."
+  },
+  {
+    "id": "hermes-learning-and-memory-037",
+    "category": "Tools, plugins & extensibility",
+    "name": "Skills with progressive disclosure and a cached, tiered index",
+    "what": "Skills are on-demand SKILL.md packages (plus references, templates, scripts, assets) compatible with the agentskills.io format. The prompt carries only a compact index; the model loads a skill body or a single reference file when needed.",
+    "how": "build_skills_system_prompt renders \"## Skills\" with category descriptions (DESCRIPTION.md) and rows of name + description truncated to 60 chars (57 + ellipsis; SKILL_PROMPT_DESC_LIMIT). Precedence is project > local > create_dir > external_dirs; categories outside the coding context collapse to names-only lines. The prompt instructs the model to MUST load any partially relevant skill. Levels: skills_list (about 3k tokens), skill_view(name), skill_view(name, file_path).",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/prompt_builder.py:1352-1500",
+      "C:/dev/hermes-agent/agent/prompt_builder.py:1424-1492",
+      "C:/dev/hermes-agent/agent/skill_utils.py:822-839",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:172-200"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon injects up to 3 matched skills under a character budget per turn; Hermes instead lets the model route from a cheap index, which scales to hundreds of skills and avoids matcher misses.",
+    "notes": "Cost: the index is paid on every session and the \"MUST load\" wording over-triggers; the repo mitigates with 60-char descriptions and names-only demotion."
+  },
+  {
+    "id": "hermes-learning-and-memory-038",
+    "category": "Platform architecture",
+    "name": "Skills index snapshot cache and mid-conversation change notices",
+    "what": "The skills index is cached in process and on disk and kept in the volatile prompt tier. Skills added, edited or removed mid-conversation are announced once on the next user message; the system prompt picks them up at the next compaction.",
+    "how": "_build_skills_manifest stats every skill file; _load_skills_snapshot reuses .skills_prompt_snapshot.json when version and manifest match (two-layer cache: in-process LRU then disk). agent/skills_index_delta.py compares the index the prompt carries with the index the session would build now on every turn and delivers the difference as a per-turn user-message note (\"The skills available in this conversation changed after its system prompt was built...\", with Now available / No longer available lists). Each note states the full difference against the prompt, is sent only when the difference changes, and is read back from the transcript by a fresh agent (the gateway builds one per turn); the idea is credited as ported from cloudflare/cloudflare-os#267.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/prompt_builder.py:1191-1260",
+      "C:/dev/hermes-agent/agent/prompt_builder.py:1494-1580",
+      "C:/dev/hermes-agent/agent/skills_index_delta.py:1-37",
+      "C:/dev/hermes-agent/agent/skills_index_delta.py:100",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:184-192"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon learned skills change after each run; announcing deltas in-band instead of rebuilding the system message preserves cache hits.",
+    "notes": "Same \"ephemeral note, not prompt rewrite\" pattern as the api_content sidecar."
+  },
+  {
+    "id": "hermes-learning-and-memory-039",
+    "category": "Memory, learning & personalization",
+    "name": "skill_manage: single operations-array tool with per-action schemas and atomic rollback",
+    "what": "The model creates, patches, deletes and attaches supporting files to skills through one tool whose every call is an ordered, atomic list of operations. A failure rolls every touched skill back.",
+    "how": "SKILL_MANAGE_SCHEMA advertises only operations[] with an anyOf of per-action shapes (create: content; patch: old_string/new_string or full content as last resort; write_file/remove_file: file_path; delete: absorbed_into), each with additionalProperties:false so grammar-constrained backends cannot emit another action text slot. The legacy flat shape is still accepted for old transcripts and staged replay. skill_manager_batch validates and applies; skill_manager_guards enforce path containment and delete safety.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skill_manager_tool.py:822-928",
+      "C:/dev/hermes-agent/tools/skill_manager_batch.py",
+      "C:/dev/hermes-agent/tools/skill_manager_guards.py:105-140",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:646-667"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A single batched tool with per-action schemas is a clean contract for Verevon UpsertAgentSkill if the model (not a side consumer) is to edit skills.",
+    "notes": "Issue #112677 (27B model emitting file_content on create rolled back whole batches) drove the per-action schema branches."
+  },
+  {
+    "id": "hermes-learning-and-memory-040",
+    "category": "Memory, learning & personalization",
+    "name": "Skill authoring linter (advisory): incident-log shape, sprawl and size rules",
+    "what": "Every create or SKILL.md/references write returns advisory lint findings that keep skills as lessons, not logs: too many PR/issue references, more than 60 reference files, or a body over about 24k characters.",
+    "how": "tools/skill_linter.py implements frontmatter checks (description length, marketing words, platform primitives), body checks (expected \"When to Use\" section, incident reference density threshold of >=4 refs and 0.5 per 1k chars), file checks (forbidden README/CHANGELOG/.env, references sprawl) and an oversized-body soft budget of 24,000 chars because skill_view loads the whole file into context for the rest of the session. Findings warn; they never block.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skill_linter.py:26-60",
+      "C:/dev/hermes-agent/tools/skill_linter.py:127-215",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:630-645"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon learned skills have no quality gate beyond Wilson quarantine after the fact; a pre-write lint (size, incident density) would stop low-quality skills entering the injection pool.",
+    "notes": "Cheap deterministic checks complementing the prompt doctrine."
+  },
+  {
+    "id": "hermes-learning-and-memory-041",
+    "category": "Memory, learning & personalization",
+    "name": "Lessons-not-logs skill authoring doctrine (prompt as product IP)",
+    "what": "The prompts that govern skill writing define what a skill is: the procedure in order with concrete commands, the user preferences for the result, and pitfalls stated as one rule plus one clause of why. They forbid incident narration, ticket numbers and dates, and demand class-level umbrella names.",
+    "how": "_LESSON_LAYER_BLOCK, _DO_NOT_CAPTURE_BLOCK and the skill/combined review prompts specify: procedure first; pitfall = generalizable rule + mechanism; same lesson twice is one rule; do not duplicate AGENTS.md or tool schemas; fix wrong sentences in place instead of appending UPDATE notes; preference order (1) patch a skill loaded in this session, (2) patch an existing umbrella, (3) add a references/templates/scripts file, (4) create a new class-level umbrella; never capture environment-dependent failures, negative claims about tools, transient errors, one-off narratives or unresolved failures presented as workflows.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:385-440",
+      "C:/dev/hermes-agent/agent/background_review.py:440-510",
+      "C:/dev/hermes-agent/agent/learn_prompt.py:11-85"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "These prompts can be lifted nearly verbatim (in Norwegian/English) into Verevon sessionreview; the \"do not capture\" list directly prevents self-imposed refusals hardening into the skill library.",
+    "notes": "Each rule traces to an observed failure (hoarding libraries, \"tool X is broken\" skills that outlive the bug)."
+  },
+  {
+    "id": "hermes-learning-and-memory-042",
+    "category": "Memory, learning & personalization",
+    "name": "/learn: user-directed skill authoring from sources",
+    "what": "The user can say /learn with a directory, URL, pasted notes or \"what we just did\" plus requirements, and the agent distills it into a reusable skill, using a lean index plus per-chapter reference files for large sources.",
+    "how": "build_learn_prompt composes one normal turn prompt: inventory sources with existing tools, honor every requirement in the request, extend an existing skill rather than duplicating, pick the shape by source (single SKILL.md vs knowledge-base layout with on-demand skill_view of references), process large corpora one chapter at a time, ignore invisible/bidi Unicode in sources, never write the OS username as author (author is the literal \"Hermes\"), and report the skill name and reference list. Foreground creates are stamped created_by=\"learn\" (user-owned, not curator-managed).",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/learn_prompt.py:1-197",
+      "C:/dev/hermes-agent/tools/skill_usage.py:522-535",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:117-171"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A \"teach me from this doc/repo\" flow that outputs a skill (not an embedding index) is a differentiator for Verevon Spaces and org knowledge.",
+    "notes": "No distillation engine: it is purely a prompt over existing tools, which makes it backend independent."
+  },
+  {
+    "id": "hermes-learning-and-memory-043",
+    "category": "Memory, learning & personalization",
+    "name": "Skill usage telemetry sidecar and lifecycle hook",
+    "what": "Every skill load, view and patch is counted in a sidecar file outside the skill, together with state, pin, provenance and a reuse-after-patch signal. Plugins receive a lifecycle event per change.",
+    "how": "tools/skill_usage.py keeps ~/.hermes/skills/.usage.json keyed by skill name (use_count, view_count, patch_count, last_used_at, last_viewed_at, last_patched_at, created_at, first_seen_at, state active/stale/archived, pinned, created_by agent|learn|installed, patch_generation, last_reused_patch_generation) under a cross-process lock with atomic writes. bump_use computes reuse_after_patch (used again after a patch generation). _emit_skill_lifecycle invokes the on_skill_lifecycle plugin hook with action, provenance, use_count, reused and reuse_after_patch.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skill_usage.py:1-12",
+      "C:/dev/hermes-agent/tools/skill_usage.py:348-356",
+      "C:/dev/hermes-agent/tools/skill_usage.py:470-535",
+      "C:/dev/hermes-agent/hermes_cli/plugins.py:134-135"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon already records injected skills per request for feedback credit; adding patch generations and reuse-after-patch would give a direct \"did this learned change help\" metric.",
+    "notes": "Telemetry is kept out of frontmatter on purpose so user-authored files stay clean and bundled/hub skills are not touched."
+  },
+  {
+    "id": "hermes-learning-and-memory-044",
+    "category": "Transparency, observability & control",
+    "name": "reuse_after_patch: closed-loop signal for learning usefulness",
+    "what": "Each skill patch bumps a generation counter; the next load after a patch is recorded as reuse_after_patch, giving a measurable answer to \"did the learned update ever get used again\".",
+    "how": "bump_patch increments patch_generation; bump_use sets last_reused_patch_generation = generation when uses > 0 and generation > last_reused, returning reuse_after_patch to the lifecycle hook and shared metrics.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skill_usage.py:497-520"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Cheap to add to Verevon skill credit assignment and could feed the Wilson quarantine as a positive signal.",
+    "notes": "No in-repo consumer that acts on the signal (for example to demote unused patches) was found; it is exposed to hooks and telemetry. Medium confidence on its intended use."
+  },
+  {
+    "id": "hermes-learning-and-memory-045",
+    "category": "Memory, learning & personalization",
+    "name": "Provenance-scoped skill ownership (agent vs user vs hub vs bundled)",
+    "what": "Only skills the background review created are eligible for autonomous curation. Skills made at the user request, hub installs, bundled skills and external directories are not touched unless the user opts in.",
+    "how": "skill_usage.created_by in {agent, learn, installed}; is_curator_managed keys strictly on \"agent\"; adopt_skill and hermes curator pin/unpin change eligibility; bundled prune requires curator.prune_builtins; hub names come from .hub/lock.json; adopt_skill brings a user skill under curator management; pinning opts a skill out of automatic transitions; PROTECTED_BUILTIN_SKILLS is an escape hatch. skill_provenance.set_current_write_origin separates background_review writes from foreground ones in a ContextVar.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skill_usage.py:40-45",
+      "C:/dev/hermes-agent/tools/skill_usage.py:260-345",
+      "C:/dev/hermes-agent/tools/skill_provenance.py:1-24",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/curator.md:13-20"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon org/Space ownership and sharing of skills needs the same rule: autonomous maintenance only on agent-authored skills, never on curated org content.",
+    "notes": "Asymmetry: the review prompt lets the reviewer patch any loaded skill (hand-written, installed, bundled, pinned) while the curator touches only agent-created ones."
+  },
+  {
+    "id": "hermes-learning-and-memory-046",
+    "category": "Tools, plugins & extensibility",
+    "name": "Bundled-skill sync by origin hash (3-way, never clobber user edits)",
+    "what": "Bundled skills are copied and updated across releases without overwriting user customizations; user-deleted skills are not re-added.",
+    "how": "tools/skills_sync.py records \"name:hash\" lines in .bundled_manifest. New skills are copied; existing ones update only if the bundled copy changed and the user copy still matches the recorded origin hash; upstream-removed skills leave the manifest only when no active or archived copy remains. hermes skills reset restores a bundled skill on request.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skills_sync.py:1-12",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:1063-1100"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Relevant when Verevon ships platform skills that orgs fork or edit: track origin hash to merge safely.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-047",
+    "category": "Tools, plugins & extensibility",
+    "name": "Skill config, secure setup on load, conditional activation and inline templating",
+    "what": "Skills can declare config settings, required environment variables (asked for only in the local CLI, never in chat), fallback or requires conditions on toolsets/tools, platform limits and inline template variables.",
+    "how": "Frontmatter metadata.hermes.config (stored under skills.config in config.yaml and injected into context on load), required_environment_variables with prompt/help (auto-passed to terminal and execute_code sandboxes), fallback_for_toolsets / requires_toolsets / fallback_for_tools / requires_tools, platforms, and skill_preprocessing substitutes ${HERMES_SKILL_DIR}, ${HERMES_SESSION_ID} and runs inline !`cmd` snippets (single line, output capped at 4,000 chars).",
+    "evidence": [
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:277-335",
+      "C:/dev/hermes-agent/agent/skill_preprocessing.py:1-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Conditional activation (show a free fallback skill only when the premium tool is missing) maps to Verevon connector availability.",
+    "notes": "Inline shell expansion is powerful and needs the same trust gating as hooks."
+  },
+  {
+    "id": "hermes-learning-and-memory-048",
+    "category": "Safety, permissions & governance",
+    "name": "Skill supply-chain scanning: trust levels, agent-created guard, advisory scanners",
+    "what": "Installed skills are scanned with a built-in policy and trust tiers; agent-created skills can optionally be scanned; hub installs can show advisory results from NVIDIA SkillEvaluator/SkillSpector.",
+    "how": "tools/skills_guard.py scan_skill and should_allow_install return allow/ask/deny verdicts; trust levels builtin, official, trusted, community (dangerous verdicts stay blocked even with --force); skills.guard_agent_created is opt-in post-write scanning in skill_manage; project-local skills use scan-time quarantine and a trust prompt.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skill_manager_tool.py:44-70",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:367-405",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:918-926",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:496-520"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon planned decisions mention skills as versioned packages with scorecards and supply-chain checks; this is the tiered-trust model to mirror.",
+    "notes": "Agent-created skill scanning is default off because terminal() runs the same code ungated."
+  },
+  {
+    "id": "hermes-learning-and-memory-049",
+    "category": "Memory, learning & personalization",
+    "name": "Skill write approval with staged diffs",
+    "what": "When skills.write_approval is on, every skill create/patch/write_file/delete is staged regardless of origin and reviewed with /skills pending, diff, approve and reject.",
+    "how": "tools/write_approval.py stages skill payloads under HERMES_HOME/pending/skills/<id>.json with a one-line gist; /skills diff renders a unified diff; approve replays the write. Independent from skills.guard_agent_created (content scanner).",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/write_approval.py:1-80",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:668-704"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A review-and-approve queue for agent-authored skills is the governance control orgs will ask for before enabling autonomous learning.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-050",
+    "category": "Memory, learning & personalization",
+    "name": "SOUL.md as identity slot #1 (per-home, scanned, never from cwd)",
+    "what": "A single persona file in the Hermes home defines who the agent is. It is read only from the home (never the working directory), seeded on first run, never overwritten, and used verbatim after scanning and truncation.",
+    "how": "load_soul_md reads HERMES_HOME/SOUL.md through _read_text_with_timeout, strips legacy Bot Mode text, scans with _scan_context_content (user-authored file: warn only; distribution-owned file: block), truncates to the context budget and places it first in the stable prompt tier; if absent or empty a built-in identity is used. is_legacy_template_soul upgrades only files that carry zero user intent (known scaffolds), compared after normalization.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/prompt_builder.py:83-110",
+      "C:/dev/hermes-agent/agent/prompt_builder.py:1644-1700",
+      "C:/dev/hermes-agent/agent/system_prompt.py:544-552",
+      "C:/dev/hermes-agent/hermes_cli/default_soul.py:9-70",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/personality.md:8-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon persona hierarchy is platform > org > Space > agent > persona; the safe-upgrade rule for seeded defaults (only replace if zero user intent) is reusable for org templates.",
+    "notes": "The scaffold comment says \"loaded fresh each message\"; code loads SOUL.md while building the cached system prompt (once per session and after compaction), so edits apply at the next rebuild (medium confidence on runtime effect; gateway agent caching may refresh sooner)."
+  },
+  {
+    "id": "hermes-learning-and-memory-051",
+    "category": "Memory, learning & personalization",
+    "name": "Default persona text as an anti-verbosity, anti-sycophancy spec",
+    "what": "The shipped SOUL tells the model to match reply length to the weight of the ask, report finished work as what changed/verified/left, avoid filler, plain claims over adjectives, and to agree because it is right, not because the user said it.",
+    "how": "DEFAULT_SOUL_MD (identical to the repo SOUL.md and DEFAULT_AGENT_IDENTITY) is about 120 words; it replaced an older generic helpful-assistant paragraph and a \"targeted and efficient exploration\" line that was removed on purpose (#95681).",
+    "evidence": [
+      "C:/dev/hermes-agent/SOUL.md",
+      "C:/dev/hermes-agent/hermes_cli/default_soul.py:9-19"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A compact tone/discipline spec like this is a good base for the Verevon default persona across Norwegian and English.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-052",
+    "category": "Memory, learning & personalization",
+    "name": "Personality overlays and a single sanctioned write path",
+    "what": "Users can switch between 14 built-in personalities (helpful, concise, technical, teacher, kawaii, pirate, noir, ...) or define their own (string or structured system_prompt/tone/style) as session overlays on top of SOUL.md.",
+    "how": "hermes_cli/personality.py merges BUILTIN_PERSONALITIES with root personalities and agent.personalities (later wins), persists the selected name only to display.personality via atomic round-trip YAML edit (comments preserved, mode 0600), and never writes the user-owned agent.system_prompt.",
+    "evidence": [
+      "C:/dev/hermes-agent/hermes_cli/personality.py:19-146",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/personality.md:60-200"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon already has per-thread persona_enabled and a persona layer; the structured tone/style definition is a simple schema to reuse.",
+    "notes": "Novelty personalities are low value for an enterprise product."
+  },
+  {
+    "id": "hermes-learning-and-memory-053",
+    "category": "Memory, learning & personalization",
+    "name": "Profiles as isolated islands and shareable persona distributions",
+    "what": "Each profile has its own SOUL, config, skills, cron, memories, sessions and secrets. A profile can be packaged and installed from a git URL as a \"distribution\" that carries the persona and skills but never the owner learned state.",
+    "how": "profile_distribution.py: manifest distribution.yaml; DEFAULT_DIST_OWNED = SOUL.md, config.yaml, mcp.json, skills, cron; USER_OWNED_EXCLUDE adds memories, sessions, plans, workspace, home, backups, cache. At load time a distribution-owned SOUL.md that trips the injection scanner is blocked, while a user-authored one only warns. Profile scope is carried by ContextVars (HERMES_HOME override plus secret scope) into worker threads.",
+    "evidence": [
+      "C:/dev/hermes-agent/hermes_cli/profile_distribution.py:1-60",
+      "C:/dev/hermes-agent/hermes_cli/profile_distribution.py:340-360",
+      "C:/dev/hermes-agent/agent/prompt_builder.py:1672-1690"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Clean separation of agent definition (shareable) from learned state (private) maps directly onto Verevon Space agents and shared skills.",
+    "notes": "Profiles are also the only multi-user boundary for built-in memory (one profile = one user)."
+  },
+  {
+    "id": "hermes-learning-and-memory-054",
+    "category": "Memory, learning & personalization",
+    "name": "Onboarding bootstraps the user model from host facts and setup cards",
+    "what": "The first-run /initiate-setup turn greets the user, asks what to call them and an accent preference through cards, and passes machine facts so the agent can tailor suggestions.",
+    "how": "build_initiate_setup_prompt assembles a skill text plus a JSON fact block (surface, tools_present, primary_profile, free-tier route, setup_completed_at, host facts); account facts come from OS user records (never environment variables); NON_NAMES filters generic account names; setup_choose card answers are recorded per session and not re-asked.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/initiate_setup_prompt.py:12-45",
+      "C:/dev/hermes-agent/agent/initiate_setup_facts.py:1-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already has onboarding connect-graph flows; seeding a USER profile from that step (name, role, language) gives memory a cold-start.",
+    "notes": "Only headers read; wiring to USER.md not verified."
+  },
+  {
+    "id": "hermes-learning-and-memory-055",
+    "category": "Tools, plugins & extensibility",
+    "name": "Layered project context files plus progressive subdirectory hints",
+    "what": "AGENTS.md, CLAUDE.md, .hermes.md and .cursorrules are loaded from the git root down to the cwd at start, and context from deeper directories is appended to tool results the first time the agent touches them.",
+    "how": "prompt_builder collects context files with precedence and threat scanning; agent/subdirectory_hints.py walks up to five ancestors of paths seen in tool arguments, loads the first match per directory, enforces symlink containment and a read deny-list, caps each hint at 32,000 chars (head + tail with a path marker) and appends it to the tool result so the system prompt stays cached.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/subdirectory_hints.py:1-60",
+      "C:/dev/hermes-agent/agent/prompt_builder.py:1690-1874",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/context-files.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon Do mode currently receives no org/Space/persona instructions; delivering scoped instructions lazily via tool results is a cache-safe way to close that gap.",
+    "notes": "Verevon is not an IDE, but the technique generalizes to \"Space instructions on first touch of a Space\"."
+  },
+  {
+    "id": "hermes-learning-and-memory-056",
+    "category": "Models & routing",
+    "name": "Three-tier system prompt (stable, context, volatile) rebuilt only on compaction",
+    "what": "The system prompt is assembled as stable (identity, guidance, tool rules), context (project files, workspace) and volatile (skills index, memory, user profile, timestamp, runtime hints) tiers and reused unchanged for the whole session; compression is the only rebuild trigger.",
+    "how": "build_system_prompt_parts orders tiers so longest-prefix caches keep the unchanged scaffold; worktree-dependent blocks follow project context; the profile line (path) and timestamp ride in volatile; plugin sections are frozen and reconstructed from persisted prompt bytes on resume (_frozen_plugin_prompt_sections, reconstruct_static_prefix); invalidate_system_prompt reloads memory and clears the frozen plugin snapshot. Full prompts are stored once per hash in system_prompts.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/system_prompt.py:1-12",
+      "C:/dev/hermes-agent/agent/system_prompt.py:730-830",
+      "C:/dev/hermes-agent/agent/system_prompt.py:113-175",
+      "C:/dev/hermes-agent/AGENTS.md:18-27"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon prompt order (tools, system, history) could adopt explicit stability tiers so org-level and Space-level blocks sit in the shared prefix and per-user memory sits last.",
+    "notes": "Doctrine \"prompt caching is sacred\" and \"narrow waist\" (every core tool is paid on every call) shape the whole repo; evals (prefix_rediet) A/B the prompt footprint."
+  },
+  {
+    "id": "hermes-learning-and-memory-057",
+    "category": "Memory, learning & personalization",
+    "name": "Nudge-driven post-turn review fork (the self-improvement loop)",
+    "what": "After a turn, a hidden fork of the agent re-reads the conversation and decides whether to save a memory or create/patch a skill. It runs after the reply is delivered, so it never competes with the user task.",
+    "how": "Triggers: memory review every memory.nudge_interval user turns (default 10, _tick_memory_nudge in turn_context); skill review when tool-calling iterations since the last skill_manage call reach skills.creation_nudge_interval (default 10; counters reset when the model itself uses memory or skill_manage). turn_finalizer spawns the review only when a final response exists, the turn was not interrupted and skip_background_review is false (cron sets it). spawn_background_review_thread picks one of three prompts (_MEMORY_REVIEW_PROMPT, _SKILL_REVIEW_PROMPT, _COMBINED_REVIEW_PROMPT) and the caller runs it in a daemon thread over a snapshot of the messages. Limits: _REVIEW_MAX_ITERATIONS = 16, input budget 75% of the review model context (cap 600k, fallback 120k).",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/agent_init.py:1296-1330",
+      "C:/dev/hermes-agent/agent/agent_init.py:1378-1384",
+      "C:/dev/hermes-agent/agent/turn_context.py:752-760",
+      "C:/dev/hermes-agent/agent/turn_context.py:1125",
+      "C:/dev/hermes-agent/agent/turn_iteration_prep.py:165-168",
+      "C:/dev/hermes-agent/agent/turn_finalizer.py:763-790",
+      "C:/dev/hermes-agent/agent/background_review.py:173-230",
+      "C:/dev/hermes-agent/agent/background_review.py:1295-1330"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon already has a comparable loop (RUN_COMPLETED to capability-core sessionreview to UpsertAgentSkill); differences to weigh: Hermes reviews on a turn/iteration cadence rather than per run and reuses the live prompt cache.",
+    "notes": "Quality 5 for execution. Weakness: the quality of what is learned is not evaluated anywhere in the repo (see eval record). The prior Verevon doc correctly states this loop writes only local memory/skill files and is not connected to fine-tuning."
+  },
+  {
+    "id": "hermes-learning-and-memory-058",
+    "category": "Models & routing",
+    "name": "Cache-parity review fork (same prefix, detached persistence, digest when routed)",
+    "what": "The review runs on the main model with a byte-identical system prompt, tools and reasoning config so it hits the warm prompt cache (a cited roughly 26 percent end-to-end cost cut). If routed to a cheaper model it replays a compact digest instead.",
+    "how": "build_cache_parity_fork constructs a detached AIAgent: parent runtime and credentials, _cached_system_prompt and session_start copied, inherited cache scope and conversation root, _prompt_cache_fork_tag=\"review\" for slot-keyed caches, _persist_disabled and no session DB, no external memory providers, no MCP refresh, in-place-only compaction, nudges set to 0 to avoid recursion, tools[] inherited from the parent. When auxiliary.background_review.{provider,model} names another model (routed), _digest_history keeps the last 24 messages verbatim and collapses older ones into one synthetic user digest, and reasoning_effort is honoured; on the same-model path it is ignored with a one-time warning.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:956-1040",
+      "C:/dev/hermes-agent/agent/background_review.py:245-300",
+      "C:/dev/hermes-agent/agent/background_review.py:324-360",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:376-408"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "If Verevon moves learning from a separate transcript-review service to an in-process fork, prefix parity is the cost lever; otherwise route to a cheaper model with a digest as the docs show (3-5x cheaper in their benchmarks).",
+    "notes": "The 26 percent and 3-5x figures come from code comments and docs (issue #25322, PR #17276); not independently verified. The same fork helper also serves /btw side questions."
+  },
+  {
+    "id": "hermes-learning-and-memory-059",
+    "category": "Safety, permissions & governance",
+    "name": "Review fork sandbox: dispatch-side whitelist, auto-deny approvals, memory gated by trigger",
+    "what": "The unattended fork can only use memory and skill tools plus read-only file tools. Dangerous-command approvals auto-deny, a skill-nudge review never gets the memory tool, and operators can add narrowly scoped extra tools.",
+    "how": "_review_tool_whitelist builds the allowed names from get_tool_definitions for [\"memory\",\"skills\"] (memory only when the memory trigger fired and a store is enabled) plus read_file and search_files, enforced at dispatch so the advertised tools[] stays identical to the parent. _bg_review_auto_deny is installed as the thread approval callback. auxiliary.background_review.extra_tools admits named parent tools (for example a human-gated proposal tool).",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:1042-1122",
+      "C:/dev/hermes-agent/agent/background_review.py:1131-1200",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:447-465"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon capability policy already restricts tool sets per mode; a \"dispatch-side whitelist with unchanged schema\" is the way to restrict a background learner without breaking cache.",
+    "notes": "Read tools were added after a denial storm (about 142 denials and 204 read-before-write refusals in two days on one deployment)."
+  },
+  {
+    "id": "hermes-learning-and-memory-060",
+    "category": "Safety, permissions & governance",
+    "name": "Enforced read-before-write for autonomous skill edits",
+    "what": "An unattended reviewer cannot patch a skill from memory of the transcript: it must have freshly loaded that exact skill (or support file) during the same review, and quoted transcript text does not count.",
+    "how": "skill_view and read_file call mark_background_review_skill_read, which records the resolved path in a ContextVar set shared by copied tool contexts; _background_review_read_before_write_guard refuses patch, write_file overwrite and remove_file without a mark. On refusal the prompt tells the model to view once and retry once. New skills and new support files need no prior read.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skill_manager_guards.py:55-100",
+      "C:/dev/hermes-agent/agent/background_review.py:490-497",
+      "C:/dev/hermes-agent/tools/skill_manager_tool.py:30-34"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Prevents hallucinated patches in any autonomous editor; directly applicable to Verevon skill updates and artifact edits by background agents.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-061",
+    "category": "Agent runtime",
+    "name": "Foreground priority: review cancellation, ABA-safe run tokens and idle deferral",
+    "what": "A new user turn, an interrupt or session teardown cancels an in-flight review (waiting at most 2 seconds for acknowledgement). On the managed local model the review is queued until the machine is idle so it does not steal the GPU.",
+    "how": "_BackgroundReviewRun is a per-review token with cancel_requested/request_done events and an admission handshake; prepare_background_review_run installs it before Thread.start and finish_background_review_run clears only its own token (ABA safe). cancel_background_review_for_live_turn interrupts off-thread and waits up to _BACKGROUND_REVIEW_CANCEL_TIMEOUT_SECONDS=2.0. review_idle_queue coalesces one slot per session (newest snapshot wins), requires a 15 s quiet window (polled every 5 s) and force-dispatches after defer_max_age_s (30 min); explicit /refine never defers.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:25-170",
+      "C:/dev/hermes-agent/agent/review_idle_queue.py:1-60",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:466-497"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon learning runs server side after RUN_COMPLETED so GPU contention is moot, but the cancel-on-new-turn handshake matters if learning shares a thread or sandbox with the live run.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-062",
+    "category": "Transparency, observability & control",
+    "name": "Review cost attribution, config surface and user notifications",
+    "what": "Review token usage is attributed to the parent session under task=background_review, the review can be disabled, routed, capped or given extra tools, and the user sees a short notice when something is saved.",
+    "how": "_snapshot_review_usage and _record_review_usage_to_parent write into session_model_usage; completion is logged (\"Background review complete: ... calls in out result\"); config under auxiliary.background_review: enabled, provider, model, reasoning_effort (routed only), max_input_tokens, extra_tools, defer, defer_max_age_s; display.memory_notifications = off|on|verbose (verbose shows a preview or old-to-new skill diff snippet), overridable per platform.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:754-815",
+      "C:/dev/hermes-agent/agent/background_review.py:574-735",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:346-375"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon cost-core should attribute learning spend as its own task so org admins can see and cap it, and notify users of learned changes.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-063",
+    "category": "Memory, learning & personalization",
+    "name": "/refine: user-triggered review with a focus instruction",
+    "what": "The user can run a review on demand and steer it with a focus string; it is treated as an attended review so memory operations are not downgraded to proposals.",
+    "how": "spawn_background_review_thread appends \"The user explicitly requested this review with the following focus\" to the chosen prompt; explicit=True propagates to the fork write origin, set_review_attended(True) disables the unattended delete gate while every other review guard still applies.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:1301-1332",
+      "C:/dev/hermes-agent/tools/skill_provenance.py:25-44"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A \"learn from this thread now\" button is a simple affordance on top of an existing review pipeline.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-064",
+    "category": "Memory, learning & personalization",
+    "name": "Skill curator: idle-triggered lifecycle (active, stale, archived) without a daemon",
+    "what": "Once a week (and, in the CLI/TUI, only after two idle hours) a curator pass marks unused agent-created skills stale after 14 days and archives them after 30; used skills reactivate. Nothing is deleted.",
+    "how": "maybe_run_curator is polled by the gateway housekeeping loop (which passes idle_for_seconds=inf, so only the interval gates it) and by the CLI/TUI runtime (which passes a measured idle time compared against min_idle_hours=2). should_run_now requires curator.enabled, not paused, last_run_at older than interval_hours (168) and seeds last_run_at on first sight so a new install never mutates on day one. apply_automatic_transitions walks curated_report() using latest real activity (use/view/patch timestamps, created_at excluded), treats use_count 0 on young skills as absence of evidence, protects pinned and cron-referenced skills, archives via skill_usage.archive_skill (moves to .archive/) with ledger actor \"curator\". State lives in skills/.curator_state; an O_EXCL claim file (skills/.locks/curator-run, stale after one hour) allows one automatic pass per home across processes.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/curator.py:31-35",
+      "C:/dev/hermes-agent/agent/curator.py:160-250",
+      "C:/dev/hermes-agent/agent/curator.py:1169-1212",
+      "C:/dev/hermes-agent/gateway/run.py:4613-4616",
+      "C:/dev/hermes-agent/hermes_cli/cli_tui_runtime_mixin.py:352",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/curator.md:11-70"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon learned skills accumulate with only Wilson quarantine after dissatisfaction; a staleness lifecycle with protected sets (pinned, scheduled-task-referenced) is the missing garbage-collection half.",
+    "notes": "Archive-not-delete is a hard invariant, also stated in the review prompt (\"Never delete a skill here\")."
+  },
+  {
+    "id": "hermes-learning-and-memory-065",
+    "category": "Memory, learning & personalization",
+    "name": "Curator LLM consolidation pass (opt-in umbrella building)",
+    "what": "An optional forked pass reads the agent-created skill list and merges narrow skills into class-level umbrellas, demotes depth into references/templates/scripts, and archives the absorbed originals with a structured report.",
+    "how": "run_curator_review(consolidate=True) takes a tar.gz snapshot, then runs CURATOR_REVIEW_PROMPT on an auxiliary-routed fork with no terminal: prefix clusters, merge/create/demote strategies, package-integrity rules for support files, read-before-write, and skill_manage delete requiring absorbed_into (umbrella must exist). The output must end with a YAML block (consolidations from/into/reason, prunings name/reason); _classify_removed_skills and _reconcile_classification cross-check it against tool calls; _rewrite_cron_refs migrates cron job skill references to the umbrella. Dry-run prints a banner and writes the report without mutating.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/curator.py:266-470",
+      "C:/dev/hermes-agent/agent/curator.py:517-700",
+      "C:/dev/hermes-agent/agent/curator.py:915-1004",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/curator.md:36-70"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A reference for the \"skills become a hoarded library\" problem; the absorbed_into forwarding rule and cron reference migration are directly relevant to Verevon scheduled tasks that reference skills.",
+    "notes": "Default OFF (consolidate: false) because it costs 50-100 aux calls; the prompt is deliberately aggressive (\"fewer than 10 archives means you stopped too early\"), a calibration choice to revisit."
+  },
+  {
+    "id": "hermes-learning-and-memory-066",
+    "category": "Transparency, observability & control",
+    "name": "Skill ledger, content-addressed backups and single-edit rollback",
+    "what": "Every skill mutation by any actor (agent, curator, user) is logged with before/after file manifests, so a single edit or a whole curator run can be undone. Rollbacks are themselves undoable.",
+    "how": "tools/skill_ledger.py appends JSONL entries to skills/.curator_ledger.jsonl with sha256-deduplicated blobs under ~/.hermes/.curator_backups/blobs/; actor is derived from a ContextVar (derive_actor); delete/archive/purge restore complete packages; rollback_entry fails closed if its safety capture fails; ledger is bounded (5 MB default, compaction that dedups unchanged files). agent/curator_backup.py snapshots skills/ (excluding .hub, .git, .archive, the ledger and transient dirs like venv/node_modules) before consolidation, keeps the last 2, and snapshots the current tree before any rollback; cron-jobs.json skill fields are restored too. Archive TTL purge is explicit and ledgered.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/skill_ledger.py:1-80",
+      "C:/dev/hermes-agent/tools/skill_ledger.py:569",
+      "C:/dev/hermes-agent/agent/curator_backup.py:1-60",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/curator.md:127-195"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon versioned skills with audit would benefit from per-edit before/after manifests and \"undo this learning\" rather than only quarantine.",
+    "notes": "No ledger or rollback for learned skills is reported in the peer inventories (Claude desktop has skill recording and .skill archives, Codex has a skill-creator system skill); absence in shipped-binary inventories is weak evidence."
+  },
+  {
+    "id": "hermes-learning-and-memory-067",
+    "category": "Transparency, observability & control",
+    "name": "Learning journey: graph of learned skills and memory chunks with edit/delete",
+    "what": "A timeline and star map shows everything the agent has learned (skills with learning signal and individual memory entries), links related items, replays the build-up, and lets the user edit or delete any node.",
+    "how": "agent/learning_graph.build_learning_graph includes non-base skills that are agent-created, created by /learn, or used, excludes external mounts, links skills by related_skills and memory-to-skill by lexical overlap (top 4 per card, name hit weighted 6), and reports density stats. Memory nodes are ids \"memory:<source>:<index>:<fingerprint>\" where the fingerprint is a sha256 prefix of the entry text so edits survive list shifts. learning_mutations deletes (skills are archived, memory removed under the store lock) or opens $EDITOR. Surfaces: hermes journey (list/delete/edit, --play, --json), TUI /journey overlay, desktop star map (d3-force).",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/learning_graph.py:1-255",
+      "C:/dev/hermes-agent/agent/learning_mutations.py:1-60",
+      "C:/dev/hermes-agent/hermes_cli/journey.py",
+      "C:/dev/hermes-agent/apps/desktop/src/app/starmap/",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/memory.md:245-264"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A transparent, editable view of what the assistant has learned about the user is a trust feature Verevon list/create/delete /v1/memories API could surface as a graph.",
+    "notes": "No graph or timeline view of learned memories and skills is reported in the peer inventories (Claude desktop, Codex, Cursor, Antigravity, DeepSeek); claude.ai and ChatGPT web were not audited."
+  },
+  {
+    "id": "hermes-learning-and-memory-068",
+    "category": "UI/UX & product design",
+    "name": "Shareable memory-loadout code (privacy-preserving)",
+    "what": "The star map can be exported as a short share code that encodes the shape of what was learned (kinds, categories, usage, time positions, edges) while dropping all memory prose.",
+    "how": "apps/desktop/src/app/starmap/share-code.ts encodes nodes as bit fields (kind, interned label and category, useCount, state, memory source, created_by, pinned, 12-bit time position) and edges as fixed-width indices through a generic @/lib/loadout codec (bitstream, DEFLATE, version and checksum frame, base64url) with prefix HML and labels trimmed to 64 chars; a 60-skill map is a few hundred characters.",
+    "evidence": [
+      "C:/dev/hermes-agent/apps/desktop/src/app/starmap/share-code.ts:1-60",
+      "C:/dev/hermes-agent/apps/desktop/src/app/starmap/share-controls.tsx"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Low priority; illustrates sharing learned-capability metadata without personal content, relevant to sharing skill packs between orgs.",
+    "notes": "Novelty feature; no peer equivalent."
+  },
+  {
+    "id": "hermes-learning-and-memory-069",
+    "category": "Agent runtime",
+    "name": "Auxiliary-model context compression with protected head and tail",
+    "what": "When the window fills, old tool output is pruned first and a cheap auxiliary model summarizes the middle turns; the head and a recent tail stay verbatim and later compactions update the earlier summary instead of re-summarizing it.",
+    "how": "ContextCompressor defaults: threshold_percent 0.50 (raised to at least 0.75 for windows under 512k, capped at 85% when the minimum-context floor binds), protect_first_n 3, protect_last_n 20, summary_target_ratio 0.20 with _MIN_SUMMARY_TOKENS 2000 and ceiling 10,000, summary input cap 160k chars. _prune_old_tool_results dedupes and demotes old tool outputs (>= 200 chars) to bounded summaries or a cleared-output placeholder, retires stale images, spares the pending tool round and recently loaded skills; then _generate_summary uses auxiliary.compression with a previous-summary snapshot for iterative update. Windows resolve from provider metadata, probes and config; per-model thresholds and a threshold token cap are supported.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_compressor.py:2803-2860",
+      "C:/dev/hermes-agent/agent/context_compressor.py:817-853",
+      "C:/dev/hermes-agent/agent/context_compressor.py:1150-1152",
+      "C:/dev/hermes-agent/agent/context_compressor.py:3277-3330",
+      "C:/dev/hermes-agent/agent/context_compressor.py:3977-4030"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has tier 1 (clear stale tool results) and tier 2 (head summary); Hermes adds iterative summary update, token-budgeted tail and image retirement.",
+    "notes": "The file is 5,852 lines; many thresholds carry issue references showing years of production tuning."
+  },
+  {
+    "id": "hermes-learning-and-memory-070",
+    "category": "Agent runtime",
+    "name": "Summary framing and template (reference-only handoff)",
+    "what": "The summary is prefixed with an explicit instruction that it is background, that the latest user message wins, that memory stays authoritative and that tools remain fully active, and it follows a fixed section template.",
+    "how": "SUMMARY_PREFIX (\"[CONTEXT COMPACTION - REFERENCE ONLY]\") includes clauses added after observed failures: stale-task resumption on topic overlap (#41607/#38364), narration-only turns after compaction (#65848), reverse signals (\"stop\", \"undo\") end in-flight work. _summary_template_sections defines Historical Task Snapshot, Goal, Constraints & Preferences, Completed Actions (numbered, with tool and outcome), Active State, Blocked, Key Decisions, Errors & Fixes (quote the user correction), Resolved Questions, Relevant Files, Critical Context (never keys or tokens) and Pruned Skills; a temporal-anchoring rule rewrites finished actions as dated past tense.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_compressor.py:248-292",
+      "C:/dev/hermes-agent/agent/context_compressor.py:4105-4180"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "The prefix clauses are battle-tested guards against post-compaction misbehaviour; Verevon compaction notices should carry the same \"latest message wins\" and \"tools remain active\" rules.",
+    "notes": "The comments are a compact failure catalogue (stale task resumption, narration-only turns, summary treated as active instructions)."
+  },
+  {
+    "id": "hermes-learning-and-memory-071",
+    "category": "Agent runtime",
+    "name": "Lean mode: verbatim user messages, mechanical anchor index and exact session log",
+    "what": "In lean mode the compaction keeps a small clamped tail but adds LLM-free sections: the user own messages verbatim (newest first) and an anchor index of exact identifiers (PRs, commit SHAs, branches, files, error names, handles, URLs), so needle facts cannot be paraphrased away.",
+    "how": "_augment_summary_lean appends \"## User Messages (verbatim, newest first)\" (budget 24,000 chars, 4,000 per message), \"## Anchor Index (mechanically extracted, exact)\" built by _build_anchor_index with per-category regex caps and frequency ordering (7,000 chars, noise list), and a \"## Detailed Session Log\" (about 4k tokens) with a hard rule to preserve identifiers exactly. Tail floor 10k and cap 25k tokens, never above 20% of the window; tail_mode legacy keeps 0.20*window.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_compressor.py:917-1060",
+      "C:/dev/hermes-agent/agent/context_compressor.py:3681-3730",
+      "C:/dev/hermes-agent/agent/context_compressor.py:2810-2816"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "A deterministic identifier ledger costs no tokens and doubles as a session_search map; it would raise recall on the compaction eval cases Verevon already runs.",
+    "notes": "No peer inventory reports a regex-harvested anchor ledger inside the compaction summary (DeepSeek compaction-basic is an LLM summary plus tool-result pruner and image offload; Codex shows PreCompact/PostCompact hooks and auto-compact fallbacks)."
+  },
+  {
+    "id": "hermes-learning-and-memory-072",
+    "category": "Agent runtime",
+    "name": "Compaction failure hardening: anti-thrash breaker, cooldown ladder, deterministic fallback",
+    "what": "Compaction degrades gracefully: after ineffective passes it blocks itself and probes again after five minutes; summary failures back off 60/300/900 s, retry once on the main model, then fall back to a deterministic handoff; a benched summary model is skipped.",
+    "how": "_ineffective_compression_count is persisted on the session row (compression_ineffective_count) so restarts never disarm it; _ANTI_THRASH_RECOVERY_SECONDS=300 allows one probe (count drops to 1 strike); structural no-ops back off 300 s without striking. _TIMEOUT_COOLDOWN_LADDER=(60,300,900), _CONSECUTIVE_OVERLOAD_ABORT_ESCALATION=3. PreLlmSkipMixin skips the summary call when the middle is under 10% of the threshold after a strike or after two fallback summaries in a row (probe deadline persisted in model_config). compression_locks and session_turn_leases tables serialize compaction; _ensure_compressed_keeps_last_assistant_reply keeps the reply the user is reading.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_compressor.py:792-810",
+      "C:/dev/hermes-agent/agent/context_compressor.py:2715-2760",
+      "C:/dev/hermes-agent/agent/context_compressor_prellm.py:1-92",
+      "C:/dev/hermes-agent/agent/conversation_compression_reply_anchor.py:18-60",
+      "C:/dev/hermes-agent/hermes_state_common.py:568-582"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon compaction retries on overflow; persisting a thrash counter and a benched-summarizer state per thread would prevent compaction loops on incompressible sessions.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-073",
+    "category": "Models & routing",
+    "name": "Escalating cache-aware compaction: proactive prune, micro-compaction, native provider compaction",
+    "what": "Three optional layers sit around the full summary: a proactive tool-output prune that fires only in reclaim batches, a rolling per-exchange micro-compaction (off by default because it breaks the cache), and provider-native server-side compaction on eligible OpenAI models.",
+    "how": "proactive_prune_tokens with min_reclaim 4,096 tokens and rearm only after the prompt regrows the reclaimed amount (every commit is a cache boundary). MicroCompactionMixin folds old assistant/tool exchanges into one rolling summary marker (user turns never absorbed) and is disabled by default. native_compaction sets context_management compaction items for gpt-5.6 on api.openai.com or the Codex backend (and Astra on official Codex OAuth) with the native threshold clamped 8,192 tokens below the local trigger so the server goes first and the local compressor remains the fallback.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_compressor.py:2810-2860",
+      "C:/dev/hermes-agent/agent/micro_compaction.py:1-60",
+      "C:/dev/hermes-agent/agent/native_compaction.py:1-60",
+      "C:/dev/hermes-agent/website/docs/developer-guide/micro-compaction.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already offers optional Anthropic clear_tool_uses; Hermes shows how to coordinate native and local compaction so two systems never race.",
+    "notes": "The earlier Verevon doc covers the two-owner handoff; the reclaim-batch rearm rule is new."
+  },
+  {
+    "id": "hermes-learning-and-memory-074",
+    "category": "Agent runtime",
+    "name": "Skill-aware compaction: [SKILL_PRUNED] markers and re-injected pruned-skill list",
+    "what": "Large skill bodies loaded earlier are demoted to short markers during compaction and listed verbatim in the summary so the model knows to reload them before relying on them. Just-loaded skills are protected.",
+    "how": "skill_view results over 5,000 chars outside the most recent 10-message window are replaced with [SKILL_PRUNED: ... reload with skill_view(...)] markers (max 20 re-injected under \"## Pruned Skills\"); _collect_protected_skill_names keeps just-loaded and tail-referenced skills whole (#32106); SKILLS_GUIDANCE includes a \"Skill Safety Rule\" telling the model to reload before acting and ignore stale markers after reload.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_compressor.py:849-905",
+      "C:/dev/hermes-agent/agent/context_compressor.py:1083-1085",
+      "C:/dev/hermes-agent/agent/prompt_builder.py:243-265"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon has reattach_skill and a skills character budget; explicit pruned markers plus a verbatim re-list are a sturdier contract than silent drops.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-075",
+    "category": "Memory, learning & personalization",
+    "name": "Memory-aware compaction handoff",
+    "what": "Compaction knows about memory: providers can feed insights into the summary prompt, the summary states that memory remains authoritative, and the memory block is reloaded from disk when the prompt is rebuilt.",
+    "how": "compress(memory_context=...) receives on_pre_compress output via sanitize_memory_context (force redaction, 6,000 char cap with 4,000 head and 1,500 tail); SUMMARY_PREFIX asserts MEMORY.md/USER.md are always authoritative; invalidate_system_prompt reloads MEMORY.md/USER.md so this session writes become visible after compaction.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_engine.py:20-35",
+      "C:/dev/hermes-agent/agent/context_compressor.py:251-292",
+      "C:/dev/hermes-agent/agent/system_prompt.py:808-828"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon already injects a compaction memory directive (fetch_compaction_memory_directive); the sanitize-and-cap step and the \"memory is authoritative\" clause are small adds.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-076",
+    "category": "Tools, plugins & extensibility",
+    "name": "Pluggable ContextEngine (lossless engines such as LCM)",
+    "what": "The compaction strategy can be replaced by a plugin engine selected in config; the engine decides when to compact, how, and may expose its own tools such as grep over archived context.",
+    "how": "ContextEngine ABC (agent/context_engine.py) requires name, update_from_response(usage), should_compress, should_compress_info, compress(messages, current_tokens, focus_topic, force, memory_context) and maintains token state attributes; context.engine selects plugins/context_engine/<name>; plugin engines are never auto-activated. Host guards (user-turn anchor, last-reply anchor) are applied at the commit boundary for every engine.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_engine.py:48-130",
+      "C:/dev/hermes-agent/website/docs/developer-guide/context-compression-and-caching.md:37-60",
+      "C:/dev/hermes-agent/agent/conversation_compression_reply_anchor.py:1-40"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Not needed now; shows the seam for swapping summary versus lossless compaction behind one trait.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-077",
+    "category": "Transparency, observability & control",
+    "name": "Compaction recall eval harness (recall accuracy versus tokens retained)",
+    "what": "Compaction policies are scored by what a fresh model can still answer from only the post-compaction context, not by tokens saved.",
+    "how": "evals/compaction/runner.py takes a real long transcript, generates and caches a bank of factual questions from the region that compaction will summarize, runs each policy (current, lean, codex-style, aggressive tail, or a Jev decision-model arm), asks a fresh LLM, judges against gold and emits a scorecard of recall versus tokens. scripts/ rebuild transcripts from session lineages (copy the DB first, dedupe rotation copies by content hash, resolve prompts through system_prompts) and render an HTML before/after report; test_region_scoping.py plants sentinels to prove the summarizer only sees the middle region.",
+    "evidence": [
+      "C:/dev/hermes-agent/evals/compaction/README.md",
+      "C:/dev/hermes-agent/evals/compaction/policies.py",
+      "C:/dev/hermes-agent/evals/compaction/test_region_scoping.py"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon eval-lab-py already ported this (cases/compaction); the lineage-reconstruction scripts and the region-scoping tripwire are the unported parts.",
+    "notes": "Transcripts are intentionally not committed (real session data). Peer inventories report no compaction eval harness (Claude: none found; Codex: developer scripts only)."
+  },
+  {
+    "id": "hermes-learning-and-memory-078",
+    "category": "Transparency, observability & control",
+    "name": "A/B eval methodology for prompt and tool-schema diets (session_search, prefix re-diet)",
+    "what": "Changes to tool schemas or the fixed prompt prefix are validated with live A/B runs where only one file differs, seeded deterministic data and programmatic oracles, run on weak and mid models three times each.",
+    "how": "evals/session_search_schema/runner.py extracts tools/session_search_tool.py from two git refs and runs six tasks (discover, forced scroll, broaden, link emission, profile link, browse) against a seeded session DB with oracles; metrics include pass, calls, malformed calls, first-call prompt tokens and wall time; rules require 3 reps, identical denominators and one retry for provider noise. evals/prefix_rediet runs real AIAgents from two checkouts with scripted browser and vault stubs to prove deferred tools are still found after the prompt diet (schema diet 1,570 to 695 tokens/call).",
+    "evidence": [
+      "C:/dev/hermes-agent/evals/session_search_schema/README.md",
+      "C:/dev/hermes-agent/evals/prefix_rediet/README.md",
+      "C:/dev/hermes-agent/evals/prompt_footprint/property_guidance.py"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Adopt for any Verevon change to tool descriptions or system preambles; weak models are the sensitive signal.",
+    "notes": "Hermes calls this \"hermesbench discipline\"."
+  },
+  {
+    "id": "hermes-learning-and-memory-079",
+    "category": "Transparency, observability & control",
+    "name": "Post-mortem forensics for cost, cache behaviour and tool friction",
+    "what": "Scripts recompute observed (not modeled) figures from a copy of the session database and logs: where money went, cache hit ratios, delegation timeouts, tool-call friction and /goal loop behaviour.",
+    "how": "evals/postmortem/forensics (tokens, logcalls, delegation, tools, goal_loop, rework) read state_copy.db and rotated agent.log files with no model calls; a reference run reports 1,394 sessions and about $19.3k with cache write/read/output buckets, p50 prompt 229k tokens and 93.9% hit ratio; live_ab and review_probes exercise real code paths against fake providers. Everything is labeled OBSERVED or MODELED.",
+    "evidence": [
+      "C:/dev/hermes-agent/evals/postmortem/README.md",
+      "C:/dev/hermes-agent/agent/insights.py:1-50"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon cost-core could run an equivalent \"where did the tokens go\" report per org, separating learning, compaction and main-loop spend.",
+    "notes": "Strong evidence culture; but no eval measures whether learned skills or memories improve task outcomes."
+  },
+  {
+    "id": "hermes-learning-and-memory-080",
+    "category": "Transparency, observability & control",
+    "name": "Gap: no outcome eval for the learning loop itself",
+    "what": "The repo evaluates compaction recall, tool schemas and cost, but no harness measures whether memories and skills written by the review actually improve later tasks.",
+    "how": "evals/ has no background_review, curator or memory-quality harness; coverage is 29 unit-test files for background review/curator (mechanics, guards, cost, cache parity) plus reuse_after_patch counters and opt-in aggregate metrics as indirect signals.",
+    "evidence": [
+      "C:/dev/hermes-agent/evals/",
+      "C:/dev/hermes-agent/tests/agent/test_background_review.py",
+      "C:/dev/hermes-agent/tests/agent/test_curator.py",
+      "C:/dev/hermes-agent/tools/skill_usage.py:497-509"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has implicit-dissatisfaction and explicit-feedback signals and calibration rows; building a held-out \"did learned skills help\" eval on top would put Verevon ahead.",
+    "notes": "Inference from absence in evals/ and tests/ listings (grep for background_review/curator/memory_tool in evals found only incidental hits)."
+  },
+  {
+    "id": "hermes-learning-and-memory-081",
+    "category": "Transparency, observability & control",
+    "name": "Closed-enum, bucketed, opt-in telemetry for the learning loop",
+    "what": "Memory operations, curator runs and delegation fan-outs are recorded as aggregate metrics with fixed vocabularies and count buckets, never content, and only inside recorded consent windows.",
+    "how": "shared_metrics_loop.record_builtin_memory_call(action, operations, outcome, failure_class) maps raw values to closed enums in shared_metrics_contract (MEMORY_OP_FAILURE_CLASSES has 20 values; MEMORY_OP_ORIGINS background_review|foreground; CURATOR_OUTCOMES; COUNT_BUCKETS for archived/created/merged/patched). Recording is a no-op unless shared metrics are enabled for the profile (telemetry.shared_metrics.enabled and send default false) and never raises into callers; packages are sent only if the whole period lies within consent windows.",
+    "evidence": [
+      "C:/dev/hermes-agent/hermes_cli/observability/shared_metrics_loop.py:1-60",
+      "C:/dev/hermes-agent/hermes_cli/observability/shared_metrics_loop.py:150",
+      "C:/dev/hermes-agent/hermes_cli/observability/shared_metrics_contract.py:262-275",
+      "C:/dev/hermes-agent/hermes_cli/observability/shared_metrics_contract.py:918-927",
+      "C:/dev/hermes-agent/tools/memory_tool.py:214-240"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Privacy-by-construction telemetry (closed enums, buckets, consent windows) fits Verevon ZDR and GDPR posture and can measure learning health without reading content.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-082",
+    "category": "Transparency, observability & control",
+    "name": "Trajectory export and private trace upload",
+    "what": "Sessions can be exported as ShareGPT-style trajectories (completed and failed files) for training and debugging, or uploaded as private Hugging Face agent traces in Claude Code JSONL shape with forced secret redaction.",
+    "how": "agent/trajectory.save_trajectory appends JSONL under a file lock; batch_runner.py produces per-batch outputs with tool stats and checkpoint resume; agent/trace_upload converts OpenAI-format messages to the Claude Code JSONL shape, creates the dataset private, redacts every text body with force=True and refuses upload if redaction fails.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/trajectory.py:37",
+      "C:/dev/hermes-agent/agent/trace_upload.py:1-60",
+      "C:/dev/hermes-agent/website/docs/developer-guide/trajectory-format.md:1-40",
+      "C:/dev/hermes-agent/batch_runner.py"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon trajectory.rs is an in-memory ring buffer; a persisted, redacted, org-scoped export is the missing half, but Hermes confirms trajectories are not wired to the online learner.",
+    "notes": "Corroborates the earlier Verevon note that background_review/curator are not a fine-tuning pipeline."
+  },
+  {
+    "id": "hermes-learning-and-memory-083",
+    "category": "Memory, learning & personalization",
+    "name": "Negative finding: no implicit-feedback or user-model learning in core",
+    "what": "Hermes core does not collect regenerate/edit/correction signals or build a quantitative user model; its only sentiment detector is a cosmetic regex for affection, and learning from corrections relies on the review fork reading the transcript.",
+    "how": "agent/reactions.detect_reaction matches gratitude/love words and hearts to trigger pet and heart animations (token free, never touches the conversation). The review prompts list frustration phrases (\"stop doing X\", \"too verbose\") as first-class skill signals. USER.md is the only built-in user model (1,375 chars). Embeddings or vector retrieval are absent from core (grep over agent, tools, hermes_state*, cron).",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/reactions.py:1-43",
+      "C:/dev/hermes-agent/agent/background_review.py:440-470",
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:22-25"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 2,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon is ahead here: implicit dissatisfaction signals with Wilson-bounded skill quarantine and calibration rows have no Hermes equivalent.",
+    "notes": "Absence claim based on greps; semantic recall and user modeling exist only through external providers (Honcho etc.)."
+  },
+  {
+    "id": "hermes-learning-and-memory-084",
+    "category": "Agent runtime",
+    "name": "Cron jobs as agent runs: scripts, skills, context chaining and multi-platform delivery",
+    "what": "Users and the agent itself schedule recurring or one-shot agent runs (durations, \"every monday 9am\", 5-field cron, ISO instants) that load skills, run a data-collection script first, chain the previous job output, run in a given working directory and deliver to one or more channels.",
+    "how": "cron/jobs.py create_job fields: prompt, schedule, repeat, deliver (origin/local/platform), skills (list), model/provider/base_url, script (stdout injected into the prompt; with no_agent=True the script is the whole job), monitor_script/monitor_url, context_from (job ids; latest non-silent output injected, 8,000 chars cap), enabled_toolsets, workdir (loads AGENTS.md/CLAUDE.md), attach_to_session, reasoning_effort, failure_deliver, paused, pinned, interpreter. Jobs live in jobs.json with atomic writes; the agent uses a cronjob_manage tool, users use hermes cron or /cron; a dashboard page and /api/jobs exist.",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/jobs.py:1813-1880",
+      "C:/dev/hermes-agent/cron/job_definition.py:13-20",
+      "C:/dev/hermes-agent/cron/scheduler_prompt.py:54-70",
+      "C:/dev/hermes-agent/cron/AGENTS.md:1-20"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon scheduled runs are one no-tool 1,024-token call with no delivery (baseline); this is the feature-complete reference for what a scheduled run should be able to do.",
+    "notes": "Quality 5 for execution depth. Peers per the audit-3 inventories: Claude desktop has scheduled tasks (CCD and Cowork, with watcher history and approved permissions), Codex has local automations with inbox items, Cursor has an automations UI with a webhook panel, Manus has scheduled tasks and triggers, DeepSeek has a schedule package, T3 Code none; none of those inventories shows monitor hashing, wake gates or notepads."
+  },
+  {
+    "id": "hermes-learning-and-memory-085",
+    "category": "Agent runtime",
+    "name": "Monitor-mode cron: hash-suppressed change detection before any LLM call",
+    "what": "A cron job can attach a cheap source (script or URL). The agent only runs when the source output changed, and when it does it receives a capped diff of what changed.",
+    "how": "cron/monitor.py hashes the exact UTF-8 bytes of the monitor output (SHA-256, no normalization) and compares with the hash of the last agent-triggering tick: unchanged means a silent no_change run (no LLM); changed or first run injects a \"MONITOR CHANGE DETECTED\" block with a unified diff capped at 4,000 chars plus new output capped at 8,000; source failure is an error and never counts as a change and leaves the stored hash untouched; monitor_url uses a bounded GET (256 KiB, 30 s). State: monitor_state in jobs.json plus monitor_last_output.txt under the job output directory.",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/monitor.py:1-60",
+      "C:/dev/hermes-agent/cron/jobs.py:1840-1849"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon watches (capability-core cron/tasks/watches) could use zero-token change detection before waking a model, which is a major cost lever for monitoring use cases.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-086",
+    "category": "Agent runtime",
+    "name": "Wake gate and silent sentinel to avoid pointless runs and messages",
+    "what": "A pre-run script can print {\"wakeAgent\": false} to skip the model entirely, and an agent run that has nothing to report replies [SILENT] so no message is delivered.",
+    "how": "_parse_wake_gate reads the last non-empty stdout line as JSON and skips the agent only when wakeAgent is explicitly false (any other output wakes normally). SILENT_MARKER = \"[SILENT]\" is recognised as whole response, first line or last line, plus bracketless SILENT / NO_REPLY variants; blueprint prompts and the self-context intro (\"avoid repeating what was already reported\") use it for continuity.",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/scheduler_prompt.py:21-52",
+      "C:/dev/hermes-agent/cron/scheduler.py:526-560",
+      "C:/dev/hermes-agent/cron/blueprint_catalog.py:139"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Needed for any Verevon scheduled briefing or watcher so that \"nothing new\" costs nothing and sends nothing.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-087",
+    "category": "Agent runtime",
+    "name": "Per-job durable notepad (cursors and watermarks)",
+    "what": "Each cron job has a small key-value notepad that persists across wake-ups and is injected into the prompt, so recurring jobs can remember what they already processed.",
+    "how": "cron/notepad.py stores (job_id, key, value, updated_at) in cron/notepad.db with caps of 16 KB per value, 128-char keys and 64 KB per job; oversized writes raise and leave the store untouched; the write path is the CLI (hermes cron notepad <job> set) via the terminal tool, deliberately not a model tool.",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/notepad.py:1-60"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A bounded per-task state slot is an easy way to give Verevon scheduled tasks continuity without a full memory system.",
+    "notes": "Keeping the write path off the model tool surface preserves the narrow-waist rule."
+  },
+  {
+    "id": "hermes-learning-and-memory-088",
+    "category": "Agent runtime",
+    "name": "At-most-once scheduling, execution ledger, incidents and quota holds",
+    "what": "Scheduled work is accounted for exactly: missed slots are recovered once, crashes cannot double-fire, failures are grouped into acknowledgeable incidents, and jobs park themselves when a provider usage window is known to be closed.",
+    "how": "tick() advances next_run_at before dispatch and stamps pending_slot in the same save; cron/occurrences restores a slot once if its owner is dead and the executions ledger (SQLite, scheduled_instant, immutable terminal states, 1,000 terminal rows kept) blocks a second fire; catch-up window is half the period clamped to 120 s - 2 h; per-home tick lock; idle-based inactivity watchdog (default 600 s) interrupts stalled sessions. cron/incidents groups failures by (job_id, normalized error signature) with detected, alerted and closed states and repeat-alert throttling; cron/quota_hold parses \"retry after N s\" from rate-limited auth errors and parks next_run_at past the recovery boundary (+60 s slack).",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/AGENTS.md:20-60",
+      "C:/dev/hermes-agent/cron/executions.py:1-40",
+      "C:/dev/hermes-agent/cron/occurrences.py:1-40",
+      "C:/dev/hermes-agent/cron/incidents.py:1-30",
+      "C:/dev/hermes-agent/cron/quota_hold.py:1-50"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon cron sweeper to Temporal ScheduledRunSupervision already gives durability; the incident signature dedup and quota-hold parking are concrete reliability features to add.",
+    "notes": "Multi-profile scoping (one ticker iterating profiles under a scope guard) is a source of many fixes; documented as \"per-profile process assumptions are the bug class\"."
+  },
+  {
+    "id": "hermes-learning-and-memory-089",
+    "category": "Agent runtime",
+    "name": "Consent-first automation suggestions",
+    "what": "The agent and catalog can propose ready-to-run automations that the user accepts with one tap or dismisses forever; nothing is created automatically and the pending list is capped to avoid nagging.",
+    "how": "cron/suggestions.py stores suggestions with a job_spec, dedup_key latch and status pending/accepted/dismissed; VALID_SOURCES = catalog, blueprint, usage, integration; MAX_PENDING = 5; accept calls cron.jobs.create_job with the stored spec (no second job engine). suggestion_catalog seeds curated starters (daily briefing, important-mail monitor using classify_items.py). Producers for the usage and integration sources were not found in the tree.",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/suggestions.py:1-60",
+      "C:/dev/hermes-agent/cron/suggestion_catalog.py:1-60",
+      "C:/dev/hermes-agent/tools/blueprints.py:150-165"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Matches Verevon consent and Control-decision rules; \"the review proposes an automation from observed usage\" is a natural extension of the learning loop.",
+    "notes": "The usage source is declared (self-improvement review) but no producer was found: treat as planned."
+  },
+  {
+    "id": "hermes-learning-and-memory-090",
+    "category": "Agent runtime",
+    "name": "Automation Blueprints: one slot schema rendered everywhere",
+    "what": "A parameterized automation (daily briefing, weekday monitors) is defined once with typed slots and renders as a dashboard form, a pre-filled /blueprint command, an agent seed prompt and a docs deep link; users never type cron syntax.",
+    "how": "cron/blueprint_catalog.AutomationBlueprint (key, title, category, schedule_template with {slot} placeholders, prompt_template, slots of type time/enum/text/weekdays) plus fill_blueprint that validates values into create_job kwargs. tools/blueprints.py lets any skill declare metadata.hermes.blueprint (schedule, deliver, prompt, no_agent, model, provider, enabled_toolsets) so blueprints ride the skills-hub pipeline and can be exported back to SKILL.md.",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/blueprint_catalog.py:1-80",
+      "C:/dev/hermes-agent/cron/blueprint_catalog.py:744",
+      "C:/dev/hermes-agent/tools/blueprints.py:1-70",
+      "C:/dev/hermes-agent/website/docs/reference/automation-blueprints-catalog.mdx"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon BLUEPRINT_ACTIVATION_DESIGN.md exists; the \"skill that declares an automation\" idea unifies skills, sharing and scheduling.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-091",
+    "category": "Memory, learning & personalization",
+    "name": "Cron runs keep memory but never learn (and a doc/code mismatch)",
+    "what": "Scheduled runs load the profile persona and memory but skip the post-turn review fork, so automations consume memory without writing skills or notes.",
+    "how": "cron/scheduler.py builds the cron agent with skip_memory=False and skip_background_review=True (\"~30K tokens per event with no human in the loop\"). cron/AGENTS.md still says \"Cron sessions pass skip_memory=True; memory providers intentionally do not run during cron\". agent_init comments also say cron agents now take the normal memory path. Session search demotes cron sessions so they do not dominate recall.",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/scheduler.py:2494-2495",
+      "C:/dev/hermes-agent/cron/AGENTS.md:87",
+      "C:/dev/hermes-agent/agent/agent_init.py:1305-1312",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:23-35"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Decide explicitly for Verevon: scheduled runs should read org/user memory but write only through an approval path or not at all.",
+    "notes": "Docs are stale relative to code here; code is ground truth."
+  },
+  {
+    "id": "hermes-learning-and-memory-092",
+    "category": "Agent runtime",
+    "name": "/goal: judge-driven persistent objective (Ralph loop) with quality gates",
+    "what": "A standing goal keeps the agent working across turns until an auxiliary judge decides it is done, blocked or waiting; deterministic shell gates must pass before DONE can be declared.",
+    "how": "hermes_cli/goals.py: after each turn a judge (auxiliary.goal_judge, 30 s timeout, 4,096 max tokens) returns DONE / BLOCKED / WAIT / CONTINUE as JSON; failures are fail-open (continue) with auto-pause after 3 parse failures or 5 transport failures; budget DEFAULT_MAX_TURNS 20; optional completion contract (verification, constraints, stop condition), /subgoal criteria, wait barriers on background processes or sessions; gates (/goal gate add) run before the judge and a failed gate output becomes the continuation prompt (300 s timeout, 3 retries). Continuation is a normal user message so the cache stays intact; state persists in SessionDB state_meta.",
+    "evidence": [
+      "C:/dev/hermes-agent/hermes_cli/goals.py:1-130",
+      "C:/dev/hermes-agent/hermes_cli/goals.py:798-830",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/goals.md",
+      "C:/dev/hermes-agent/evals/goal_command_parity.py"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon Do mode could gain a judged completion loop with evidence-bearing gates rather than relying on the model to self-terminate.",
+    "notes": "Adjacent to the learning facet (agent runtime) but included because it is an autonomy loop that shares the SessionDB and cache rules."
+  },
+  {
+    "id": "hermes-learning-and-memory-093",
+    "category": "Agent runtime",
+    "name": "/loop self-paced backoff and /heartbeat idle re-entry",
+    "what": "/loop re-runs a prompt or slash command on a fixed or self-paced cadence inside the session (backing off while replies do not change); /heartbeat gives a session one recurring instruction that fires only when idle and coalesces missed ticks.",
+    "how": "hermes_cli/loops.py: min fixed interval 30 s, backstop 100 ticks, self-paced floor 60 s doubling to a 15 min ceiling and resetting on change, stop on a LOOP_COMPLETE line, --times, or an --until judge; state in SessionDB state_meta. hermes_cli/heartbeat.py: minimum 60 s, injected only between turns as a plain user message (\"if nothing changed reply briefly\"), state heartbeat:<session_id> that follows compression rotations; gateway watchers restore after restarts.",
+    "evidence": [
+      "C:/dev/hermes-agent/hermes_cli/loops.py:1-40",
+      "C:/dev/hermes-agent/hermes_cli/heartbeat.py:1-60",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/loops.md",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/heartbeat.md"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "In-thread recurring wake-ups keep full conversation context, which Verevon cron (isolated runs) cannot offer.",
+    "notes": "Mechanics read from module headers and docs."
+  },
+  {
+    "id": "hermes-learning-and-memory-094",
+    "category": "Transparency, observability & control",
+    "name": "Context budget breakdown that names memory and skills",
+    "what": "The /context view breaks the window into system prompt, tools, skills, memory, MCP, subagent definitions and conversation so users and operators can see what memory and skills cost every turn.",
+    "how": "agent/context_breakdown.py estimates tokens per tier from the stable prompt tier, tool schemas, the <available_skills> block and the MemoryStore snapshot blocks; zero categories are dropped except conversation (a deliberate membership rule); estimates are labelled as not tokenizer-exact and not gate authority. hermes prompt-size reports the fixed prompt footprint.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/context_breakdown.py:1-60",
+      "C:/dev/hermes-agent/agent/context_breakdown.py:91-110",
+      "C:/dev/hermes-agent/hermes_cli/subcommands/prompt_size.py"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Fits the DeepSeek-style transparency goal: show users how many tokens memory, skills and instructions consume per turn.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-095",
+    "category": "Transparency, observability & control",
+    "name": "Insights engine over the session database",
+    "what": "A usage report aggregates sessions into tokens, cost estimates (with honest estimate labels), tool and skill usage, activity patterns and model/platform breakdowns for any number of days.",
+    "how": "agent/insights.InsightsEngine(db).generate(days=30) reads sessions and messages, uses usage_pricing to estimate cost per model, counts skill_view/skill_manage calls, and renders terminal or dashboard output; sub-cent totals are shown at 4 decimals (format_cost_label).",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/insights.py:1-90",
+      "C:/dev/hermes-agent/hermes_cli/subcommands/insights.py"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon insights_overview exists as a chat tool; learned-skill and memory usage could be added as sections.",
+    "notes": ""
+  },
+  {
+    "id": "hermes-learning-and-memory-096",
+    "category": "Platform architecture",
+    "name": "Memory and skills as plain files on disk (portability versus multi-tenancy)",
+    "what": "Everything learned is stored as human-readable files in the profile home (MEMORY.md, USER.md, SKILL.md trees, JSON sidecars, a pending/ staging dir, ledger and snapshots) that can be edited, backed up and moved; sessions are the only database.",
+    "how": "get_hermes_home() resolves the profile root (ContextVar override); atomic writes via utils.atomic_write_text / atomic_json_write; cross-process locks via fcntl/msvcrt; hermes backup/import includes provider backup_paths(); profile distributions exclude user-owned dirs.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/memory_tool_store.py:222-265",
+      "C:/dev/hermes-agent/tools/skill_usage.py:1-12",
+      "C:/dev/hermes-agent/hermes_cli/profile_distribution.py:38-45",
+      "C:/dev/hermes-agent/agent/memory_provider.py:200-206"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "A cloud multi-tenant product needs a DB, but offering export/import of memory and skills as plain Markdown (and a user-visible \"memory file\") would match the transparency promise.",
+    "notes": "Limitation: no per-user scoping inside a profile; shared group chats rely on external providers (Honcho peers, identity mapping)."
+  },
+  {
+    "id": "hermes-learning-and-memory-097",
+    "category": "Platform architecture",
+    "name": "Prompt-cache-sacred and narrow-waist doctrines as architecture rules",
+    "what": "Two written invariants drive design reviews: never mutate past context, swap toolsets, reload memory or rebuild the prompt mid-conversation (compression is the only exception), and keep the core tool surface minimal because every tool is paid on every call.",
+    "how": "AGENTS.md \"Two invariants\". Mechanisms that follow: frozen memory snapshot, api_content sidecar, system-prompt tiers, goal and heartbeat prompts as plain user messages, dispatch-side whitelists, skill index change notes, deferred tools (tool_search) and schema diets validated by A/B evals; new capability should arrive as CLI command plus skill, service-gated tool or plugin.",
+    "evidence": [
+      "C:/dev/hermes-agent/AGENTS.md:18-27",
+      "C:/dev/hermes-agent/evals/session_search_schema/README.md",
+      "C:/dev/hermes-agent/evals/prefix_rediet/README.md"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Worth adopting verbatim as Model Plane review rules: every feature must state its prompt-cache impact and tool-schema token cost.",
+    "notes": "Most of the repo learning-efficiency design is a consequence of these two rules."
+  },
+  {
+    "id": "hermes-learning-and-memory-098",
+    "category": "Memory, learning & personalization",
+    "name": "Hermes learning loop as a whole: strengths and weaknesses",
+    "what": "The loop is consent-aware, cache-friendly, auditable and reversible, but depends on one LLM judgement per cadence with no outcome evaluation and no semantic retrieval in core.",
+    "how": "Chain: nudge counters to cache-parity fork to whitelisted memory/skill tools with read-before-write and write-approval gate to ledger and usage telemetry to idle curator archive and optional consolidation to journey view with edit/delete. Retrieval chain: frozen memory snapshot + skills index (model-routed) + FTS5 session search + optional external provider prefetch.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:1-8",
+      "C:/dev/hermes-agent/agent/curator.py:1-8",
+      "C:/dev/hermes-agent/tools/memory_tool.py:1-6",
+      "C:/dev/hermes-agent/tools/session_search_tool.py:1-9"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Synthesis record: keep Verevon feedback-driven quarantine and calibration, adopt Hermes review safety (add-only unattended, read-before-write, approval staging), ledger and idle curator.",
+    "notes": "Weaknesses: tiny built-in memory budget, cadence-based triggers miss one-off corrections, no user-model, no embeddings in core, review quality unevaluated, single-user profile scoping, doc drift (cron memory, search summarization)."
+  },
+  {
+    "id": "hermes-learning-and-memory-099",
+    "category": "Safety, permissions & governance",
+    "name": "Tiered injection scanning, credential-exfil guard and auto-pause for unattended runs",
+    "what": "Scheduled jobs run non-interactively with auto-approved tools, so their prompts are scanned (strict for the short user prompt, narrower for the assembled prompt that includes skill bodies), a provider/base_url pair that could leak a stored key is refused, and an unrunnable job is auto-paused with an audit reason instead of re-firing forever.",
+    "how": "cron/scheduler_prompt._scan_assembled_cron_prompt chooses the scanner by content: user prompt only gets the strict _scan_cron_prompt; prompts with skills or injected data get _scan_cron_skill_assembled (only unambiguous directives such as \"ignore previous instructions\"; command-shape patterns dropped because skill postmortems describe them; invisible Unicode sanitized rather than blocked so a false positive cannot kill a job permanently). _guard_job_credential_exfil validates the stored provider/base_url pair at run time and fails closed. _block_and_pause_job calls pause_job with paused_reason and emits an alert document.",
+    "evidence": [
+      "C:/dev/hermes-agent/cron/scheduler_prompt.py:367-445",
+      "C:/dev/hermes-agent/tools/cronjob_prompt_scan.py:1-45"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon scheduled and Do-mode runs are also unattended; scanning assembled prompts (skills, injected data) and pausing on a trip with an auditable reason are cheap controls to add before enabling tool use in scheduled runs.",
+    "notes": "Motivated by issue #3968 (a malicious skill carrying an injection payload bypassed every gate under cron auto-approval)."
+  },
+  {
+    "id": "hermes-learning-and-memory-100",
+    "category": "Agent runtime",
+    "name": "Todo list as working memory that survives compaction",
+    "what": "The model keeps a revisioned task list for multi-step work. After context compression the list is re-injected as a synthetic row so the plan is never lost, and UI clients can reject stale updates.",
+    "how": "tools/todo_tool.TodoStore holds {id, content, status, parent} items (statuses pending, in_progress, completed, cancelled; max 256 items and 4,000 chars each) with a monotonic revision bumped on every write; one todo_list tool reads (no args) or writes (replace or merge by id). TODO_INJECTION_HEADER marks the post-compaction row so ContextCompressor and the commit path can tell it from a real user message, strip the old snapshot and re-add the current list; the store is rehydrated from history with a 512,000 char cap on forged results.",
+    "evidence": [
+      "C:/dev/hermes-agent/tools/todo_tool.py:1-40",
+      "C:/dev/hermes-agent/agent/conversation_compression.py:2300-2320",
+      "C:/dev/hermes-agent/agent/context_compressor.py:4356"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Verevon has plan mode and approved plans prepended to runs; a compaction-proof, revisioned task list would give Do mode durable working memory across tiers of compaction.",
+    "notes": "Bounded caps matter because the list rides through every compaction."
+  },
+  {
+    "id": "hermes-learning-and-memory-101",
+    "category": "Tools, plugins & extensibility",
+    "name": "Skills as slash commands with stacking and bundles",
+    "what": "Every installed skill is a /skill-name command; up to five leading skill tokens can be stacked in one message, and YAML bundles group skills (plus a standing instruction) under a single command.",
+    "how": "agent/skill_commands.py builds a per-identity (platform, home, project) command map shared by CLI and gateway, with a multi-slot cache and collision handling; leading /skill tokens are parsed until the first non-skill token, then the skill bodies are loaded into one user message with the remaining text as the instruction (MemoryManager later strips the scaffolding so providers see only the instruction). Bundles live in ~/.hermes/skill-bundles/<slug>.yaml with name, description, skills and instruction and are managed with hermes bundles.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/skill_commands.py:1-30",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:73-116",
+      "C:/dev/hermes-agent/website/docs/user-guide/features/skills.md:521-605",
+      "C:/dev/hermes-agent/agent/memory_manager.py:511-521"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon capability-core has a command catalogue (/models, /compact) with no composer wiring; skills-as-commands and bundles give users a way to invoke learned procedures deterministically.",
+    "notes": "Command-map internals were read at header level only."
+  },
+  {
+    "id": "hermes-learning-and-memory-102",
+    "category": "Memory, learning & personalization",
+    "name": "Adapting to the user over time: corrections become task-skill rules",
+    "what": "The assistant tailors itself by turning the user corrections and frustration signals (\"stop doing X\", \"too verbose\", \"remember this\") into rules inside the skill that governs that kind of task, so the next session starts already fixed; only cross-cutting preferences go to USER.md.",
+    "how": "The skill and combined review prompts list signals that warrant action (style, tone, format, verbosity or workflow corrections; non-trivial technique; a loaded skill that proved wrong or outdated) and a \"User-preference embedding\" rule: the lesson lives in exactly one place, the governing skill when one exists, USER.md only when no skill owns it. Patches are applied to the skill loaded in the session first. The compaction template separately records user corrections verbatim under Errors & Fixes so they survive compaction until the review runs.",
+    "evidence": [
+      "C:/dev/hermes-agent/agent/background_review.py:448-470",
+      "C:/dev/hermes-agent/agent/background_review.py:498-505",
+      "C:/dev/hermes-agent/agent/background_review.py:520-530",
+      "C:/dev/hermes-agent/agent/background_review.py:549-556",
+      "C:/dev/hermes-agent/agent/context_compressor.py:4156-4160"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Verevon persona and custom instructions are configured by admins; learning per-task user preferences into scoped skills would personalise without growing a global memory block.",
+    "notes": "Cadence-based triggering (every 10 turns or 10 tool iterations) can miss a one-off correction before the session ends; an explicit /refine or the model own skill_manage call covers the gap."
+  }
+]

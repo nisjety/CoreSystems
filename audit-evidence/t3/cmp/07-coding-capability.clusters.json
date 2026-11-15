@@ -1,0 +1,1418 @@
+{
+ "category": "Coding capability",
+ "excluded": [
+  {
+   "id": "web-chatgpt-web-product-089",
+   "reason": "Billing feature (credit purchase, rate-limit reset banking, referrals) misfiled under coding; belongs to the cost/billing category and has no coding-capability content."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t3-07-001",
+   "name": "Agent file-edit engine: exact-match replace with tolerant matching, actionable errors and safe concurrency",
+   "description": "A deterministic edit tool (old_string -> new_string) that the agent uses to change files or documents in place. It requires a unique match by default, falls back to whitespace and line-ending tolerant matching, gives did-you-mean hints on failure, can guard against stale reads with a version check, locks each file for parallel tool calls and computes diffs off-thread. Cursor dropped its speculative apply model in favour of exactly this.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "deepseek"
+    ],
+    "n": 3,
+    "of": 9,
+    "cls": "common"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-072",
+    "cursor-ai-features-009",
+    "cursor-harness-architecture-057",
+    "deepseek-harness-architecture-162",
+    "cursor-harness-architecture-059",
+    "cursor-harness-architecture-068"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-057",
+     "cursor-ai-features-009",
+     "cursor-harness-architecture-059"
+    ],
+    "why": "q5 SRC. A concrete matching ladder: exact, then trimmed line match with endsWith/startsWith on the boundary lines, then a fuzzy did-you-mean block with +/-2 context lines. It refuses multiple matches unless replace_all is set, returns a structured result (changedLineRange, linesAdded/Removed, whitespace-relaxed flag) and shares a file lock manager across parallel calls. DeepSeek (162) adds the best stale-read guard and Antigravity (072) adds per-model variants and lazy-edit heuristics."
+   },
+   "mechanism": "Tool schema {file_path first (so UIs can show the target while args stream), old_string, new_string, replace_all?}. Validate that old_string is non-empty and differs from new_string. Resolve the target through the workspace FS under the per-call sandbox policy. Version guard: the read tool records a content hash/version per path, and the edit is checked against it; otherwise return FS_NOT_OBSERVED with a remedy (DeepSeek 162). Matching: exact first. With 0 hits, retry with per-line trim (first line ends-with, last line starts-with) and CRLF normalisation. With 0 hits still, return a did-you-mean block anchored on the longest line of old_string. With >1 hits and no replace_all, fail and ask for more context. Apply atomically under a per-path mutex shared by parallel tool calls. Compute a unified diff with 3 context lines (offload to a worker pool above a size threshold). Return before/after hunks, counts and a whitespace_relaxed flag for telemetry. Antigravity adds max_fuzzy_edit_distance_fraction, partial success and a lazy-comment check that rejects truncating edits such as \"... rest unchanged\".",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-107",
+     "v-chat-agents-ui-100"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:24-34",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2679"
+    ],
+    "gap": "There is no file read, edit or write tool. Files in a Space workspace can only be changed by writing a whole python/sh program in code_interpreter, and update_artifact replaces the entire artifact content (it has a forgiving id resolver but no partial edit). A grep for apply_patch/str_replace/write_file/edit_file in Model Plane Rust found only MCP test fixtures. Long artifacts and workspace files are therefore re-emitted in full on every revision, which is slower, costs more and risks silent truncation.",
+    "strengths": "The update_artifact near-miss id and title fallback (tool_loop.rs:2690-2715) is a good robustness pattern to keep."
+   },
+   "benefit": "Revising a 20-page report or a multi-file Space workspace becomes a small, reviewable patch instead of a full rewrite. That means fewer output tokens (cost), lower truncation risk, and an exact diff the UI already knows how to render (diff.ts). It is also the foundation for C02, C03, C04, C06 and C08.",
+   "approach": "Model Plane execution-core: add governed fs.read / fs.edit / fs.write tools bound to capability ids in capability_policy.rs. They operate on the leased Space workspace (workspace_cas/hydrate/promote) and on artifact bodies (an edits[] mode for update_artifact). Implement the matching ladder in a small Rust crate (for example mp-edit) with property tests, and return before/after so the gateway emits the existing patch-as-diff card. Keep promotion into Data Plane documents as the only way out of the workspace.",
+   "effort": "M",
+   "dependencies": [
+    "Space workspace lease (sandbox-manager)",
+    "capability-core bindings for new tool names",
+    "artifact version store"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Fuzzy matching can apply an edit in the wrong place: record match quality and refuse below a threshold. Tools must stay inside the lease root (path traversal) and respect ZDR (no edit content in logs).",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Every coding-capable reference (Claude, Codex, Cursor, Antigravity, DeepSeek, Manus) edits files incrementally. Verevon agent pages cannot, and users would notice on the first non-trivial code or document revision. The work is small, self-contained and high-leverage.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-002",
+   "name": "Model-native edit format chosen per model vendor (apply_patch grammar vs str_replace)",
+   "description": "Offer each model family the edit tool shape it was trained on: GPT-5/Codex-family models get a freeform apply_patch tool with a compact patch grammar, and Anthropic/Gemini/xAI models get Write + StrReplace. Codex also intercepts patches piped through the shell and redirects the model to the proper tool.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-063",
+    "cursor-ai-features-008",
+    "cursor-harness-architecture-058"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-063"
+    ],
+    "why": "q5 SRC. A Lark-grammar-constrained freeform tool (begin_patch/end_patch, add/delete/update hunks, Move to, @@ context lines), parser errors that name the valid headers, shell-heredoc interception via tree-sitter, line-ending preservation and streaming patch events. Cursor (058) shows the vendor switch in production."
+   },
+   "mechanism": "The tool catalogue builder switches on model family: openai gpt-5*/codex registers apply_patch as a freeform (grammar-constrained) tool; other families get fs.write + fs.edit (C01). apply_patch grammar: \"*** Begin Patch\", then (\"*** Add File: p\" plus + lines | \"*** Delete File: p\" | \"*** Update File: p\" [\"*** Move to: q\"] (\"@@ [ctx]\" then lines prefixed by space, - or +)*), then \"*** End Patch\". Update hunks locate their context with a seek_sequence (exact, then rstrip, then trim, then unicode-normalised). If the shell tool receives a command whose heredoc parses as a patch, refuse with \"rerun as apply_patch\". Both paths emit the same before/after result and diff event.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-planned-decisions-098"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:26"
+    ],
+    "gap": "No edit tool exists at all (see C01), so there is no per-vendor variant. This matters more than usual because Verevon's product route is the Codex app-server (gpt-5.6-terra), a model family trained on apply_patch.",
+    "strengths": ""
+   },
+   "benefit": "A higher first-try edit success rate and fewer retries on the default terra route. One internal edit representation keeps diff cards and audit identical across providers.",
+   "approach": "After C01, add an apply_patch parser in the same Rust crate and a model-family switch in the gateway tool catalogue, where provider capabilities are already known. Use grammar-constrained tool calling where the provider supports it; otherwise validate the patch and return errors that name the grammar.",
+   "effort": "M",
+   "dependencies": [
+    "C01 edit engine",
+    "provider capability flags for freeform/grammar tools"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Two edit surfaces to test; grammar support differs by provider and on the subscription route.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "A measurable reliability gain on Verevon's main model route, but only after C01 exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-003",
+   "name": "Per-turn \"changed files\" summary and replay",
+   "description": "Each agent turn that changed files ends with a compact card listing the changed files with +/- counts. The list is grouped as a tree and auto-expands only for small changes, and it is backed by turn-start vs turn-end snapshots. Optionally, the user can step through each edit as a replay.",
+   "prevalence": {
+    "sourcesWith": [
+     "t3code",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "t3code-ui-and-multimodel-041",
+    "deepseek-harness-architecture-078",
+    "deepseek-transparency-and-customization-144"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-041"
+    ],
+    "why": "q4 SRC. A clean UX rule (auto-expand only when <=5 files and <=200 changed lines), a directory tree with single-child chain collapse and aggregated stats, and expansion state persisted per thread and turn. DeepSeek 078 supplies the snapshot mechanism (DOC) and 144 the replay idea."
+   },
+   "mechanism": "At turn start, snapshot the workspace (content hashes per path; DeepSeek uses a git temp index plus whole-file copies for untracked files). At turn end, diff the snapshots and emit a turn.diff.complete event {files:[{path,added,removed,status}]}. UI: an AssistantChangedFilesSection under the answer, with a tree built by compacting single-child directories, auto-expand thresholds of 5 files / 200 lines, and a click on a file opens the diff panel at that file. Replay: collect old/new text for each edit tool call during the turn and step through them.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-100",
+     "v-modelplane-107"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:617",
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:642",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2023-2100"
+    ],
+    "gap": "code_interpreter already hashes the workspace before and after a run (snapshot_file_hashes / collect_output_files), but only to return new or changed files as download cards. There is no per-turn change summary across all tool calls of a Do run, no +/- stats and no file tree. Tool cards render a patch only when a single tool returned one.",
+    "strengths": "The before/after hashing primitive and the shared DiffView renderer already exist."
+   },
+   "benefit": "Transparency, a stated Verevon value borrowed from the DeepSeek reference: the user sees at a glance what an agent run changed in their Space before it is promoted into Data Plane documents.",
+   "approach": "execution-core: lift the snapshot/diff out of code_interpreter into the run loop (turn start/end over the leased workspace manifest, which is already CAS-addressed) and emit a typed run event. session-core persists it as a receipt. Frontend Plane renders the card with the existing DiffView.",
+   "effort": "M",
+   "dependencies": [
+    "C01 for meaningful edits",
+    "Space workspace manifest"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Large workspaces: cap file counts and skip binaries. ZDR runs must not persist file contents in the receipt (paths and counts only).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap given the existing hashing and strongly aligned with the transparency goal, but only valuable once agents write many files.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-004",
+   "name": "Diff review surface with scopes and accept/reject",
+   "description": "A diff panel that shows agent changes per turn, against a base, or as uncommitted changes (stacked or split), with accept/reject per hunk, file or all, and written feedback on a rejection returned to the agent.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor",
+     "t3code",
+     "claude",
+     "web-chatgpt"
+    ],
+    "n": 5,
+    "of": 9,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-073",
+    "cursor-ai-features-017",
+    "t3code-ui-and-multimodel-038",
+    "claude-runtime-architecture-067",
+    "web-chatgpt-web-product-085"
+   ],
+   "bestInClass": {
+    "source": "antigravity",
+    "recordIds": [
+     "antigravity-agent-ux-and-gemini-073"
+    ],
+    "why": "q4 SRC. The only record whose accept/reject carries a scope (FILE|HUNK|ALL) and written_feedback back into the trajectory, plus STALE/CLEARED states. T3 Code 038 has the best scope model (turn | branch | working tree, persisted per thread)."
+   },
+   "mechanism": "Agent edits land in a pending layer (a workspace overlay) instead of the durable copy. A review object per step holds per-file unified diffs. User actions produce {is_accept, scope, written_feedback, diffs}. A reject reverts the hunk in the overlay and injects the feedback as the next user turn, and a review goes stale when the file changed since. Panel selection {kind: turn{turnId}|base{ref}|working} is persisted per thread, with stacked/split rendering and per-file collapse.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-100"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/diff.ts:61-243",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:474",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1942",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs:1-8"
+    ],
+    "gap": "Verevon renders read-only unified diffs (tool patches and the artifact revision \"show changes\" view, with a 2,000-line cap) and has an artifact version stepper. There is no accept/reject, no hunk scope, no rejection feedback to the agent, and no review step in front of PromoteWorkspace (workspace overlay -> Data Plane documents).",
+    "strengths": "One shared DiffView serves both patch producers, with an honest stat-only fallback above the line cap."
+   },
+   "benefit": "Puts the human in control of what an agent writes into durable Space content. This fits the authority model (the agent proposes; the owner plane commits) and the promotion step that already exists.",
+   "approach": "Frontend Plane: extend DiffView with hunk selection and a reject-with-comment action. Model Plane: make PromoteWorkspace accept a hunk or file selection; on reject, revert in the overlay and append the feedback to the run. Artifact revisions can reuse the same accept/reject to restore part of a prior version.",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "C03",
+    "PromoteWorkspace overlay merge"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "A hunk-level revert on top of later edits needs a 3-way merge; scope it to the latest turn first.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Common in coding tools, and for Verevon it is the natural review gate before promotion. Read-only diffs already cover the transparency need, so it is not priority.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-005",
+   "name": "Inline line or selection comments that travel into the next prompt",
+   "description": "Select lines in a diff or file (or a passage in a document) and write a comment. The comment is attached to the composer as a structured review comment, and the agent receives it with the next message.",
+   "prevalence": {
+    "sourcesWith": [
+     "t3code",
+     "claude"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "t3code-ui-and-multimodel-039",
+    "claude-product-ux-101"
+   ],
+   "bestInClass": {
+    "source": "t3code",
+    "recordIds": [
+     "t3code-ui-and-multimodel-039"
+    ],
+    "why": "q4 SRC with fully readable source. A serialised <review_comment> block {filePath, range, text, diff excerpt, fence language} round-trips back into a comment card in the user bubble, and one annotation component is reused for diffs, file previews and PR reviews. Claude desktop (101) confirms the pattern, with comments sent to Claude."
+   },
+   "mechanism": "An annotatable view wraps the diff, code or document renderer. A selection becomes a draft annotation (Cmd/Ctrl+Enter submits, Esc cancels) and then a composer chip kept in the draft store. On send, each comment is serialised to a tagged block containing the path, the line or character range, the comment text and the selected excerpt. The server passes it verbatim to the model, and the client parses the block back to render a card instead of raw markup.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:474"
+    ],
+    "gap": "There is no comment-on-selection in the artifact panel or the diff view (a search for getSelection/selection edits in features/chat found none). Users have to describe locations in prose.",
+    "strengths": ""
+   },
+   "benefit": "Precise steering of revisions for documents, reports and code artifacts, which are Verevon's core outputs. It cuts ambiguous \"change the third paragraph\" turns and needs no IDE surface.",
+   "approach": "Frontend Plane only for v1: an annotation layer over ChatArtifactPanel (markdown, code) and DiffView that serialises comments into the user message as a typed content part. The Model Plane gateway renders it into the prompt and records the artifact id and version, so the model edits the right revision (pairs with C01).",
+   "effort": "S",
+   "dependencies": [
+    "artifact version ids in the client (exist)"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Comments against a stale version: bind each comment to the artifact id and version, and warn when it has changed.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small effort and a visible quality gain for both document and code work; a differentiator against claude.ai and ChatGPT web.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-006",
+   "name": "Post-edit lint and diagnostics feedback loop",
+   "description": "After the agent edits code, linter and compiler diagnostics for the change are fed back so the agent can fix its own errors, optionally automatically. They are computed in a hidden copy so the user's view is not disturbed, and a verification mode runs tests and builds.",
+   "prevalence": {
+    "sourcesWith": [
+     "antigravity",
+     "cursor"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "antigravity-agent-ux-and-gemini-074",
+    "cursor-ai-features-010",
+    "cursor-harness-architecture-067",
+    "cursor-ai-features-023"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-010",
+     "cursor-harness-architecture-067"
+    ],
+    "why": "q4 SRC. A shadow workspace computes lints for a change without touching the user's files (GetLintsForChange), plus an explicit ReadLints tool with a 10 s timeout. Antigravity 074 adds auto-fix without a prompt and a verification mode."
+   },
+   "mechanism": "After each successful edit, run the language toolchain on the changed files in the sandbox (tsc/eslint/ruff/cargo check/go vet, chosen by extension) within a time budget. Diff the diagnostics against the pre-edit baseline so only newly introduced errors are reported, and attach them to the edit tool result (or expose read_lints). Auto-fix: when new errors exist, inject a short notifying prompt for one bounded repair round. Verification mode: run the declared test/build commands and report pass/fail as a step.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-101",
+     "v-planned-decisions-096"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1-15",
+     "apps/Model Plane/bridges/lsp-bridge"
+    ],
+    "gap": "Only an LSP pass-through client to an external Python bridge exists, and it is off and not agent-visible. Decision H11 (\"post-write diagnostics instead of an LSP bridge\") is deferred to Wave 6. There is no edit tool to hook diagnostics onto yet (C01).",
+    "strengths": "The decision to prefer post-write diagnostics over a full LSP bridge matches what the best references actually do."
+   },
+   "benefit": "Code produced in chat and agent runs compiles more often without user round-trips. Diagnostics run inside the existing hermetic sandbox, so there is no new trust boundary.",
+   "approach": "Execute H11 in execution-core: a diagnostics step after fs.edit/fs.write in Space workspaces, with toolchains baked into the sandbox image, new-errors-only diffing, and one auto-repair round under the run budget. Skip the LSP bridge.",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "sandbox image with toolchains",
+    "run budget"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Toolchain image size and cold-start time. The networkless sandbox cannot install dependencies, so pre-bake them or mount a cache.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "A clear quality win for code tasks that is already decided (H11); it depends on C01.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-007",
+   "name": "LSP-based code navigation tool (definition, references, hover)",
+   "description": "A read-only language-server tool the agent can call for go-to-definition, references, implementation and hover, or plugin-provided language servers that start automatically.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "deepseek"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-135",
+    "deepseek-harness-architecture-147"
+   ],
+   "bestInClass": {
+    "source": "deepseek",
+    "recordIds": [
+     "deepseek-harness-architecture-147"
+    ],
+    "why": "q3. A clean seam: provider chosen by extension, one server per workspace, serialised calls, bounded results grouped by file and structured LSP_UNAVAILABLE failures. It is DOC-only, though, and opt-in."
+   },
+   "mechanism": "lsp tool {op: definition|references|implementation|hover, path, line, col}. The host maps extension -> language id -> stdio server, starts one per workspace lazily, serialises requests, caps results and groups them by file, and returns normalised locations with short excerpts.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-101",
+     "v-planned-decisions-096",
+     "v-modelplane-109"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1-15"
+    ],
+    "gap": "The LspQuery pass-through exists but is not deployed and not offered to the agent; H11 chose diagnostics over the bridge.",
+    "strengths": ""
+   },
+   "benefit": "Helps navigation in large codebases; low value for Verevon's chat-sized workspaces.",
+   "approach": "Keep the bridge parked. Revisit only if Space workspaces regularly hold real repositories.",
+   "effort": "M",
+   "dependencies": [
+    "C08 search tools first"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Process management per workspace inside a networkless sandbox; memory use.",
+   "tier": "skip",
+   "significance": 2,
+   "rationale": "Verevon is not an IDE. Grep/read tools (C08) plus diagnostics (C06) cover most of the value, which is consistent with decision H11.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-008",
+   "name": "Workspace search and read tools (grep, glob, ranged read, file picker)",
+   "description": "Ripgrep-shaped grep and glob tools with bounded, paged output and guards; a read tool with offsets, line numbers, images and PDFs; and, in the UI, a fuzzy file picker and content search backed by a budgeted native index.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "deepseek",
+     "t3code"
+    ],
+    "n": 3,
+    "of": 9,
+    "cls": "common"
+   },
+   "members": [
+    "cursor-harness-architecture-060",
+    "cursor-harness-architecture-061",
+    "deepseek-harness-architecture-079",
+    "t3code-ui-and-multimodel-104",
+    "t3code-architecture-074"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-061",
+     "cursor-harness-architecture-060"
+    ],
+    "why": "q4 SRC. A ripgrep argument surface (pattern, glob, type, output_mode, -A/-B/-C, multiline, head_limit) with a broad-glob guard, and versioned read schemas (negative offsets, line numbers, images/PDF). DeepSeek 079 adds over-cap sampling and truncation flags; T3 Code 074 adds strict index budgets (25k entries, 15 s scan, idle eviction)."
+   },
+   "mechanism": "grep maps to ripgrep (a bundled binary) with workdir-relative paths, head_limit and a truncated flag. glob sorts by mtime and samples across top-level directories when over the cap. read {path, offset (negative = from the end), limit, line_numbers} returns images and PDF pages as model-readable parts. All of them are bounded by byte caps. UI: projects.searchEntries/searchContents RPCs over an in-process index with hard size and time budgets.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-107",
+     "v-modelplane-109"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:24-34",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:767"
+    ],
+    "gap": "There are no grep/glob/read tools over a Space workspace. The model can only shell out inside code_interpreter (per call, hermetic) or use knowledge_search over Data Plane documents. The governed shell tool is read-only, human-gated and not offered in Do mode.",
+    "strengths": "knowledge_search over Data Plane covers document retrieval, which is the larger Verevon need."
+   },
+   "benefit": "Lets agents inspect uploaded projects or generated multi-file outputs cheaply and precisely. It is a prerequisite for useful edits (C01) across more than one file.",
+   "approach": "execution-core: read-only fs.read/fs.grep/fs.glob tools over the leased workspace (ripgrep in the sandbox image), with output caps aligned with tool_result_handles for large results. Put them in a low-risk capability class so they need no approval.",
+   "effort": "S",
+   "dependencies": [
+    "Space workspace lease",
+    "result handles"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Secret files in uploaded projects (.env): apply a deny list like Cursor's Tab guard (cursor-ai-features-005) and redact.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small, safe and needed alongside C01. The UI file picker is a later nice-to-have.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-009",
+   "name": "Semantic codebase index (Merkle sync, embeddings, syntax-aware chunks, index reuse)",
+   "description": "Workspace code is embedded for semantic search, synced by Merkle-tree diffing, chunked on syntax boundaries, reranked, and reused across clones by similarity hash with encrypted paths. Semantic search is the default agent entry point.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "antigravity"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-011",
+    "cursor-ai-features-013",
+    "cursor-harness-architecture-062",
+    "cursor-harness-architecture-064",
+    "cursor-harness-architecture-065",
+    "cursor-harness-architecture-066",
+    "antigravity-architecture-093"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-011",
+     "cursor-harness-architecture-064",
+     "cursor-harness-architecture-065"
+    ],
+    "why": "q5 SRC. The Merkle handshake uploads only changed subtrees, a SimHash lets a new clone attach to a teammate's index, and paths are encrypted client-side; tree-sitter chunks and reranking on top."
+   },
+   "mechanism": "The client builds a Merkle tree over embeddable files. The handshake sends the root plus a SimHash, and the server copies an existing index when it is similar enough. SyncMerkleSubtree uploads only differing leaves. Chunks are cut with tree-sitter, then embedded and reranked. The SemanticSearch tool reads the warm index (~10 ms), with Grep as the exact fallback.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-109",
+     "v-chat-agents-ui-103"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1-15"
+    ],
+    "gap": "No code index (out of scope by design). Data Plane v2 already owns document retrieval and embeddings.",
+    "strengths": "Data Plane retrieval/graph is the right owner if code ever needs indexing."
+   },
+   "benefit": "Low for a non-IDE chat product. Tree-sitter chunking could improve Data Plane retrieval of code documents.",
+   "approach": "Do not build this in Model Plane. Optionally ask Data Plane to add syntax-aware chunking for code MIME types.",
+   "effort": "XL",
+   "dependencies": [
+    "Data Plane chunker"
+   ],
+   "planeOwner": "Data Plane",
+   "risks": "Building it in Model Plane would duplicate retrieval across planes.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "An IDE capability; it would duplicate Data Plane retrieval and break plane ownership.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-010",
+   "name": "Instant exact-text index (sparse n-gram regex index with ripgrep fallback)",
+   "description": "A Rust on-disk n-gram index answers regex search over large repositories. It falls back to ripgrep and raises an alarm when too many queries fall back.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-012",
+    "cursor-harness-architecture-063"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-harness-architecture-063",
+     "cursor-ai-features-012"
+    ],
+    "why": "q5 REA+SRC. The crepe crate (gix, regex-automata, rkyv, memmap2, rayon) with memory-bounded spilling and fallback monitoring."
+   },
+   "mechanism": "Build index.bin + postings.bin of sparse n-grams per worktree and commit, weighted by a frequency table. At query time, extract the required n-grams from the regex, intersect the postings and verify the candidates; otherwise run ripgrep.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-109"
+    ],
+    "evidence": [],
+    "gap": "Not present, and not needed at Verevon workspace sizes.",
+    "strengths": ""
+   },
+   "benefit": "None at chat-workspace scale.",
+   "approach": "Not applicable; ripgrep (C08) is enough.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "A large-repo IDE optimisation.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 1,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-011",
+   "name": "Git-history-aware retrieval (PR history search, co-change files)",
+   "description": "Agents search past pull requests and find files that historically change together.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-014"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-014"
+    ],
+    "why": "The only source (q3, SRC, medium confidence)."
+   },
+   "mechanism": "GitIndexService indexes PR history; GitGraphService uploads commits and answers co-change queries.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-109"
+    ],
+    "evidence": [],
+    "gap": "No git integration, by design.",
+    "strengths": ""
+   },
+   "benefit": "None for Verevon chat.",
+   "approach": "Not applicable.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "A repository-centric IDE feature.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-012",
+   "name": "Tab completion and next-edit prediction (editor inline AI)",
+   "description": "Streamed multi-line edit prediction accepted with Tab, cursor-jump prediction, server-tuned debounce and context, delta file sync, secret-file guards, and fate tracking for evaluation. These run as low-latency services separate from the agent loop.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-001",
+    "cursor-ai-features-002",
+    "cursor-ai-features-003",
+    "cursor-ai-features-004",
+    "cursor-ai-features-005",
+    "cursor-ai-features-006",
+    "cursor-harness-architecture-132"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-001",
+     "cursor-ai-features-004",
+     "cursor-ai-features-006"
+    ],
+    "why": "The only source; q4-5 SRC with the full service surface (CppService, FileSync deltas, fate labels)."
+   },
+   "mechanism": "Debounced StreamCpp requests carry edit history, recent files and LSP context over a server-mirrored copy of the files. Responses replace a range, shown as ghost text or an inline diff, and every suggestion is labelled with its fate for evaluation.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-109",
+     "v-chat-agents-ui-103"
+    ],
+    "evidence": [],
+    "gap": "Out of scope: Verevon has no code editor.",
+    "strengths": ""
+   },
+   "benefit": "None directly. Two ideas are reusable: the .env/secret-file deny list (cursor-ai-features-005) for any Verevon file-read tool, and fate tracking for suggestion features.",
+   "approach": "Do not build. Borrow the secret-file guard into C08.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Verevon is explicitly not an IDE.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-013",
+   "name": "Selection-scoped inline edit (Cmd+K style rewrite of a selection)",
+   "description": "Select a region, type an instruction, and the model rewrites only that region in place with a streamed diff. The same pattern generates terminal commands.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-007"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-007"
+    ],
+    "why": "The only record (q4 SRC): StreamCmdK with context reranking and a terminal variant."
+   },
+   "mechanism": "Request {selection range, surrounding context (reranked chunks), instruction} -> a streamed replacement for the range, rendered as an inline diff with accept/reject.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:474"
+    ],
+    "gap": "There is no select-and-rewrite in the artifact panel (a search of features/chat for selection handling found none). INF: ChatGPT canvas and Claude artifacts offer comparable selection actions, but no record in this category documents them.",
+    "strengths": ""
+   },
+   "benefit": "For documents and code artifacts: \"rewrite this paragraph\" or \"translate this table\" without regenerating the whole artifact.",
+   "approach": "A frontend selection toolbar in ChatArtifactPanel that sends {artifact id, version, range, instruction}. Model Plane applies it through the C01 edit engine as a constrained edit, and DiffView renders it. It shares its UI with C05.",
+   "effort": "S",
+   "dependencies": [
+    "C01",
+    "C05 selection layer"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Some edits need context outside the selection; fall back to a full turn.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful polish once C01 and C05 land; the evidence in this category comes from one source.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-014",
+   "name": "Code review as a first-class run with a strict findings standard",
+   "description": "A review run targets uncommitted changes, a base branch, a commit or custom instructions, runs inline or detached, and returns prioritised findings (P0-P3) as strict JSON with locations. The reviewer reports only what the author would fix and otherwise says \"no findings\". It can run as a subagent near the end of substantial work, with findings cards and one-click fixes.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexagent",
+     "claude",
+     "cursor",
+     "antigravity"
+    ],
+    "n": 4,
+    "of": 9,
+    "cls": "common"
+   },
+   "members": [
+    "codexagent-agent-runtime-and-models-086",
+    "codexagent-plugins-and-extensibility-116",
+    "claude-product-ux-103",
+    "cursor-ai-features-016",
+    "antigravity-agent-ux-and-gemini-075"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-086",
+     "codexagent-plugins-and-extensibility-116"
+    ],
+    "why": "q5 SRC. Four targets, inline/detached delivery, a visible review mode, steering disabled during review, an output schema {findings[{title, body, confidence_score, priority, code_location}], overall_correctness, overall_confidence_score} and rule attribution to AGENTS.md. The explicit-only review skill enforces the \"no invented findings\" standard. Claude 103 has the best findings UX (walkthrough, apply fix, rerun)."
+   },
+   "mechanism": "review/start {target, delivery, threadId} spawns a read-only, sandboxed reviewer with a target-specific prompt (the diff of staged + unstaged + untracked files; the merge-base for a branch; the sha for a commit). The output is held to the JSON schema and rendered as a findings card. \"Apply fix\" sends a finding back as a scoped edit turn.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-108"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:1-3",
+     "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:2113"
+    ],
+    "gap": "There is no code review run. Verevon does have a deterministic source-bound drafting review (numbers, dates, schedules, word counts, revision preservation) over documents, which is a different but related reviewer.",
+    "strengths": "source_validation.rs is a real differentiator for document correctness. Keep it, and consider exposing it with the same findings-card UX."
+   },
+   "benefit": "A generic \"review this\" run (a code artifact, a workspace diff or a document) with prioritised, located findings gives users a trustworthy second pass and pairs with Verevon's existing deterministic checks.",
+   "approach": "Model Plane: a review subagent profile (read-only capability set) with a findings JSON schema. Targets are an artifact revision diff, a Space workspace turn diff (C03) or attached code. Merge deterministic source_validation findings into the same schema. Frontend: a findings card with \"apply fix\" through C01.",
+   "effort": "M",
+   "dependencies": [
+    "subagent.task (shipped)",
+    "C03 for workspace targets",
+    "C01 for apply-fix"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "False positives erode trust: enforce the \"only what the author would fix\" standard and a confidence threshold.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Present in most coding references and transferable to documents; it builds on shipped subagents and source validation.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-015",
+   "name": "Hosted pull-request review bots and PR code tours",
+   "description": "Server-side services review GitHub PRs with parallel agents and a verification pass, post inline comments, learn from reactions and auto-resolve threads once fixed. They also generate revisable guided tours of a PR.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "web-claudeai"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-015",
+    "web-claudeai-web-product-066",
+    "cursor-harness-architecture-070",
+    "cursor-ai-features-128"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-066"
+    ],
+    "why": "q4 DOC. Parallel issue-class agents plus a verification step that filters false positives, dedupe/rank, severity labels and auto-resolve. Cursor Bugbot (015) is the SRC-verified equivalent, with feedback learning."
+   },
+   "mechanism": "A GitHub App webhook fires on open, push or mention. Reviewers fan out per issue class, a verifier agent checks each finding against the code, findings are deduped and ranked, and inline comments are posted with a severity. Reactions are tracked for tuning.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-103",
+     "v-modelplane-109"
+    ],
+    "evidence": [],
+    "gap": "No PR bots (a search for pull request/github in chat, agents and api found none).",
+    "strengths": ""
+   },
+   "benefit": "Outside Verevon's product scope.",
+   "approach": "Not applicable. If it is ever wanted, it would be a scheduled routine using an integration-corev2 GitHub provider action.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "A developer-platform product, not a chat/agent page feature.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-016",
+   "name": "Pull-request workspace and lifecycle automation (CI watch, auto-fix, auto-merge)",
+   "description": "A PR cockpit (list, checks, comments, files, commits, batched reviews with a verdict) plus agents that watch a PR, fix CI failures and review comments per user instructions, and auto-merge when green. It works across GitHub, GitLab, Azure DevOps and Bitbucket using the user's own CLI logins.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "cursor",
+     "t3code"
+    ],
+    "n": 4,
+    "of": 9,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-102",
+    "codexagent-agent-runtime-and-models-099",
+    "cursor-ai-features-021",
+    "t3code-ui-and-multimodel-044",
+    "t3code-architecture-061",
+    "codexagent-plugins-and-extensibility-101",
+    "cursor-ai-features-146"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-102"
+    ],
+    "why": "q5 SRC. A full PR pane plus monitoring and auto-fix/auto-merge bound to the session. T3 Code 061 is the best provider abstraction: four forges through the user's installed CLIs, no forge credentials held, rate-limit cooldown."
+   },
+   "mechanism": "Bind a PR to a session and poll its checks and review threads. On a failure or a new comment, start a fix turn with the user's standing instructions; enable auto-merge when the required checks pass. A provider registry maps each host to a CLI or API implementation.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-103",
+     "v-modelplane-109"
+    ],
+    "evidence": [],
+    "gap": "No source-control integration; git and worktrees are out of scope (ledger). cursor-ai-features-146 (Origin) is flags-only INF.",
+    "strengths": ""
+   },
+   "benefit": "Low for Verevon's audience. The transferable pattern is \"an agent watches an external object and acts per standing instructions\", which Verevon routines already approximate.",
+   "approach": "If needed, expose GitHub/GitLab as integration-corev2 provider actions with owner-plane ACLs and let routines watch them; no PR UI in Verevon.",
+   "effort": "L",
+   "dependencies": [
+    "integration-corev2 GitHub provider"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Credential custody for forges must stay in integration-corev2, and write actions need approval gates.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "A coding-workflow product surface that does not fit a non-IDE chat product.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t3-07-017",
+   "name": "Repository security scanning products",
+   "description": "Long-running repository scans for multi-file vulnerabilities, with self-verification, human checkpoints, validated findings (root cause, attack path, severity), patch drafts, schedules, spend limits and signed result webhooks; also a /security-review command and a CI action. INF: ChatGPT Codex Security Cloud scans are also described, in a record (web-chatgpt-web-product-085) that is assigned to the diff-review cluster.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "codexagent",
+     "web-claudeai"
+    ],
+    "n": 3,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-145",
+    "codexagent-agent-runtime-and-models-087",
+    "web-claudeai-web-product-067",
+    "web-claudeai-web-product-068"
+   ],
+   "bestInClass": {
+    "source": "codexagent",
+    "recordIds": [
+     "codexagent-agent-runtime-and-models-087"
+    ],
+    "why": "q4 SRC. Scan jobs that pause for input, and findings with a validation status, root cause, attack path and patch. Claude Security (145/067) adds schedules, spend limits and signed webhooks (partly DOC)."
+   },
+   "mechanism": "A scan-job state machine (queued, running, action required, done) over a repository snapshot, a validation agent per finding, patch generation, and export plus webhooks signed per hook.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-chat-agents-ui-103"
+    ],
+    "evidence": [],
+    "gap": "Not present; out of scope.",
+    "strengths": ""
+   },
+   "benefit": "Outside scope. Two ideas are reusable for Verevon routines: long jobs that pause for input, and signed result webhooks.",
+   "approach": "Not applicable.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "A separate security product built on coding agents.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-018",
+   "name": "Integrated terminal view and terminal awareness",
+   "description": "Terminal tabs with selection-to-chat and link handling. The agent reads terminal output (dev server, failed builds), /init scaffolds project instructions, and lifecycle hooks run with a trust review.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "claude-product-ux-104",
+    "web-chatgpt-web-product-087"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-104"
+    ],
+    "why": "q4 SRC. A PTY host per session with tabs, attach-selection-to-conversation and command tracking. ChatGPT/Codex 087 (DOC) adds agent-side terminal awareness and team config."
+   },
+   "mechanism": "A PTY host (ConPTY/node-pty or a Rust pty) per workspace with an xterm.js view; a selection becomes a composer attachment; command start/exit events are visible to the agent.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4089-4109",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:767"
+    ],
+    "gap": "Do-mode process_* tools (start/read/stdin/list, Space-scoped) and a governed read-only shell exist, but the UI shows them as generic tool cards. There is no terminal view and no selection-to-chat. No baseline record in this category covers it; the evidence comes from the shell/processes row of the v-chat-agents-ui baseline narrative.",
+    "strengths": "A durable process registry under a governed capability policy is ahead of most web chat products."
+   },
+   "benefit": "Readable live output of long-running agent processes (builds, scripts) on the agent page, which improves transparency.",
+   "approach": "Frontend Plane: a read-only terminal-style renderer (ANSI, scrollback) for process_* streams, with no interactive user shell (this keeps the authority model intact). Selection-to-chat via C05.",
+   "effort": "S",
+   "dependencies": [
+    "process_read streaming events"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "An interactive shell for users would widen authority; keep it agent-only and read-only for viewers.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Polish for agent transparency; not blocking.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-019",
+   "name": "Build-and-preview generated apps (dev server preview, UI screenshots, design handoff)",
+   "description": "The agent builds a web app, starts or detects a dev server, shows a live preview (including checkpoint previews), returns UI screenshots, and can publish session output as shareable artifacts or import designs.",
+   "prevalence": {
+    "sourcesWith": [
+     "claude",
+     "web-chatgpt",
+     "web-claudeai",
+     "manus"
+    ],
+    "n": 4,
+    "of": 9,
+    "cls": "common"
+   },
+   "members": [
+    "claude-product-ux-136",
+    "web-chatgpt-web-product-088",
+    "web-claudeai-web-product-069",
+    "manus-computer-control-architecture-087"
+   ],
+   "bestInClass": {
+    "source": "claude",
+    "recordIds": [
+     "claude-product-ux-136"
+    ],
+    "why": "q4 SRC. Dev-server candidate detection, explanations for cold starts and port conflicts, request throttling and an ask-Claude fallback. Manus 087 adds checkpoint preview pages and webdev LSP presets; Claude.ai 069 (DOC) shares artifacts between code and chat."
+   },
+   "mechanism": "The workspace declares a start command and port, or the agent detects them, and the sandbox runs it. A reverse proxy exposes the port to a sandboxed iframe on a per-run origin. Checkpoints snapshot the workspace and serve a static build for comparison, and a screenshot tool captures the preview for the model.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-chat-agents-ui-100"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4361-4383",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:474"
+    ],
+    "gap": "Single-file HTML artifacts render in a sandboxed iframe (allow-scripts, no same-origin) with versions. There is no multi-file app build, no dev-server preview from the Space workspace (the sandbox has no network and no port exposure), and no screenshot-of-preview loop.",
+    "strengths": "Sandboxed HTML artifact rendering with a version stepper and diff is already at claude.ai artifact parity."
+   },
+   "benefit": "\"Build me a small app/dashboard\" is a headline use case for claude.ai, ChatGPT and Manus. A Space-workspace preview would let Verevon agents ship multi-file web outputs safely.",
+   "approach": "Model Plane execution-core: start with a static-build preview (bundle the workspace with a pinned toolchain and serve the dist folder from a per-run isolated origin via the Frontend gateway), then optionally expose dev-server ports behind sandbox-manager leases. Take screenshots through Quarry (the Model proposes, Quarry executes) rather than with a Model Plane browser.",
+   "effort": "L",
+   "dependencies": [
+    "C01",
+    "C08",
+    "sandbox toolchain image",
+    "isolated preview origin in the Rust gateway"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Serving untrusted code needs strict per-run origins, a CSP and no cookies. ZDR runs must not persist builds beyond the lease.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "A strong user-visible capability in the reference set that extends an existing strength (HTML artifacts); the large effort keeps it below priority.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-020",
+   "name": "Best-of-N parallel attempts across models",
+   "description": "Fan one prompt out to several models in parallel threads and let the user apply the preferred result while the others are undone.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-019"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-019"
+    ],
+    "why": "The only record (q4 SRC): planBestOfN/runBestOfNFanout with sibling undo."
+   },
+   "mechanism": "A parent run spawns N child runs (different models or seeds) on copies of the workspace. The results are shown side by side, and applying one discards the sibling overlays.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "A search of the frontend and Model Plane for best-of-N/compare-models found nothing. Verevon has multi-model routing and subagent fan-out (research_fan_out) but no user-facing parallel attempts.",
+    "strengths": ""
+   },
+   "benefit": "Multi-model comparison is a natural fit for a multi-model chat (the T3 Code reference value), but cost multiplies.",
+   "approach": "Model Plane: reuse subagent child runs with per-model routing and per-child workspace overlays. Frontend: a side-by-side compare with \"keep this\".",
+   "effort": "M",
+   "dependencies": [
+    "C03/C04 overlays for code",
+    "cost plane budgeting"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "N times the cost; it must respect per-org budgets and ZDR on every provider leg.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Single-source; appealing for power users but not core.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-021",
+   "name": "Debug mode: hypothesis-driven runtime instrumentation",
+   "description": "A mode where the agent forms hypotheses, inserts logging, asks the user to reproduce, ingests the logs and iterates until the root cause is proven.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "cursor-ai-features-022"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-022"
+    ],
+    "why": "The only record (q4 SRC): a mode prompt plus a local NDJSON ingest server."
+   },
+   "mechanism": "The mode prompt enforces hypothesise -> instrument -> reproduce -> analyse. Instrumentation writes NDJSON to a file or POSTs it to a localhost ingest endpoint the agent can read.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record covers it; check Model Plane modes and skills for a debugging workflow. Likely absent (INF: Verevon has no user-run code target to instrument).",
+    "strengths": ""
+   },
+   "benefit": "Low: Verevon users rarely run their own code against a Verevon agent.",
+   "approach": "If wanted, ship it as a prompt-only skill for code_interpreter work.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Needs a user-run application; IDE-centric.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-022",
+   "name": "Retained, recoverable agent workspaces (git worktrees with retention and recovery)",
+   "description": "Tasks run in isolated workspaces that are retained up to a limit with LRU eviction, with snapshot receipts to recover deleted checkouts and a preview step before cleanup.",
+   "prevalence": {
+    "sourcesWith": [
+     "manus"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "manus-computer-control-architecture-053"
+   ],
+   "bestInClass": {
+    "source": "manus",
+    "recordIds": [
+     "manus-computer-control-architecture-053"
+    ],
+    "why": "The only record (q4 SRC): retention get/list/set/preview/prepare/cleanup and recovery receipts."
+   },
+   "mechanism": "A workspace registry with a retention limit (default 30) and LRU eviction, a snapshot receipt per workspace, and a two-phase cleanup (preview, then commit).",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs:1-8",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs:1-8"
+    ],
+    "gap": "Verevon deliberately rejects git worktrees (ledger:1821) and instead has Space-scoped sandbox leases with a CAS-backed manifest, snapshots and a PromoteWorkspace overlay merge (per the v-modelplane baseline). Not checked: an explicit retention limit and a preview-before-cleanup step.",
+    "strengths": "CAS-addressed workspace snapshots plus promotion into Data Plane documents give an equivalent or stronger durability model for a non-git product."
+   },
+   "benefit": "Already covered.",
+   "approach": "Keep it; consider a retention preview in the Space UI.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "An equivalent capability exists in a form that fits Verevon.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-023",
+   "name": "AI code attribution and commit authoring",
+   "description": "Commits are scored for Tab vs agent vs human lines using per-request snapshots. Agent-written commits get a fixed Co-authored-by trailer, commit messages and branch names are drafted from diffs, and a command applies the last agent diff.",
+   "prevalence": {
+    "sourcesWith": [
+     "cursor",
+     "codexagent"
+    ],
+    "n": 2,
+    "of": 9,
+    "cls": "differentiator"
+   },
+   "members": [
+    "cursor-ai-features-018",
+    "cursor-harness-architecture-069",
+    "codexagent-agent-runtime-and-models-072",
+    "cursor-ai-features-020"
+   ],
+   "bestInClass": {
+    "source": "cursor",
+    "recordIds": [
+     "cursor-ai-features-018",
+     "cursor-harness-architecture-069"
+    ],
+    "why": "q4 SRC. Per-request file snapshots and line-id maps measure how much AI-written code survives. Codex 072 has the cleanest trailer policy."
+   },
+   "mechanism": "Snapshot files at agent request start and end, map line ids, attribute added lines to Tab/agent/human at commit time, and report analytics.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-109"
+    ],
+    "evidence": [],
+    "gap": "No git, so not applicable. The analogue: Verevon artifact versions already record which revision the agent produced.",
+    "strengths": ""
+   },
+   "benefit": "None for chat. Provenance of agent-written content is better served by artifact version metadata and audit.",
+   "approach": "Not applicable.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Git/IDE-centric.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-024",
+   "name": "IDE and platform distribution (Xcode, Microsoft Foundry)",
+   "description": "The assistant is available inside third-party IDEs and cloud platforms.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-claudeai"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "web-claudeai-web-product-070"
+   ],
+   "bestInClass": {
+    "source": "web-claudeai",
+    "recordIds": [
+     "web-claudeai-web-product-070"
+    ],
+    "why": "The only record (q3 DOC, medium confidence)."
+   },
+   "mechanism": "Vendor integrations that expose the model and agent through partner surfaces.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-modelplane-109"
+    ],
+    "evidence": [],
+    "gap": "No IDE integrations (out of scope). Verevon has a public API/SDK (per the v-modelplane baseline) that partners could use.",
+    "strengths": ""
+   },
+   "benefit": "None for the chat/agent pages.",
+   "approach": "Not applicable.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "A distribution channel, not a page capability.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t3-07-025",
+   "name": "Composer next-message prediction",
+   "description": "After the assistant responds, a predicted next user message appears in the composer; Tab accepts it, and the user can then edit or send.",
+   "prevalence": {
+    "sourcesWith": [
+     "web-chatgpt"
+    ],
+    "n": 1,
+    "of": 9,
+    "cls": "unique"
+   },
+   "members": [
+    "web-chatgpt-web-product-086"
+   ],
+   "bestInClass": {
+    "source": "web-chatgpt",
+    "recordIds": [
+     "web-chatgpt-web-product-086"
+    ],
+    "why": "The only record (q3 DOC)."
+   },
+   "mechanism": "A context-conditioned suggestion is generated after each turn and prefilled as ghost text in the composer.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:422-427",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:327"
+    ],
+    "gap": "Verevon ships AI follow-up suggestion chips from a follow_ups SSE event (session-only). It does not prefill the composer as ghost text with Tab accept. Not verified live.",
+    "strengths": "Follow-up chips are the same capability in a less intrusive form; keep them."
+   },
+   "benefit": "Already covered.",
+   "approach": "Optional: Tab-to-accept the first chip into the composer.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "An equivalent is shipped.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  }
+ ]
+}

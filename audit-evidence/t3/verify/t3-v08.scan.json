@@ -1,0 +1,1201 @@
+[
+ {
+  "finalId": "F-t3-064",
+  "title": "Public, versioned Agent API with origin-tagged runs as the one entry for every surface (SPA, API keys, schedules, mail, later channels)",
+  "searches": [
+   "rg /v1/agent|/v1/agents|agent/v1|/v1/runs over Model Plane rust/services and Frontend gateway src",
+   "rg THREAD_ORIGINS|resolve_thread_origin|run_origin|RunOrigin|origin_kind|trigger_source|parent_run_id over session-core",
+   "rg -i origin over Model Plane rust, go, proto (CORS and comments filtered out)",
+   "rg x-api-key|API_KEY_ENABLED|apiKey|api_key over model-gateway src and Control auth-core",
+   "rg ScheduledRun|start_scheduled_run|prepare_scheduled_run_thread over Model Plane rust and go",
+   "rg mail_task|mail-task over model-gateway src and Frontend gateway domains",
+   "rg chat/completions|openai_compatible|OpenAI-compatible over Model Plane services and Frontend gateway",
+   "rg verevon-cli|clap|bridge-cli over Frontend gateway and Model Plane clients",
+   "rg openapi-generator|generate-sdk|model-plane-sdk over Model Plane api and Frontend src",
+   "rg slack|microsoft teams over Model Plane rust/go, Frontend gateway and src (code only)",
+   "rg Office add-in|outlook add-in over apps (no hits)",
+   "read Channel Plane CHANNEL_PLANE_DEEP_DIVE.md status lines"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 136,
+    "why": "/v1/invoke and /v1/invoke/stream are the only run-start routes; BFF is the consumer",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 207,
+    "why": "GET /v1/runs listing route consumed by the gateway BFF",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 351,
+    "why": "/v1/cron routes proxied for scheduled work",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 174,
+    "why": "Internal mail-task prepare-thread bridge route, service-scoped",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0034_thread_origin.sql",
+    "line": 36,
+    "why": "threads.origin enum chat, space, agent_run, support, system; set once at creation",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0041_mail_task_thread_origin.sql",
+    "line": 21,
+    "why": "origin enum widened with mail_task value",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "line": 2252,
+    "why": "THREAD_ORIGINS list: chat, space, agent_run, support, system, mail_task",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "line": 2316,
+    "why": "resolve_thread_origin: caller declares origin; checked against space_id",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+    "line": 511,
+    "why": "Run metadata source scheduled_run used in scheduled-run SQL predicate",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "line": 4582,
+    "why": "start_scheduled_run RPC handler implemented in session-core",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "line": 88,
+    "why": "Scheduled-run Control decision audience, action and schema constants",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "line": 1503,
+    "why": "parent_run_id and child_run_id lineage edges for orchestrated child runs",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "line": 29,
+    "why": "StartScheduledRun and PrepareScheduledRunThread RPC definitions",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0028_space_scoped_cron.sql",
+    "line": 5,
+    "why": "cron schedules carry space_ref for Space-scoped scheduled runs",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/api/openapi.yaml",
+    "line": 91,
+    "why": "OpenAPI covers invoke, run events, cron, tasks; not an agent-run API",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/api/generate-sdk.sh",
+    "line": 14,
+    "why": "openapi-generator builds TypeScript and Python SDKs from the spec",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/api/sdk/python/docs/AiApi.md",
+    "line": 1,
+    "why": "Generated Python SDK docs exist; internal contract surface only",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents_runs.rs",
+    "line": 5,
+    "why": "Gateway proxies GET /v1/runs and run detail for the SPA only",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+    "line": 197,
+    "why": "Gateway streams run events to the SPA; no external consumer found",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "line": 74,
+    "why": "BFF route /api/v1/runs/{run_id}/events registered for the SPA",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/settings/api_keys.rs",
+    "line": 17,
+    "why": "User API key list and create handlers in gateway settings domain",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 2409,
+    "why": "settings.create_api_key: high risk, approval required, one-time secret",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts",
+    "line": 1112,
+    "why": "better-auth apiKey plugin, enabled only when API_KEY_ENABLED is true",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/model-plane-token.controller.ts",
+    "line": 1,
+    "why": "Mints short-lived RS256 bearers for the model-gateway audience",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduledRunsPanel.tsx",
+    "line": 36,
+    "why": "Chat panel lists, updates and deletes the user's cron schedules",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx",
+    "line": 56,
+    "why": "Dialog to create a recurring scheduled run from chat",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx",
+    "line": 91,
+    "why": "Notes several workflow types fail every scheduled fire, silently",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs",
+    "line": 594,
+    "why": "Execution-core calls Quarry /v1/agent/runs; internal client, not public",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/clients/bridge-cli/src/main.rs",
+    "line": 1,
+    "why": "bridge-cli operator shell over bridge-core sessions; not a public CLI",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/channel/webhook.go",
+    "line": 29,
+    "why": "WebhookAdapter: functional generic channel adapter; no Teams or Slack adapter",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go",
+    "line": 53,
+    "why": "Channel registry defaults every channel to a NoopAdapter",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs",
+    "line": 117,
+    "why": "Slack message.send exists only as an integration tool operation",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/config.rs",
+    "line": 20,
+    "why": "OpenAI-compatible base URL is outbound provider config, not an inbound endpoint",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md",
+    "line": 5,
+    "why": "Channel Plane stated as docs-only future area, not an active runtime",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-026",
+  "title": "Human takeover and hand-back from live views: agent-requested takeover for logins, 2FA and CAPTCHAs, then point-and-comment steering",
+  "searches": [
+   "rg take[_ -]?over|takeover|human_takeover|hand[_ -]?back|request_human over Frontend src and gateway, Model Plane rust and go, Ingestion Plane",
+   "rg live[_ -]?view|liveView|screencast|VNC|novnc over Frontend, Model Plane, Quarry-v2 crates",
+   "rg captcha|two[_ -]?factor|2fa|totp|login required over execution-core, browser-broker, Quarry runtime, browser.rs",
+   "rg annotat|pick element|element picker|draw region|design mode|point and comment over Frontend, Model Plane, Quarry",
+   "rg synthetic input|expected input|input arbitration|human typed over Frontend dashboard, browser.rs, Quarry, execution-core (no hits)",
+   "rg browser grant|BrowserGrant|grant_id over browser-broker, browser_agent.rs, browser.rs",
+   "rg pause|paused|control_mode over execution-core browser_agent.rs and model-gateway browser_run.rs",
+   "rg suggest-action|browser_suggest_action over Model Plane model-gateway and Frontend dispatchers",
+   "rg commentAnchors over Frontend dashboard browser session and chrome",
+   "rg persistent_profile over browser.rs and Quarry core and runtime",
+   "read CHAT_GAP_CLOSURE_PLAN E9 and E10 rows and VEREVON_UI_COWORK_RESEARCH section 2.2"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts",
+    "line": 69,
+    "why": "BrowserControlMode type: agent_control or human_takeover",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "line": 265,
+    "why": "Gateway BrowserControlMode enum with HumanTakeover variant",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "line": 705,
+    "why": "Agent-actor browser actions rejected while human takeover is active",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "line": 5222,
+    "why": "browser_action.set_control_mode validates agent_control or human_takeover",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 3060,
+    "why": "Browser action rejects agent-issued actions while a human holds control",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+    "line": 497,
+    "why": "humanTakeoverActive gates the model loop; UI shows takeover state",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx",
+    "line": 912,
+    "why": "Pauses browser loop when human_takeover mode is selected",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "line": 418,
+    "why": "Live frame routes: frame, frames/stream and frames/ws per browser session",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "line": 2578,
+    "why": "Capability list advertises human_takeover, live_frame_stream, annotate",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx",
+    "line": 131,
+    "why": "Per-run live-view link to the agent live-view endpoint",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "line": 866,
+    "why": "Work panel shows a live screen figure for agent activity",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts",
+    "line": 129,
+    "why": "Comment anchors are one hard-coded placeholder at fixed coordinates, not user comments",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+    "line": 1844,
+    "why": "Renders comment anchors from the placeholder model",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-loop.ts",
+    "line": 94,
+    "why": "requestPause, resume and stop wired to controlBrowserAiRun",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+    "line": 1,
+    "why": "Durable browser-agent run with pause, resume and stop controls",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+    "line": 217,
+    "why": "run_paused and run_resumed events on the browser event sink",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+    "line": 220,
+    "why": "Human approval gate for risky browser actions, fails closed",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+    "line": 972,
+    "why": "wait_out_pause_or_cancel: loop blocks while the run is paused",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 223,
+    "why": "/v1/browser/suggest-action: model proposes browser actions for Quarry to execute",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/server/server.go",
+    "line": 83,
+    "why": "Sensitive browser approval requires a parent grant id",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go",
+    "line": 144,
+    "why": "Sensitive grant requires a parent browser grant",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+    "line": 68,
+    "why": "Quarry owns control mode so a gateway restart cannot reset takeover",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs",
+    "line": 89,
+    "why": "Quarry BrowserControlMode enum with HumanTakeover variant",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+    "line": 2539,
+    "why": "Single frame endpoint documented for live preview and human takeover",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+    "line": 2597,
+    "why": "GET /v1/agent/runs/{run_id}/live-view route",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+    "line": 2907,
+    "why": "live_frame_ws WebSocket handler for live frames",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+    "line": 3704,
+    "why": "Route /v1/agent/runs/:run_id/frames/ws mounted",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs",
+    "line": 170,
+    "why": "Detects captcha markers and classifies the page as a challenge",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs",
+    "line": 188,
+    "why": "Detects sign-in and login-required markers",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+    "line": 236,
+    "why": "ChallengeKind enum for captcha, login and access-denied signals",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs",
+    "line": 141,
+    "why": "Live view URL captured from the Browserbase session",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+    "line": 1704,
+    "why": "CDP screencast frame listener on the local browser driver",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md",
+    "line": 703,
+    "why": "B5 human takeover plan section",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md",
+    "line": 997,
+    "why": "Live-view takeover listed as a planned item",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 186,
+    "why": "E9 Open in browser from a chat message, planned not built",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 187,
+    "why": "E10 live view and human takeover from chat panel, L effort",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 193,
+    "why": "Exit criteria include take over and hand back",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+    "line": 428,
+    "why": "Human takeover for secrets, 2FA and CAPTCHA proposed in section 2.2",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-068",
+  "title": "Policy and data-flow transparency: effective-policy origin view and declared egress catalogue",
+  "searches": [
+   "rg effective[_ -]?(policy|privacy|posture|setting) or policy origin or patched by or resolved from over Frontend, Model Plane, Control Plane",
+   "rg egress|Content-Security-Policy|connect-src|outbound host over Frontend gateway and src, Model Plane services, Support Plane, Infra Plane, scripts",
+   "rg trust center|TrustCenter|what leaves|sub-processor over Frontend settings and gateway, Control Plane",
+   "rg one-way|tighten|ratchet|never loosen over Frontend gateway domains and Model Plane model-gateway",
+   "rg served_by|servedBy over Frontend chat and Model Plane model-gateway",
+   "rg privacy[_ -]?tier over Frontend features and Model Plane profile.rs",
+   "read AUTHORED_INSTRUCTIONS_ADR layers section",
+   "rg telemetry with consent|toggle in Frontend settings (no hits)",
+   "rg effective policy in apps markdown docs"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx",
+    "line": 26,
+    "why": "Trust Center shows per-connected-app transparency cards",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-sections.ts",
+    "line": 84,
+    "why": "Trust Center section registered in workspace settings",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs",
+    "line": 4,
+    "why": "Trust Center aggregates tool-action audit events",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+    "line": 86,
+    "why": "Org privacy raise is one-way, matching the rest of the chain",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs",
+    "line": 75,
+    "why": "Same one-way raise applied on the AI route",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/profile.rs",
+    "line": 112,
+    "why": "Client profile may ratchet stricter, never weaker",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/budget.rs",
+    "line": 306,
+    "why": "Caller may tighten own run; org ceiling still applies",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/run_budget.rs",
+    "line": 63,
+    "why": "Subagent budget ceiling with the same one-way safety",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "line": 292,
+    "why": "servedBy provenance: serving provider, residency and privacy tier per answer",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "line": 438,
+    "why": "Processing note derived from servedBy provenance",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "line": 872,
+    "why": "served_by provider recorded on the gRPC infer response",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/router_policy.rs",
+    "line": 1,
+    "why": "Admin GET returns the effective routing policy from inference-core",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+    "line": 2387,
+    "why": "Privacy tier shown only when the run record carries one",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts",
+    "line": 14,
+    "why": "Preview CSP sets connect-src none for sandboxed HTML only",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+    "line": 102,
+    "why": "Stream handler reads effective posture from the response body",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go",
+    "line": 1226,
+    "why": "Effective policy fences every active Space when org policy changes",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md",
+    "line": 22,
+    "why": "Two-layer model; lower layers cannot weaken policy, not code-enforced",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/capability-ownership-matrix.md",
+    "line": 66,
+    "why": "Egress and OS isolation recorded as a genuine gap",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/scripts/verify-sandbox-isolation.sh",
+    "line": 45,
+    "why": "Checks that unshare-net blocks sandbox network egress",
+    "kind": "test"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-065",
+  "title": "Declarative provider registry and bring-your-own connections",
+  "searches": [
+   "rg provider[_ -]?profile|ProviderProfile|provider[_ -]?registry over Model Plane rust, go, proto and Frontend src and gateway",
+   "rg byok|bring your own|BYO|customer gateway|customer key over Model Plane, Frontend and Integration Core",
+   "rg INFERENCE_PROVIDER_ORDER|provider_order over inference-core",
+   "rg bedrock|vertex|foundry|azure_openai over inference-core src",
+   "rg subscription_connection_id|connection_id|connectionId over inference-core and Integration Core",
+   "rg model discovery|discover_models|GET /models over inference-core, model-gateway, capability-core and Frontend",
+   "rg helper command|credential process|assume role|workload identity over Model Plane and Integration Core (no BYO hits)",
+   "rg custom model|hide model|reorder over router-policy and settings (no hits)",
+   "read capability-core gap-analysis and roadmap providers.extended entry"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/config.rs",
+    "line": 209,
+    "why": "Provider order read from INFERENCE_PROVIDER_ORDER env, default anthropic,openai",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/config.rs",
+    "line": 42,
+    "why": "Azure OpenAI endpoint and key read from environment variables",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+    "line": 1,
+    "why": "Subscription adapter holds no OAuth token; uses an opaque connection id",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+    "line": 115,
+    "why": "subscription_connection_id required for the subscription route",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+    "line": 160,
+    "why": "subscription_connection_id field on the provider request",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/auth.rs",
+    "line": 314,
+    "why": "Connection id checked in route enforcement; tests cover the subscription route",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/codex_subscription.go",
+    "line": 55,
+    "why": "Integration Core owns connection-scoped subscription usage and connect state",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/api/codex_subscription.go",
+    "line": 114,
+    "why": "connect/:connectionId/:loginId route for the subscription connection",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations/model_subscriptions.rs",
+    "line": 13,
+    "why": "Starts the official Codex device-code flow for a subscription connection",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/integrations/components/ChatGptSubscriptionPanel.tsx",
+    "line": 313,
+    "why": "UI states Verevon never receives the password or API key",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/router_policy.rs",
+    "line": 1,
+    "why": "Admin router policy (mode to model table) is the model-visibility control",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs",
+    "line": 310,
+    "why": "Provider label map from the integration-core provider registry",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/docs/gap-analysis.md",
+    "line": 75,
+    "why": "Extended provider registry recorded as missing: Gemini, Mistral, Cohere, Ollama",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/roadmap/data.go",
+    "line": 274,
+    "why": "Roadmap item providers.extended with status no",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 195,
+    "why": "/v1/models lists models; no provider discovery or BYO path",
+    "kind": "code"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-039",
+  "title": "Runtime release safety: signed candidate and separate rollback artifact, rehearsed rollback, deployed audit fix and a release gate",
+  "searches": [
+   "read Model Plane scripts/release-artifact.sh; rg sign|manifest|rollback|candidate|digest in it",
+   "rg cosign|sigstore|minisign|signed candidate|rollback artifact over Model Plane scripts, docs, deploy and repo scripts",
+   "rg coresystem-conformance over repo scripts and apps",
+   "rg release evidence|candidate|rollback in MODEL_PLANE_RELEASE_EVIDENCE.md",
+   "rg canary over Model Plane docs, roadmap, scripts and repo scripts",
+   "rg audit publisher|publisher fix|4,992|stuck over session-core and postmortem 0002",
+   "list session-core migrations revert folder; rg expand contract or forward-compatible (no migration policy hit)",
+   "rg drain over model-gateway src"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/scripts/release-artifact.sh",
+    "line": 7,
+    "why": "ARTIFACT_FORMAT_VERSION 3 with an 11-service list",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/scripts/release-artifact.sh",
+    "line": 126,
+    "why": "verify checks the signed root manifest, image lock and migration inputs",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/scripts/release-artifact.sh",
+    "line": 133,
+    "why": "MODEL_PLANE_ARTIFACT_SIGNING_KEY build input for signed artifacts",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/scripts/release-artifact.sh",
+    "line": 135,
+    "why": "MODEL_PLANE_ROLLBACK_ARTIFACT_DIR: separate accepted rollback artifact input",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/scripts/release-artifact.sh",
+    "line": 145,
+    "why": "Rollback locator must resolve to a distinct trusted-signed root",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/scripts/tests/release-contract-test.sh",
+    "line": 397,
+    "why": "Test requires an independently signed rollback artifact",
+    "kind": "test"
+   },
+   {
+    "path": "C:/dev/CoresSystem/scripts/coresystem-conformance.sh",
+    "line": 10,
+    "why": "Conformance script reads the Model Plane release evidence register",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/scripts/coresystem-conformance.sh",
+    "line": 106,
+    "why": "Candidate and rollback states; absent evidence adds blockers",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/scripts/coresystem-conformance-artifact.sh",
+    "line": 101,
+    "why": "Report carries candidate and rollback states",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_RELEASE_EVIDENCE.md",
+    "line": 17,
+    "why": "Defines candidate and rollback evidence classes",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_RELEASE_EVIDENCE.md",
+    "line": 50,
+    "why": "Release status blocked: candidate and rollback artifacts absent (dated doc)",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md",
+    "line": 85,
+    "why": "Roadmap step 8: separate rollback artifact and restore rehearsal still to do",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md",
+    "line": 89,
+    "why": "Numeric canary and rollback thresholds not yet defined",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md",
+    "line": 5,
+    "why": "Audit publisher fix built but not deployed; 4,992 rows not replayed",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/audit_publisher.rs",
+    "line": 449,
+    "why": "Stuck-row counts per class for alerting on undelivered audit rows",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/revert/0044_run_retention_receipt.down.sql",
+    "line": 1,
+    "why": "Down migration revert script present for run retention receipt",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/drain.rs",
+    "line": 1,
+    "why": "Graceful drain on shutdown so redeploy does not kill in-flight turns",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/docs/core-research/grpc-safe-rebuild-decision-2026-07-16.md",
+    "line": 132,
+    "why": "Requires an externally located, independently signed rollback artifact",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-061",
+  "title": "Personalisation that tailors itself: a standing user profile in the cached prefix, tone presets, a personal onboarding step and trustworthy settings",
+  "searches": [
+   "rg user[_ -]?profile|standing (profile|memory)|mental[_ -]?model|honcho over Model Plane and Frontend",
+   "rg tone preset|personality|style preset|writing style|verbosity over Frontend features and Model Plane verbosity.rs",
+   "rg persona over Frontend settings and gateway persona.rs",
+   "rg onboarding with persona, memory, preference or role over Frontend onboarding and gateway onboarding",
+   "rg settings search|searchSettings over Frontend settings and actions (no hits)",
+   "rg cache_control|cache breakpoint|prefix cache over inference-core anthropic.rs and model-gateway sse.rs",
+   "rg time zone|timeZone|user_locale over model-gateway and session-core (no prompt hits)",
+   "rg settings.update_me|update_preferences|update_setting over Frontend action-registry",
+   "rg MemoryConsolidationWorkflow over Model Plane go and Frontend settings",
+   "read LEARNING_EDGE_FEATURES_2026-09-17 mental-model entries"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dream_extractor.rs",
+    "line": 102,
+    "why": "MAX_EXISTING_SLOTS caps a user standing-profile slot list at 40",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dream_extractor.rs",
+    "line": 698,
+    "why": "LLM extraction writes user-scope memory entries",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "line": 437,
+    "why": "Query selects user-scoped llm slots owned by the user",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs",
+    "line": 1,
+    "why": "Per-turn memory prefetch gating; user-model context per turn",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "line": 1666,
+    "why": "Per-turn memory context block added to the prompt, not a cached segment",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "line": 5167,
+    "why": "400 ms memory prefetch timeout constant",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/verbosity.rs",
+    "line": 1,
+    "why": "Concise, detailed and minimal response-style directives",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+    "line": 173,
+    "why": "cache_control breakpoint limit and ephemeral marker exist",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go",
+    "line": 138,
+    "why": "MemoryConsolidationWorkflow registered as a workflow type",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx",
+    "line": 91,
+    "why": "MemoryConsolidationWorkflow schedules fail every fire, silently, per comment",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.tsx",
+    "line": 13,
+    "why": "What do you remember about me: user memory list with per-item delete",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "line": 236,
+    "why": "Composer tone setting: concise, detailed, balanced",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "line": 2552,
+    "why": "Chat tone option mapped to the verbosity directive",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs",
+    "line": 1,
+    "why": "User persona layer of the authored-instruction hierarchy (ADR-0003)",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/PersonaSection.tsx",
+    "line": 11,
+    "why": "Persona: 1500-character style or tone preference with enable switch, no presets",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/onboarding/components/OnboardingPage.tsx",
+    "line": 378,
+    "why": "Onboarding sends org personalization signals to the model prompt",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "line": 2376,
+    "why": "update_me, update_preferences, update_setting: low risk, no approval",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md",
+    "line": 115,
+    "why": "Mental-model standing derived-profile writer planned as item 4",
+    "kind": "doc"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md",
+    "line": 233,
+    "why": "Standing derived profile recorded as Missing, not started",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-034",
+  "title": "Trajectory ledger with exact model-visible request capture and timing waterfall",
+  "searches": [
+   "rg request[_ -]?snapshot|RequestSnapshot|request header event over Model Plane and Frontend (no hits)",
+   "rg step_timing|first_token_at|ttft|waterfall over Model Plane, Frontend chat and agents (no product hits)",
+   "rg trajectory|Trajectory over Model Plane model-gateway and session-core and Frontend gateway",
+   "rg Inspect|inspector|copy trace|trace id|request id over ChatPanels, ChatMessages and AgentRunConsole",
+   "rg prompt hash|content addressed|tool catalogue over Model Plane services",
+   "rg debug prompt|prompt dump|DEBUG verbosity over Model Plane and Frontend (no hits)",
+   "rg GetContextAssembly|threads/:thread_id/context over Model Plane http_routes and Frontend ChatPanels",
+   "rg proof bundle over session-core and AgentRunConsole",
+   "rg timing|turn_timing|provider timing over model-gateway and inference-core"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/trajectory.rs",
+    "line": 1,
+    "why": "In-memory trajectory ring buffer with Atropos export, not user-facing",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "line": 1632,
+    "why": "record_trajectory gRPC handler exists",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "line": 298,
+    "why": "Bounded in-memory trajectory store on gateway state",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/turn_timing.rs",
+    "line": 1,
+    "why": "Per-turn phase timing on one monotonic clock per streamed turn",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/inference-core/src/provider/timing.rs",
+    "line": 1,
+    "why": "Per-attempt timing fields: handler, routing, provider, first token",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "line": 268,
+    "why": "Usage event carries latency and cost for the insight popover",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "line": 159,
+    "why": "GET threads context route exposes assembled context to the gateway",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "line": 557,
+    "why": "Context inspector itemizes assembled segments with token estimates, collapsed by default",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "line": 266,
+    "why": "Trace surface tab labelled Spor (Trace) in the work panel",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "line": 500,
+    "why": "Grounding summary shows trace id text; not a copy action",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "line": 1271,
+    "why": "RunProofPanel fetches the run proof bundle",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "line": 1429,
+    "why": "Run event list shows a count of events; no grouping or inspector",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+    "line": 275,
+    "why": "Agent run console loads the proof bundle resource",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "line": 1224,
+    "why": "Builds run proof bundle from tenant-scoped records",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs",
+    "line": 1,
+    "why": "Sha256 content-addressed blob store client, reusable for prompt blobs",
+    "kind": "code"
+   }
+  ],
+  "impression": "partial"
+ },
+ {
+  "finalId": "F-t3-060",
+  "title": "Scoped memory for Spaces, Projects and named agents with isolation",
+  "searches": [
+   "rg agent_memory over session-core migrations and src",
+   "rg scope_kind|ScopeKind|memory scope over Model Plane and Frontend",
+   "rg project memory|project isolation over Model Plane and Frontend (no hits)",
+   "rg SELF.md|agent home|home store|agent notes|memory tab over Model Plane and Frontend agents (no hits)",
+   "rg space memory|space-scoped memory over Frontend and session-core (no hits)",
+   "rg space_read_decision over Frontend gateway spaces.rs",
+   "rg scope|owner tags over letta-bridge",
+   "rg agent_skills scope, owner_user_id, shared_with over session-core grpc.rs",
+   "read CHAT_GAP_CLOSURE_PLAN I21 row and chat-organization storage key"
+  ],
+  "hits": [
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql",
+    "line": 219,
+    "why": "agent_memory.scope: run, thread, session, user, org, global; no space or agent",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0007_dream_memory.sql",
+    "line": 8,
+    "why": "Unique index on org, session, scope, key",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0011_identity_scoping.sql",
+    "line": 11,
+    "why": "Unique index on org, scope, owner, key for identity scoping",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0037_agent_memory_lineage.sql",
+    "line": 66,
+    "why": "supersedes_id and is_latest lineage columns on agent_memory",
+    "kind": "config"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_grpc.rs",
+    "line": 486,
+    "why": "User scope from topic USER; owner taken from the verified thread",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "line": 437,
+    "why": "Memory lookup filters by user owner or thread session",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "line": 2798,
+    "why": "Looks up the user-scoped agent_memory row per org",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "line": 5331,
+    "why": "agent_skills visibility by scope org, owner or shared_with; precedent only",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/letta-bridge/internal/agentmemory/client.go",
+    "line": 122,
+    "why": "userID tag on long-term records for scoped list and delete",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/letta-bridge/internal/agentmemory/client.go",
+    "line": 152,
+    "why": "Semantic search scoped to org only, not per space or agent",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "line": 2147,
+    "why": "scope_kind org used in capability payload; Space decisions are separate",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "line": 168,
+    "why": "RunAgentRequest space_id field 14 marks a Space-scoped agent run",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 1469,
+    "why": "Runs list passes Control-signed Space read decision ref and token",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "line": 4228,
+    "why": "ADR-0003 org-layer instruction resolution for Space scope",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.tsx",
+    "line": 13,
+    "why": "User memory list across conversations; no agent or space filter",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts",
+    "line": 8,
+    "why": "Chat projects are client-side storage keyed per org and user",
+    "kind": "code"
+   },
+   {
+    "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+    "line": 273,
+    "why": "I21 server-synced Projects deferred to Wave 6",
+    "kind": "doc"
+   }
+  ],
+  "impression": "partial"
+ }
+]

@@ -1,0 +1,124 @@
+[
+ {
+  "finalId": "F-t1-024",
+  "verdict": "partial",
+  "checked": [
+   "C:/Program Files/WindowsApps/MSTeams_26260.1701.5139.3736_x64__8wekyb3d8bbwe/locale/generated-touchdown/en-us/desktop.json (error_curtain_* body/label keys for cert, proxy, policy, corrupt_package, resource, os, runtime_version; unresponsive_renderer_button_wait/trace/restart)",
+   "scratchpad/extract/slack/dist/main.bundle.cjs (webContentsTimeoutDialogEpic; fatal JS exception handler string)",
+   "scratchpad/extract/slack/dist/resources/locales/en/desktop_messagebox_en_GB.json (stopped responding / Keep waiting / Restart & report issue / trouble loading)",
+   "scratchpad/extract/grokbot/dist/renderer/assets/index.eager-app-CY939ORZ.js (client/restore-failed, sand-client-restore-stuck timeoutMs 3e4, client_restore event with stage/generation/elapsedMs)",
+   "scratchpad/extract/grokbot/dist/electron-main/main-app.cjs (sand_min_client_version schema and fallbacks; SAND_CLIENT_UPDATE_REQUIRED header -> updateSink.noteBackendUpdateRequirement -> checkForUpdates trigger backend_gate; getMinimumVersion/getMaxAgeDays consumers)",
+   "C:/dev/buzz/desktop/src/app/RootErrorBoundary.tsx:1-60 and desktop/src/main.tsx:87-108 (root render boundary with Reload)",
+   "grep for ErrorBoundary/ChunkLoadError/vite:preloadError in C:/dev/buzz and C:/dev/qm"
+  ],
+  "corrections": "(1) Prevalence of crash/render recovery is 4 of 5, not 3: buzz also has a root React error boundary that shows a 'Buzz failed to start' screen with a Reload button (desktop/src/app/RootErrorBoundary.tsx). That makes it table stakes. QM: none found. (2) The Teams hang toast has Wait / Trace / Restart. desktop.json has no Reload button string. (3) The Teams error curtain is a native-shell screen for when the web client fails to start. It is not a render/chunk error boundary. No reference showed per-region boundaries, lazy-chunk recovery, or a build-id stale-tab reload: those parts of the title are Verevon proposals and must be labelled INF. (4) Grok Bot has no generic feature_min_versions map. Remote config sand_min_client_version has fixed fields: min_version, backend_min_version, novnc_port_token_min_version, hosted_mcp_oauth_callback_min_version, max_age_days (default 14). Only min_version and max_age_days have client-side consumers. The per-feature fields appear only in the schema and fallback, so their enforcement is presumably server-side (INF). (5) SAND_CLIENT_UPDATE_REQUIRED arrives as ConnectError metadata and starts an auto-updater check (trigger backend_gate). A 'banner or forced reload' was not observed.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Teams staged nag-then-block staleness policy is DOC-only (Learn teams-client-update). The shell strings only show an update toast.",
+   "Teams curtain and repair are native (work when WebView2 fails). Many Teams recovery behaviors are ECS-flag controlled (enableTeamsRepair, enableUserInitiatedRepair, ...).",
+   "Slack crash-integrity restart path is behind the crash_integrity_check flag. The unresponsive timeout is 5 s, or 15 s with the extended_unresponsive_timeout flag.",
+   "Grok Bot per-feature version floors: schema-level evidence only, enforcement not observed client-side.",
+   "No REA tool was used for this item. Evidence was re-read directly from the installed Teams locale JSON and the pre-extracted Slack and Grok Bot bundles."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-002",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/crates/buzz-acp/src/config.rs:54-59 (SubscribeMode Mentions|All|Config), :95-112 (RespondTo OwnerOnly default|Allowlist|Anyone|Nobody), :533/:625 (BUZZ_ACP_REPLAY_FLOOR publish-first)",
+   "C:/dev/buzz/crates/buzz-acp/src/filter.rs:5-6,162,173 (first-match-wins rules, hard timeout, MAX_EXPR_LEN 4096, eval semaphore)",
+   "C:/dev/buzz/desktop/src/features/messages/lib/persistentAgentAudience.ts, stripImplicitAgentMentions.ts, ui/NonMemberMentionDialog.tsx (Invite vs send without inviting)",
+   "C:/dev/buzz/docs/remote-mention-routing.md:5 (publication refreshes authorization for exact destination)",
+   "C:/dev/buzz/crates/buzz-acp/src/pool.rs:4234-4356 (thread context fetch on wake; no overheard concept anywhere in buzz)",
+   "C:/dev/qm/src/surface-cache/ambient-judge.ts:9-95 ({act, reason, asked_by}, earlier-context do-not-act backdrop)",
+   "C:/dev/qm/src/surface-cache/channel-policy-store.ts:4,92-169 (BOT_MODES ignore|rollup|action|user, channel_policy_history)",
+   "C:/dev/qm/src/api/routes/context-policy.ts:70-90 (baseUpdatedAt check -> 409 conflict, ambientEnabled)",
+   "C:/dev/qm/src/harness/agent-tools.ts:3370-3400,3489-3497 (surface tool actions post|reach|react|edit|delete|read_thread|whats_new|search|read_members|read_file; post_cannot_address; silent if no post)",
+   "Teams main-locale-en-us-23ba9acb36586a4b.js.gz (project_agent_configuration_keywords_tooltip, project_agent_proactive_help_settings_text, project_agent_at_mention_button_label)",
+   "scratchpad/extract/grokbot/dist/electron-main/proto.cjs (GrokBotRoomMemberTurnOutcome SENT|PASS|SKIPPED|TIMEOUT|CANCELLED|ERROR, GrokBotRoomPost)"
+  ],
+  "corrections": "(1) The line saying unaddressed messages reach agents only as overheard context describes QM (qm-architecture-122), not buzz. Buzz's default subscribe=mentions drops unaddressed events, and on wake buzz fetches thread context. (2) Teams channel-agent keywords are focus/guidance keywords (the tooltip says they guide what the agent focuses on), not wake triggers. Do not count them as a trigger policy. (3) Teams has a project-agent toggle, 'Allow the agent to offer help proactively', which is an ambient-participation analogue (string-only). Say that QM's judge mechanism is unique, not that ambient participation is 1 of 5. (4) QM's compare-and-swap is an app-level optimistic check on baseUpdatedAt (read, compare, then upsert; 409 on mismatch), not an atomic DB CAS. (5) Grok Bot protos include room-member turns with a PASS/SKIPPED outcome, so it may be a third source for explicit room I/O with silence allowed (proto names only, mechanism not traced). Mark it as a possible third source rather than asserting 2 of 5.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Buzz mention-to-invite and owned-agent discovery are documented as needing an independent security review. The docs acknowledge an atomicity gap between final authorization and publish.",
+   "Buzz agents are desktop/harness-hosted (ACP). Wake/replay-floor complexity comes from agents being offline.",
+   "Teams proactive-help and @agent evidence is UI strings only (Copilot/project agent, likely license-gated). The interaction model comes from a Build 2026 blog post (DOC).",
+   "QM ambient/rollup bot modes are admin-configured per channel. ambientEnabled null means default rule.",
+   "No REA tool was used for this item. The Teams locale chunk was read with zcat/grep, and buzz/qm were read as SRC."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-014",
+  "verdict": "partial",
+  "checked": [
+   "scratchpad/extract/grokbot/dist/electron-main/main-app.cjs ~@1265000 (canvas_prompt_text_config fallback skillDescription; text describes a 'Cursor Canvas')",
+   "scratchpad/extract/grokbot/dist/electron-main/main-app.cjs feature flags: grok_bot_canvas_skill default false, grok_bot_documents_ui default false, grok_bot_files_stage default false, grok_bot_library_pages default false, canvas_design_mode default false, shared_canvases default true, cloud_canvas_skill default false",
+   "scratchpad/extract/grokbot/dist/local-exec-daemon/main.cjs (EditCanvas, WriteDocument, WriteDocumentAsset, ReadDocument, ListDocuments as tool-name enum entries)",
+   "scratchpad/extract/grokbot/package.json:93-105 (mammoth, mermaid, pdfjs-dist 5.4.296, xlsx); renderer/assets chunk-fullscreen-file-viewer-body, chunk-file-stage, chunk-document-page",
+   "C:/dev/qm/src/playgrounds/playground.ts:1-48 (validatePlaygroundHtml checks only size <=512000 bytes and non-empty)",
+   "C:/dev/qm/plugins/web-ui/server/index.ts:235-247,1119-1150 (PLAYGROUND_CSP sandbox allow-scripts, default-src/connect-src none)",
+   "C:/dev/qm/test/agent-tools.test.ts:373-379 (miniapp stays unavailable while playground rendering is deferred, for surfaces undefined/web/slack)",
+   "C:/dev/qm/skills-seed/miniapp/SKILL.md:8",
+   "C:/dev/qm git log src/playgrounds (de8a8e08 model playgrounds as typed artifacts)"
+  ],
+  "corrections": "(1) QM's playground/miniapp tool is currently not offered on any surface. A test asserts it stays unavailable on web, slack and default while playground rendering is deferred. Present QM as dormant/deferred code, not a shipping in-room artifact feature. (2) QM's server validation does not enforce no network and no external assets. validatePlaygroundHtml checks only size (512 KB) and emptiness. Isolation is enforced at render time by a strict CSP (connect-src none, default-src none, sandbox allow-scripts), and the miniapp skill prompt asks for no network use. (3) Grok Bot's canvas-first rule is a remote-config fallback string whose text refers to a 'Cursor Canvas'. It is inherited from the Cursor platform (the package is named 'sand'). The Grok Bot canvas skill, documents UI and files stage flags all default to false, so the capability is flag-gated and off by default client-side. EditCanvas/WriteDocument are seen only as tool-name enum entries. (4) The create_or_update_artifact {id, kind, title, content, version} tool, the side panel with a revision stepper, and 'tool withheld from surfaces without a renderer' as a live behaviour were not found in any reference. They are Verevon proposals and must be labelled INF/proposal. (5) Viewer registry claims for Grok Bot (pdf.js, mammoth DOCX, xlsx, mermaid, size fallback) are confirmed SRC.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Grok Bot canvas/document features are flag-gated (default false) and partly inherited from Cursor. Server-side enablement is unknown.",
+   "QM playground is deferred/unregistered. Only its storage, CSP and renderer code exist.",
+   "Slack file previews are DOC-only.",
+   "Artifacts in the room effectively have 0 of 5 references shipping them on by default. Inline viewers: 2 of 5 (Grok Bot SRC, Slack DOC).",
+   "No REA tool was used for this item. Direct grep/node reads of the pre-extracted Grok Bot bundle and the QM repo."
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t1-007",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/buzz/desktop/src/features/messages/lib/ (mentionIdentityTrust.ts, mentionPasteBinding.ts, mentionRanking.ts:58-71 recent-mention rank, recentMentionPubkeys.ts, buildMentionCandidates.ts)",
+   "C:/dev/buzz/desktop/src/features/messages/ui/NonMemberMentionDialog.tsx (Invite vs send without inviting)",
+   "C:/dev/buzz/crates/buzz-db/src/runtime/mod.rs:30-60 (insert_mentions: server indexes mention rows in the event transaction)",
+   "grep for roster validation of mentions in C:/dev/buzz/crates/buzz-relay/src (only workflow_sink.rs resolve_mention_pubkeys for workflow-authored messages)",
+   "grep for @here/@channel/@everyone in C:/dev/buzz desktop/src, crates, docs (none)",
+   "scratchpad/extract/grokbot/dist/renderer/assets/index-Bo3NzkuN.js (CKe scoping: group -> memberIds; else other agents, groups containing current, hidesUnaddedTeamBots filter; getNoMentionMembers/getMentionPeople/mcpReferenceItems)",
+   "Slack and Teams records re-read: slack-product-surface-004 (DOC help-center URLs), teams-product-surface-018 (locale strings + Learn limits)"
+  ],
+  "corrections": "The mechanism mixes sources. In buzz, roster resolution and ambiguity rejection happen in the desktop composer and the CLI (client side). The relay indexes mention rows (insert_mentions), but no server-side check of each mention id against the room roster was found, except for workflow-authored messages. Buzz has no @channel/@here/@everyone broadcast handles. Role-gated broadcast and group handles come from Slack (DOC: @everyone restricted by role, SCIM user groups) and Teams (strings + Learn: team/channel mentions, tags, the 10,000-member limit). 'Checks broadcast handles against a role policy' and 'notifications fan out from mention records only' describe the recommended Verevon design, not one observed reference, so label them INF. Grok Bot groups in the mention menu are Bot group chats, not people group handles. mentionRanking and the Grok Bot scoping function are confirmed.",
+  "prevalenceCorrect": true,
+  "caveats": [
+   "Slack mention/broadcast policy is DOC-only, and user-group sync is tier-gated (Business+ / Enterprise).",
+   "Teams evidence is locale strings plus Learn docs. Team/channel mentions are admin-gated and blocked over 10,000 members.",
+   "Buzz identity-binding detail partly comes from docs/mention-editor.md (DOC), backed by the lib files that exist.",
+   "QM relies on the host surface's (Slack/Teams) mention model rather than its own.",
+   "No REA tool was used for this item."
+  ],
+  "confidence": "medium"
+ },
+ {
+  "finalId": "F-t1-020",
+  "verdict": "partial",
+  "checked": [
+   "C:/dev/qm/src/api/routes/browser-model.ts:28-64 (403 without grant or in strict posture, 409 on account/model change, 422 branch)",
+   "C:/dev/qm/skills-seed/browse/SKILL.md:41-49,133-135 (CDP_URL + LIVE_VIEW, sign-ins and profiles DM-only, profile-less in channels)",
+   "scratchpad/extract/grokbot/dist/electron-main/proto.cjs (EndGrokBotBoxHandoff, GrokBotBoxHandBackTrigger BUTTON|VIEWER_CLOSED|DISMISSED)",
+   "scratchpad/extract/grokbot/dist/electron-main/main-core.cjs (SAND-E0417 botBlock, retryable false, withBotBlockDetection from URL + title)",
+   "scratchpad/extract/grokbot/dist/renderer/assets/index.eager-app-CY939ORZ.js (strings: You're in control; Screen paused while you're away; Wake)",
+   "scratchpad/extract/grokbot/dist/renderer/assets/chunk-computer-screen-preview-rMnqczxJ.js (states live/stream/asleep/sleeping/wake/waking/retry/recording/unreachable)",
+   "scratchpad/extract/grokbot/dist/electron-main/main-app.cjs flags (cloud_agent_desktop_lease default true, local_computer_use/mac_computer_use default false)",
+   "Records grokbot-agent-product-019/020/022/116, grokbot-agent-runtime-018/019/020/111/129 re-read for cited offsets"
+  ],
+  "corrections": "(1) Live view with human takeover is not unique to Grok Bot. QM's browse skill hands the person the provider's LIVE_VIEW link to finish sign-in walls, then re-runs. That makes 2 of 5, with Grok Bot best-in-class (embedded noVNC, explicit hand-back RPC). (2) 'Grok Bot hands off instead of retrying on bot walls' is partly INF. Only the non-retryable botBlock classification is SRC; the link from botBlock to the handoff flow was not traced. (3) A preview that is a periodic frame or low-rate VNC stream was not verified. The preview chunk only shows live/stream/asleep/wake/retry states. (4) QM sign-in profiles are used only in DMs; 'shown only in DMs' should say 'used only in DMs'. (5) space_ref on browser runs and a room-scoped preview card are Verevon proposals (INF). No reference ties browser runs to a shared multi-human room.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "QM's agent browser is a prompt-level skill that depends on an org provider key (Kernel, Anchor or Browserbase). It is not core product UI, and its availability is configuration-dependent.",
+   "Grok Bot is built on the Cursor sand platform (Cursor backend error text, /opt/cursor recording staging). The Box is a cloud VM, and local/mac computer-use flags default to false.",
+   "Grok Bot teach mode evidence is protos, strings and chunk names (SRC strings). End-to-end skill authoring was not traced.",
+   "Control-owner badge evidence is the You're in control / Take control strings. An agent-side badge string was not separately confirmed.",
+   "No REA tool was used for this item. Direct reads of the pre-extracted Grok Bot bundle and the QM repo."
+  ],
+  "confidence": "medium"
+ }
+]

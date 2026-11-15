@@ -1,0 +1,765 @@
+[
+  {
+    "finalId": "F-t2-060",
+    "title": "Isolate each browser session or tenant in its own container or VM instead of a shared Chromium",
+    "searches": [
+      "rg microvm|firecracker|gvisor|kata|nsjail|cgroup|tmpfs across Quarry and Model Plane code",
+      "rg browser in sandbox-manager (no hits); AcquireLease scopes in server.go",
+      "rg BackendID|SANDBOX_MANAGER_BACKEND_ID in sandbox-manager",
+      "rg create_browser_context|user_data_dir|session affinity in quarry-browser",
+      "rg tenant|isolation|cookie leak in quarry-browser",
+      "rg Kernel|Browserless|Browserbase registrations in quarry-edge main.rs",
+      "rg VM isolation / Kernel mentions in Ingestion Plane docs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 417,
+        "why": "Per-session CDP browser context created inside one shared Chromium process",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 226,
+        "why": "Chromium user data dir set per launch; no container or VM boundary",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 3452,
+        "why": "Regression test for cross-session cookie leak inside the shared Chromium",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/pool.rs",
+        "line": 32,
+        "why": "LeasePool keeps warm sessions on one driver behind a semaphore; no isolation",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/session.rs",
+        "line": 141,
+        "why": "Tenant-scoped profile storage keyed by verified org_id, not by container",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go",
+        "line": 84,
+        "why": "AcquireLease serves code and workspace scopes; no browser substrate",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go",
+        "line": 67,
+        "why": "Lease records one configured BackendID; reusable lease primitive for a browser pool",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/sandbox-manager/cmd/main.go",
+        "line": 60,
+        "why": "Backend id comes from one SANDBOX_MANAGER_BACKEND_ID env value per process",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/sandbox.rs",
+        "line": 6,
+        "why": "Adjacent: bubblewrap, Landlock and seccomp sandbox for code execution, not browsers",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md",
+        "line": 268,
+        "why": "Doc lists Kernel as VM-level isolation; Kernel driver is not registered",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+        "line": 310,
+        "why": "Browserbase is the only managed provider registered at startup, pool of 4",
+        "kind": "code"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t2-030",
+    "title": "Monitor change quality: normalised-content fingerprint, text/JSON diffs, tags and an optional goal-aware judge",
+    "searches": [
+      "rg diff_paragraphs|SemanticDiff|unified_diff|similar:: across Quarry crates, services and docs",
+      "rg text_fingerprint|content_fingerprint|fresh_fingerprint in quarry-transform, quarry-runtime, quarry-edge",
+      "rg judge|meaningful|verdict|goal in gateway monitoring and Model Plane (no monitor judge hits)",
+      "rg tag|json_diff|schema in change_routes.rs and monitoring.rs (no hits)",
+      "rg diffId and diff view in verevonv3 ingestions UI",
+      "rg Diff computation in CHANGE_TRACKING.md and GAP.md claims"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/diff.rs",
+        "line": 72,
+        "why": "diff_paragraphs and SemanticDiff exist; only unit tests call them",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/diff.rs",
+        "line": 18,
+        "why": "diff::compare fingerprint classifier used only by transform tests",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/fingerprint.rs",
+        "line": 21,
+        "why": "text_fingerprint normalises whitespace and case; not used for monitor compare",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs",
+        "line": 524,
+        "why": "Monitor fingerprint is content_fingerprint over the raw response body",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs",
+        "line": 542,
+        "why": "Normalised text_fingerprint emitted alongside but not used for comparison",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs",
+        "line": 51,
+        "why": "Check route compares a caller-supplied fresh_fingerprint, not fetched content",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs",
+        "line": 566,
+        "why": "Diff artifact records only the fingerprint transition, not content changes",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs",
+        "line": 515,
+        "why": "Baseline comparison keyed by org and URL only; no tag field",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/CHANGE_TRACKING.md",
+        "line": 127,
+        "why": "Doc: diff computation still future work; diffs stored as raw bytes",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+        "line": 463,
+        "why": "Stale doc says semantic diff is wired; code has no production caller",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs",
+        "line": 132,
+        "why": "Gateway reads the scrape fingerprint, a raw-body hash, for monitor checks",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs",
+        "line": 284,
+        "why": "Change-monitor schedule creation has no goal or judge field",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/monitoring-client.ts",
+        "line": 34,
+        "why": "ChangeRecord diffId is typed but no UI renders diff content",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/ingestions/components/VerevonIngestionsPage.tsx",
+        "line": 912,
+        "why": "Monitoring tab offers on-demand check and status badge; no diff view",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-065",
+    "title": "Cached declarative extraction profiles generated by the Model, with bounded browser-agent escalation",
+    "searches": [
+      "rg ExtractionProfile|extraction_profile across Quarry crates, services and Model Plane",
+      "rg codegen|generate_extractor|profile cache|selector cache|regenerat in Quarry, Model Plane and gateway (no extractor cache hits)",
+      "rg smartscrape|escalat|requires_escalation|needs_browser_escalation",
+      "rg json_schema::validate in quarry-core and quarry-runtime",
+      "rg /v1/extract structured route and Model Plane calls",
+      "rg section 40 Extraction Profiles in Quarry planning docs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+        "line": 276,
+        "why": "Declarative ExtractionProfile contract exists: fields, selectors, ordered sources",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+        "line": 259,
+        "why": "ExtractionSource covers network JSON, JSON-LD, DOM, accessibility and visual",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs",
+        "line": 2261,
+        "why": "Deterministic executor runs a caller-selected profile over observation bytes",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 823,
+        "why": "Agent run request accepts a caller-supplied extraction_profile",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs",
+        "line": 203,
+        "why": "/v1/extract calls the Model per request; no extractor or profile cache",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs",
+        "line": 178,
+        "why": "Model JSON output validated against the schema, issues returned",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/json_schema.rs",
+        "line": 118,
+        "why": "Shared JSON Schema validator returns issues for structured results",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs",
+        "line": 254,
+        "why": "Advisory requires_escalation flag; escalation left to Model or policy",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs",
+        "line": 387,
+        "why": "Static-to-browser escalation is a body and status heuristic, not model-directed",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs",
+        "line": 1,
+        "why": "Adjacent: Redis page cache keyed by fingerprint; not an extractor cache",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md",
+        "line": 2907,
+        "why": "Doc section 40 specifies the ExtractionProfile concept",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-056",
+    "title": "Provider APIs and export rewrites before rendering (Google Docs, GitHub, Notion, transcripts), after verifying current coverage",
+    "searches": [
+      "rg docs.google|drive.google|export?format|rewrite in Quarry crates and services (no hits)",
+      "rg transcript|youtube|caption|download_ref|/v1/audio in Quarry crates",
+      "rg drive.file.content|exportAs|googleExportTarget in integration-corev2 and gateway",
+      "rg github provider case in integration-corev2 Service.Execute",
+      "rg ProviderResolver|connected account|integration-corev2 calls from Quarry (no hits)",
+      "rg upload-url|uploadRef|/parse in Quarry and Data Plane v2 (no hits)",
+      "rg notion|import_source_type in gateway and knowledge workspace"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/drive_read.go",
+        "line": 594,
+        "why": "googleExportTarget maps Docs and Slides to text/plain, Sheets to text/csv",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/drive_read.go",
+        "line": 48,
+        "why": "drive.file.content exportAs=text is the extractor-free slice for Google documents",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/drive_read_test.go",
+        "line": 1028,
+        "why": "Tests pin Docs-to-plain-text and Sheets-to-CSV export mappings",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/README.md",
+        "line": 376,
+        "why": "Doc describes Google Docs export through drive.file.content",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations/browse.rs",
+        "line": 36,
+        "why": "Read-only allowlist includes google.drive.file.content for browsing",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/integrations-client.ts",
+        "line": 334,
+        "why": "SPA integration operation union includes google.drive.file.content",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/service.go",
+        "line": 178,
+        "why": "Service.Execute has a github provider dispatch case",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/audio_routes.rs",
+        "line": 9,
+        "why": "POST /v1/audio turns an audio_url into a transcript via Model Plane STT",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs",
+        "line": 487,
+        "why": "Default download_ref returns unsupported; no document export path in Quarry",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 274,
+        "why": "download_ref agent action exists in the run action surface",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/workspace.rs",
+        "line": 1520,
+        "why": "Notion is a labelled connected-source type in knowledge workspace",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+        "line": 377,
+        "why": "Comment: future knowledge.connect_source covers notion, hubspot, salesforce",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/ARCHITECTURE.md",
+        "line": 125,
+        "why": "Doc: YouTube and media extraction belongs behind an optional feature gate",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-059",
+    "title": "Register governed remote browser backends (Kernel, Browserless, Browserbase) behind an egress-containment proof",
+    "searches": [
+      "rg Kernel|Browserless|Browserbase in quarry-edge main.rs, config.rs and quarry-runtime",
+      "rg isolated_egress|security_evidence across Quarry crates",
+      "rg KernelDriver::new|BrowserlessDriver::new constructors (test-only hits)",
+      "rg backends|list_backends|/v1/agent/backends in quarry-edge and gateway (no hits)",
+      "rg driver_kind in FetchPolicy",
+      "rg guard_third_party_processing for browserbase in privacy.rs",
+      "rg remote-provider gates in Ingestion Plane docs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs",
+        "line": 269,
+        "why": "BrowserDriverCapabilities already defines isolated_egress and security_evidence flags",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 1887,
+        "why": "Local Chromium claims isolated_egress only when a pinned proxy is present",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1200,
+        "why": "Agent runs refuse drivers lacking isolated_egress or security_evidence",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+        "line": 310,
+        "why": "Only Browserbase registered at startup as managed provider, pool of 4",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+        "line": 337,
+        "why": "Local chromiumoxide driver behind browser-agent feature, lease pool of 2",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs",
+        "line": 833,
+        "why": "KernelDriver constructed only inside test modules; not registered",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs",
+        "line": 341,
+        "why": "BrowserlessDriver constructed only inside test modules; not registered",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs",
+        "line": 88,
+        "why": "FetchPolicy driver_kind already names browserless and kernel as values",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/privacy.rs",
+        "line": 146,
+        "why": "Third-party processing guard already names the browserbase processor",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 371,
+        "why": "Browser session API has no backend or capability listing route",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md",
+        "line": 20,
+        "why": "Doc: Browserless, Browserbase and Kernel remain gated for agent use",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md",
+        "line": 87,
+        "why": "Doc gate: SSRF and redirect tests required per remote provider before agents",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-026",
+    "title": "Per-operation browser deadlines, bounded tab attach and retry-once on a destroyed execution context",
+    "searches": [
+      "rg timeout|Duration|tokio::time::timeout in crates/quarry-browser/src",
+      "rg const [A-Z_]+: Duration in quarry-browser",
+      "rg context destroyed|execution context|observe again in Quarry and Model Plane",
+      "rg execute_with_retry|retry_once|backoff across Quarry crates",
+      "rg attachedToTarget|pending open|handshake (no hits)",
+      "rg request_timeout|launch_timeout in quarry-browser (no hits)",
+      "rg tool_call_is_retryable|MAX_TOOL_ATTEMPTS in execution-core runtime_loop",
+      "rg max_steps|max_runtime_s in gateway browser.rs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 76,
+        "why": "Explicit download begin and complete deadlines of 10 s and 30 s",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 685,
+        "why": "Accessibility snapshot capture wrapped in a 5 s tokio timeout",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 1733,
+        "why": "Wait-for event loop bounded by caller-supplied timeout_ms",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 226,
+        "why": "Browser launch builder sets no request or launch timeout",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 1255,
+        "why": "Frame without active execution context returns error; caller must re-observe",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 2134,
+        "why": "Upload target frame with no execution context also returns observe-again error",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 2807,
+        "why": "Deadline-polled wait loop with 50 ms poll interval",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs",
+        "line": 549,
+        "why": "Kernel state fetch bounded by 5 s timeout; driver not registered",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs",
+        "line": 241,
+        "why": "Hydration settle loop uses a budget overridable by an env var",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs",
+        "line": 124,
+        "why": "Lease acquisition wait bounded by acquire_timeout",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 485,
+        "why": "Agent runs bounded by step and runtime budgets, not per-operation deadlines",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs",
+        "line": 37,
+        "why": "Model Plane tool dispatch retries transient failures up to 3 attempts",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 1916,
+        "why": "Retry loop gated by risk classifier and transient match; not CDP-aware",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/retry.rs",
+        "line": 62,
+        "why": "execute_with_retry defined; only its own tests call it",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-040",
+    "title": "Parallel batch scrape with shared options, idempotent creation and wait-or-resume",
+    "searches": [
+      "rg /v1/batch, batch_handoff, BatchRequest, BatchJobWF, maxConcurrency, appendToId, invalidUrls in Quarry and gateway",
+      "rg Idempotency-Key|idempotency_key|FindByIdempotencyKey across quarry-edge, quarry-control and Quarry docs",
+      "rg processing_continues|408|wait_ms|Retry-After across Quarry crates, services and docs",
+      "rg AIMD|host_scheduler|autoscale for per-host concurrency",
+      "rg job routes in quarry-control resources.go (no cancel route found)",
+      "rg idempotency registry in Model Plane model-gateway (adjacent pattern)",
+      "rg verevon-crawl Idempotency-Key producer in gateway (doc only)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 670,
+        "why": "BatchRequest carries urls, ingest and zdr only; no scrape options",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs",
+        "line": 681,
+        "why": "batch_handoff forwards only urls, ingest, org and user to orchestrator",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go",
+        "line": 359,
+        "why": "BatchJobWF processes URLs one at a time in a plain loop",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go",
+        "line": 413,
+        "why": "Job create honours Idempotency-Key by returning the existing job; no payload hash",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/cycle23.go",
+        "line": 436,
+        "why": "Generic Idempotency-Key handler is a no-op placeholder returning false",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/migrations/005_cycle23.sql",
+        "line": 65,
+        "why": "Idempotency table keyed by org, key and route; no live replay wiring",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/migrations/007_jobs_idempotency_key.sql",
+        "line": 9,
+        "why": "Unique partial index enforces job idempotency_key uniqueness",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go",
+        "line": 150,
+        "why": "FindByIdempotencyKey scopes lookups by org",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs",
+        "line": 471,
+        "why": "Edge mints its own Idempotency-Key per control call; client keys not read",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs",
+        "line": 165,
+        "why": "Same generated Idempotency-Key pattern on schedule calls",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+        "line": 323,
+        "why": "Curated batch uses /v1/batch after URL dedupe and a 200 URL cap",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/host_scheduler.rs",
+        "line": 4,
+        "why": "Per-host AIMD scheduler exists and could bound batch fan-out",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs",
+        "line": 103,
+        "why": "Adjacent: Claim enum replays cached results and reports in-flight duplicates",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "line": 9046,
+        "why": "Adjacent: /v1/invoke wires the idempotency claim on the client key",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/ONBOARDING_LIVE_CRAWL.md",
+        "line": 293,
+        "why": "Doc plans a verevon-crawl Idempotency-Key; no gateway code sends it",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/CROSS_PLANE_AUTH.md",
+        "line": 116,
+        "why": "Doc: Idempotency-Key enforcement in handlers still described as pending",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-047",
+    "title": "Fetch-path reliability: one deadline budget, wired retries and typed failure sub-codes",
+    "searches": [
+      "rg execute_with_retry|RetryPolicy|backoff_delay across Quarry crates",
+      "rg CancellationToken|deadline|budget|disconnect in quarry-runtime and quarry-edge",
+      "rg sub_code|subcode|DriverFailed in quarry-core error.rs and api_error.rs",
+      "rg defaultActivityOpts RetryPolicy in quarry-orchestrator",
+      "rg classify_scrape_failure|site_blocked|scrape_timeout in gateway",
+      "rg tool_call_is_retryable|MAX_TOOL_ATTEMPTS in execution-core",
+      "rg execute_with_retry, section 39 and typed failure in Quarry docs"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/retry.rs",
+        "line": 62,
+        "why": "execute_with_retry has no production caller; only its own tests",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs",
+        "line": 164,
+        "why": "Public re-export of the retry executor that the fetch path never calls",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs",
+        "line": 113,
+        "why": "RetryPolicy with max and transient codes; fetch-path consumer not located",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs",
+        "line": 10,
+        "why": "ErrorCode enum has 17 coarse variants and no sub-code variants",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs",
+        "line": 38,
+        "why": "retryable() flag drives the transient or permanent split",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs",
+        "line": 22,
+        "why": "API error envelope carries retry_after_seconds for rate-limit style responses",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs",
+        "line": 17,
+        "why": "FallbackDriver waterfall has no per-driver deadline or budget splitting",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs",
+        "line": 387,
+        "why": "Static-to-browser escalation is a body-size and status heuristic gate",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go",
+        "line": 94,
+        "why": "Live retries are Temporal activity policy: 5 attempts, exponential backoff, 5 min",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs",
+        "line": 287,
+        "why": "Gateway maps failures to site_blocked or scrape_timeout by status and elapsed time",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1446,
+        "why": "Agent run TTL defaults to 120 s from max_runtime_s",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs",
+        "line": 37,
+        "why": "Adjacent: Model Plane tool-dispatch retry, 3 attempts, risk-gated",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "line": 1916,
+        "why": "Wired retry loop consults the risk-gated check after each failed attempt",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/SCRAPING_ENGINE_GAPS.md",
+        "line": 84,
+        "why": "Doc records execute_with_retry exhaustion gap and skipped escalation",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md",
+        "line": 2779,
+        "why": "Doc section 39 plans typed acquisition and challenge failure classes",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  }
+]

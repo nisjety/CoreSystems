@@ -1,0 +1,1185 @@
+[
+ {
+  "finalId": "F-t1-025",
+  "title": "Multi-agent rooms: turn-taking, governed delegation, agent-to-agent messages and background child work",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 1,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Let several agents live in one room and cooperate: a room coordinator fans out per-member turn requests (nonce, deadline, parent/root ids, outcome sent|pass|skipped|timeout|cancelled), a hop limit and loop detector (shadow first), and an agent-to-agent message contract with typed delivery outcomes. A delegate must re-resolve its own authority through Control, and the whole chain renders as one collapsed unit with an openable transcript. Child sessions carry space_id and audience.",
+  "whyItMatters": "Humans plus several agents working in the same room is the core of the Space vision and the main gap relative to Grok Bot. Verevon's Control model (agents as their own subjects) is a better base for this than any reference, but today only one agent can be addressed per message and delegation is unbuilt.",
+  "referenceBestPractice": {
+   "bestSource": "grokbot (turn protocol); qm (orchestrator spine, subagent inheritance)",
+   "others": [
+    "buzz (failure mode without a breaker)",
+    "slack (agent messaging docs)"
+   ],
+   "prevalence": "Multi-agent turn-taking 2 of 5 (differentiator); agent-to-agent messaging 3 of 5 (common); subagents/swarms 2 of 5 (differentiator)",
+   "mechanism": "Grok Bot coordinator fans out RequestMemberTurn{nonce, member, peers, new_messages, is_winding_down, deadline_ms, parent_request_id, root_parent_request_id}; members answer with outcome SENT|PASS|SKIPPED|TIMEOUT|CANCELLED; idempotency by nonce; hop limit via root-id depth; wind-down mode; loop detector off|shadow|on; UI shows each member's reading/typing/working phase. Agent messages: SendAgentMessage{from,to,message_id,text,reply_to} with outcomes FORBIDDEN|TARGET_NOT_FOUND|DUPLICATE, a collapsed 'messaged N agents' summary with openable transcript and a separate cost flow. QM spine: the coordinator cannot run tools, posts an early ack, delegates to child sessions (inherit caller scope+audience, durable mailbox that is data and never human authorization, tree caps, cycle checks) and is re-woken on completion."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:149 (single mentionedAgentRef per message)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/subagent_results.rs:1-30 (generic subagent machinery, no Space context)",
+    "apps/Frontend Plane/verevonv3/docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md:552-590 (UI-2c delegation: not started; existing subagent mechanism keeps the same identity at depth 1; execution-core has no network path to the gateway; no safe partial slice)",
+    "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:55,256 (still not started; collapsed chain rendering noted as a differentiator)"
+   ],
+   "gap": "No room coordinator, no per-member turn protocol, no loop guard, no agent-to-agent path in Spaces (Chief/Core routing view is read-only), no delegate re-resolution primitive, children carry no Space or audience and nothing is visible in the room."
+  },
+  "approachOriginal": "Follow the constraints in SPACE_AGENT_SCOPE_PLAN UI-2c: delegation is a side effect so it lives only in execution-core's governed loop, never in model-gateway's plain chat loop; the delegate gets a Control decision for its own subject in the same Space, bound to the initiating human's turn (re-resolved, never inherited). Add a room coordinator in the Model Plane driven by Application room events with bounded fan-out, depth and per-room caps, the nonce/deadline/outcome protocol above, loop detection in shadow mode first, and per-member phases for the UI. Add the execution-core to gateway (or Application) path the plan says is missing. Child sessions propagate space_id and audience; mailbox content is treated as data. Render a delegation as one collapsed card (item F-t1-004 (R-t1-07-02)). Tag agent-to-agent cost as its own flow (item F-t1-027 (R-t1-07-11)).",
+  "effortOriginal": "XL",
+  "dependencies": [
+   "Item F-t1-002 (R-t1-07-01) (multi-agent addressing)",
+   "Item F-t1-004 (R-t1-07-02) (cards)",
+   "Item F-t1-027 (R-t1-07-11) (cost attribution and per-room caps)",
+   "Item F-t1-010 (R-t1-07-05) (permissions)",
+   "execution-core to gateway network path"
+  ],
+  "planeOwner": "Model Plane (coordinator, execution-core delegation); Control Plane (delegate decisions); Frontend Plane (per-member phases, collapsed chain)",
+  "risks": "Cost blow-up and loops (Buzz shows the failure): ship with shadow loop detection and hard per-room caps. Authority laundering between agents: delegate must re-resolve and recipient checks must use the initiating human's decision. Scope widening in children.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 23,
+   "DOC": 3,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Phase UI-2c in apps/Frontend Plane/verevonv3/docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md (scoped narrowly to same room, one hop, human present; not started)."
+  },
+  "sourceClusters": [
+   "C-t1-07-013",
+   "C-t1-07-014",
+   "C-t1-07-015"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-025",
+    "status": "planned",
+    "exactGap": "A room message can address exactly one agent: the composer holds a single mentionedAgentRef and the gateway applies it as a persona and binding-policy overlay (agent_name, agent_system_prompt, allowed_tools, approval_mode) on the invoking human's own turn (spaces.rs inject_mentioned_space_agent_persona and apply_mention_binding_policy). execution-core has generic subagent.* delegation (depth 1, default 8 children, same identity; child runs are registered on the parent's thread with no space or audience field, StartManagedRunRequest) but no delegate_to_agent, room coordinator, turn nonce/deadline protocol, loop detector or agent-to-agent path in Spaces; UI-2c is documented as designed but not started with no safe partial slice. Application only consumes NATS events and publishes no room events a coordinator could be driven by.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:149,382-414 (single mentionedAgentRef per send)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4175,4399-4482 (single mention resolved to a bound agent, persona injected)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4500-4570 (binding policy: trigger_modes, approval_mode blocked/auto/require_confirmation, allowed_tools filter)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:1-70,140-170 (MAX_DEPTH 1, DEFAULT_MAX_CHILDREN 8, guard_depth; same driver, fresh history)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2560-2680 (register_delegated_child_run: user bearer, parent thread, ZDR child not registered)",
+     "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sessions.proto:493-509 (StartManagedRunRequest has thread_id, no space_id or audience)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md:552-632 (UI-2c not started; no safe partial slice; recommended design; constraints)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md:55,256 (UI-2c not started; collapsed chain a differentiator)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/space-defenition.md:184-192 (collapsed unit of work rendering rule)",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/nats.ts:412-471,984 (handlers are inbound NATS subscribers; no outbound publish found by grep)"
+    ],
+    "reuse": [
+     "execution-core subagent module (depth guard, child ceiling, research_fan_out) and register_delegated_child_run lineage (subagent_edges, batch_id grouping)",
+     "gateway inject_mentioned_space_agent_persona plus apply_mention_binding_policy as the single persona and policy pipeline (the plan calls back into it)",
+     "Control roster endpoint /api/v1/internal/spaces/:space_ref/roster for the same-Space target check",
+     "SpaceApprovalPanel and the run owner approval rule for approvals that belong to the initiating human",
+     "Space activity-grammar render classes for the collapsed chain row"
+    ],
+    "constraints": "Delegation is a side effect, so it can live only in execution-core's governed loop, never model-gateway's plain chat loop. The room composer never requests the agentic feature, so approval_mode auto is inert, and flipping it would hand the room agent execution-core's whole capability surface (browser, sandbox, registered capabilities): a narrow delegate_to_agent capability must exist first. Plane rules: execution-core has no network path to the gateway and must not call Convex (no cross-plane DB access); Control is reachable through the user_core_client precedent. Today a room agent is a persona overlay on the human's turn, so 'the delegate re-resolves its own authority' needs a new primitive and every hop must record the initiating human. ZDR: a ZDR run registers no child run, lineage or stored answer, so the collapsed chain and loop detection cannot rely on durable lineage for ZDR; peer content is untrusted data.",
+    "approachAdjustment": "Stage it as SPACE_AGENT_SCOPE_PLAN already decides: (1) UI-2c narrow slice with a delegate_to_agent capability in execution-core, same room, one hop, human present, re-entering a new internal non-streaming gateway endpoint under the original human's session bearer and the existing persona pipeline, plus a collapsed card in SpaceRoomTimeline; (2) multi-mention fan-out in the gateway; (3) only then a coordinator with the nonce/deadline/outcome protocol and shadow loop detection. Correct two statements: the coordinator cannot be 'driven by Application room events' because Application emits none (a new outbound feed is part of the work, or the coordinator lives on the gateway/execution-core path), and children are not Space-less in effect because they are registered on the parent's thread_id even though the proto has no space field.",
+    "effortRevised": "XL",
+    "effortNote": "Kept XL: the plan calls even the narrow slice multi-service and multi-session; the narrow UI-2c slice alone is L and the coordinator and turn protocol add to it.",
+    "verdict": "reword",
+    "verdictReason": "The gap statement is accurate but the approach conflicts with the recorded UI-2c design (gateway callback with the human bearer, no Convex call from Rust) and assumes an Application event feed that does not exist; it should be restated as a staged build starting from the narrow slice.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-026",
+  "title": "Typed cards and agent input requests (forms and secret drop)",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 2,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Define a small Verevon card schema (sections, buttons, select, fields, chart, link, with a required plain-text fallback) that agents emit as typed tool results and rooms render natively, with actions round-tripping as typed run signals. Build the first card type as request_input: an agent tool that pauses the run, shows a form (choices, multi-step, custom answer, dismiss) and resumes on submit, where secure fields post straight to the Control credential broker and only an opaque handle enters the run.",
+  "whyItMatters": "Structured input makes multi-human rooms readable (who answered what) and replaces long prose with compact actionable UI. Keeping secrets out of chat is mandatory for ZDR and for agents that sign in to services for a person. Both are visible quality jumps for agent messages.",
+  "referenceBestPractice": {
+   "bestSource": "qm",
+   "others": [
+    "grokbot",
+    "slack",
+    "teams"
+   ],
+   "prevalence": "Forms and secret capture: 2 of 5 (differentiator); cards/blocks: 2 of 5 (common)",
+   "mechanism": "qm's secret drop mints a one-time URL (7-day TTL) via mint/peek/redeem with take-on-redeem; the value goes to the person's keychain with an optional grant to the conversation and the transcript records only that a secret was provided. Grok Bot's request_input tool {fields[], secure, multi_step} creates a pending widget in the thread; Respond/Submit/Dismiss resume the run with a typed message. Slack Block Kit is the best-specified card schema (server-validated, action_id/value round-trips, required top-level text); Teams Adaptive Cards add charts and dynamic search."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:329-336",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:23-118",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:32",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:393-403",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1979-1986"
+   ],
+   "gap": "Agent output renders Markdown, code and charts and there is a built-in approval card (owner-only decide, reconcile-on-error), but there is no general typed card schema with actions and no forms: agents can only ask in prose. Tool-call/plan cards and chat artifacts are absent in rooms. The credential broker for secret fields (S3.4) is planned only. The AG-UI stream accepts up to 32 caller-declared client tools (spot-check), which may carry the pause/resume round trip, but whether a client result resumes a Space run is unverified."
+  },
+  "approachOriginal": "Frontend Plane: card schema aligned with AG-UI generative-UI events, validated server-side in the gateway, rendered by the room timeline; start with buttons, select, fields, chart and link. Model Plane: request_input tool with a pause/resume contract that reuses approval continuation (or the AG-UI client-tool result path after verifying it resumes a Space run); card actions return as typed run signals through the gateway with a per-action authority check. Secret fields post directly to the Control credential broker (S3.4) and return an opaque handle; only the handle enters the run, transcript, logs and snapshots. Show the requesting agent's identity and destination on every form.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Approval continuation / run signal API",
+   "S3.4 credential broker (for secret fields)",
+   "AG-UI stream"
+  ],
+  "planeOwner": "Model Plane (request_input and resume); Frontend Plane (card schema, renderer); Control Plane (credential broker)",
+  "risks": "Phishing-style forms driven by injected prompts; card actions are an injection path and need server-side validation plus per-action authority; secrets must never reach transcript, logs, snapshots or the model.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 6,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-06-009",
+   "C-t1-06-010",
+   "C-t1-06-026"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-026",
+    "status": "partial",
+    "exactGap": "Rooms render user turns as plain text and assistant turns as Markdown (with chart fences) plus one built-in approval card (SpaceApprovalPanel, decided only by the run owner); there is no typed card schema, no request_input tool, no form and no card-action round trip, and no credential broker or secret-drop code exists in apps/Control Plane (S3.4 is plan-only). Agents ask today by ending the turn with a prose question (execution-core agent.rs SNIPPET_USER_SUPPLIED_ARGS). The AG-UI client-tool path cannot carry a pause/resume (caller-declared tools are only offered to the model, an unresolvable name returns an error to the loop) and approval-gated resume is itself quarantined pending a descriptor-backed dispatcher.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:322-348 (user turn plain text, assistant ChatMarkdown, approval panel only for awaiting_approval)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx:23-130 (owner-only decide, refusal rendered as a sentence)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-approvals.ts:91-127 (approve = decide + bare resumeRun, deny = cancelRun)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:4,386-402 (room turns use streamChat, not the AG-UI route)",
+     "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts:100-190 (typed ConversationNode union in Chat only: approvals, plan-approval, follow-ups, artifacts, steps)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:32,56-64,380-410,872-905 (MAX_TOOLS=32, caller tools forwarded, approvals sent as non-executable CUSTOM events, /stream/{id} GET is stream reconnect not a tool-result submit)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:166-186,659-696 (prose-question pattern; client tools appended as untrusted defs, no executor)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:150-190,500-574 (awaiting_approval step outcome)",
+     "apps/Model Plane/rust/services/execution-core/src/state.rs:144-156 (bare resume only resumes a user-paused run; approved resume is a separate verified transition)",
+     "apps/Model Plane/rust/services/execution-core/src/grpc.rs:1090-1153 (resume_run with approval_id verifies a durable granted approval then resume_durable_approval_continuation)",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:1555-1586,1709-1741 (granted approval continuation reported as pending/quarantined; bare resume path is for user-paused runs only; ZDR continuation_gate)",
+     "apps/Model Plane/rust/services/model-gateway/src/approvals.rs:254-272 (quarantine_granted_approval_continuation until a descriptor-backed dispatcher exists)",
+     "apps/Model Plane/rust/services/session-core/migrations/0022_encrypted_approval_continuation_descriptors.sql:1-25 (encrypted continuation descriptor table)",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1979-1986 (S3.4: reuse Control grants and existing secret stores, do not add a QM-style keychain)",
+     "Grep of apps/Control Plane for credential_broker|CredentialBroker|secret_store|vault: no matches (negative)",
+     "Grep of apps (excluding node_modules/target) for request_input|secret_drop|secure_field: only an unrelated support-request schema in src/shared/actions/action-registry.ts (negative)"
+    ],
+    "reuse": [
+     "shared/chat-nodes ConversationNode union, derive.ts and registry.ts (typed node renderers already used in Chat) as the card schema and renderer base for rooms",
+     "ChatMarkdown chart fence (features/chat/components/ChatChart) for chart cards",
+     "SpaceRoomComposer reply-to-thread plus the existing thread:append Control decision as the answer path for a form submit",
+     "SpaceApprovalPanel owner-only/refusal rendering pattern and reconcile-on-error discipline",
+     "Quarry opaque run-scoped handle and BrowserBroker run grant as precedent for opaque handles (secret fields only after S3.4)"
+    ],
+    "constraints": "Runs are owner-bound, so only the member who started the run can answer a request (a second member answering needs an explicit delegation design). Approval-gated resume is quarantined (http_routes.rs:1555-1579, approvals.rs:254-272), so request_input cannot reuse approval continuation today. S3.4 explicitly says to reuse existing secret stores and not to add a QM-style keychain, which conflicts with the item's 'secret drop to a credential broker'. ZDR runs are persistence-free: answers and any continuation descriptor must not be stored for ZDR threads (continuation_gate already blocks resume under ZDR). Card actions must be validated server-side in the gateway under a Control decision; the browser never sends authority. The room composer rides the native chat stream, not AG-UI.",
+    "approachAdjustment": "Split into two slices. (1) Cards: extend the existing shared/chat-nodes union with form/choice/link nodes and render them in SpaceRoomTimeline instead of inventing a new schema; validate server-side in the gateway. (2) request_input as an end-turn tool: the tool result carries a typed form node, the submit posts a normal Space append (a typed user turn) under the existing append decision and starts a new run, so no run pause/resume is needed and the quarantined approval continuation is avoided; true pause/resume waits for the descriptor-backed dispatcher. Defer secure fields until S3.4 lands and route them to an existing secret store (no new keychain); drop 'secret drop' from this item. Do not depend on the AG-UI client-tool path.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged as a whole. The cards slice is M (reuse chat-nodes); request_input as end-turn plus typed reply is M-L; a true pause/resume variant would be XL and is blocked on the continuation dispatcher.",
+    "verdict": "reword",
+    "verdictReason": "Not shipped (only the approval card exists), but the item's mechanism assumes approval continuation and AG-UI client tools that cannot resume a Space run, and its secret-drop half contradicts S3.4's 'no keychain' decision. Reword to reuse chat-nodes, use end-turn plus typed reply, and defer secure fields.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-027",
+  "title": "Agent operations: per-room and per-agent cost and budgets, admin allow/block, answer-quality surface, and room-behaviour evals",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 3,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Attribute usage to Space and agent binding by flow (chat, scheduled, agent-to-agent, browser, computer) in cost-core, add a per-Space allowance with warnings and a hard stop plus a room spend panel, and let admins allow or block agent definitions with a reason shown to users. On the answer itself add an AI label, citation chips and the thumbs-plus-reason feedback that /chat already has, a closed vocabulary of typed turn failures, and a room-behaviour eval suite that replays scripted multi-person scenarios against the gateway and Model Plane.",
+  "whyItMatters": "Per-agent and per-room cost is table-stakes in four of five references, and it is the safeguard that makes multi-agent rooms, browsers and computers affordable to ship. Admins need to govern which agents may exist, and a room-behaviour eval is how Buzz keeps agents from becoming noisy or silent regressions.",
+  "referenceBestPractice": {
+   "bestSource": "grokbot (cost by flow and bot, hard limits); teams (AI label, citations, admin allow/block); buzz (room-behaviour evals)",
+   "others": [
+    "qm (rolling-window admission check, multiplayer scenarios on real Slack)",
+    "slack"
+   ],
+   "prevalence": "Cost and usage attribution 4 of 5 (table-stakes); AI labelling/citations/feedback 3 of 5 (common); admin governance 2 of 5; turn resilience and typed failures 2 of 5; room-behaviour evals 2 of 5 (differentiator)",
+   "mechanism": "Buzz per-turn usage record {turn usage, cumulative, null for unknown, deltaReliable, session/turn seq}; Grok Bot series centsByFlow and centsByBotId, hard limits, prepaid top-up and usage warnings; QM admission check of rolling-window spend per person and org. Teams: a disclaimer label per agent message, citation chips that open the source, feedback {thumb, reason: not asked|inaccurate|low quality|too slow, comment}, explicit allow/block per agent app with reasons. Grok Bot: closed vocabulary of system-event kinds covering every resume path, typed result unions per tool, first-token and idle deadlines with server-paced retry. Buzz evals: task containers run the real product process tree with a roster manifest, scripted human actors, assertions on thread placement, notifications and silence plus an LLM judge, used as release regression."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Model Plane/go/services/cost-core (no Space or agent reference anywhere in its Go or SQL files; migrations 0001-0010 only)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:541-567 (only an org budget_exceeded refusal is surfaced in the room)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:410-509 (thumbs plus reason feedback exists in /chat)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx (no feedback, citation or AI-label controls beyond the isAgent header)",
+    "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs:1-25 (implicit dissatisfaction signal)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/eval.rs:1-20 (run success/drift rollup only, not room-behaviour scenarios)",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx:22 (org installations registry; presence, not authority)"
+   ],
+   "gap": "Cost: no space_ref or agent dimension in cost-core and token figures are suppressed; only an org hard stop. Quality surface: /chat has feedback but Spaces has none, no citations, no typed failure vocabulary (status unknown in Model Plane). Governance: no per-definition allow/block policy. Evals: only a generic run success/drift rollup exists."
+  },
+  "approachOriginal": "Model Plane cost-core: tag USAGE_ENVELOPE with space_ref, agent binding and flow; expose series by flow and by agent; add an admission check against a per-Space allowance with warnings and a hard stop; under ZDR keep only aggregates. Frontend: room spend panel; reuse the ChatMessages feedback control with reasons in SpaceRoomTimeline, citation chips fed by Data v2 retrieval, a visible AI label per agent turn, and a system-event grammar in Activity backed by a typed tool-result envelope. Control: org policy allow/block per agent definition with a reason string surfaced in the bind and create dialogs. Evals: a harness that runs the gateway plus Model Plane with synthetic members and scripted human actors and asserts thread placement, notifications, approvals and silence, starting with the scenarios of items F-t1-002 (R-t1-07-01) and F-t1-025 (R-t1-07-03).",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Item F-t1-025 (R-t1-07-03) (cost caps needed before multi-agent)",
+   "Data v2 retrieval citations"
+  ],
+  "planeOwner": "Model Plane (cost-core, typed failures, evals); Control Plane (agent allow/block policy); Frontend Plane (spend panel, labels, feedback)",
+  "risks": "ZDR conflicts with usage detail: keep only aggregates. Over-notification from warnings. Eval flakiness: pin prompts and use deterministic actors.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 4,
+   "SRC": 19,
+   "DOC": 3,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-07-061",
+   "C-t1-07-062",
+   "C-t1-07-063",
+   "C-t1-07-021",
+   "C-t1-07-064"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-027",
+    "status": "partial",
+    "exactGap": "Absent: any Space or agent dimension in cost-core (ledger dimensions are tenant, actor, run, request, model and producer; session-core reports run tokens as 0 so the room Activity cost line prints nothing), any per-Space allowance (model-gateway budget.rs checks request and org ceilings only and the room renders just the org budget_exceeded refusal), org-level allow/block of agent definitions (the registry is presence not authority; only a per-binding approval_mode blocked exists), Space-side feedback and citations (feedback is bound to the run owner), and room-behaviour evals. Already present: the Agent chip on agent turns, thumbs plus reason in /chat with a gateway feedback route, a closed failure-code allowlist in session-core, and eval-lab-py (live-stack YAML case runner with budget, ZDR, org-isolation and HITL cases) plus a gateway run success/drift rollup.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go:40-50 (dimension bounds: tenant, actor, run, request, model, producer)",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/migrations/0003_accounting_attribution.up.sql:1-5 (producer_id only; migrations 0001-0010 have no space or agent column)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/budget.rs:1-70 (pre-flight guard against org limits and request max_cost_usd/max_tokens)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs:111-128 (ZDR turns refuse max_cost_usd as spend_cap and attachments, honor max_tokens)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:530-575 (only budget_exceeded surfaced, link to org Spend ceiling)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:418-430 (PostTurnHeader Agent chip is the only AI marker)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:690-725 (run tokens are 0 in session-core; cost-core run_id not joined)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:152,410 (thumbs plus reason feedback in /chat)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:70 (POST /api/v1/chat/feedback route)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6516-6545 (resolve_feedback_target rejects a turn owned by another user)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/terminalization.rs:200-211 (closed allowlist of seven run failure codes)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/eval.rs:1-30 (run success and drift rollup, no room scenarios)",
+     "C:/dev/CoresSystem/docs/EVAL_HARNESS_MVP.md:1-12 (eval-lab-py shipped 2026-07-08: live-stack case runner and report)",
+     "C:/dev/CoresSystem/apps/Model Plane/python/eval-lab-py/cases/baseline/ (directory listing: 12 YAML cases incl. 07_hitl_pause, 09_budget_ceiling, 11_org_isolation, 12_zdr_grounding)",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts:215-235 (agent registry is presence, not authority)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx:7-17 (installations view is presence only)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4519-4535 (binding approval_mode blocked refuses invocation)"
+    ],
+    "reuse": [
+     "model-gateway budget.rs admission point and the USAGE_ENVELOPE publish in http_routes.rs (add space_ref, binding ref and flow)",
+     "cost_entries.run_id as the join key to runs that carry space_id",
+     "ChatMessages thumbs plus reason control and the /api/v1/chat/feedback route",
+     "PostTurnHeader Agent chip and activity-grammar runCostDetail for the spend panel",
+     "session-core terminalization failure-code allowlist as the typed failure vocabulary",
+     "eval-lab-py runner and baseline YAML cases as the harness for room-behaviour scenarios",
+     "per-binding approval_mode blocked as the room-level block; add the org-level policy in Control"
+    ],
+    "constraints": "ZDR: model-gateway refuses max_cost_usd (spend_cap) on ZDR turns and honors only max_tokens, so a per-Space allowance cannot ride on a request-level cost cap for ZDR orgs; use token ceilings or admission-side aggregates and keep ZDR usage aggregate-only. Plane ownership: cost attribution is Model Plane (cost-core plus the model-gateway and execution-core producers must carry space_ref and binding ref); allow/block is a Control policy while the Application registry stays presence-only (ADR-0002); citations must come from Data v2 retrieval under the Space decision. Space access never widens owner-plane ACL: feedback is currently owner-bound, so a colleague cannot rate another member's turn without a Space-aware feedback authority.",
+    "approachAdjustment": "Drop 'add an AI label' (the Agent chip exists) and build the eval suite on eval-lab-py instead of a new harness. Make slice one 'attribute and show': carry space_ref and binding ref through USAGE_ENVELOPE and run records, fix the zero token fields in session-core, then a room spend panel; add allowance enforcement afterwards, token-based so it survives ZDR. Reusing the thumbs control needs a Space-aware feedback authority first (any current recipient may rate; rating attributed to the rater and the agent binding). Treat allow/block (Control, M) and evals (M-L) as separate items.",
+    "effortRevised": "XL",
+    "effortNote": "Four separable work items are bundled; cost attribution alone is L because cost-core has no space or agent dimension, session-core token fields are 0 and several producers change.",
+    "verdict": "reword",
+    "verdictReason": "Status is partial rather than absent: the Agent chip, /chat feedback, failure-code allowlist and eval-lab-py exist and should be reused, and the ZDR spend-cap refusal and owner-bound feedback change the approach. The need for per-room cost visibility stays valid.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-028",
+  "title": "Persistent per-agent computer with lifecycle UX and a governed egress boundary",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 4,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Grow the credential-free, network-less, run-scoped code_interpreter workspace into a per-(Space, agent) computer: a resource record with lifecycle states (absent, hibernated, starting, running), a durable home that survives runs, hibernate and pre-thaw on presence intent, and a room view of its files and processes with stop/kill. Route its network through Quarry with per-turn capability tokens and an audience egress floor (intersection of allowed hosts, union of denied), and add pattern-triggered process watches. Design the execute target so the user's own machine can be added later.",
+  "whyItMatters": "An agent that works like a colleague with its own PC is the other half of the Grok Bot vision. Today the sandbox is deliberately hermetic, so agents cannot reach anything, and inline runs lose their edits, so there is no durable workplace to show in the room.",
+  "referenceBestPractice": {
+   "bestSource": "grokbot (lifecycle and cost-aware wake); qm (resource records, durable home snapshots, capability tokens plus authorising egress proxy)",
+   "others": [
+    "buzz (agents as supervised local processes, pluggable computer backends)"
+   ],
+   "prevalence": "Persistent agent computer 3 of 5 (common); lifecycle UX 1 of 5; sandbox security boundary 2 of 5 (differentiator); pluggable backends 2 of 5; own machine 2 of 5 (differentiator)",
+   "mechanism": "QM sandbox resource record {owning scope, provider, identity, lifecycle} with an explicit default per scope ('no default -> no execution'); home snapshots via provider checkpoints plus throttled tar to object storage, a pending marker before create and never adopting a blank home over a saved one. QM egress: HMAC/Ed25519 token {aud, scopeId, actorId, members, egress, credentials, runId, runLease}; an Envoy filter calls the authz check, resolves DNS, rejects private ranges and dials the checked IP; allowed egress hosts = intersection over the audience, denied = union; backend profile egressEnforcement none|ip_port|domain with refusal of substitutes. Grok Bot: ReportClientPresence{agent, viewing, surface, intent: APP_FOREGROUND|CHAT_OPEN|COMPOSER_FOCUS|TYPING|UPLOAD_START} yields NONE|IN_FLIGHT|PRETHAW|REFUSED, calls tagged background never wake, and a pure wake|hold|follow function; pattern-triggered wake-ups use an output observer with batching and notification limits."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-45 (Space-scoped lease for code_interpreter only: credential-free SCRATCH by default, read-only rootfs, no network; inline ExecuteStep runs lose edits and rely on the lease TTL)",
+    "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go (process registry shipped)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:106-169 (processes listed read-only)",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1954-1968 (S3.2 capability profile reports ephemeral persistence, bounded one-shot processes, no backup, egress off)"
+   ],
+   "gap": "No per-agent computer, no lifecycle states or hibernation, no durable home beyond run end, no room-visible computer view, no signal/kill or watches from the room, no network path for the sandbox, no per-turn capability token with an audience egress floor, no backend capability contract beyond the published profile."
+  },
+  "approachOriginal": "Model Plane sandbox-manager: per-(Space, agent) lease with a durable home, a resource record and lifecycle states, snapshots on run end and periodic checkpoints, and the 'no default -> no execution' rule; publish a typed backend capability profile {persistence, processSessions, egressEnforcement} and refuse unsupported routes (keep few backends). Egress: send sandbox traffic through Quarry (reuse its SSRF guards) with a per-turn capability token bound to the run lease and the Space decision audience floor, never direct internet. Frontend: Work tab computer section (state, files, processes, stop/kill) and presence intents (typing, composer focus) to pre-thaw. Add pattern-triggered watches on process output using the S4.3 Watch primitive. ZDR orgs get ephemeral homes. Keep the execute target abstract (scoped|scratch|owner-machine) so a typed exec protocol to the user's own device can be added later without redesign.",
+  "effortOriginal": "XL",
+  "dependencies": [
+   "Item F-t1-027 (R-t1-07-11) (per-computer cost attribution)",
+   "Item F-t1-044 (R-t1-07-09) (credentials broker for authenticated egress)",
+   "Item F-t1-012 (R-t1-07-08) (audience labels)",
+   "Quarry egress route"
+  ],
+  "planeOwner": "Model Plane (sandbox-manager, execution-core); Ingestion Plane (Quarry egress); Frontend Plane (Work tab)",
+  "risks": "Cost and data residency of persistent homes; ZDR conflict; Quarry latency and capacity as an egress path; maintenance cost of many backends; a desktop/own-machine agent is a large attack surface and should stay deferred.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 42,
+   "DOC": 4,
+   "INF": 4
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "S3.2 sandbox capability profile and Space lease, S3.3 durable Space workspace, S4.2 process registry and S4.3 Watch in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (S3.2 last checkbox, signed profile and backend-pinned lease, is still open)."
+  },
+  "sourceClusters": [
+   "C-t1-07-042",
+   "C-t1-07-044",
+   "C-t1-07-043",
+   "C-t1-07-056",
+   "C-t1-07-045",
+   "C-t1-07-041"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-028",
+    "status": "partial",
+    "exactGap": "More ships than the item assumes: a Control-signed, backend-pinned Space capability profile and lease (AcquireLease with scope_type thread|agent and capability_decision), a Space-level CAS-backed durable workspace with per-run overlays and PromoteWorkspace (S3.3), a Postgres process registry with agent-callable process_start/read/stdin/signal/list tools gated by cap.process.background and the space:processes permission (S4.2), and a Watch core with routes in capability-core (S4.3). Still missing: a per-(Space, agent) computer record with hibernate/starting states (SandboxLifecycleState has only SCRATCH, ACTIVE, SNAPSHOTTING, DESTROYED), any room route to stop/kill a process or to create/list watches (SpaceWorkPanel is read-only and the gateway reports watches_not_built), any sandbox network path (AllowDomains refuses without a proxy; Quarry's pinned proxy is loopback-only browser transport), per-turn capability tokens with an audience egress floor, and any owner-machine target. Inline ExecuteStep runs still lose workspace edits (documented known gap) and no ZDR gate was found in sandbox-manager or the lease code (INF).",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-50 (Space lease credential-free SCRATCH by default; inline ExecuteStep path loses edits; LEASE_TTL one hour)",
+     "apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs:1-20 (S3.3 PromoteWorkspace merges run overlay into restart-durable Space compute state; document promotion not yet wired)",
+     "apps/Model Plane/proto/model_plane/v1/sandboxes.proto:14-47,85-125,163 (AcquireLease scope_type/capability_decision, ActivateLease, GetWorkspaceManifest, PromoteWorkspace, process RPCs, SandboxLifecycleState SCRATCH/ACTIVE/SNAPSHOTTING/DESTROYED, processes_permitted)",
+     "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go:1-40 (durable process registry; execution-core owns the OS process)",
+     "apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go:140-175 (Promote per-path CAS merge)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:641-653,4086-4110 (process tool family offered only when space_scoped and process host enabled; process_signal term/kill exists as an agent tool)",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:780-790 (process tools map to cap.process.background)",
+     "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:327-351 (process_host_enabled env switch; measured capability_profile)",
+     "apps/Model Plane/rust/services/execution-core/src/process_host.rs:360-380 (host-local signal and kill_for_lease; no room route calls them)",
+     "apps/Model Plane/rust/services/execution-core/src/executor.rs:160-181 (AllowDomains refused when no egress proxy is configured)",
+     "apps/Control Plane/user-core/internal/spaces/space_capability_decision.go:14-60,140-175 (signed model.space.capability_profile decision, processes claim vocabulary, space:egress and space:processes permissions, ZDR flag carried)",
+     "apps/Model Plane/go/services/sandbox-manager/internal/authz/capability_verifier.go:160-185 (egress claim requires space:egress permission)",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:349-350,5415-5460 (only GET /v1/processes and /v1/processes/:id/output; no stop route)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1618-1628,2517-2600 (delivery_ledger_not_built and watches_not_built gaps; processes read under room read authority)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:106-135,160-185 (Work tab read-only; routines managed in Settings)",
+     "apps/Model Plane/go/services/capability-core/internal/watch/routes.go:1-50 and predicate.go:1-60 (Watch HTTP surface, closed predicate grammar: any, literal contains, state_change; no regex)",
+     "apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql:1-40 (watch record and event log, owned operationally by capability-core)",
+     "apps/Control Plane/user-core/internal/http/server.go:355-368 (watch-create-decision and watch-observe-decision routes)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:1-38 (DNS-pinned egress proxy for Chromium, loopback-only, 'never a tenant-facing proxy service')",
+     "apps/Model Plane/go/services/capability-core/migrations/0007_tenant_scopes_and_risk_constraints.up.sql:70-71 (scope_kind set has no 'space')",
+     "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:215-257 (Application Plane presence beat online|typing, no intent field)",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:1935-1968 (S3.2/S3.3 text; its 'last checkbox open' is stale versus the signed profile and pinned lease in code)"
+    ],
+    "reuse": [
+     "sandbox-manager AcquireLease/ActivateLease/SnapshotSandbox/PromoteWorkspace and the Space workspace manifest (extend the lease key to Space+agent)",
+     "Control space_capability_decision.go signed profile, space:egress and space:processes permissions",
+     "process registry store plus execution-core process_host.signal for a room stop/kill route",
+     "capability-core Watch core (/api/v1/watches, sweeper, Control watch decisions) for pattern-triggered watches",
+     "Quarry dns_guard::resolve_public_url (SSRF guard) as the vetted resolver for any egress proxy",
+     "recordSpacePresence and space-presence.ts for presence signals (extended with an intent value)"
+    ],
+    "constraints": "No cross-plane DB access: pre-thaw intent from presence (Application Plane Convex) must reach Model Plane as a gateway API call carrying a Control decision, never a shared table. Space access never widens an owner-plane ACL: egress and process permissions come only from Control's signed decision (space:egress, space:processes), credential-free remains the default and authenticated egress depends on the S3.4 broker. Quarry's PinnedBrowserEgressProxy is a loopback Chromium transport, so the item's 'route sandbox traffic through Quarry' needs a new route, not reuse; Model-proposes/Quarry-executes governs browser actions, so any browser use from the computer must still go through Quarry browser grants. ZDR must propagate: sandbox-manager and the lease code contain no ZDR handling (INF), so a durable per-agent home needs an explicit ephemeral rule for ZDR orgs before it grows. Capability scope_kind has no 'space' value, so Space-scoped capability rows need a migration.",
+    "approachAdjustment": "Re-baseline the item on what ships and stage it. (1) Room stop/kill: a Space route to model-gateway to execution-core process_host.signal under a Control effect decision (S-M). (2) Surface watches: create/list/cancel through capability-core /api/v1/watches in the Work tab and replace watches_not_built (M). (3) Per-(Space, agent) home: new lease scope key, lifecycle states beyond SCRATCH/ACTIVE, periodic snapshots and a ZDR/ephemeral rule (L). (4) Egress: a Model Plane or sandbox-manager side authorising proxy that reuses Quarry's dns_guard and the Control-signed space:egress permission with an audience floor, not Quarry's loopback proxy (L). Keep the execute target abstract as a design note but drop 'the user's own machine' from the recommendation. Correct the stale S3.2 'open' status in the doc.",
+    "effortRevised": "XL",
+    "effortNote": "XL stays for the whole computer; slices 1 and 2 are independent S-M deliveries that should ship first and are what the room is actually missing.",
+    "verdict": "reword",
+    "verdictReason": "Per-agent computer, lifecycle, egress and own-machine are still absent, but durable Space workspace, signed backend-pinned leases, process registry with agent signal/kill tools and the Watch core already exist, so the item misstates 'no durable home' and 'no capability contract' and should be re-scoped to the real gaps (room controls, watch surfacing, per-agent home, egress).",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-030",
+  "title": "Room content hardening: read authorization for attachments and transcripts, stricter CSP, anti-spoofing, link and download safety",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 6,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Four small web changes for a UI that renders other people's and agents' content. Check room membership and audience on attachment and transcript reads and render an explicit 'restricted' state instead of swallowing the 403. Tighten the CSP (Trusted Types with a sanitiser policy, narrower connect-src and img-src, report-only candidate policy with a report endpoint, subresource integrity). Keep agent-generated HTML in the sandboxed no-network iframe and approval UI in the main origin. Mark agent-sourced links and files and serve attachments with safe headers.",
+  "whyItMatters": "An XSS or exfiltration channel in a room acts with a user's agent authority. Several cheap controls already exist; these changes close the remaining broad allowances (img-src and connect-src allow any https host) and the silent 403.",
+  "referenceBestPractice": {
+   "bestSource": "teams",
+   "others": [
+    "buzz (kind-level read policy; attachment ACL gap to avoid)",
+    "slack (link, protocol and download safety)"
+   ],
+   "prevalence": "Strict CSP with Trusted Types: 2 of 5 (teams, slack); fine-grained read authz: 1 of 5 (buzz); trusted sensitive UI: 1 of 5 (teams); link and download safety: 1 of 5 (slack).",
+   "mechanism": "CSP: default-src 'self', nonce-based script-src, require-trusted-types-for 'script' with named policies, object-src 'none', base-uri 'none', plus a Content-Security-Policy-Report-Only with a stricter candidate and SRI integrity for every build chunk. Reads: a kind-level policy consulted on every read path (query, push, search) returns not-found for hidden kinds, and attachment reads check the parent message's room ACL. Links: scheme allowlist, warnings for unusual protocols, safe download headers."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/nginx.conf:70 (enforced CSP: default-src 'self', script-src 'self' plus Turnstile and Nexi, frame-ancestors 'none', object-src 'none', base-uri and form-action 'self'; but style-src 'unsafe-inline', connect-src 'self' https:, img-src allows any https host; no Trusted Types, nonce, report-only policy or SRI)",
+    "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts:1-40 (agent HTML preview iframe with default-src 'none', connect-src 'none', img-src data and blob only, form-action 'none')",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2680 and src/features/spaces/components/SpaceRoomTimeline.tsx:201 (deny-by-default shared-read gate; the timeline swallows the 403 and shows a preview, per the UI baseline)",
+    "Per-room attachment ACL and Content-Disposition and nosniff headers on room downloads: not found or verified"
+   ],
+   "gap": "The server gate is right but the UI hides it; attachment authorization per room is not recorded; the CSP lets agent- or member-authored markdown trigger requests to arbitrary https hosts (images, fetch), which is a known exfiltration channel (inference); no Trusted Types or SRI."
+  },
+  "approachOriginal": "Frontend Plane gateway: confirm attachment fetches check room membership and audience and add not-found semantics for hidden kinds; Frontend: render a restricted state for 403. nginx.conf: add require-trusted-types-for with a DOMPurify policy, replace connect-src https: with the own API and the telemetry host, restrict img-src to own origin plus a media proxy for chat images, add a Content-Security-Policy-Report-Only candidate and a gateway report endpoint, add an SRI plugin to the Vite build. Keep approval dialogs in the main origin and agent HTML only in sandbox-html iframes. Mark agent-sourced links, allow only https and mailto without a warning, and serve attachments with Content-Disposition attachment and nosniff.",
+  "effortOriginal": "M",
+  "dependencies": [],
+  "planeOwner": "Frontend Plane (nginx, gateway, SPA)",
+  "risks": "Third-party scripts (Turnstile, Nexi checkout) can break under Trusted Types. Remote chat-media images need a proxy. Over-tight CSP can break existing embeds, so roll out through report-only first.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 15,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-10-038",
+   "C-t1-10-041",
+   "C-t1-10-040",
+   "C-t1-10-042"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-030",
+    "status": "partial",
+    "exactGap": "The server side is already deny-by-default: room transcript, thread list, activity, knowledge and work reads all take a Control shared-read decision and the transcript route returns 403 space_read_not_authorized (spaces.rs:2616-2680), but SpaceRoomTimeline.tsx:201 swallows that 403 with .catch(() => null) and falls back to the thread preview, and a declined read leaves the thread list owner-bound (spaces.rs:1158-1165), so a room whose org has not enabled shared reads silently shows only your own posts as previews. nginx.conf:70 enforces a CSP with connect-src 'self' https:, img-src 'self' data: https: blob: and style-src 'unsafe-inline' and has no Trusted Types, report-only policy or report endpoint, and the markdown renderer builds [text](url) anchors with no scheme or destination check (chat-media-markdown.tsx:1278-1279), though script-src 'self' without unsafe-inline already blocks javascript: execution. Spaces have no attachments or download route to protect (chat documents upload is user-scoped, documents.rs:54), so a per-room attachment ACL is moot until attachments ship.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1086-1215",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2616-2680",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:197-205",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:258-292",
+     "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:650-680",
+     "apps/Frontend Plane/verevonv3/nginx.conf:46-70",
+     "apps/Frontend Plane/verevonv3/nginx.conf:103-114",
+     "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts:1-40",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:500-525",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx:1236",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx:1273-1281",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-markdown.test.ts:371-400",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1333",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1401",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1443",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx:172-190",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:54",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:157"
+    ],
+    "reuse": [
+     "The existing Control shared-read decision on every Space read route (shared_thread_read_decision) as the single authorization point; add attachments to it rather than a parallel check",
+     "sandbox-html.ts preview CSP plus sandbox=\"allow-scripts\" without allow-same-origin for any agent HTML",
+     "Mermaid securityLevel strict and KaTeX trust false, which already close the few innerHTML sinks (only three exist in src)",
+     "nginx.conf CSP variable and its per-location re-emit pattern for adding a Report-Only header",
+     "Gateway nosniff header (main.rs:157) for download responses"
+    ],
+    "constraints": "Authorization stays with Control and the owning plane through the gateway; the restricted state is a UI rendering of the existing 403 and must not leak anything the read decision withheld (the preview fallback is only safe because the declined listing is owner-bound). The 403 is a per-room or per-org policy outcome, not a per-post one, so it is one room-level message. Tightening connect-src and img-src is a Frontend Plane nginx change, but connect-src https: is deliberately broad for Nexi and telemetry and img-src https: serves web-search thumbnails, favicons and remote chat media (nginx.conf:46-70, DashboardSearchResults.tsx), so narrowing needs a host inventory and a media proxy and must roll out Report-Only first. Third-party Turnstile and Nexi scripts can break under Trusted Types. Attachment read checks belong to the future Space attachment contract (Data Plane document with a Space-bound grant), not to this item.",
+    "approachAdjustment": "Re-scope to what is real. (1) S: render a room-level 'restricted' state when the transcript or thread read is refused, instead of silently showing previews. (2) S: add a scheme allowlist (https and mailto) and show the destination host for external markdown links, which also covers link-text spoofing; javascript: is already blocked by script-src but defense in depth is cheap, and the more important need grows once human posts render through ChatMarkdown (F-t1-032). (3) M: a Content-Security-Policy-Report-Only candidate with a gateway report endpoint, then narrow connect-src and img-src behind a media proxy. Demote Trusted Types (three innerHTML sinks, all already sanitized, and DOMPurify is not a direct dependency) and drop SRI (script-src is 'self' on same-origin hashed assets, so SRI adds little). Remove the standalone attachment-ACL work and attach it to the attachments feature.",
+    "effortRevised": "M",
+    "effortNote": "Unchanged in size but re-scoped: restricted state and link rules are S, the CSP report-only rollout is the M part; Trusted Types and SRI are removed or demoted.",
+    "verdict": "reword",
+    "verdictReason": "The deny-by-default server gate and the sandboxed agent-HTML path already exist, so the item should shrink to the swallowed 403, link safety and a report-only CSP rollout, and drop the attachment-ACL, Trusted Types and SRI work.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-031",
+  "title": "Org audit trail for admins: role-gated view, Space decisions and agent invocations, SIEM export, usage ledger export",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 7,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Expose audit-core to org admins and auditors through a role-gated, cursor-paginated API and view, and an export token that streams or pulls events (metadata only). Record signed Space decisions (decision id, subject, audience revision, agent principal, privacy tier, outcome), agent invocations, approvals and moderation actions. Add per-Space and per-agent attribution and a bounded export window to the usage ledger for finance.",
+  "whyItMatters": "Enterprises that adopt an agent workspace must answer which agent did what, on whose authority. Verevon already signs decisions, so exporting them is cheap and differentiating. The current read path also looks too broad: any authenticated org member can list the org's events.",
+  "referenceBestPractice": {
+   "bestSource": "slack",
+   "others": [
+    "qm (source-level mechanics: recordOnce idempotency, audited admin reads, spend ledger and bounded export)",
+    "teams (Purview audit)"
+   ],
+   "prevalence": "SIEM-grade audit: 2 of 5 (slack DOC, qm SRC); spend export: 1 of 5 (qm). Differentiator.",
+   "mechanism": "Append-only table keyed by org and sequence with a unique idempotency key; fire-and-forget record() and exactly-once recordOnce(key); a read API filters by scope, action and time with cursor pagination; an org-admin token streams JSON events (actor, action, entity, context, details, app) to a SIEM; message bodies are never logged; each export is itself audited. Spend: a ledger by day, scope, origin and model with a bounded, token-authenticated export."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Control Plane/audit-core/internal/api/api.go:106-115 (GET and POST /v1/audit, /v1/usage and GET /v1/usage/summary, service-authenticated only)",
+    "apps/Control Plane/audit-core/internal/api/api.go:197-222 (filters org_id, since, until, event, user_id, limit default 100; no cursor)",
+    "apps/Control Plane/audit-core/internal/store/schema.sql:11-33 and :45-66 (audit_events with plane, event, subject, resource_id, outcome, details, event_id, payload_hash; usage_events with tokens and cost_cents) and migrations/003_logical_control_audit_idempotency.sql",
+    "apps/Control Plane/audit-core/internal/api/service_auth.go:205-213 and :268-273 (scope audit:read:self; HMAC delegation with replay nonce binds the org; the signed X-User-Role is carried but the list handler does not consult it)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs:30-112 (session-gated proxy of /v1/audit for the Trust Center; no admin check in the handler)",
+    "apps/Control Plane/user-core/internal/spaces/decision.go (no audit emission seen; signed Space decisions are not recorded in audit-core)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx:145-259 (per-Space Activity panel)"
+   ],
+   "gap": "The audit and usage pipes exist, but there is no admin-scoped audit view or export, no cursor, no Space, agent or decision-id dimension, and decisions are not recorded. The read handler appears to rely on org binding alone, so a normal member could read all org events (needs a trace through audit-core to confirm)."
+  },
+  "approachOriginal": "audit-core: add cursor pagination, filters for plane, subject, resource_id, outcome and decision_id, require an admin or auditor role from the signed delegation (self-scope for ordinary members), and per-org export tokens with audited exports. Control user-core: emit space.decision.issued and space.decision.denied events (metadata only). Model Plane: session-core audit_publisher already records tool actions with data category and zdr; add agent-invocation and approval events. cost-core and session-core add space_ref and agent principal to usage metadata. Gateway: /api/v1/admin/audit and an export route. Frontend: an admin Audit view filterable by Space, agent and decision id. Under ZDR carry metadata only. First step in W1: trace the audit-core read handler; if a normal member can read all org events, fix that as a bug before building the admin view.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "audit-core",
+   "Control decision ids on every effect",
+   "org admin role catalog (F-t1-006 (R-t1-02-05))"
+  ],
+  "planeOwner": "Control Plane (audit-core) with Frontend Plane gateway",
+  "risks": "An export is a mass exfiltration path, so reads must be audited and scoped. Event volume. The tool_action consumer in the Trust Center must keep working when the read path is role-gated.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 8,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-10-003",
+   "C-t1-10-045"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-031",
+    "status": "partial",
+    "exactGap": "audit-core already ingests JetStream events (session-core tool_action and tool_action_reserved, user-core erasure and dsar_export through a durable outbox, leads-core, conversation-core, ingestion) and serves GET /v1/audit and /v1/usage(/summary) with org, since, until, event and user_id filters (limit default 100, no cursor) plus a daily retention purge. The access concern is CONFIRMED by trace (SRC): the gateway list_audit only needs a session and forwards the filters, audit-core verifies that the signed delegation binds the org but never consults the delegated role, so any org member can read all org events including other users via user_id; the settings \"Recent security events\" panel is described as admin review material but is not gated. Missing: admin or auditor gating, cursor pagination, plane/subject/resource filters, export, Space decision and agent-invocation events (user-core decision issuance emits nothing and decisions are stateless signed tokens), and Space or agent dimensions on the usage ledger (cost-core Entry carries org, user, producer, run and model only).",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/api.go:106-116,197-222",
+     "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/api/service_auth.go:203-213,215-275",
+     "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/store/schema.sql:11-66",
+     "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/events/events.go:27-60",
+     "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber.go:287-295",
+     "C:/dev/CoresSystem/apps/Control Plane/audit-core/cmd/server/main.go:93-96,150-185",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs:28-106",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:1255-1290,1545-1562",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/decision.go:1-40",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/users/gdpr_audit_outbox.go:25-110",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go:262-330",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/025_owner_effect_reservations.up.sql:1-40",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:1-60",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/retention_receipt.rs:28-34",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go:80-92,239-246",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/cost-core/internal/server/server.go:160-200",
+     "C:/dev/CoresSystem/apps/Application Plane/conversation-core/conversation-core-go/internal/conversation/types.go:235-275",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-735",
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/server.go:131-140"
+    ],
+    "reuse": [
+     "audit-core store, API, durable subscriber and the daily runRetention loop",
+     "user-core durable audit outbox (gdpr_audit_outbox.go, subject prefix verevon.audit.v2.control.user-core.*, JetStream PubAck plus Nats-Msg-Id) for Space decision events",
+     "session-core audit outbox and run-lifecycle envelopes (mp.v1.run.<run_id>.event) for agent invocation records",
+     "existing per-Space Activity route and conversation-core ListSpaceAuthorityEvents for the per-Space view",
+     "dsar_export and lead_export audit subjects as the precedent for audited exports",
+     "owner/admin gate pattern used by the org-core GDPR erasure routes (server.go:131-140)"
+    ],
+    "constraints": "audit-core enforces subject, plane and producer authority (subscriber.go:287-295), so each plane must emit its own events: Space decisions from user-core under verevon.audit.v2.control.user-core.*, agent invocations from session-core under verevon.audit.v2.model.session-core.*; Model-side subjects also need nats-provisioner manifest entries (SRC audit_publisher.rs:28-36). Metadata only: audit details JSONB must never hold message content or the decision token (ZDR); tool_action already carries data_category and zdr. Decisions are issued per effect, so persisting every decision is high volume (INF): record denials and effect-bound decisions with decision_ref, not every read decision. The admin role must come from the signed delegation claim (UserRole is already carried and verified but unused). A role-gated read path must not break the Trust Center tool_action aggregation, so keep a self-scoped member view. An export is a mass-exfiltration path and must itself be audited, bounded and token-scoped. Org retention for audit is a single global AUDIT_RETENTION_DAYS; per-org values (org_compliance.audit_log_retention_days) are dormant (see F-t1-051).",
+    "approachAdjustment": "Split out the access-control defect as an S security fix and ship it first: gateway requires admin or owner for org-wide reads, audit-core honors claims.UserRole and forces user_id to the caller for non-admins, and the settings panel is gated with the existing workspace-admin check. Then build cursor pagination, filters and the export token. For decisions, emit from user-core through its existing durable audit outbox, for denials and effect-bound decisions only. For agent invocations reuse session-core audit or run-lifecycle events. Add space_ref and agent_ref to cost-core usage entries through the producer, not by reading another plane database.",
+    "effortRevised": "M",
+    "effortNote": "M overall as written; the role-gating fix is S and should be tracked as its own W1 security item.",
+    "verdict": "reword",
+    "verdictReason": "The suspected read-path defect is confirmed by trace and should lead the item; and \"exporting signed decisions is cheap\" is wrong because decisions are not recorded anywhere today, so emission must be built.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-032",
+  "title": "Composer for real work: rich text, persistent drafts, queue and steer while a turn runs, attachments and paste chips, scheduled send, and ref-based context chips with a pre-send preview",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 8,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Replace the plain textarea with a rich-text composer that emits markdown plus mention refs, render human posts through the same ChatMarkdown as agent output, keep per-room and per-thread drafts across navigation and failed sends, wire the existing queue and steer backend into the Space composer, and add attachments (including folder drop), long-paste chips, model presets and scheduled send. Add 'Ask the agent about this' from canvas, list, file, artifact and Work/Knowledge/Activity selections: the selection travels as a typed reference chip, the exact payload is shown before sending, and the Model Plane frames it as quoted, capped, untrusted data.",
+  "whyItMatters": "The composer is where people and agents meet; today it is a disabled-while-sending textarea whose text is lost on navigation, and human posts render as plain text while agent posts get full markdown. Buzz's context hand-off shows how to give an agent context without copying content into the transcript.",
+  "referenceBestPractice": {
+   "bestSource": "grokbot (Tiptap chat editor, send journal and delivery states); buzz (revisioned drafts, markdown toolbar); qm (queue chips and steer); QM for a human+agent composer; Slack for the human messaging set; Buzz for selection-to-context; Buzz (SRC, highest-quality evidence in this category): context block capped at 100 items and 16,000 characters, control characters collapsed, values JSON-quoted, a fixed treat-as-data notice, and a byte-identical payload preview before signing",
+   "others": [
+    "slack",
+    "teams",
+    "Slack (formatting toolbar, clips, send-later)",
+    "Buzz (selectable list groups, count menu, discuss action, capped context block builder opening an agent chat or channel)",
+    "QM (SRC) app bar with select, marker, draw and capture posting snapshots via postMessage",
+    "Grok Bot design mode (SRC)"
+   ],
+   "prevalence": "[R-t1-01-08] Rich composer 4 of 5 and drafts 4 of 5 (table-stakes); scheduled send 3 of 5 (common); queue/steer and reliable send 1 of 5 each (unique) [R-t1-12-05] composer 2 of 5 (Slack, QM; common, likely under-counted since attachments are industry-standard, INF); selection-to-context 1 of 5 (Buzz; unique) [R-t1-08-08] in-page context: 1 of 5, unique; annotate: 2 of 5, differentiator",
+   "mechanism": "[R-t1-01-08] grokbot: Tiptap/ProseMirror with a restricted schema (paragraph, lists, code, link, mention chip) serialised to markdown on send, Shift+Enter as a user setting, dir=auto per paragraph. buzz: draft keyed by (room, thread) holding text, mentions, attachment refs and a revision; clearing writes an empty tombstone with a higher revision so late async completions cannot resurrect it. grokbot send pipeline: client nonce, local journal, server dedupes by message id, bubble confirms on transcript echo, typed delivery ACCEPTED|DUPLICATE|REFUSED and an UNKNOWN_DURABILITY state. qm: editable queue chips while a run streams and a steer promotion through a durable RunSignal. Scheduled send fires through the normal send path with the author's authority rechecked at fire time. [R-t1-12-05] Composer state {text, attachments[], chips[], loadout}; a paste handler turns text over N characters into a chip atom labelled from its first line; loadout presets upserted with cap 8; a slash token parser opens a command menu from a registry; scheduled send writes a job owned by the message plane. Buzz: buildContext(selection) produces a quoted, capped block of object refs and the action opens an agent chat or new channel with the block pre-attached as visible chips. [R-t1-08-08] buildContextBlock(selection) produces JSON-quoted values with caps; the prompt adds a fixed instruction that quoted values are data; the UI renders the exact string to be appended and the user confirms. Annotate: a bar script inside the sandboxed frame captures the selection (DOM path plus box) and an annotated screenshot and posts it to the parent with origin checks; the parent attaches it to the composer as typed context."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:147",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:744-747",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:329-336",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:136-137",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:38-44",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:165-205",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2184-2219",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:597-772 (two-row textarea, model picker, skill chips, reply banner, ZDR refusals surfaced)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:106-192 and components/SpaceKnowledgePanel.tsx:82-243 (read-only lists, no selection)",
+    "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:181",
+    "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:263",
+    "apps/Model Plane/rust/services/model-gateway/src/author_guidance.rs:194",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+   ],
+   "gap": "[R-t1-01-08] The composer is a plain textarea (rows=2) disabled while a send is in flight; human turns render as a plain paragraph while agent turns use ChatMarkdown; draft text is a component-local signal lost on navigation or failure. The gateway accepts an idempotency_key for the append decision (generated per request when absent) but no client-stable key was found in the chat client, and Session Core dedupe by key was not verified. Queue/steer backend exists (invocation queue route and re-minted append decision per queued message) but only /chat uses it. No human scheduled send (agent crons only). [R-t1-12-05] No attachments, formatting, emoji, slash commands, clips, scheduled send, presets or paste chips, and no multi-select or \"ask an agent about these\" action. Every send is an AI invocation. [R-t1-08-08] Model Plane already applies injection defense and a treat-as-data notice to untrusted retrieved and tool content, but it was not verified that room artifacts or selected context pass through it. The Space composer has no context chip, no pre-send payload preview and no annotate feedback (grep of the spaces components finds none). The comparator left this status unknown."
+  },
+  "approachOriginal": "[R-t1-01-08] Frontend Plane: Tiptap core (ProseMirror) wrapped for Solid with a restricted schema, emitting markdown plus mentions[] (F-t1-007 (R-t1-01-02)); render human turns with ChatMarkdown. Drafts: localStorage keyed (spaceRef, threadId) inside try/catch with revision tombstones, cleared on logout and honoring ZDR; restore on failed send. Send: client UUID idempotency_key passed to the gateway and bound into the Control decision digest (the append decision already takes one), Session Core dedupes on it, UI shows pending, failed (retry restores draft) and sent. Queue/steer: wire queueInvocationInput into SpaceRoomComposer so a message typed during a run becomes an editable queued chip showing its author, and promote to steer for an authorized member. Last phase: scheduled send through a Control schedule primitive that rechecks authority at fire time. Build one composer with category 12 (C-t1-12-009). [R-t1-12-05] Frontend Plane: composer state with chips that hold refs (documentId, runRef, threadRef) resolved by Data/Model planes at use time; attachments go through Data Plane documents with Space-bound ACL (never widened) and respect ZDR; slash menu reads human-eligible entries from shared/actions/action-registry.ts. Each append still needs a Control thread:append decision bound to the final bytes. Scheduled send needs an owner (Model Plane session or an Application Plane scheduler) and is deferred. Selection mode lands on the three read-only lists once chips exist. [R-t1-08-08] Frontend Plane: add Ask agent about this on canvas, list and file views producing a typed context chip with a byte-exact preview; for HTML artifacts add a selection overlay in the sandboxed viewer with origin-checked postMessage. Model Plane: render attached context as quoted untrusted blocks with caps, reusing the moderation injection_defense path, and bound what is attached by the viewer's own grants. Under ZDR drop screenshots from the payload.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t1-001 (R-t1-01-01) shared append so non-owners can queue and steer",
+   "F-t1-007 (R-t1-01-02) mention chips",
+   "Session Core dedupe by idempotency key",
+   "Control schedule primitive (scheduled send only)",
+   "Human-only message path (category 01)",
+   "Attachments in Data Plane (category 08)",
+   "Room skills (S3.5) for slash completion",
+   "F-t1-015 (R-t1-08-01) canvas",
+   "F-t1-013 (R-t1-08-03) file library",
+   "F-t1-014 (R-t1-08-02) HTML artifacts for the annotate phase"
+  ],
+  "planeOwner": "Frontend Plane (composer) with Model Plane (untrusted-context framing, dedupe) and Control Plane (scheduled send)",
+  "risks": "[R-t1-01-08] Editor bundle size and ProseMirror-in-Solid integration. Digest-bound decisions must include the nonce to stay replay-safe. Steer by a non-owner needs the shared-append authority. Drafts in browser storage must be clearable under ZDR. Authority can drift between schedule time and fire time. [R-t1-12-05] Copying content into prompts would bypass owner ACL and ZDR, so pass refs. Content-bound append decisions complicate drafts and scheduled send. ZDR content must not reach external preview or embedding services. Attachments are table stakes in practice (INF): promote to priority if the category 01 human-only path lands first. [R-t1-08-08] Context bloat and screenshots may contain data the agent should not see under ZDR. postMessage origin validation. The annotate phase is polish and can slip.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 16,
+   "DOC": 3,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-01-013",
+   "C-t1-01-026",
+   "C-t1-01-042",
+   "C-t1-01-045",
+   "C-t1-01-027",
+   "C-t1-12-009",
+   "C-t1-12-028",
+   "C-t1-08-021",
+   "C-t1-08-008"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-032",
+    "status": "partial",
+    "exactGap": "The Space composer is a two-row plain textarea that is disabled while a turn streams and is cleared before the send starts, so a failed send loses the draft; it keeps no drafts, attachments, paste chips, human scheduled send or context chips (SpaceRoomComposer.tsx:147, 387, 745-746), and human posts render as plain text while agent posts use ChatMarkdown (SpaceRoomTimeline.tsx:329-336). The queue/steer backend is already Space-aware (gateway chat.rs:40-44 and json_handlers.rs:176-205 mint a fresh content-bound Control append decision; use-chat-controller.ts:2208-2223 passes spaceRef), but SpaceRoomComposer imports only streamChat and cancelInvocation (line 4). Home already has the pieces to extract (ZDR-gated draft hook, paste-to-attachment chips, attachment preparation, mid-run submit), no client idempotency key is sent (none in chat-client.ts; spaces.rs:137 generates one when absent), and chat document upload is user-scoped, not Space-bound (documents.rs:54).",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:4",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:147",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:376-402",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:597-630",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:745-746",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:329-336",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:56-70",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:137",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:605-626",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:40-44",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:176-205",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:54",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2184-2260",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:2000-2030",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:608",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:813-836",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:887",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:2489",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/home-draft.ts:1-60",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:67",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:82-110",
+     "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:183",
+     "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:260-266",
+     "apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql:1-30"
+    ],
+    "reuse": [
+     "useHomeDraft and home-draft-storage (sessionStorage, 400 ms debounce, ZDR gate via isLocalRetentionAllowed, identity-keyed) for Space drafts keyed by user, org, space and thread",
+     "DashboardComposer paste-to-attachment helpers (4000-char threshold, pastedTextAttachmentFile) and prepareChatAttachments, extracted into a shared module",
+     "queueInvocationInput client plus the gateway queue route, which already takes space_ref and re-mints a Control thread:append decision",
+     "ChatMarkdown for human posts (after the link rules in F-t1-030 land)",
+     "Model Plane moderation scan_injection and trust-class framing for untrusted context blocks",
+     "capability-core cron_schedules (Space-scoped, re-authorized per fire) for any later scheduled send"
+    ],
+    "constraints": "Every Space send needs a fresh Control thread:append decision bound to the exact bytes (spaces.rs inject_personal_thread_context), so drafts, queued chips and any scheduled send must re-obtain a decision at send time. All posts currently go through the chat/model stream and the Space router has no human-only post route (INF: every send is a model invocation), so a scheduled human post needs the category 01 human-only path first. Attachments must become Data Plane documents bound to the Space with a Control grant and must never widen an owner-plane ACL; today's chat document upload is user-scoped, and ZDR attachments must not reach external services. Drafts in browser storage must be cleared under ZDR (reuse the retention gate). The schedule primitive is owned by Model Plane capability-core cron_schedules, not Control. Steer by a non-owner needs the shared-append authority (F-t1-001). Context chips must pass refs, with the Model Plane framing them as quoted untrusted data and screenshots dropped under ZDR.",
+    "approachAdjustment": "Drop the Tiptap/ProseMirror editor: a markdown textarea with a small toolbar and live preview gives most of the value without the bundle and Solid integration risk, so demote the rich-text editor. Reuse the existing ZDR-aware useHomeDraft instead of building revision tombstones (sessionStorage is tab-local, so the cross-tab resurrection race the tombstones solve does not arise). Wire queueInvocationInput into SpaceRoomComposer (backend already Space-aware) and restore the draft on a failed send, render human posts through ChatMarkdown, and extract the Home composer's paste chips and attachment preparation rather than rewriting them. Correct the owner of scheduled send to Model Plane capability-core and defer it. Split the context-chip 'Ask the agent about this' work into its own item that follows the canvas, file and artifact surfaces.",
+    "effortRevised": "L",
+    "effortNote": "As one bundle it is closer to XL. Split: drafts, failed-send restore and human markdown rendering are S; queue/steer wiring is M; attachments and paste chips need a new Space-bound upload path (L); scheduled send and context chips are separate L items; the rich-text editor is demoted.",
+    "verdict": "reword",
+    "verdictReason": "The composer gaps are real and the Space-aware queue backend and ZDR draft hook make the first slices cheap, but the item bundles six features, overbuilds the editor and drafts, and mis-assigns the schedule primitive.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-033",
+  "title": "SPA realtime client layer: client-supplied idempotency key, send states with in-place optimistic row, normalized store with version guards, offline vs service-down banner",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 9,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Make the composer generate an idempotency_key per send and reuse it on retry (a new key only when the content changes), expose queued, sending, accepted and failed states, and key the timeline row by that key until the canonical id arrives from the stream, reconciling in place. Replace per-component fetches with a Solid store keyed by entity id that stream frames and fetches patch with version guards (a write supersedes an older in-flight read). Add a connectivity service that probes a no-auth gateway health route to tell offline from service-down and shows a banner with the last-fresh time.",
+  "whyItMatters": "The gateway generates its own idempotency key when the composer omits one, so a client retry after a timeout creates a second append and a second billed AI turn. A store that push frames can patch is needed to apply the stream cleanly, and the room should explain unreachable states instead of showing stale data. These are small, cheap changes with direct cost and trust payoff.",
+  "referenceBestPractice": {
+   "bestSource": "Grok Bot (send journal with stages queued, prepared, dispatching, accepted-awaiting-echo; resource state machine with stale-while-revalidate and write-supersedes-read guards); Slack for connectivity states",
+   "others": [
+    "Buzz (content-addressed event ids with ON CONFLICT DO NOTHING; optimistic-<uuid> row swapped on success keeping the render key)",
+    "QM (idempotency keys and 5-minute replay window at every ingress)",
+    "Teams (central data layer with normalized cache; DOC/SRC)",
+    "Slack (online, slackDown, offline via unauthenticated api.test probe; sleep and wake forwarded)"
+   ],
+   "prevalence": "3 of 5 for idempotent sends (common); 2 of 5 for a normalized data layer; 3 of 5 for connectivity awareness (common); optimistic in-place insert 1 of 5",
+   "mechanism": "Client generates a send id on Enter and persists it with the draft; server insert is ON CONFLICT (tenant, send_id) DO NOTHING and returns was_inserted; the client marks accepted only when the echo with the same send id arrives. Resource<T> = {state: loading, ready, failed(prev), empty, unavailable, value, version}. Probe a cheap no-auth health endpoint on connection errors, listen to online/offline, visibilitychange and page freeze/resume, and resync on resume."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:136-137,605-613",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:386,402-473,524-595",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:35-145",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:273-338",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:363-460",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs:2598",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:91"
+   ],
+   "gap": "SRC verified: spaces.rs required_or_generated invents an idempotency_key when the client omits it, and no idempotency reference appears in the Space composer or lib files. Control append decisions already bind the key and payload digest, so only the client key is missing; whether Session Core dedupes on it was not verified (grpc.rs:2598 derives an idempotency hash for the message event). The timeline updates only on the next poll, data fetches are per component, and there is no offline vs service-down banner or last-fresh label."
+  },
+  "approachOriginal": "Composer (SpaceRoomComposer.tsx): generate the key per send, store it with the pending exchange, send it in the append body so spaces.rs passes it into the Control thread:append decision; confirm Session Core dedupes on (thread, key) and returns the existing turn, otherwise add it in append_message_in_tx. Keep approvals and pins deliberately non-optimistic. Store: createStore keyed by entity id with version guards and explicit resource states, keeping the existing gap-not-empty rendering as the unavailable state. Connectivity: small service using the existing gateway unauthenticated /health route (apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:91, rate-limit exempt) as the probe plus online/offline, visibilitychange and freeze/resume hooks feeding the watchdog of F-t1-003 (R-t1-09-01) and a room banner. Coordinate with F-t1-032 (R-t1-01-08) (composer states and queueing).",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Session Core dedupe on idempotency key (verify)",
+   "F-t1-003 (R-t1-09-01) for echo-based confirmation",
+   "F-t1-032 (R-t1-01-08) composer work"
+  ],
+  "planeOwner": "Frontend Plane",
+  "risks": "Content-bound decisions: a retry with edited content must get a new key. Store refactor churn across SpacePage components. Gateway health probe must stay unauthenticated and content-free.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 18,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-09-007",
+   "C-t1-09-008",
+   "C-t1-09-025",
+   "C-t1-09-027"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-033",
+    "status": "partial",
+    "exactGap": "The gateway already honors a client-supplied idempotency_key for Space thread create and append (spaces.rs required_or_generated at :136 and :192; the key is not in FORGED_SPACE_AUTHORITY_FIELDS) and Control binds it into the decision digest, but the composer never sends one and nothing dedupes (SRC): Control decisions are stateless signed tokens, and Session Core append_message_in_tx assigns a fresh ULID and derives the event idempotency hash from message id and sequence, not from the client key. The composer sends through the SSE POST /api/v1/chat/stream with one in-flight exchange (streaming, done, stopped, error), blocks while submitting and does not use the existing resumeStream/resume route that the main chat controller uses; the timeline is a 6 s poll with a latestThreadRequest ordering guard and a module-level published store (space-live-work.ts), and there is no offline versus service-down banner, only a threadsUnavailable flag. The unauthenticated static /health route exists in the gateway and is proxied by nginx, but it reports nothing about upstream planes.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:34-47,120-195",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:191-192,605-625",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:376-480",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1811-1858",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:32",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:78-110,239-290",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:1-145",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:2432-2442,2598-2640",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0002_events_and_ordinals.sql:34-37",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:296-400",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:91,204",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/nginx.conf:91",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:389"
+    ],
+    "reuse": [
+     "gateway required_or_generated and the Control thread-append decision, which already accept and bind a client key and a content digest",
+     "chat-client resumeStream and the gateway /api/v1/chat/stream/resume/{request_id} route plus the use-chat-controller recovery logic",
+     "session-core events unique index on (org_id, idempotency_key) and derive_idempotency_hash",
+     "space-live-work.ts published store and the SpacePage latestThreadRequest guard as the minimal store and version guard",
+     "gateway /health (rate-limit exempt, nginx-proxied) as the reachability probe"
+    ],
+    "constraints": "Plane ownership (SRC/INF): the effective dedupe has to live in Session Core (Model Plane), not only in the Frontend Plane, because Control tokens are stateless and the gateway holds no dedupe state; the item lists Frontend Plane as sole owner. The events unique index is per org on idempotency_key, so a raw client key would collide across users and threads (INF): Session Core must namespace it, for example a hash of org, thread, author and key, and compare the content digest so the same key with different content is a conflict, not a silent return. A retried POST also starts a new agentic run, so dedupe must cover run start (or the client must reconnect through the existing resume route when it already holds a request id) or the second billed turn still happens. ZDR: the dedupe record may hold only the hashed key and content digest, never content. Space authority is unaffected because the decision still binds subject, Space and revision.",
+    "approachAdjustment": "Re-scope into three slices. (1) Idempotency end to end (Model plus Frontend): the composer generates a key per send and reuses it on retry; Session Core derives a namespaced dedupe hash for append and run start, returning the existing message or request id; where the client already has a request id from the connected frame, reconnect with resumeStream instead of re-posting. (2) Connectivity banner (S): probe /health plus navigator online and visibilitychange events, shown with last-fresh time. (3) Descope the normalized store: keep the existing published store and ordering guard until server push lands (F-t1-003); coordinate send states and queueing with F-t1-032.",
+    "effortRevised": "M",
+    "effortNote": "Unchanged at M only if the store refactor is descoped; the Session Core dedupe is a Model Plane change and the main cost.",
+    "verdict": "reword",
+    "verdictReason": "Core idea is right and cheap, but the dependency \"verify Session Core dedupes\" resolves negatively (it does not), the owning plane includes Model, and the normalized-store part is optional given existing guards.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-034",
+  "title": "Scalable room timeline: server-computed windows with exact cursors and reply summaries, virtualised rows with scroll anchoring, jump-to-latest and history paging",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 10,
+  "wave": "W2",
+  "quickWin": true,
+  "summary": "Add a Session Core query and gateway route that returns windows of top-level threads with reply count, last reply time and participants kept at write time, a keyset cursor on server seq and id and a limit+1 has_more probe. Window the SpaceRoomTimeline rows with a pure, tested anchoring policy (hold the anchor on prepend, auto-scroll on append only while pinned to the bottom, otherwise show Jump to latest), page older turns on scroll, support jump to thread or date, and keep aria-setsize/posinset.",
+  "whyItMatters": "Every 6 s poll reloads the full thread list and then fetches each transcript (N+1); with push and streaming the view will jump. Buzz's cursor windows and anchoring policy are the tested pattern.",
+  "referenceBestPractice": {
+   "bestSource": "Buzz (NIP-CW timeline windows: top_level, include_summaries, composite until + before_id cursor, thread_metadata computed at ingest); Buzz (written, tested anchoring policy on a patched virtual list, mobile IME handling)",
+   "others": [
+    "Grok Bot (FLIP animation for rows shifting under late content, epoch-keyed layout cache)"
+   ],
+   "prevalence": "[R-t1-09-07] 1 of 5; unique [R-t1-12-06] 2 of 5 (Buzz, Grok Bot); differentiator",
+   "mechanism": "[R-t1-09-07] Maintain thread_metadata (reply_count, last_reply_at, participants) at write time; page with WHERE (created_at, id) < (until, before_id) ORDER BY created_at DESC, id DESC LIMIT n+1 and return summaries inline; reject client timestamps beyond a skew bound or order by server seq instead so keyset order is replica-safe. [R-t1-12-06] Virtual list with measured row heights; anchoring state {pinnedToBottom, anchorRowId, anchorOffset}: on prepend preserve anchor offset, on append scroll only if pinned, show Jump-to-latest when not pinned and new rows arrive; ResizeObserver plus FLIP animates siblings when a row grows, disabled under reduced motion."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:193-204",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:78-87",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:134-416 (plain <ol>; MAX_TURNS_PER_POST = 30 at line 50; no scrollTop or scrollIntoView use anywhere in features/spaces)",
+    "apps/Frontend Plane/verevonv3/package.json (no virtualisation library; solid-js ^2.0.0-rc.0)"
+   ],
+   "gap": "[R-t1-09-07] The full thread list loads on every poll with no paging, no jump-to-date and no reply summaries, each post fetches its own transcript (N+1), and deep links with thread_id are ignored. [R-t1-12-06] No virtualisation, no scroll anchoring and no paging: the full thread list loads on every 6 s poll, so the view will jump once realtime or streaming lands."
+  },
+  "approachOriginal": "[R-t1-09-07] Session Core (apps/Model Plane/rust/services/session-core): add a Space timeline-window query over threads with origin=space, with reply summaries stored at append time; expose through model-gateway and a gateway route GET /api/v1/spaces/{id}/timeline?before=&limit=. Order by server seq from F-t1-003 (R-t1-09-03) rather than client timestamps. Summaries and participant lists are filtered by per-thread read decisions. SPA: virtualised list in SpaceRoomTimeline.tsx fed by the store of F-t1-033 (R-t1-09-06); fetch bodies lazily per visible post. [R-t1-12-06] Frontend Plane: a windowing layer for the timeline with a standalone anchoring-policy module and lifecycle tests, plus a turn-paged history call from Model Plane through the gateway. Because the app is on Solid 2.0 RC with no virtual-list dependency, first confirm that @tanstack/solid-virtual works on Solid 2, otherwise implement windowing with IntersectionObserver and measured heights.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Session Core query support for thread summaries",
+   "F-t1-003 (R-t1-09-03) for server seq",
+   "F-t1-033 (R-t1-09-06) store",
+   "Typed row model (F-t1-004 (R-t1-12-03))",
+   "Turn-based history paging API in Model Plane",
+   "Push realtime (category 09) is the consumer that makes this necessary"
+  ],
+  "planeOwner": "Model Plane (Session Core windows) with Frontend Plane (gateway route, virtualised timeline)",
+  "risks": "[R-t1-09-07] Summaries must respect per-thread read decisions and not leak participants of threads the reader cannot see. Backfilling reply summaries for existing threads needs a resumable job. [R-t1-12-06] Virtualisation breaks find-in-page and screen-reader reading order unless handled; Solid 2 RC compatibility of third-party list libraries; unmeasured rows cause scroll jumps.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-09-022",
+   "C-t1-12-014"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-034",
+    "status": "partial",
+    "exactGap": "No cursor, windowing or summaries exist anywhere on the path: the gateway route takes only limit (default 80, max 200) and Session Core's ListThreadsRequest has no cursor, so posts beyond the newest 80 are unreachable in the room; the SPA sorts all threads ascending in a plain ordered list with no scroll anchoring, jump-to-latest or virtualisation and re-reads the list every 6 s. The N+1 transcript fetch is real only on first load (each post's resource is keyed on thread updated_at, so polls refetch only changed posts). A room 'reply' is a turn inside the thread and normalizeTranscriptTurns keeps only the first 30 turns (MAX_TURNS_PER_POST), so the newest turns of a long post are silently dropped; session-core has no reply_count, last_reply or participant fields.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:710,951-953,1086-1260 (GET threads route; limit only; per-request Control shared read decision; response returns full array)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1157 (limit default 80, clamp 1-200)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:78-87,293-298 (SPACE_TIMELINE_POLL_MS = 6000, interval re-read)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:50,60-75,137-170,193-208 (MAX_TURNS_PER_POST=30 keeps first 30 turns; ascending sort by updated_at; transcript resource keyed on updated_at)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:157-181,672-690 (getSpaceThreads has no cursor; per-thread transcript call)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:1954-1967 (distance-from-bottom autoFollow and scrollToBottom, an in-repo anchoring precedent)",
+     "apps/Frontend Plane/verevonv3/package.json:26-36 (no virtual-list dependency; solid-js ^2.0.0-rc.0)",
+     "apps/Model Plane/proto/model_plane/v1/sessions.proto:958-985 (ListThreadsRequest: limit, space_id, origin, read decision; no cursor)",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:5503-5596 (list_threads: sort key derived through lateral joins on last message, pinned first, LIMIT only; audience-revision ceiling filter)",
+     "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs:10,651-663 (ListRuns after_run_id cursor, limit and has_more probe: in-repo keyset precedent)",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:150-155 (clamp_thread_limit)",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7779-7810,8010-8030 (ThreadSummaryResponse fields; no summaries)",
+     "Grep of apps/Model Plane/rust/services/session-core for reply_count|turn_count|last_reply|participant: only an unrelated message_count check and a migration comment (negative)"
+    ],
+    "reuse": [
+     "chat controller distance-from-bottom and scrollToBottom logic (use-chat-controller.ts:1954-1967) as the basis for a pure anchoring policy module",
+     "session-core run listing's after_run_id/has_more cursor shape (run_service_grpc.rs) as the in-repo keyset precedent",
+     "gateway shared_thread_read_decision flow (fresh Control decision per request) for every page",
+     "existing unread-since-last-visit marker (space-unread.ts) for the jump-to-latest/new-messages affordance",
+     "createElementHeight shared helper for measured heights if virtualisation is later needed"
+    ],
+    "constraints": "Session Core (Model Plane) owns threads and messages, so the cursor and summaries belong there and flow through model-gateway to the Rust gateway; the Frontend Plane cannot compute them. Cursors must carry no authority: every page re-runs the Control shared read decision and the audience-revision ceiling already applied in list_threads, and summary participants must be filtered per reader so a reply count cannot leak a thread the reader may not see. Keyset order needs a persisted sort key: the current order is computed at read time from the last message, so a (pinned, last_activity_at, id) cursor needs a stored last_activity_at (or message sequence) column plus an index, not a derived expression. ZDR threads are persistence-free and never appear in the listing.",
+    "approachAdjustment": "Ship the client-only slice first (S): fix the first-30 truncation by paging the transcript from the newest turn backwards, add jump-to-latest and pinned-to-bottom anchoring on poll using the chat precedent and a pure tested policy module, keep aria-setsize/posinset, and try content-visibility/IntersectionObserver per the UI audit before adding a virtual-list dependency (verify solid-virtual on Solid 2 RC only if needed). Then the server slice (M): migration adding a persisted last_activity_at and turn_count/last_turn_at/participant ids maintained at append time, a before/limit+1 has_more query in Session Core, a gateway route with before/limit, and lazy transcript fetch per visible post. Treat 'reply summaries' as per-thread turn summaries, since replies are turns in the post, and drop the dependency on F-t1-003 server seq unless it ships first.",
+    "effortRevised": "L",
+    "effortNote": "Raised from M: the change spans a Session Core migration and query, model-gateway, the Rust gateway, the SPA windowing and an anchoring module with tests. The client-only slice stays S and is the real quick win.",
+    "verdict": "reword",
+    "verdictReason": "The gap is real and absent in code, but the item mis-describes the N+1 (polls refetch only changed posts), misses that posts beyond 80 and turns beyond 30 are silently invisible, and its keyset cursor ignores that the sort key is derived at read time, so the approach needs a persisted activity column and a split into client and server slices.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-035",
+  "title": "Attention outside the open tab: installable PWA, content-free Web Push with service-worker Open/Reply, in-tab toasts, tab-title and app badge",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 11,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Add a web app manifest, a versioned service worker (build-id-keyed shell cache, reconnecting page, push and notificationclick handlers) and an install affordance. Add Web Push (VAPID) subscriptions per device in notification-core where the push payload is only an opaque wake plus a notification id; the service worker fetches the notification through the gateway and renders it, honouring hide-preview, with Open and Reply only (an approval opens the approval view, never approves from a toast). In the tab, add one toast store fed by the attention stream, a tab-title and favicon count and navigator.setAppBadge from the unread map with a monotonic projection, and optional per-signal sounds.",
+  "whyItMatters": "There is no manifest, service worker or push, so an agent that finishes or needs approval while the tab is closed cannot reach anyone. Buzz's content-free wake push is the reference pattern that fits ZDR; the native desktop shell (5 of 5 references) can come later on top of this.",
+  "referenceBestPractice": {
+   "bestSource": "qm (installable single web build with phone mode) for the PWA surface; slack for the aggregated unread state behind tray and badge; Buzz (content-free wake push); Slack for toasts with inline reply and action buttons; Teams (in-app toast panel and banners); Grok Bot for the badge projection; Slack for sounds",
+   "others": [
+    "buzz (native mobile apps, badges, running agents in tray)",
+    "teams (presence-aware tray icon, jump list)",
+    "grokbot (monotonic unread projection feeding the badge)",
+    "Slack (grouped toasts, reply input, content-free logs)",
+    "Teams (wake-for-calls path, dismissal and suppression reasons)",
+    "Grok Bot (permission state reported to the server, active-device routing)",
+    "Slack (HTML toast window, 13-14 named sounds, tray and overlay cues)",
+    "Buzz (per-slot sounds)"
+   ],
+   "prevalence": "[R-t1-11-01] Installable PWA 2 of 5 sources (qm, buzz) = differentiator; unread badge/tray state 3 of 5 (buzz, slack, teams) = common. Presence outside the open tab is treated as table stakes by every native client. [R-t1-05-05] 4 of 5 sources across push, native toasts and permission handling; common [R-t1-05-08] 4 of 5 sources; toasts common, badge and sounds table-stakes",
+   "mechanism": "[R-t1-11-01] One web build with a shared breakpoint constant for CSS and JS and a visualViewport listener to keep the composer above the keyboard (qm); web manifest plus service worker for app shell and Web Push; Badging API fed by an aggregated unread count; Slack derives a three-state icon (rest/unread/highlight) plus a count tooltip from the same aggregate. [R-t1-05-05] Buzz: the device registers an encrypted, expiring (at most 30 days), installation-scoped lease with self-only filters; after read-authorization checks the server queues a wake; a blind gateway sends a constant payload; the client wakes, fetches pending items through the authenticated API, verifies and renders locally, so neither the push provider nor the gateway sees content. Slack builds a ToastGeneric toast from the normalised payload with grouped header, avatar, reply input and action buttons; the reply dispatches with channel, thread and trace ids and logs only non-content fields. Grok Bot reports {platform, os_permission, can_ask_again, in_app_enabled} per device so the server skips denied devices; Slack throttles macOS re-prompts (3 per session, 10 minutes apart). On the web the equivalent is showNotification with actions plus a notificationclick handler. [R-t1-05-08] Teams draws its own toast panel (corner, compact or comfortable density, grouped collections, in-place update) and a separate web-layer banner system, distinguishing in-context banners from OS toasts. Grok Bot computes the badge from the same roster as the sidebar, skips muted or hidden items, and rejects stale snapshots by epoch and sequence so the number never moves backwards. Slack stores a sound id per event type and plays it in the web layer when visible, otherwise passes it to the OS notification."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/index.html:1-15",
+    "apps/Frontend Plane/verevonv3/index.html:10",
+    "apps/Frontend Plane/verevonv3/nginx.conf:69",
+    "apps/Frontend Plane/verevonv3/nginx.conf:102-105",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:280-290",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css:44084-44110",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:101",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:192",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs:17-30",
+    "apps/Application Plane/notification-core/internal/notification/delivery_worker.go:91-94",
+    "apps/Frontend Plane/verevonv3/src/features/tickets/lib/ticket-bulk-actions.ts",
+    "apps/Frontend Plane/verevonv3/src/features/voice/speech-playback.ts"
+   ],
+   "gap": "[R-t1-11-01] Responsive workroom layout and dark theme ship, but index.html links no manifest, the title is the static string \"verevonv3\", and a source grep (src, public, vite.config.ts) finds no service worker, Push API or setAppBadge use outside the demo guard. Unread counts exist only as navbar badges polled on a timer. Cannot be installed and cannot notify when the tab is closed (SRC; also stated in the dated parity audit, DOC). [R-t1-05-05] A Novu adapter exists but is disabled by default, and provider-side ZDR is not proven. The delivery worker marks any ZDR request failed with zdr_async_delivery_unavailable, so ZDR orgs get no push. There is no service worker, Notification API use or PushManager in the web app (INF from grep, low risk) and no permission or device-state reporting. No OS or browser notifications exist at all. [R-t1-05-08] A grep of verevonv3 src found toast code only in ticket bulk actions and global.css, no notification sounds (the only audio code is voice read-aloud), and no Badging API use or title count. A shared notice component under another name could exist outside these greps, so status rests on negative searches (INF)."
+  },
+  "approachOriginal": "[R-t1-11-01] Frontend Plane (verevonv3): add public/manifest.webmanifest plus icons and link it in index.html; hand-rolled or vite-plugin-pwa service worker that precaches the shell keyed by the build id from F-t1-024 (R-t1-11-04) and never caches /api, Space transcripts or media (ZDR); serve the worker script and index.html with no-cache (nginx.conf:102-105 gives every .js file a one-year immutable header, so sw.js needs its own location, and the CSP comment at nginx.conf:69 assumes no workers, so check worker-src/manifest-src); push handler and Open/Reply actions exactly as specified in this item (R-t1-05-05) (subscription storage and fan-out stay in Application Plane notification-core, payload carries ids only); title \"(n) Verevon\" and setAppBadge from the same unread map as this item (R-t1-05-08), skipping muted rooms; manifest protocol_handlers (web+verevon) and share_target route through the resolver from F-t1-039 (R-t1-11-03) and the share target from F-t1-070 (R-t1-06-12). Native tray with a running-agent list is deferred to F-t1-073 (R-t1-11-09). [R-t1-05-05] Application Plane (notification-core): store Web Push subscriptions per device with the permission state; enqueue a wake through the S4.4 ledger (F-t1-060 (R-t1-05-10)); lift the ZDR refusal only for the wake class whose payload is constant and content-free. Gateway: a scoped, short-lived token for the service worker's fetch of /notifications/{id}. Frontend Plane: register a service worker; render with Open and Reply actions; Reply posts to the right thread without opening the app; approvals never act from the toast. Active-device suppression: reuse the gateway's presence calls to keep a renewable activity lease (store only the current lease, no log) and default to sending when unsure; this is the device-routing half of the cross-device cluster. Use Novu only for non-ZDR orgs, if at all. [R-t1-05-08] Frontend Plane: a notification store in a shared module consuming the F-t1-009 (R-t1-05-02) stream and F-t1-008 (R-t1-05-01) signals, rendered by a toast stack (max N, timeout, pause on hover, in-place update for agent progress). Compute the title and favicon badge and setAppBadge from the same unread map as the sidebar, applying updates only on newer sequence numbers. Sounds via Web Audio when the tab is visible, with settings in the F-t1-008 (R-t1-05-04) preferences. Keep scope to agent-attention, not Slack-level polish.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t1-024 (R-t1-11-04) (service-worker cache invalidation)",
+   "F-t1-039 (R-t1-11-03) (route resolver for protocol and share handlers)",
+   "F-t1-008 (R-t1-05-01) payload and signals",
+   "F-t1-060 (R-t1-05-10) delivery ledger",
+   "Service worker in verevonv3",
+   "Scoped token for session-less fetch",
+   "F-t1-008 (R-t1-05-04) hide_preview",
+   "F-t1-009 (R-t1-05-02) unread map and stream",
+   "F-t1-008 (R-t1-05-01) signals",
+   "F-t1-008 (R-t1-05-04) preferences"
+  ],
+  "planeOwner": "Frontend Plane (manifest, service worker, toasts, badge) with Application Plane (push subscriptions and fan-out in notification-core)",
+  "risks": "[R-t1-11-01] Stale service-worker caches pin users to an old bundle (pair with F-t1-024 (R-t1-11-04)), and the current nginx rules would cache sw.js for a year unless exempted; iOS web push works only for installed PWAs; payloads and cached responses must never carry message text from ZDR Spaces; badge counts must respect per-Space mute. [R-t1-05-05] Session-less service-worker fetch needs a narrowly scoped token; iOS web push limits; any third-party push provider needs ZDR proof even for a constant payload; approving effectful actions out of context; preview text leaking ZDR content into the OS notification centre; browsers block repeated permission prompts permanently. [R-t1-05-08] Toast spam from agents (rate limits must apply); badge drifting from the sidebar if computed separately; the Space definition lists 'notification polish' as a non-goal (docs/space-defenition.md:352-353), so keep this minimal; native tray and OS focus cues wait for a desktop shell.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 34,
+   "DOC": 1,
+   "INF": 4
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-11-035",
+   "C-t1-11-011",
+   "C-t1-05-026",
+   "C-t1-05-012",
+   "C-t1-05-011",
+   "C-t1-05-015",
+   "C-t1-05-014",
+   "C-t1-05-018"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-035",
+    "status": "absent",
+    "exactGap": "Nothing for out-of-tab attention exists in the SPA: index.html links only an icon and the static title 'verevonv3', public/ has no manifest or service worker, and a source search finds no service worker, Notification/Push API, setAppBadge or dynamic document.title outside the demo guard, so the only cues are in-tab navbar unread counts and sidebar unread dots (CoreNavbar.tsx:86-90, CoreSidebarSpacesPanel.tsx:288-317). notification-core has no web-push path: 'push' is Novu vocabulary behind a disabled-by-default adapter (runtime/client.go:48, 105, 201-219), every ZDR delivery is marked failed (delivery_worker.go:92), and its consumers cover only inbox, mail-task, social, session and org-deletion events, none for Space posts, agent-run completion or approvals. The delivery ledger the item depends on (S4.4) is unbuilt: the Watch primitive deliberately stops at 'recorded' (capability-core watch.go:6-9).",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/index.html:1-15",
+     "apps/Frontend Plane/verevonv3/public (directory listing: no manifest or service worker)",
+     "apps/Frontend Plane/verevonv3/nginx.conf:69-70",
+     "apps/Frontend Plane/verevonv3/nginx.conf:103-114",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:86-90",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:272-292",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx:35",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:288-317",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:1-60",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/notifications.rs:17-30",
+     "apps/Frontend Plane/verevonv3/docs/space-defenition.md:352-353",
+     "apps/Application Plane/notification-core/internal/notification/delivery_worker.go:70-96",
+     "apps/Application Plane/notification-core/internal/runtime/client.go:48",
+     "apps/Application Plane/notification-core/internal/runtime/client.go:105",
+     "apps/Application Plane/notification-core/internal/runtime/client.go:201-219",
+     "apps/Application Plane/notification-core/internal/feed/types.go:12-20",
+     "apps/Application Plane/notification-core/internal/consumers (file list: control_session, conversation_followed_message, mail_task_drafted, social_publish_failed, org_deletion)",
+     "apps/Model Plane/go/services/capability-core/internal/watch/watch.go:6-9",
+     "apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql:1-30"
+    ],
+    "reuse": [
+     "space-live-work.ts unread and live-thread maps plus the Convex spaceReadMarkers and mark_space_read route as the single unread projection for title, favicon and app badge",
+     "notification-core feed, preferences, subscribers and delivery-worker framework (recipient resolver, retention check) as the home for push subscriptions",
+     "capability-core Watch primitive and the future S4.4 delivery ledger as the source of agent-finished and needs-approval events",
+     "SpaceApprovalPanel and the Space #chat deep link (activity-grammar.ts:199) as the Open target; approvals are never decided from a toast",
+     "nginx.conf per-extension locations as the pattern for a dedicated no-cache /sw.js and manifest location"
+    ],
+    "constraints": "Subscription storage and fan-out belong to Application Plane notification-core, not the Frontend; the wake payload must be an opaque id with no content, and delivery_worker.go currently refuses every ZDR request, so the content-free wake needs an explicit carve-out decided by Control retention policy rather than a blanket lift. Producing the events is Model Plane (run completion, approval requested) and Control (membership), so the item depends on notification-core gaining Space/run/approval consumers that do not exist. Whatever the service worker renders must be authorized for the recipient at read time (the existing recipientResolver pattern) and must not widen Space access; approvals stay with the run owner. nginx.conf:103 gives every .js file a one-year immutable header, so /sw.js needs its own no-cache location, and stale-worker pinning needs build-keyed invalidation. Space definition lists notification polish as a non-goal, so keep scope to agent attention. Any third-party push provider needs ZDR proof even for a constant payload.",
+    "approachAdjustment": "Slice it. Slice A (S, Frontend only): tab title with an unread count, favicon dot, navigator.setAppBadge and an in-tab toast, all fed from the existing space-live-work unread/live projection and honoring per-room mute. Slice B (M): manifest, icons, install affordance and a minimal service worker that caches only the shell, with its own nginx location. Slice C (L): Web Push, which first needs notification-core producers for Space, run and approval events and the S4.4 delivery ledger. The scoped short-lived token for the service worker is probably unnecessary because a same-origin service-worker fetch carries the session cookie (INF, needs a quick test); an expired session can simply render a generic 'Open Verevon' notification. The browser permission prompt should come from an explicit setting, not on load.",
+    "effortRevised": "XL",
+    "effortNote": "As written (PWA plus Web Push plus toasts plus badge, with five dependencies) it is more than L; sliced, A is S, B is M and C is L, and C is blocked on notification-core event producers and the delivery ledger.",
+    "verdict": "reword",
+    "verdictReason": "The need is real and nothing exists, but the status is absent rather than partial, the item is three slices of very different size, and push cannot start until notification-core has Space-event producers and a ZDR-safe wake class.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-036",
+  "title": "Room automations: create schedules, watches, calendar and event triggers from the room, with fire outcomes, recipient consent, goals and run traces",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 12,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "The backend already re-authorizes every schedule fire through Control; finish the product around it. Expose schedule create, pause and test-run in the Work tab through spaces.* actions (also agent-callable), finish the Watch primitive so process output and external events wake the room, add a calendar-event trigger beside cron (prep before a followed meeting, follow-up after) on the existing calendar read action plus approval-gated event creation, and show a fire log with an outcome vocabulary (ok, silent, deferred, failed, refused), stored recipient acceptance, skip-with-note when a member left, pause while nobody reads, optional goal runs with a verifier, and run traces with cancel, steer and retry. Let agents draft automations as triggers for a human to approve rather than cloning a no-code builder.",
+  "whyItMatters": "Scheduled and event-triggered agent work is table stakes among the agent references (4 of 5) and workflow automation in Teams, Slack and buzz; creation lives in Settings today and the Work tab is read-only.",
+  "referenceBestPractice": {
+   "bestSource": "qm; qm (fire keys, outcomes, loops with gates, runAs and recipient rules, goals governor); grokbot (routine panel, pause-while-away); teams (reports with reviewers); Grok Bot (SRC, medium): calendar as an agent trigger source plus approval-gated scheduling and prep packs",
+   "others": [
+    "slack",
+    "teams",
+    "buzz",
+    "buzz (heartbeats)",
+    "Teams (REA): native calendar and Outlook add-in",
+    "Slack and QM: integrations or an agent skill only"
+   ],
+   "prevalence": "[R-t1-06-06] Workflow automation: 3 of 5 (table-stakes); crons, loops and watches: qm only (unique) [R-t1-07-10] Scheduled/event-triggered work 4 of 5 (table-stakes); per-fire reauthorization and consent 2 of 5 (differentiator); goals with verifier 1 of 5 (unique); reviewed reports 1 of 5 (unique) [R-t1-03-08] 4 of 5 (Teams native; Grok Bot, Slack and QM via integration or agent skill); table-stakes only in the integration-level sense.",
+   "mechanism": "[R-t1-06-06] qm crons support timezone, one-shot and sub-day intervals, destinations, runAs modes, a fire log and shared-scope editing; deterministic fire keys and slot claims through a job queue. Loops add a playbook, ledger, ship gates and a governor that quarantines on consecutive failures (shadow run before arming). Watches turn background process output into new turns. Slack Workflow Builder adds broad triggers and steps, run history and AI-drafted workflows; buzz's YAML engine with step traces is the best open implementation. [R-t1-07-10] QM: deterministic fireKey per (cron, scheduled time), a thread per fire, outcomes running|ok|silent|deferred|failed|refused, a stranded-fire sweep, webhook ingest acked after durable store, Loop items with gates auto|hold; runAs owner|scopeFloor|scopeShared with membership skip notes at fire time, audience built from the current members and recipient acceptance stored. Grok Bot pauses routines whose output is unread and asks on return. QM goals: GoalRecord{objective, floor, capTokens, governor} with a governor every 3 rounds or 30 min returning continue|complete|step_back|pause. Teams reports: schedule {once|daily|weekly|monthly, approvers}, draft -> reviewers edit/approve -> share to room. [R-t1-03-08] OAuth calendar connector reads events; triggers {event or series, offset} start agent runs; a schedule_meeting tool produces an approval card \"Schedule this meeting?\" and then a provider action; repeat model {frequency, interval, days_of_week, month_day, weekday_of_month, time, timezone}."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:426-596",
+    "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:886-1000",
+    "apps/Model Plane/go/services/capability-core/internal/watch/routes.go:15-33",
+    "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:171-189",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2200-2230",
+    "apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go:20-33 (each schedule slot is reauthorized with the scheduler credential and the signed decision is verified before task creation)",
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:148-152 (fire key = next fire time, idempotency key = schedule id + fire key)",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities/scheduled_run_authorizer.go:17-60 (execution intent bound to template digest, fresh Control authority per run)",
+    "apps/Model Plane/go/services/capability-core/internal/watch/watch.go:1-40 (Watch: a standing intent bound to one resource, one Space, one member's authority, cursor-based)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:421-590 (Control-decided schedule creation inside a personal Space)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:171-189 (Work tab lists schedules and their run threads)",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/calendar_read.go:1-60 and service.go:208,294 (SRC: read-only calendar.events for Outlook via Graph and Google, Europe/Oslo windows, paging token; its header says live proof against a provider is still pending)",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:103,113 (SRC: calendar.events listed as a non-write agent tool for Google and Outlook)",
+    "apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts:257-275 (SRC: Calendar nav entry is the social post calendar)",
+    "Baseline (SRC): agent cron schedules exist and are filtered by space_ref in the gateway Space work projection"
+   ],
+   "gap": "[R-t1-06-06] Space schedules exist with a Control create decision bound to a template digest and a separate fire decision per tick, but creation lives in Settings and the Work tab is read-only. The watch surface is mounted in capability-core but its routes require a user principal (humanCaller rejects service identities: a watch belongs to a person), and watches are not exposed to rooms (S4.3). Background processes are listed but do not wake the room; there are no message/reaction/join triggers, no loops, ledger or governor, no run trace in the room, no cancel/steer/retry (S4.5) and no destinations beyond the room (S4.4). There is no per-agent personal home; the Work tab and Activity cover review. [R-t1-07-10] Per-fire reauthorization, fire keys and a Watch primitive are shipped (SRC). Missing or unconfirmed: create/pause/test-run from the room UI, an outcome vocabulary and silence sentinel visible to people, stored recipient consent, pause-while-unread, event triggers wired from Watch to runs, goal governor, scheduled reports with reviewers. [R-t1-03-08] The comparator recorded this as absent, but the read side exists: an agent can already list calendar events through integration-corev2. Missing: any write operation (create or update event), a calendar-event trigger beside cron, a prep-pack run template, a Space surface for upcoming meetings, and live verification of the read action. Writing needs extra OAuth scope and a reconnect."
+  },
+  "approachOriginal": "[R-t1-06-06] Frontend Plane: schedule create/edit in the Work tab via spaces.* actions with a Control decision per create and per fire. Model Plane capability-core: finish S4.3 (process-output adapter first, one adapter per PR) so a watch can be created under the delegating person on behalf of an agent run and wake the room; add Space triggers beside schedules (webhook per F-t1-047 (R-t1-06-03), room events later). Frontend Work cockpit (S4.5): run trace per automation, per-agent lens filtered to the viewer's delegations, cancel/steer/retry. Let agents draft automations for human approval; expose approval steps only once suspend/persist/resume is one tested path. Add loops with a human ship gate and a cost governor last. [R-t1-07-10] Frontend: create/pause/test-run in the Work tab by extending the existing Control-decided create path (spaces.rs inject_personal_schedule_create_context) from personal Spaces to room Spaces. Model Plane capability-core: a fire-log outcome enum and silence sentinel, recipient acceptance stored per schedule, skip with a note when a member is gone (audience from current members at fire time), pause schedules whose output stays unread and ask on return, and Watch events as triggers that reuse the same per-fire reauthorization with turn_origin=automation. Optional goal record {objective, token cap, governor every N rounds: continue|complete|step_back|pause} with an independent verifier. Reports: a schedule whose output is an approval card for reviewers and then a share-to-room step (builds on item F-t1-010 (R-t1-07-05)). [R-t1-03-08] Model Plane (capability-core schedules and watches): new trigger kind calendar_event {connection, event or series, offset} implemented first as a poller over windowed calendar.events reads, no webhook dependency; the run executes in the Space with the room agent. integration-corev2: add calendar.create_event as is_write behind the existing effect-bound authorization (payload digest, idempotency key); Frontend: approval card \"Schedule this meeting?\" in the room and an Upcoming meetings read-only section in the Work tab. Prep pack uses Space thread history plus Data Plane retrieval under the Space decision. Meeting links found in events are offered to F-t1-066 (R-t1-03-04) with consent.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "S4.1 Space-scoped cron extension",
+   "S4.3 Watch primitive",
+   "S4.4 durable delivery",
+   "S4.5 unified Work cockpit",
+   "F-t1-019 (R-t1-06-01) agent self-API",
+   "Approval continuation",
+   "Control turn_origin (item F-t1-010 (R-t1-07-05))",
+   "Item F-t1-027 (R-t1-07-11) (cost caps for unattended runs)",
+   "S4.4 delivery outbox for completion delivery",
+   "integration-corev2 calendar connectors with write scope",
+   "Agent scheduler in capability-core",
+   "In-room approval cards",
+   "Live proof of calendar.events on a real provider"
+  ],
+  "planeOwner": "Model Plane (capability-core triggers, Watch, goals); Control Plane (per-fire decisions, consent); Ingestion Plane (calendar actions); Frontend Plane (Work tab)",
+  "risks": "[R-t1-06-06] Runaway cost (needs caps and a governor); approval steps that fail instead of suspending; automations that re-trigger themselves (tag executions); stale-authority fires must be disabled visibly. [R-t1-07-10] Spam and cost from unattended runs: silence sentinel, caps, pause-while-away. Goal loops can spend a lot: token cap and verifier. [R-t1-03-08] OAuth scope breadth and calendar data sensitivity under ZDR. Polling cost. The read action has not been proven live per its own header.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 37,
+   "DOC": 10,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-06-06] apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (S4.1 Space-scoped cron, S4.3 Watch primitive, S4.4 delivery, S4.5 Work cockpit) [R-t1-07-10] S4.1 Space-scoped cron, S4.3 Watch, S4.4 delivery and S4.5 Work cockpit in docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md (S4.1 and S4.3 are visible in code; room-side controls are not). [R-t1-03-08] integration-corev2 calendar_read.go header: agent read tool planned as F6, live proof F10 (read only; no trigger or write)"
+  },
+  "sourceClusters": [
+   "C-t1-06-025",
+   "C-t1-06-024",
+   "C-t1-06-012",
+   "C-t1-07-054",
+   "C-t1-07-055",
+   "C-t1-07-057",
+   "C-t1-07-058",
+   "C-t1-03-014"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-036",
+    "status": "partial",
+    "exactGap": "The read side and the fire-time authority are shipped: the Work tab lists a room's schedules and their fired runs (SpaceWorkPanel.tsx, gateway space_work), and capability-core's Sweeper reauthorizes every slot through Control with a fire key and idempotency key (cron/sweeper.go:148-160). Creation exists only in Settings and only for the caller's personal Space, because Control's schedule-create, fire, run and step decisions and the watch create/observe decisions all call validatePersonalAuthority (so a room-bound schedule or watch cannot be created or fired today, and ZDR is refused outright); the gateway also reports watches as watches_not_built and the Watch package has one source (background process output) behind humanCaller. Missing on top: room UI to create/pause/test-run, any watch exposure or non-process source, calendar triggers and any calendar write (calendar.events is read-only and its header says live proof is pending), a user-visible outcome vocabulary (cron_fires holds only pending/failed and the Settings UI does not surface it), stored recipient consent, goals/governor and run traces with cancel/steer/retry.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:171-189 (read-only routines note: creation is an admin write in Settings; room creation is held by release gates)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:421-596 (inject_personal_schedule_create_context: Control-decided create; with no space_ref it resolves only the caller personal Space)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1620-1630 (work projection names delivery_ledger_not_built and watches_not_built as unavailable sections)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2322-2345 (space_work composes runs and schedules; schedules are filtered by space_ref, not authorized by it)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:70-98 (explicit space_ref in a cron create still requires org admin; personal path relaxed)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/schedule_create_decision.go:62-97 (validatePersonalAuthority, entitlement, ZDR forbids durable schedule creation)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:111-128 (personal Space required; recipient audience must be exactly the current subject)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:143-185 (shared-Space contracts exist only for thread create and retrieval)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/schedule_fire_decision.go:84-96 (fire decision also personal-only)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/scheduled_run_decision.go:95-135 (run/execute decision personal-only, ZDR forbids scheduled runs)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/scheduled_step_decision.go:152-162 (step decision personal-only)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/spaces.go:803-808 (watch create decision resolves personal evidence)",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/spaces.go:894-905 (schedule create decision resolves personal evidence)",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:42,148-160,226-262 (AuthorizeFire per slot; cron_fires rows are pending or failed)",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:893-1000 (space_ref filter on list; create verifies the signed Control token and persists audience/revision bindings)",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/watch.go:1-35 (Watch is one resource, one Space, one member; stops at recorded, delivery is S4.4)",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/watch/routes.go:15-60 (routes require humanCaller; service identities refused)",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/cmd/main.go:975-985 (process output is the only watch source today)",
+     "C:/dev/CoresSystem/apps/Ingestion Plane/integration-corev2/internal/actions/calendar_read.go:1-70 (calendar.events read only; live proof pending; no write)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:101-113 (calendar.events listed as a non-write tool for Google and Outlook; no calendar create)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx:80-108,235 (create form, pause toggle; per-fire failures not surfaced)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs:1-30 (existing per-run notify-me watcher through capability-core)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2007-2040,2200-2232 (S4.1 and S4.5 plan text and execution evidence; live proof still open)"
+    ],
+    "reuse": [
+     "Control-decided create path (gateway inject_personal_schedule_create_context plus schedule_template digest) and capability-core CronHandler/Sweeper with ControlFireAuthorizer",
+     "Settings CronSchedulesSection create form and updateCronSchedule enable/disable toggle as the pause/resume contract",
+     "Gateway space_work projection and SpaceActivityFeed for the Work tab list",
+     "cron_fires rows and fired-run threads as the fire-log source",
+     "capability-core watch package (store, sweeper, process_output adapter, humanCaller rule)",
+     "gateway run_watchers.rs per-run completion watcher (capability-core to notification-core) for completion notices",
+     "calendar.events read action and execution-core integration_tools catalogue as the poller input",
+     "integration-corev2 effect-bound provider-action authorization for an approval-gated calendar.create_event"
+    ],
+    "constraints": "Control owns authority and today every schedule/watch contract is personal-Space only with a default-deny schedule_fire_entitled claim, so room schedules need new shared-audience Control contracts (Application recipient snapshot, audience taken from current members at fire time, skip-with-note) mirroring ValidateForSharedThread; a UI form alone cannot ship it. ZDR: Control refuses durable schedule creation and scheduled runs under ZDR, so room automation must be hidden or refused with a typed reason in ZDR rooms. A Watch is a person's standing intent (service identities rejected), so an agent-drafted watch is created under the approving human's authority; delivery is S4.4 and Watch deliberately stops at recorded. Model proposes, Ingestion executes: calendar.create_event must go through execution-core's provider-action path and integration-corev2 authorization, and a calendar trigger runs under the connected user's own provider connection, so the room must name whose connection it uses.",
+    "approachAdjustment": "Do not describe room creation as a Frontend change that extends the personal path: lead with a Control slice (shared-audience variants of schedule create, fire, run and step, then watch create/observe). Then ship in independent slices: (1) fire-log and outcome surface over existing cron_fires and run threads plus pause/resume from the Work tab via the existing update route; (2) room-bound schedule create with stored recipient acceptance; (3) expose the Watch routes through the gateway for process output once S4.4 delivery exists; (4) calendar-event poller trigger and approval-gated calendar.create_event after live proof of calendar.events and the extra OAuth scope; (5) goals, loops with ship gates and reviewer reports are demoted to a later wave.",
+    "effortRevised": "XL",
+    "effortNote": "As bundled it spans Control, capability-core, gateway, integration-corev2 and the Work tab and contains two L slices (shared-audience Control contracts, calendar trigger plus write) before goals; the fire-log and pause slice alone is S-M.",
+    "verdict": "reword",
+    "verdictReason": "The backend authority and fire-key work already ships, so the item must say that creation is personal-only at Control (not just a missing form), name the slices, and demote goals, loops and calendar writes. The core need (room automation with visible fire outcomes) stays valid.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ }
+]

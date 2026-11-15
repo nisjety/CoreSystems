@@ -1,0 +1,1080 @@
+[
+ {
+  "finalId": "F-t1-048",
+  "title": "Room visibility, directory and self-join (org-public or private), with a late-joiner history rule",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 24,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Add open/private visibility to named rooms in Control, a paged directory of org-public rooms the caller is not in (member count, description), and a self-join decision that grants exactly room membership with the default role; private rooms return not-found to non-members. Record join and leave sequence per membership so thread reads can be limited to a tenure window, and make membership-change and revocation delivery durable. Self-join must never widen the ACL on documents bound to the room.",
+  "whyItMatters": "Browse and join is table stakes in buzz, Slack and Teams; today a person sees only rooms they were added to. Control already stores a privacy_revision to build on.",
+  "referenceBestPractice": {
+   "bestSource": "buzz; slack",
+   "others": [
+    "teams (preview-before-join flexible channels)",
+    "qm (tri-state membership, deny-on-unknown fallback; sequence-bounded participant windows)",
+    "slack (public and private channels, no record in this category)",
+    "buzz",
+    "teams"
+   ],
+   "prevalence": "[R-t1-02-02] 3 of 5 for discovery and self-join (buzz, teams, qm); tenure windows 1 of 5 (qm); table-stakes for discovery, unique for tenure [R-t1-04-05] 3 of 5 sources; table-stakes (Slack evidence is DOC only; buzz open channel directory is SRC)",
+   "mechanism": "[R-t1-02-02] room.visibility in {open, private}. GET /rooms/directory returns open rooms in the org the caller is not in, paged and separate from the member poll. POST /rooms/{id}/join self-grants the default role only for open rooms; private rooms 404 to non-members; when membership is unknown, deny. QM adds ParticipantWindow{validFromSeq, validToSeq} on membership rows that filters transcript reads and approvals, and a roster-version fence on enqueue. [R-t1-04-05] Rooms carry visibility (public or private); the directory lists public rooms in the org with member count and description; join is a self-add membership allowed only for public rooms; an external directory lists cross-org connections with status (pending, active)."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-735 (no directory, browse, join or visibility route; listing is filtered to the caller's Control index)",
+    "apps/Application Plane/convex-core/convex/schema.ts:546-580 (spaces table has name but no visibility or topic field)",
+    "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:51-66 (membership rows carry no valid_from or sequence); privacy_revision exists at line 38",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:35-43",
+    "apps/Control Plane/user-core/internal/nats/shared_publisher.go:196-214 (revocation events on plain NATS, loss tolerated)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2747-2810",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacesIndexPage.tsx"
+   ],
+   "gap": "[R-t1-02-02] No visibility, directory, self-join or tenure rule. Fencing by authority and audience revision is strong, but late-joiner history and durable delivery of revocations are not covered. [R-t1-04-05] Space listing is filtered to the caller's Control index (spaces.rs:2747-2810). A grep in this step found only an is_organization_room flag (the org's own room, pinned in the sidebar) and no visibility field under Control Plane user-core/internal/spaces, so there is no public visibility, browse route or self-join route."
+  },
+  "approachOriginal": "[R-t1-02-02] Control Plane (user-core): add visibility to registered_spaces (bump privacy_revision on change) and a self-join decision that writes a membership only for open rooms and org members, keeping thread_read_entitled and the owner-plane knowledge ACL in force. Store join and leave sequence per membership and carry the reader's window in the thread-read decision (shared_thread_read_decision.go) so Session Core filters transcripts; make the history rule a room setting (full history default for open rooms, strict window default for guests). Application Plane: mirror visibility on spaces and add a directory query separate from the member list. Gateway: GET /api/v1/spaces/directory, POST /api/v1/spaces/{space_ref}/join. Frontend: browse dialog in CoreSidebarSpacesPanel. Move membership_changed to JetStream or an outbox. [R-t1-04-05] Control Plane (user-core spaces): add visibility to the Space record and a self-join decision that adds the caller as a member of an org-public Space and nothing else; bound documents keep their own owner-plane ACL checks. Gateway: GET browse route returning only org-public Spaces of the caller's active org. Frontend: directory page with search by name and a Join button. Membership changes must propagate to Session Core reliably.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Room role management (F-t1-022 (R-t1-02-01)) for the default join role",
+   "Model Plane Session Core thread-read filtering by window",
+   "Durable membership events (JetStream)",
+   "Space visibility model (Control)",
+   "Reliable membership-change propagation to Session Core (today plain, lossy NATS)",
+   "Room membership and roles (rooms/teams category)"
+  ],
+  "planeOwner": "Control Plane (visibility, join decision, tenure) with Model Plane (tenure-window read filter) and Frontend Plane (directory page)",
+  "risks": "[R-t1-02-02] A self-joiner could read history from before they joined; decide the tenure rule first (Slack shows full history, QM windows strictly). Open-room names in the directory must respect residency and ZDR. Self-join must never widen an owner-plane ACL, so the knowledge intersection still applies after join. [R-t1-04-05] A public room with bound documents may look like it grants document access; the UI must show that documents stay owner-ACL gated. Joining a room must never widen an owner-plane ACL.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 7,
+   "DOC": 2,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-02-010",
+   "C-t1-02-023",
+   "C-t1-04-012"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-048",
+    "status": "absent",
+    "exactGap": "No visibility, directory, self-join or tenure rule exists (SRC): registered_spaces has no visibility column (privacy_revision is only a revision counter), space_memberships has no valid_from or join sequence, the gateway route table has no browse or join route, and the sidebar and listing show only Spaces in the caller Control index (a non-member already gets 404, so private-by-membership is today the only mode). Session Core applies only a recipient-audience-revision ceiling to shared-thread reads (rows newer than the reader decision are dropped), never a floor, so any current member reads the full history. membership_changed is published by user-core through JetStream fire-and-forget (errors only logged, no outbox) and consumed by session-core with a plain NATS subscribe by design, so a missed event is never replayed; the item text says \"plain NATS\" for the publisher, which is slightly off.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql:10-66",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/authority.go:120-142,205-232",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/shared_thread_read_decision.go:40-140",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go:693-775",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/spaces.go:304-345",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/nats/shared_publisher.go:96-120,195-215",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:1796-1807,5438-5465",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/space_membership_nats.rs:1-30,90-116",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-735",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2744-2830",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3008-3020",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:25-70",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts:543-580",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts:260-290",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembers.ts:206-250",
+     "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:118-141"
+    ],
+    "reuse": [
+     "Control registered_spaces and space_authority_revisions (bump privacy_revision and membership_revision on visibility or join)",
+     "gateway control_space_index plus Application labels composition in list_personal_spaces (the directory can use the same intersect pattern)",
+     "Application spaces table for name and topic; SpacesIndexPage and CoreSidebarSpacesPanel for the UI",
+     "session-core audience-ceiling filter on messages and threads (basis for a floor, see approach)",
+     "Control ReplaceMemberships and the Application intent record for the membership write"
+    ],
+    "constraints": "ADR-0001 (SRC): Application owns Space name, kind and lifecycle; Control owns membership, privacy decisions and revisions, so visibility belongs in Control and name or description in Application, and the directory must compose both in the gateway as the index already does. Membership writes today are an Application declarative full replace into Control (ReplaceMemberships deactivates managed users not declared, spaceMembers.ts:243), so a Control-native self-join would be revoked at the next sync of that room unless the self-join goes through the Application intent record or the sync is scoped by source (INF from SRC). Product intent is that team and external Spaces are visible only to explicit participants (SRC UI research doc), so org-public rooms are a deliberate Slack-style policy change: private by default and opt-in per org. Never widen an owner-plane ACL on join (ADR-0001). Room names in the directory must respect residency and ZDR. The tenure window needs a join marker: the existing per-message recipient_audience_revision stamp is a candidate floor (INF, low confidence, not traced through Application audience registration).",
+    "approachAdjustment": "Correct the premise: membership_changed already goes out over JetStream; the non-durable part is the plain-subscribe consumer in session-core (by design) and the absence of a publisher outbox. For self-join, pick the membership writer first (Application intent record versus Control source-tagged writes) and keep rooms private by default with org-public opt-in. Default the history rule to full history for open rooms, which is today behaviour and costs nothing, and defer the strict tenure floor to the guest work (F-t1-053). Split the item: visibility, directory and join is M; tenure window and durable delivery are the L part.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged at L, but recommend splitting; the visibility, directory and join slice alone is M once the membership writer is decided.",
+    "verdict": "reword",
+    "verdictReason": "Absence confirmed and the feature is table stakes, but the approach must resolve who writes room membership (declarative Application sync would clobber a Control self-join) and fix the NATS description.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-049",
+  "title": "Searchable people-and-agent directory with an agent-readable resolver",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 25,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Add a Control Plane directory search (org members and registered agents by name or email prefix) that returns only subjects the caller may see, expose it through the gateway to the add-member and DM pickers, and give agents a resolve tool that answers ok, ambiguous (with candidates) or none (with a reason).",
+  "whyItMatters": "Needed to add members, start DMs and group rooms (Teams-like team support) and for agents to address the right human. All five references have it; Verevon has per-Space rosters and an org member list but nothing searchable across the org.",
+  "referenceBestPractice": {
+   "bestSource": "teams",
+   "others": [
+    "buzz",
+    "qm",
+    "slack",
+    "grokbot"
+   ],
+   "prevalence": "5 of 5 sources; table-stakes",
+   "mechanism": "One picker resolves org directory, saved contacts and external users (external found only by exact email/SIP to prevent enumeration), with guest/external tags and chat/call/block actions; results ranked by recent interaction. qm adds resolver vocabulary for agents: ok, ambiguous, none, not-in-channel, unlinked login."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3019",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1157-1196"
+   ],
+   "gap": "A per-Space roster (person or agent kind, role) and an org member list exist. There is no searchable directory across the org or Spaces (a grep for directory or member-search routes in gateway orgs/ found none), no external or guest lookup, no contact actions, and no resolver with agent-readable errors."
+  },
+  "approachOriginal": "Control Plane (identity owner): GET /orgs/{id}/directory/search (name/email prefix, people and agents) returning only subjects visible to the caller; external lookup by exact email once external access exists. Gateway exposes it to pickers and to an agent resolve tool returning ok|ambiguous|none. Frontend: shared picker component used by add-member, DM start and the @ menu.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "DMs, group rooms and guest model (other audit categories)"
+  ],
+  "planeOwner": "Control Plane",
+  "risks": "Directory enumeration across orgs; agents resolving to the wrong person.",
+  "significance": 3,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 2,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-04-011"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-049",
+    "status": "partial",
+    "exactGap": "People side (SRC): org-core already serves GET /orgs/:id/members/search (name or email substring, active plus invited members, max 20 results, max 50 profile fetches), but the gateway never proxies it and nothing in the SPA calls it; the add-member picker instead lists every active org member from the gateway list_members route with no search box. Agent side (SRC): an org-wide agent registry already exists in the Application Plane (agentInstallationsForOrgForGateway, gateway GET /api/v1/agents/installations, ADR-0002, a presence-not-authority label surface) and the composer builds @-candidates from Space roster plus bound agents only, but nothing merges people and agents, and no agent-callable resolver returning ok/ambiguous/none exists in Model, Application or Control code (INF, from a negative grep of resolve_/lookup_/find_ patterns). The DM, group-room and guest targets the item names do not exist yet (Space kind is only personal/room/project/case), so a DM picker has no consumer today.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/handlers.go:955-1060",
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/server.go:98,120",
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/org/types.go:176-185",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs.rs:53-63",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs:173-196",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx:15-27,44-53,86-135",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/organization-client.ts:42-75",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:184-205",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts:477-512",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembers.ts:45-70",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts:546-560",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3180-3202",
+     "C:/dev/CoresSystem/apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md:34-60",
+     "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts:953-956",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/authority.go:205-222"
+    ],
+    "reuse": [
+     "org-core searchMembers handler and MemberSuggestion type (restrict to active members before exposing)",
+     "gateway orgs/members.rs list_members (auth-core list-members, already returns name and email)",
+     "Application registry: Convex agentInstallationsForOrgForGateway and gateway list_org_agent_installations (ADR-0002)",
+     "SpaceRoomComposer MentionCandidate model (person|agent) and the Control RosterMember shape (subject_type user|service)",
+     "gateway authorized_org_id pattern so the org always comes from the session, never from the client"
+    ],
+    "constraints": "Plane ownership (SRC): people identity is auth-core/org-core (Auth Core is the sole membership authority); the cross-Space agent registry is owned by the Application Plane per ADR-0002, so a Control-owned combined directory conflicts with that ADR for the agent half. ADR-0002 says the registry answers presence, not authority: a resolver result must never imply the caller may invoke the agent, which still needs Control roster/decision for the specific Space. org-core members/search is service-authenticated with no per-user delegation and also returns invited emails, so it must be exposed only through the gateway with the session org and active-only filtering. Cross-org or external lookup needs the cross-org identity and privacy contract the UI research doc requires (SRC: VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:128-132), so it must wait for F-t1-053. ZDR is not affected (names and emails only). The default ORG_MEMBERSHIP_LIMIT is 100 (SRC auth.ts:953-956), so client-side filtering of the existing list is enough at default scale.",
+    "approachAdjustment": "Do not make Control the directory owner for agents. Slice 1 (S): add a search field to the existing add-member picker, or expose org-core members/search through a gateway route that forces the session org and returns active members only. Slice 2 (M): compose people (org-core/auth-core) and agents (Application registry) in the gateway, and expose the ok|ambiguous|none resolver as an agent tool through the gateway/capability path with presence-not-authority semantics. Defer external and guest lookup to the guest model.",
+    "effortRevised": "M",
+    "effortNote": "Unchanged overall, but the people-search slice is S because org-core search and the roster list already exist; the agent resolver tool is the M part.",
+    "verdict": "reword",
+    "verdictReason": "Recommendation is valid but two premises are wrong: a people search already exists in org-core (just unexposed and with an invited-email leak), and the plane owner for the agent half is the Application Plane (ADR-0002), not Control. Also depends on DMs and guests that do not exist.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-050",
+  "title": "Meeting intelligence with consent: long-form transcription and an authority-scoped recap saved as a Space document, under a deny-by-default per-meeting AI policy",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 26,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Build the meeting-intelligence MVP from uploaded recordings first, then live calls: long-form speech-to-text with speaker labels and timestamps in the Model Plane, transcript segments stored as Data Plane knowledge units (not room posts), and a recap (decisions, action items with owners, chapters, citations to segments) written back as an editable Space document. Gate it with a Control-owned per-meeting policy {ai_access off|transcript_only|full, privacy_mode, ephemeral or retained answers, managers, locked fields} checked before any ASR, agent or recap reads audio or transcript, announced to all participants, default-off when externals are present.",
+  "whyItMatters": "Transcript and AI recap are table stakes in Teams, Slack and buzz, and the meeting-intelligence design (a meeting as a source type on existing retrieval, wiki and ZDR rails) is architecturally sound but has no code. Teams' consent controls must ship with it, not after.",
+  "referenceBestPractice": {
+   "bestSource": "Teams (REA): recap with notes, tasks, topics, chapters, speaker timeline, citations back to the recording and visibility derived from transcript access; Teams (REA): visible AI on/off, privacy mode that blocks Copilot and all agents, ephemeral versus retained answers by org policy, only selected people can change AI settings, admin-locked options shown as locked",
+   "others": [
+    "Slack (DOC): notes become a canvas in the huddle",
+    "Buzz (SRC): transcript segments are ordinary chat messages in the meeting channel",
+    "Slack (DOC): announce to all when AI notes start, default off with external guests",
+    "Grok Bot (SRC, medium): per-meeting or blanket consent card for the agent and an admin visibility setting (MANAGERS or EVERYONE)"
+   ],
+   "prevalence": "[R-t1-03-02] 3 of 5 (Buzz, Slack, Teams); table-stakes. Citations, attendance report and content-bin report are Teams-only. [R-t1-03-03] 2 of 5 (Teams, Slack) for AI policy, differentiator; Grok Bot adds consent for agent attendance; admin-locked indicator is Teams-only.",
+   "mechanism": "[R-t1-03-02] Audio to streaming or batch ASR with diarisation produces segments {speaker, t_start, t_end, text}; on meeting end a reasoning pass produces the recap with citations to segments; the recap is saved as an editable document or canvas in the room; action items become tasks only after human approval; recap visibility equals transcript visibility (no transcript access, no AI summary); attendance comes from roster events. [R-t1-03-03] Policy evaluated server-side before any agent or ASR reads meeting content. Enabling AI emits a system message to participants and a badge. Externals present means default off. Ephemeral answers are stored with a meeting-scoped TTL. Fields locked by an admin render as locked with the owner of the lock."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:43-54 (SRC: Meeting Scribe template summarises the text conversation only, decisions first, never invent)",
+    "apps/Channel Plane/docs/meeting-intelligence.md:18-58 and :136-150 (DOC: meeting as a source type, ownership table, phasing MVP upload to WhisperX through live bots)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:3955-4040 (SRC: dictation chains inference-core TranscribeSpeech with a cleanup pass; Azure Speech short audio plus an Azure OpenAI whisper deployment; refused with 412 for ZDR while no speech deployment is attested)",
+    "apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts:17-19 (SRC: dictation capped at 60 s and 1.4 MB)",
+    "Grep this session of apps/Model Plane for diariz: no matches",
+    "apps/Frontend Plane/verevonv3/docs/space-defenition.md:150-156 (DOC: agents participate only when mentioned or explicitly invoked)",
+    "apps/SPACE_AUTHORITY_ADR_2026-08-13.md (DOC: Control decisions already bind purpose, privacy class, third-party-processing allowance, retention, residency and ZDR)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:4900-4905 and zdr_posture.rs:277 (SRC: realtime voice calls decide_content_route and fails closed on ZDR)",
+    "apps/Frontend Plane/verevonv3/src/features/voice/voice-mode-state.ts:1-35 (SRC: zdr-unavailable error kind)"
+   ],
+   "gap": "[R-t1-03-02] A short-clip STT path already exists (the comparator note that no ASR exists is too strong), but it is dictation-sized: no long-form chunked or batch job, no diarisation, no segment timestamps, no transcript knowledge units, no recap document, no attendance, and no ASR option that satisfies ZDR tenants. Also, every room post is an AI turn today (SpaceRoomComposer.tsx:402-420), so transcript segments cannot be posted as room messages the way Buzz does. [R-t1-03-03] No meeting AI policy exists because there are no meetings. The building blocks exist (explicit-invocation rule, per-effect Control decisions with privacy and ZDR fields, fail-closed ZDR routing) but none covers meeting media or transcript, there is no locked-setting display on Space settings, and room roles are fixed to editor so there is no manager role to delegate AI control to."
+  },
+  "approachOriginal": "[R-t1-03-02] Model Plane: add a long-form transcription job beside TranscribeSpeech in inference-core (self-hosted WhisperX plus diarisation for sovereign and ZDR tenants, cloud ASR otherwise) returning segments with speaker, start, end, text and language, exposed through a model-gateway job route. Data Plane v2: ingest segments as knowledge units of source kind meeting with speaker and timestamp metadata so existing dense, sparse and graph retrieval work unchanged. Recap: Model Plane reasoning with the Meeting Scribe rules, written back as a wiki page or Space document through Data Plane contracts; action items proposed as tasks behind the existing approval cards (SpaceApprovalPanel). Control Plane: private-until-shared visibility with attendees as the default audience and the this item (R-t1-03-03) policy as precondition. Frontend: a Meetings section in the Space cockpit (SpaceCockpit.tsx tab list has chat, work, knowledge, activity, agent, members), upload-recording flow and a recap viewer with citation links. Attendance from call roster events. [R-t1-03-03] Control Plane (apps/Control Plane/user-core, spaces package): policy storage with org default and admin lock, plus new effects such as space.meeting.transcribe and space.meeting.ai_read whose signed decisions carry purpose and privacy class per ADR-0001. Application Plane enforces per meeting and emits the announcement event to the Space activity feed. Model Plane ASR and agents must present an allow decision and refuse otherwise, failing closed like decide_content_route. Enforcement sits on the data: transcript and recap knowledge units carry the policy revision so retrieval cannot leak them through a chat copy. Ephemeral answers use a meeting-scoped TTL. Frontend: policy chip in the call bar and meeting card; reuse the admin-locked affordance on existing Space settings.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Model Plane long-form ASR and diarisation provider",
+   "Data Plane knowledge units with time and speaker metadata",
+   "F-t1-029 (R-t1-03-05) meeting record",
+   "Space document surface (collaborative artifacts category)",
+   "Control Plane policy service and manager role (org-membership category)",
+   "ZDR propagation"
+  ],
+  "planeOwner": "Model Plane (ASR, recap); Data Plane v2 (transcript units); Control Plane (meeting AI policy)",
+  "risks": "[R-t1-03-02] Diarisation model licensing (pyannote gating). Hallucinated action items, so keep HITL. Visibility must follow transcript ACL on the data, not only the UI. Cost of streaming ASR and ZDR tenants needing self-hosted ASR. [R-t1-03-03] Policy bypass through side channels (an agent reading a chat copy of the transcript) unless enforcement is on the data. Retention TTLs must not conflict with legal hold.",
+  "significance": 5,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 4,
+   "SRC": 6,
+   "DOC": 4,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "[R-t1-03-02] apps/Channel Plane/docs/meeting-intelligence.md:136-150 (phases 1-3 are this item; docs only, no code)"
+  },
+  "sourceClusters": [
+   "C-t1-03-006",
+   "C-t1-03-007",
+   "C-t1-03-024"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-050",
+    "status": "partial",
+    "exactGap": "Only dictation-sized speech-to-text exists: model-gateway ai_dictate and inference-core transcribe_speech_as cap audio at 25 MB, the frontend caps a take at 60 s, nothing in Model Plane, Data Plane or the frontend does diarisation (grep for diariz, whisperx and pyannote found nothing), and ZDR tenants are refused until a speech deployment is attested. There is no meeting object, recap document, attendance or per-meeting AI policy, the Meeting Scribe template only summarises the text thread, and every room post is an AI turn so a transcript cannot be posted as messages. Data Plane v2 already has an audio/video segment consumer with start_ms/end_ms citation targets and local ZDR-safe embedding, but it keeps any transcript for display only and nothing in the repo produces its events, and Control's Space import, schedule and watch decisions require a personal Space, so a recap saved as a document for a shared room has no authority path yet.",
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:3952-4060 (ai_dictate: STT then cleanup, 25 MB cap, ZDR gate)",
+     "apps/Model Plane/rust/services/inference-core/src/grpc.rs:35,239-277 (transcribe_speech_as: 25 MB cap, zdr rejected unless attested, text and confidence only)",
+     "apps/Frontend Plane/verevonv3/src/features/voice/voice-recorder.ts:17-18 (60 s and 1.4 MB per take)",
+     "apps/Model Plane, Data Plane v2 services, frontend and gateway src (grep: no diarisation code)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:45-55 (Meeting Scribe summarises the conversation only)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:402 (every room post is a streamChat turn)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:43 (tabs: chat, arbeid, kunnskap, aktivitet, agent, medlemmer; no meetings)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceKnowledgePanel.tsx:1-40 and apps/gateway/src/domains/spaces.rs:712 (read-only listing of Space documents and wiki pages)",
+     "apps/Data Plane v2/services/embedding-engine-rs/src/media_consumer.rs:1-40,145-165,415-435 (audio/video segment arm, timestamps, transcript not embedded, local embedding)",
+     "apps/Channel Plane/docs/meeting-intelligence.md:3,38-58,136-144 (docs-only; ownership and phasing)",
+     "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go:111-128,261-272 (ValidateForImport requires personal authority)",
+     "apps/Control Plane/user-core/internal/spaces/personal_import_decision.go:68-78 (personal import decision, ZDR forbids durable import)",
+     "apps/Control Plane/user-core/internal/http/spaces.go:930-944 (only a personal import decision route exists)",
+     "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:52-70 (decision fields: purpose, privacy class, retention, ZDR; no widening of owner ACL)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3433-3475,3514-3527 (add member takes a member id and no role)",
+     "apps/Frontend Plane/verevonv3/docs/space-defenition.md:150-160 (agents act only when invoked)"
+    ],
+    "reuse": [
+     "ai_dictate and inference-core TranscribeSpeech provider chain (routing, language hint, ZDR gate, fail-closed decide_content_route pattern)",
+     "Data Plane text document ingestion and retrieval for transcript units, with the audio-segment consumer as an optional extra arm",
+     "Data Plane document and wiki write-back with documents.space_ref, and SpaceKnowledgePanel for listing the recap",
+     "SpaceApprovalPanel for action items proposed as approvals",
+     "Meeting Scribe agent instructions as the recap prompt seed",
+     "Control decision fields (purpose, privacy class, retention, ZDR) from ADR-0001 for the meeting policy effects"
+    ],
+    "constraints": "ZDR must propagate: no speech deployment is attested, so ZDR meetings need self-hosted ASR or must be refused fail-closed. The critical path is Control: import, schedule and watch decisions exist only for personal Spaces and forbid ZDR, so a recap document in a shared room needs a new shared-room import decision, and a manager role path is needed for AI-setting delegation (membership adds carry no role). Transcript and recap units must carry the meeting audience and policy revision at the Data Plane so Space membership never widens the owner ACL. Capture ownership is a Channel Plane docs-only question for live bots. The doc's claim that transcripts embed 'unchanged' does not hold for the media consumer, which does not embed transcripts, so use the text-document path with timestamp and speaker metadata (INF, not verified end to end).",
+    "approachAdjustment": "Resequence: (1) Control shared-room import decision and the meeting AI policy effects; (2) upload-recording flow with a long-form ASR job (self-hosted WhisperX plus diarisation for ZDR and sovereign tenants, cloud batch otherwise) extending the existing transcribe chain, emitting text knowledge units with start, end and speaker metadata; (3) recap written as a Data Plane document or wiki page bound to the Space, action items as approval cards; (4) the Meetings tab and policy chip. Do not say ASR is absent: a short-clip path exists and should be extended, not duplicated.",
+    "effortRevised": "XL",
+    "effortNote": "Was L. Long-form ASR with diarisation, a shared-room Control decision and policy, Data Plane ingestion with speaker metadata, a recap writer, a Meetings tab and a manager role path together are XL; split into the ASR and recap MVP (L) and the policy and authority work (M plus M).",
+    "verdict": "reword",
+    "verdictReason": "The gap statement is mostly right but it misses that the blocking piece is a shared-room Control decision rather than ASR, and it overlooks the existing audio-segment consumer and read-only Space knowledge listing. The effort and sequence need correcting.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-051",
+  "title": "Retention policies for rooms, files and agent sessions, plus shared-Space deletion on the existing saga",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 27,
+  "wave": "W3",
+  "quickWin": false,
+  "summary": "Add org and per-Space retention policies (keep, N days, ZDR) carried in Control's signed decision and enforced by per-plane sweepers that reuse the per-plane receipts of the Space deletion saga: room projections, Model Plane threads, messages and agent memory, sandbox-manager workspaces and process output, Data Plane documents bound to the Space, and notification feeds. Extend the saga from personal Spaces to shared Spaces with owner approval and write fencing. Legal hold overrides retention.",
+  "whyItMatters": "Retention is a gating enterprise question and a GDPR storage-limitation duty. Verevon has the hardest part already (cross-plane receipts, legal hold) but only for personal Space deletion, and nothing between keep-forever and ZDR.",
+  "referenceBestPractice": {
+   "bestSource": "slack",
+   "others": [
+    "teams (preserves edited and deleted originals in hidden compliance stores)",
+    "buzz (durable deletion engine with approvals and checkpoints)",
+    "qm (retention documented as absent)"
+   ],
+   "prevalence": "Retention: 3 of 5 (slack, teams, buzz doc); durable shared-space deletion: 1 of 5 (buzz). Common.",
+   "mechanism": "Policy objects at org, workspace, channel and DM scope; the most specific wins unless the org locks it, with a member override for private rooms. A scheduled sweeper deletes expired items across stores via deletion receipts; policy changes are audited and may need owner approval. Deletion: request, frozen inventory digest, owner approval, write fence, resumable executor with checkpoints, abortable until destruction starts, final receipt."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Control Plane/user-core/internal/spaces/authority.go:144-175 and migrations/018_space_effect_policies.up.sql (retention_class, residency, deletion_scope are opaque required strings on the per-org effect policy, bound into every decision; no sweeper consumes them)",
+    "apps/Application Plane/convex-core/convex (a grep for retention finds only a comment in spacePresence.ts:20; no sweeper)",
+    "apps/Control Plane/org-core/migrations/002_add_enterprise_fields.up.sql:30-43 and internal/org/types.go:60-68 (dormant org_compliance table: data_retention_days, audit_log_retention_days, data_residency, require_mfa, ip_allowlist; nothing outside org-core types reads it)",
+    "apps/Control Plane/org-core/internal/http/retention_posture_handler.go:1-50 (serves ZDR intent to Auth Core only, not a retention schedule)",
+    "apps/Application Plane/convex-core/convex/spaces.ts:484-1325, spaceDeletionReceipts.ts, schema.ts:718-820 and apps/Control Plane/user-core/internal/spaces/deletion_authorization.go (personal Space deletion saga, per-plane receipts, legal hold; personal-only by the S6.3 gate)",
+    "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:214-230 (agent_memory has an expires_at column; no sweeper seen)"
+   ],
+   "gap": "No retention configuration or sweeper for any plane, only an opaque label in decisions; the schedule columns in org-core are dormant; shared-room deletion is absent, and the saga migrations are not yet applied in staging (UI baseline)."
+  },
+  "approachOriginal": "Control: retention_policies (org default, Space override within an org lock) that set retention_class and a numeric TTL in the signed decision; retire or reuse org_compliance.data_retention_days. Application Plane: a sweeper over room projections that writes per-plane deletion receipts using the existing spaceDeletionOwnerReceipts schema and reconciler; each owner plane (session-core, agent_memory, sandbox-manager, Data Plane, notification feed) accepts a purge-before request. Shared-Space deletion: owner or manager approval decisions, write fence at the Application Plane, receipts from all planes, legal hold outranks everything. Frontend: retention section in Space settings and an admin default.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "deletion saga migrations 022, 023, 0026, 0027 applied in staging",
+   "legal hold",
+   "F-t1-031 (R-t1-10-05) (audit)",
+   "F-t1-006 (R-t1-02-05) (policy admin UI)"
+  ],
+  "planeOwner": "Control Plane (policy) with Application Plane (sweeper, shared-Space deletion)",
+  "risks": "Cross-plane consistency and honest receipts (partial or unknown must never read as deleted). Search and graph index purge. Copies in notification payloads. Historical Letta memory that cannot be correlated stays partial.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 10,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Deletion and export are planned and partly built: apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md S6.1 (deletion, export, retention proof) and S6.3 (personal-first rollout). A time-based retention schedule is not in the plan."
+  },
+  "sourceClusters": [
+   "C-t1-10-009",
+   "C-t1-10-036"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-051",
+    "status": "partial",
+    "exactGap": "Control signs retention_class, residency and deletion_scope into every Space decision (opaque required strings on space_effect_policies), but no plane has a time-based retention sweeper for rooms, threads, messages, agent memory or sandbox output: the only running sweeper is audit-core global AUDIT_RETENTION_DAYS purge, agent_memory.expires_at is only filtered at read time, org-core org_compliance retention columns are dormant, and Session Core runs.retention_class is only zdr, persistent or zdr_waived. The deletion saga (Application coordinator, per-owner receipts with honest unknown/partial states, legal hold, adapters for Data, Ingestion and Model) is personal-Space only, and Session Core delete_space_threads is bound to exactly one owner_principal_id, so shared rooms (threads owned by each author) cannot be purged by it. Shared-Space deletion, owner approval and write fencing are absent.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/authority.go:144-176",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/018_space_effect_policies.up.sql:1-30",
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/migrations/002_add_enterprise_fields.up.sql:31-43",
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/org/types.go:60-72",
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/retention_posture_handler.go:1-50",
+     "C:/dev/CoresSystem/apps/Control Plane/audit-core/cmd/server/main.go:93-96,150-185",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts:477-540",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts:1-56",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts:715-830",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceDeletionData.ts:1-30",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceDeletionModel.ts:1-30",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceDeletionIngestion.ts:1-30",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceDeletionReceiptReconciler.ts:1-12",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:6058-6130",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/retention_receipt.rs:1-60",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:211-235",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/memory_dedup.rs:1335-1360",
+     "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/api/space_deletion.go:1-40",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go:262-330"
+    ],
+    "reuse": [
+     "Control space_effect_policies (with policy_revision) as the signed carrier for the retention value",
+     "Application spaceDeletionOwnerReceipts, reconciler and per-owner delivery adapters (Data, Ingestion, Model) for honest receipts",
+     "session-core delete_space_threads and the Letta semantic-memory receipt flow, generalized from one owner to all authors of a Space",
+     "audit-core runRetention loop as the sweeper pattern",
+     "agent_memory.expires_at and the review_state expired value",
+     "Control legal-hold records (space_legal_holds) which already outrank deletion",
+     "org-core org_compliance.data_retention_days: reuse or retire, but decide explicitly"
+    ],
+    "constraints": "ZDR must propagate (SRC retention_receipt.rs:1-30): a zdr run persists no content, so a TTL policy applies only to persistent and zdr_waived content and must never weaken ZDR. Control decides the policy and signs it; each owner plane purges its own data and returns an honest receipt, and Application may only request a purge, never delete another plane data (no cross-plane DB access). Legal hold outranks any sweep. ADR-0001 puts the Space lifecycle and deletion coordination in Application and the authority in Control. The existing owner adapters are request-bound to a deletion_request_id and an owner principal, so a scheduled retention purge needs a different authority class and service scope (INF). The item states that saga migrations 022, 023, 0026 and 0027 are not applied in staging; I did not verify that. Search and graph index purge and copies inside notification payloads stay open risks.",
+    "approachAdjustment": "Phase it. (1) Add a numeric TTL to the Control effect policy (extend space_effect_policies rather than adding a new table) and build one sweeper in Session Core for threads and messages, which is the largest volume, plus the existing memory expiry. (2) Generalize owner adapters from \"delete this owner Space\" to \"purge before ts for this Space\" under a separate scheduled-purge scope. (3) Shared-Space deletion last, after owner approval and the write fence exist. Session Core purge must be re-keyed from (owner_principal_id, space_id) to space_id for shared rooms, since each author owns their threads.",
+    "effortRevised": "XL",
+    "effortNote": "L to XL: six owner planes need new time-bounded purge contracts and a new authority class, Session Core purge is owner-bound and must be redesigned for shared rooms, and shared-Space deletion adds approval and write-fence work. Phase 1 alone is L.",
+    "verdict": "reword",
+    "verdictReason": "Gap is accurate (policy label exists, no sweeper anywhere, saga personal-only), but the item hides how much of the saga is owner-bound; present it as phased work with the Session Core TTL sweeper first.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-052",
+  "title": "Typed timeline entries: server-signed system messages, a card registry with a safe fallback, link previews through Quarry, and pointer embeds for artifacts",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 28,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Give Session Core entries a content_type plus payload, render by type through a card registry with a neutral unsupported-update fallback, and let the server emit typed system entries from Control and Application events (member added or removed, agent bound or paused, rename, history window). Add link previews fetched by Quarry with SSRF guards and stored as a snapshot so recipients never contact the third-party site, provider link cards classified in the browser, and an embed block that stores only {kind, id} for a canvas, list, record or file and renders it under the viewer's own grant with a request-access stub.",
+  "whyItMatters": "Teams has 87+ typed system notices including agent added or removed, and buzz signs notices so clients cannot forge them; Verevon shows membership and binding changes only in a separate Activity tab. Pointer embeds keep artifacts under their own ACL instead of copying content into messages.",
+  "referenceBestPractice": {
+   "bestSource": "grokbot (typed previews with unknown and retired fallback cards); teams (87+ typed system notices incl. agent added or removed); buzz (relay-signed notices, sender-side link snapshots); Teams Loop (REA) for pointer embeds with their own ACL and a sharing warning; Grok Bot (SRC) for provider link-card classification",
+   "others": [
+    "slack",
+    "Slack typed cloud pickers as hardened child windows (SRC)"
+   ],
+   "prevalence": "[R-t1-01-10] Typed content 2 of 5 and system messages 2 of 5 (differentiators); link previews 3 of 5 (common) [R-t1-08-10] pointer embeds: 1 of 5, unique; provider cards and pickers: 2 of 5, differentiator",
+   "mechanism": "[R-t1-01-10] Entry {content_type enum, payload oneof}; the preview projection is typed; the client renders a fallback card for unknown types and logs once per type. System entries {type, actor, subject, details} are emitted by the server from authority events and are never client-authored (buzz signs them with the relay key). Link preview: the sender side fetches under SSRF guards (private-IP block, redirect cap, 256 KB page and 2 MB image caps, per-host cooldown), extracts OG metadata, re-hosts a sanitized image and stores a signed snapshot with the message; recipients never contact the third-party site. Slack lets apps enrich unfurls. [R-t1-08-10] Message body contains an embed {artifact_kind, artifact_id}; the renderer fetches the artifact under the viewer's grant and subscribes to live updates; a viewer without access sees a request-access stub; pasting elsewhere reuses the same id; the share dialog warns when posting to an audience wider than the artifact ACL. Link cards use host-pattern to provider and path-pattern to kind tables and never fetch content."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto:287-298",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:329-336",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx:56-83",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:1-12",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:629-772"
+   ],
+   "gap": "[R-t1-01-10] AppendMessageRequest carries role (user, assistant, system, tool), content and a metadata struct but no content_type; room posts render as markdown or plain text. Membership, grants and receipts appear in the separate Activity tab, not in the room timeline (checked in features/spaces: no member-added or agent-bound timeline rows). No link previews. Baseline had no record for typed content or system entries, so a final check of Session Core message conventions is still needed. [R-t1-08-10] Room posts cannot embed any artifact (chat artifacts are inline SSE payloads, not pointers to an independently authorized object). No link previews or provider cards in rooms; the baseline recorded attachments and link previews as absent in the room, and the integration-core provider actions are not offered as a picker (not re-verified)."
+  },
+  "approachOriginal": "[R-t1-01-10] Model Plane proto: add content_type and a payload oneof (or a namespaced metadata.kind as an interim to avoid a breaking migration); existing rows default to text. Application Plane: project Control membership and binding events and Space lifecycle events into typed system entries appended under a server-only decision (clients cannot author them). Frontend: card registry (text, system notice, approval card, receipt, file, link preview, unknown fallback). Ingestion Plane: a Quarry fetch-preview endpoint (private-IP block, redirect cap, 256 KB and 2 MB caps, OG extract, re-hosted sanitized image) called by the gateway at send; snapshot stored on the entry; integration-corev2 providers can later supply richer unfurls. ZDR orgs may disable previews. Coordinate with category 12 (C-t1-12-012 typed transcript rows) and category 06 (C-t1-06-027 unfurling). [R-t1-08-10] Frontend Plane: an embed block type in room messages rendering canvas, list, record and file cards by id through the gateway under the viewer's decision; a pure client-side URL classifier for provider cards; pickers later through Ingestion integration-corev2 OAuth grants that never widen the owner ACL. Application Plane live updates reuse the existing realtime projection. Adopt the embed format inside the canvas and lists work, not as a separate product.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t1-001 (R-t1-01-01) Space append path",
+   "Quarry fetch-preview endpoint",
+   "Control and Application event feeds for membership and agent binding",
+   "F-t1-015 (R-t1-08-01)",
+   "F-t1-058 (R-t1-08-06)",
+   "Rich message content (category 01)"
+  ],
+  "planeOwner": "Model Plane (entry schema) with Application Plane (system projection), Ingestion Plane (Quarry preview) and Frontend Plane (card registry)",
+  "risks": "[R-t1-01-10] Schema migration of existing turns. Event-to-timeline consistency. SSRF and tracking-pixel leakage in previews; preview snapshots under ZDR; titles of private pages leaking through external unfurls. A decision card must not be confused with a Control approval of an effect. [R-t1-08-10] N+1 fetches on long timelines. A request-access stub must not leak titles or metadata to unauthorized viewers. Server-side unfurl would leak URLs, so keep classification client-side.",
+  "significance": 3,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 3,
+   "SRC": 7,
+   "DOC": 1,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-01-016",
+   "C-t1-01-038",
+   "C-t1-01-022",
+   "C-t1-08-005",
+   "C-t1-08-014"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-052",
+    "status": "partial",
+    "exactGap": "AppendMessageRequest carries role, content and an opaque metadata Struct but no content_type, and the room timeline normalizes transcripts to user and assistant turns only (normalizeTranscriptTurns drops every other role) rendered as markdown or plain text, with the approval panel as the only inline typed card; typed rendering exists only in the Activity tab (ActivityRenderClass and lenses). There are no member-added, agent-bound or rename rows in the timeline or in Activity (activity-grammar has no membership class), no link previews and no pointer embeds; Quarry has an SSRF guard (dns_guard) and OpenGraph extraction and the gateway has a render-based scrape-preview route, but no light metadata-only fetch-preview endpoint.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/sessions.proto:287-298 (AppendMessageRequest: role, content, metadata; no content_type)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:21-67 (room is a list of thread-posts; turns normalized to user/assistant only, line 60 drops other roles)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:300-349 (turn rendering; SpaceApprovalPanel is the only typed card)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:418-430 (PostTurnHeader agent chip)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2607-2640,2690-2733 (room transcript read from Model Gateway under Control read decision)",
+     "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/grpc.rs:2432-2500 (Space-thread append needs a fresh Control append decision, or an assistant reply directly after a verified user turn)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:45-61 (ActivityRenderClass: conversation, run, schedule, process, operation, authority, approval, unknown)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityPanel.tsx:56-90 (Activity lenses; no membership lens)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:165-168 (scrape-preview route forwards to Quarry)",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/knowledge-client.ts:379-390 (scrapePreview client)",
+     "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs:1-30 (SSRF boundary; gateway forwards to Quarry rather than dialing)",
+     "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/metadata.rs:72-80 (og:image and meta extraction)",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts:925-935 (Convex chat messages tables are separate from conversation projection; room posts are not stored there)"
+    ],
+    "reuse": [
+     "Activity render-class grammar (activity-grammar.ts) as the template for a card registry with an unknown fallback",
+     "SpaceApprovalPanel as the first typed card",
+     "AppendMessageRequest.metadata Struct for an interim metadata.kind that needs no proto break",
+     "gateway quarry::scrape_preview route, Quarry dns_guard and resolve_guard, and quarry-transform metadata extraction for previews",
+     "Control Space append decisions for who may author an entry"
+    ],
+    "constraints": "Session Core owns the transcript and appends into a Space thread need a fresh Control append decision per human actor, so a server-signed system entry needs a new Control-issued system-append class and clients must not be able to author it. The room is a list of thread-posts (each a Session Core thread), not one continuous timeline, so membership and agent-state notices have no thread to live in. The gateway never dials third-party URLs (it forwards to Quarry), previews must be snapshots stored at send so recipients never contact the site, and ZDR rooms disable previews and snapshots. Pointer embeds render under the viewer's own grant and a request-access stub must not leak titles; embeds depend on the canvas and lists items existing first.",
+    "approachAdjustment": "Change the system-notice design: do not append notices into Session Core threads via Application. Emit them as typed room-level feed rows owned by an Application projection sourced from Control membership and binding events, and reserve Session Core content_type or metadata.kind for in-thread cards (approval, receipt, link preview, embed). Keep unknown roles and kinds as a neutral fallback in the transcript normalizer instead of dropping them. For previews add a metadata-only fetch mode to Quarry rather than reusing the render-based scrape-preview route.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged overall, but it bundles four separable pieces (card registry with fallback: S-M; room-level system rows: M; link preview endpoint plus snapshot: M; pointer embeds: M-L and dependent on canvas).",
+    "verdict": "reword",
+    "verdictReason": "Partial is right, but the system-notice design misplaces notices inside Session Core threads when the room is a list of thread-posts and appends need per-human Control decisions, and the Activity claim about membership is wrong. The typed-card registry and previews remain worthwhile.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-053",
+  "title": "Guests and link invitations with mandatory expiry",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 29,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Introduce a guest principal type with memberships only in explicitly granted rooms, no directory or roster access and no agent invocation by default, invited through room-scoped invitations with a required expiry. Extend invitations with shareable links or codes (TTL, max uses, optional admin approval, stored terms acceptance) and a combined invite-to-org-and-room flow.",
+  "whyItMatters": "Teams, Slack, QM and Buzz all support external collaborators; Verevon rosters only active org members, so a customer or contractor cannot be pulled into one room. Org invitations exist but cannot target a room or be shared as a link.",
+  "referenceBestPractice": {
+   "bestSource": "teams (guest tiers), buzz (invite codes), qm (mandatory guest expiry)",
+   "others": [
+    "slack (single- vs multi-channel guests, admin approval queue)"
+   ],
+   "prevalence": "guests 4 of 5 (table-stakes); link invitations 2 of 5 (common)",
+   "mechanism": "principal.type in {internal, guest}. Guests get memberships only in granted rooms, cannot browse the directory, create rooms or see the roster, and by default cannot invoke agents; invitations require expires_at and expiry removes memberships through the normal membership-change path. Invite code = base64(org, room?, role, expires_at, max_uses, nonce) + HMAC; claim verifies HMAC and expiry, counts uses, records terms acceptance, then creates the membership through the normal Control path; claim is rate-limited (10 per minute in Buzz)."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:34-48 (rosters only from active org members)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx:20-30 (picker lists org members only)",
+    "apps/Control Plane/auth-core/src/auth/auth.ts:942-960 (org email invitations, 48 h, verified email, rate-limited accept)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/membership-client.ts:5-10",
+    "apps/Application Plane/convex-core/convex/spaceMembers.ts:60-73 (a room grant requires existing org membership by design)"
+   ],
+   "gap": "Org email invitations exist, but there are no guests, no room-scoped invitations, no link or code invites with max uses, no approval queue, and no stored terms acceptance."
+  },
+  "approachOriginal": "Control Plane (auth-core, org-core, user-core): guest principal type, room-scoped guest invitation with mandatory expiry, and link invites with TTL, max uses and an optional room target and role; per-org approval policy. Agent turns in rooms with guests use the room audience in the Control decision so org-only knowledge is not retrieved. Guest seats flow to billing-core. Frontend: invite dialog on the room with a link option.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Room role management (F-t1-022 (R-t1-02-01))",
+   "Tenure windows (F-t1-048 (R-t1-02-02))",
+   "billing-core seat model"
+  ],
+  "planeOwner": "Control Plane",
+  "risks": "Agent answers in a guest room can leak org knowledge; guest seat billing; ZDR and residency apply to guest data too; link invites leak easily, so keep a short TTL, max uses and admin revoke.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 5,
+   "DOC": 3,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-02-011",
+   "C-t1-02-013"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-053",
+    "status": "partial",
+    "exactGap": "Only org-level email invitations exist (SRC): the Better Auth organization plugin in auth-core with a 48 h default expiry, email-verification requirement and a rate-limited accept route, and a gateway invite limited to member/admin roles; invitation rows carry an unused teamId column and the auth event publishes an empty inviteCode. There is no guest principal (Control space_memberships only allows user or service subjects; Application room grants require an existing active org member and are hard-coded to role editor), no room-scoped invitation, no link or code invite with max uses, no approval queue and no stored terms acceptance. The product docs also state that external access needs its own cross-org identity and privacy contract before any invite list (SRC: VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:128-132).",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts:942-1013",
+     "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts:446-451",
+     "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/db/schema.ts:225-243",
+     "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/internal/auth-event.publisher.ts:715-728",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembers.ts:45-90",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembershipSync.ts:33-53",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.tsx:15-27",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/membership-client.ts:1-10",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/members.rs:218-232",
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/handlers.go:477-487",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql:51-66",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go:693-775",
+     "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:118-141",
+     "C:/dev/CoresSystem/apps/SPACE_AUTHORITY_ADR_2026-08-13.md:62-76"
+    ],
+    "reuse": [
+     "Better Auth invitation table and flow in auth-core (expiresAt already mandatory, status, inviterId; add a room target and a token for link invites)",
+     "sendInvitationEmail/buildInvitationLink and AcceptInvitationPage plus the accept-invitation rate limit",
+     "Control recipient-audience and Space decision machinery as the fence that keeps org-only knowledge out of guest rooms (ADR-0001 intersection rule)",
+     "org-core roles already include viewer at the service level (handlers.go:483), although the gateway only allows member/admin",
+     "billing-core seat concept (not opened in this audit; verify before relying on it)"
+    ],
+    "constraints": "Auth Core is the sole org-membership authority (SRC: org-core/internal/http/server.go:122-128 comment), so guest identity belongs in auth-core, not in Application. A guest must NOT become a plain org member (INF): org-visible documents and the organization-room roster sync would then include them. Room membership writes today flow Application spaceMemberGrants -> declarative PUT to Control, and ReplaceMemberships revokes any managed (user) member not in the declared list (SRC repository.go:744-775), so a Control-created guest membership of subject_type user would be revoked on the next sync unless the guest uses a distinct subject_type or the sync is scoped by source. Control space_memberships CHECK allows only user and service (SRC 017 migration line 62). Agent turns in a guest room must use the room recipient audience so retrieval is narrowed (ADR-0001); I did not trace that Data Plane honors the audience for org-visible documents. ZDR and residency apply to guest data. The org membership cap defaults to 100 and would count guests unless modelled separately. Link invites are a mass-exposure path: short TTL, max uses, admin revoke, rate limit.",
+    "approachAdjustment": "Add a decision gate before building: choose the guest identity model (separate principal type versus restricted org role) and write the cross-org identity and privacy contract the UI research doc requires. Make one writer own room membership (see F-t1-054 source tagging) or give guests their own subject_type excluded from the Application declarative sync. Reuse the Better Auth invitation for the email path (expiry is already mandatory) and add the room target; ship link or code invites as a later slice. Keep guests out of the org-room sync and out of org-visible Data Plane documents.",
+    "effortRevised": "XL",
+    "effortNote": "L to XL: no guest primitive exists in any plane, and the work spans an identity-model decision, auth-core, a Control membership schema and sync change, Data Plane visibility treatment, billing seats and agent-audience fencing.",
+    "verdict": "reword",
+    "verdictReason": "Recommendation stays valid and the org-invitation base is correctly described, but the approach omits the identity-model gate and the declarative-sync clobber, and underestimates effort; keep it in the late wave.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-054",
+  "title": "Teams and sub-groups with source-tracked membership; mentionable groups",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 30,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Add a team concept to Control (owners, members, visibility) where a team grant expands into room memberships tagged with their source, so removing someone from a team removes only team-derived grants. Later add team-level mentions (server-side expansion at send) once Space notifications exist.",
+  "whyItMatters": "Teams are the core of the Teams half of the vision: orgs organise people into teams with their rooms. Today there is no team concept, only flat org membership and per-room lists. Teams are also the prerequisite for SCIM group sync, team-level agent context and group-based agent access.",
+  "referenceBestPractice": {
+   "bestSource": "teams",
+   "others": [
+    "qm (team contributes read-only resources to a turn only under a membership rule)",
+    "slack (user groups)"
+   ],
+   "prevalence": "teams 2 of 5 (teams, qm), mentionable groups 2 of 5 (teams, slack); common",
+   "mechanism": "team(id, org_id, name, visibility), team_members(team_id, principal, role owner|member), team_rooms(team_id, room_id). Joining a team grants membership in its standard rooms; private rooms keep their own roster. Mentions: the server expands @tag into the member list at send and fans out through the notification service with per-recipient permission checks. QM teamsForTurn includes a team layer only if the actor is on the team AND the room is configured for it."
+  },
+  "verevonTodayOriginal": {
+   "status": "absent",
+   "evidence": [
+    "apps/Application Plane/conversation-core/conversation-core-go/internal/http/server.go:92 (ticket teams are support routing only)",
+    "apps/Application Plane/convex-core/convex/schema.ts:556-562 (comment anticipates team rooms as kind room, but no team table)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces (no @here, @channel or user-group hits)"
+   ],
+   "gap": "No team or sub-group concept, no source tracking on memberships, no group mentions; Space events produce no notifications, so group mentions have nothing to ride on."
+  },
+  "approachOriginal": "Control Plane (org-core and user-core): teams as a membership source; a team grant expands into space_memberships rows tagged with source, and removal only clears that source. Application Plane: team directory projection and, later, tag definitions; notification-core allowlist extended for mention events. Team resources reach agents only through owner-plane grants, never widened by team membership. Agents in a mentionable group must be opt-in.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "Room role management (F-t1-022 (R-t1-02-01))",
+   "Room discovery (F-t1-048 (R-t1-02-02))",
+   "Space notifications (for group mentions)"
+  ],
+  "planeOwner": "Control Plane",
+  "risks": "Team-derived plus manual membership needs source tracking or removing someone from a team will wrongly remove a manual grant. Broadcast mentions to agents can trigger many paid model turns.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 3,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-02-008",
+   "C-t1-02-009"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-054",
+    "status": "stub",
+    "exactGap": "No usable team concept exists, but there is dormant scaffolding (SRC): auth-core defines team and team_member tables plus invitation.team_id in its Drizzle schema, the organization plugin config does not enable teams, and nothing reads those tables; resource_grants reserves a team subject_type in its CHECK constraint while the ACL repository rejects any non-user subject (\"MVP is user-only\"). Room membership has no source or provenance (space_memberships has only a free-text granted_by that the Application sync overwrites), and the only sync is a declarative full replace from Application, so team-derived memberships would be revoked as stale. There are no user-groups or group mentions in the gateway, Convex or the Space UI, and a grep found no Space-originated consumer in notification-core (INF), so group mentions have nothing to ride on.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/db/schema.ts:225-262",
+     "C:/dev/CoresSystem/apps/Control Plane/auth-core/src/auth/auth.ts:942-1013",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/012_resource_grants.up.sql:15-30",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/users/acl_repository.go:58-85",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/017_space_authority.up.sql:51-66",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/spaces/repository.go:693-775",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceMembers.ts:1-30,206-250",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/schema.ts:546-575",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaces.ts:260-290",
+     "C:/dev/CoresSystem/apps/Application Plane/convex-core/convex/spaceAgents.ts:464-470",
+     "C:/dev/CoresSystem/apps/Control Plane/org-core/internal/http/server.go:122-129",
+     "C:/dev/CoresSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md:118-141"
+    ],
+    "reuse": [
+     "auth-core team and team_member tables (enable the Better Auth teams option) as the team store",
+     "resource_grants subject_type team slot (already allowed by the DB CHECK) for team-level resource shares",
+     "Control space_memberships plus ReplaceMemberships (add a source dimension)",
+     "Convex spaceMemberGrants intent record and syncRoomMembersForGateway",
+     "spaceAgents triggerModes (mention|group) for agent trigger semantics"
+    ],
+    "constraints": "Auth Core owns membership and org-core deliberately does not mount membership or policy mutations (SRC server.go:122-128), so the team store belongs in auth-core with expansion into space_memberships in user-core; the item names org-core and user-core. The membership writer must be decided first (INF from SRC repository.go:744-775 and spaceMembers.ts:243): Application declares only manual user grants with managed_subject_types [user], so any team-derived Control membership is deactivated on the next room sync unless the declaration carries it or the sync is scoped to source=manual. Team membership never widens an owner-plane ACL (ADR-0001). Notifications: Space mention delivery does not exist, so group mentions stay a later phase as the item says. Agents in a mentionable group must be opt-in because one broadcast can trigger many paid turns.",
+    "approachAdjustment": "Start from the existing auth-core team and team_member tables instead of a new Control concept. Decide the single writer of room membership first: either carry a source per member in the Application declaration (manual or team:<id>) or let Control own writes with a source column on space_memberships and scope ReplaceMemberships to source=manual. Use the reserved team subject_type in resource_grants for team-level sharing.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged: the dormant tables save a little, but the membership-writer decision and the sync change keep it L.",
+    "verdict": "reword",
+    "verdictReason": "The gap is real, but the claim that no team concept exists is slightly wrong (dormant auth-core tables and a reserved grant subject exist) and the plane split should name auth-core for the team store and call out the sync clobber.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-055",
+  "title": "Personal sidebar organisation: stars, custom sections, per-group sort, hide, mute, drag-and-drop, computed system sections and cross-org badges",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 31,
+  "wave": "W2",
+  "quickWin": true,
+  "summary": "Give each user a synced sidebar preference document (stars, custom sections, per-group sort, hidden refs, mute) edited with drag-and-drop and a batch mode, plus computed system sections over the same summaries (Agent runs, Waiting for approval, Unread, Muted) that can be toggled off, and a rate-limited stale-room suggestion. Add a per-org attention summary so the workspace switcher shows cross-org badges, with keyboard switching. Ship layout changes behind a flag with a switch-back.",
+  "whyItMatters": "Sidebar organisation is table stakes in four references and becomes necessary as soon as directory, DMs and team rooms add more conversations per person; today the groups are fixed and unread is browser-local.",
+  "referenceBestPractice": {
+   "bestSource": "teams (sections), slack (workspace rail); Buzz (sort per group, synced sections and stars, dnd-kit sorting, More-unread pill); Teams for computed system sections and switch-back",
+   "others": [
+    "Grok Bot (hide from sidebar, batch move/hide/delete for agents)",
+    "Slack (Priority sort, VIP break-through)",
+    "QM"
+   ],
+   "prevalence": "[R-t1-02-12] sections 2 of 5 (teams, slack; common); account and workspace switching 4 of 5 (table-stakes, partly present) [R-t1-12-04] organisation 4 of 5 (Buzz, Grok Bot, QM, Slack; table-stakes); system sections and view modes 1 of 5 (Teams; unique)",
+   "mechanism": "[R-t1-02-12] user_sidebar(user_id, org_id, sections[{id, name, emoji, sort, filter, items[]}], muted[], favorites[]) with keyboard-accessible drag between sections; stale suggestion = rooms with no visit in N days, excluding dont_suggest entries, rate-limited to once per day. Switcher: client keeps a list of {account, tenant, session}, one cheap unread badge per tenant from a per-tenant summary endpoint, Ctrl/Cmd+1..9 and next/previous, per-tenant sign-out clears only that tenant's local data. [R-t1-12-04] Per-user blob {stars:[ref], sections:[{id,name,refs[]}], sort:{group -> alpha|recent|priority}, hidden:[ref]} stored server-side and synced; groups render in fixed order, then user sections; sortable lists with a keyboard sensor; an IntersectionObserver on unread rows outside the viewport drives a \"More unread\" pill; selection mode with shift-range and bulk actions. Teams: system folders RECENT/MUTED/MEETING_CHATS as computed views toggled in settings, and a switch-back modal that preserves custom sections."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232 (fixed groups plus a text filter)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:672-729 (org WorkspaceSwitcher)",
+    "apps/Control Plane/auth-core/src/auth/auth.ts:835-837 and :942-948 (multiSession up to 10, organizationLimit 5)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232 and 281-321 (org room pinned first, thread pinned/unread/working dots, filter box)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts (unread mirrors Application Plane read markers, but only for the open room)"
+   ],
+   "gap": "[R-t1-02-12] No sections, favorites, ordering or mute; the switcher has no cross-org unread badges, keyboard switching or tenant marker. Unread is browser-local even within one org (UI baseline), so a badge has nothing server-side to read. [R-t1-12-04] No user stars, custom sections, sort modes, drag-and-drop, hide or bulk actions, no filters or system sections, and unread dots exist only for the room open in this browser."
+  },
+  "approachOriginal": "[R-t1-02-12] Application Plane: per-user sidebar preferences and visit timestamps, plus a server-side unread and attention projection per org and member. Frontend: sections with drag ordering and mute in CoreSidebarSpacesPanel; badges and Ctrl+1..9 in the WorkspaceSwitcher. Each org's badge must come from that org's own projection (no cross-plane joins). [R-t1-12-04] Application Plane owns a per-user preference document (refs only, no room names, so retention and ZDR are not touched) read and written through typed gateway actions. Frontend Plane renders groups and computed sections from the conversation summaries, with the drag-and-drop and selection mode. Priority sort waits on the salience model already used by the Activity grammar. Note: package.json has no drag-and-drop or virtualisation library and runs Solid 2.0 RC, so check compatibility of solid-dnd or build keyboard-first sorting on existing primitives.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Server-side unread state (notifications category)",
+   "Room discovery (F-t1-048 (R-t1-02-02)) for more rooms per user",
+   "Cross-room destinations and unread aggregate (F-t1-009 (R-t1-12-02))",
+   "Run and approval state present in conversation summaries (for system sections)"
+  ],
+  "planeOwner": "Application Plane (preferences) with Frontend Plane (sidebar UI)",
+  "risks": "[R-t1-02-12] Section names are user content; ZDR orgs may require that they are not logged. [R-t1-12-04] Low authority risk, since preferences are per user and touch no Space ACL. Solid 2 RC library compatibility. Too many default sections clutters the list.",
+  "significance": 4,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 5,
+   "SRC": 11,
+   "DOC": 2,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-02-031",
+   "C-t1-02-002",
+   "C-t1-12-002",
+   "C-t1-12-003"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-055",
+    "status": "partial",
+    "exactGap": "The Spaces sidebar (CoreSidebarSpacesPanel.tsx:30-232) has fixed groups (Channels with the org room pinned first, Personal Space, All conversations of the selected room) plus a text filter, with no stars, custom sections, ordering, hide, mute or room-level unread badge, and the org WorkspaceSwitcher (CoreNavbar.tsx:672-729) has no cross-org badge or keyboard switching. A reusable organiser already exists for chat threads (ChatSidebarOrganizer.tsx and chat-organization.ts: custom projects, assignments, group/sort/filter views, native HTML5 drag with an accessible Move menu, a zod-typed action reducer) but it is browser-local (localStorage) and mounted for chat only. The item's 'unread is browser-local' premise is imprecise: the per-room marker is server-side in Convex, but sidebar unread dots come from a browser store populated only for rooms whose page was opened this session, and no cross-room or cross-org unread or attention aggregate exists.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:30-232",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:245-340",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:86-90",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:672-729",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx:14-130",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx:195-215",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:1-60",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/chat-organization.ts:1-28",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts:48-62",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:714",
+     "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:886-897",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts:100-140",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:70",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:2172-2182",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3433-3446",
+     "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:1-30",
+     "apps/Application Plane/notification-core/internal/feed/service.go:36-41",
+     "apps/Control Plane/auth-core/src/auth/auth.ts:835-838",
+     "apps/Control Plane/auth-core/src/auth/auth.ts:942-948",
+     "apps/Frontend Plane/verevonv3/package.json:28-45"
+    ],
+    "reuse": [
+     "ChatSidebarOrganizer native drag-and-drop with the accessible Move menu, and its zod-typed ChatOrganizationAction reducer, promoted to a server-synced preference document (this removes the 'no drag-and-drop library' concern)",
+     "listOrganizations and switchActiveOrganization behind the existing WorkspaceSwitcher for the cross-org list",
+     "activity-grammar.ts salience classes as the existing basis for a priority sort and computed system sections",
+     "Convex own-row, refs-only pattern (spaceReadMarkers, spacePresence) for the per-user preference document",
+     "server-pinned thread flag already relayed by the presentation route and the sidebar unread dot component"
+    ],
+    "constraints": "Each gateway request resolves exactly one authorised org (authorized_org_id from the active org), so cross-org badges need a deliberate multi-org read path that checks membership per target org and never mixes two orgs' data in one response (tenant and ZDR partition). Hide, mute and sort are presentation only and must never widen or narrow Space access; mute must be a notification preference distinct from agent pause. The preference document should store spaceRefs and ids, not room names, and live in the Application Plane as a per-user own-row record. Any server-computed attention summary must come from Application-owned read markers plus owner-plane events or APIs (approvals live in Model Plane), not DB reads. Solid 2.0 RC means prefer the existing native-drag pattern over a new library. The doc non-goals mention notification polish, which makes mute and system sections the least contentious part.",
+    "approachAdjustment": "Correct the premise: unread is server-backed per room, so the missing dependency is a per-user, per-org attention summary (rooms with unread, waiting approvals), not 'server-side unread state'. First slice: stars, custom sections, hide, mute and per-group sort for Space rooms by promoting the chat organiser's pattern and action reducer to a synced Convex preference document; computed system sections (Unread, Waiting for approval, Agent runs, Muted) on top of the attention summary; cross-org badges and Ctrl+1..9 as a separate later item that needs the multi-org read path.",
+    "effortRevised": "M",
+    "effortNote": "M holds for the room-organisation slice reusing the existing organiser; the attention aggregate and cross-org badges are a separate L, so bundled it is L.",
+    "verdict": "reword",
+    "verdictReason": "Status is partial for rooms and the pattern already exists for chat; the unread premise and the drag-and-drop concern are wrong, and cross-org badges need a different dependency than the item names.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-056",
+  "title": "Agent task tracker: Needs-input state, per-task threads and unread in the Work tab",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 32,
+  "wave": "W3",
+  "quickWin": true,
+  "summary": "Give each agent task a visible state (working, needs input, done) with a note, a task-scoped thread beside the room and per-task unread, and project it into the Space Work tab and the activity inbox. Extend the capability-core task registry with a space_ref, a thread_ref and a needs_input state, keeping agent-owned tasks distinct from human-owned list items but linkable.",
+  "whyItMatters": "A human should see exactly which agent task is waiting for them, which is the Grok Bot behaviour the vision asks for. Verevon already shows runs awaiting approval, but nothing says an agent is blocked on a question or lets a person answer in a task thread.",
+  "referenceBestPractice": {
+   "bestSource": "Grok Bot (SRC)",
+   "others": [],
+   "prevalence": "1 of 5 sources; unique",
+   "mechanism": "Task {id, title, state: working|needs_input|done, note, created_at, done_at, seen_done_at}; each task has a sub-thread id; a message sent with task_id routes to the agent about that task; a panel shows unread replies and done-but-unseen tasks, and the tasks panel is asynchronous."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:66-69",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:345-347",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:5341-5380",
+    "apps/Model Plane/go/services/capability-core/internal/tasks/types.go:1-30",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:122",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:1-40",
+    "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2220-2231"
+   ],
+   "gap": "Per-thread orchestration todos exist, and /v1/tasks proxies the capability-core task registry (org-scoped, status filter, create, patch, cancel) with states created, assigned, blocked and completed and an assignee, but types.go has no space or thread field (the handler may store more). The Work tab lists runs and shows awaiting_approval as a critical needs-a-human state. There is no free-form Needs-input state, no per-task thread or unread, and no room-level task list."
+  },
+  "approachOriginal": "Model Plane capability-core owns task state: add space_ref, thread_ref and a needs_input substate to the task registry and pass space_ref through the /v1/tasks proxy as the cron list already does. Application Plane projects task state into the Space Work tab and the activity inbox. Frontend renders task threads beside the room and per-task unread, and reuses the Activity grammar so a waiting task reads the same in Work and Activity. Messages posted in a task thread route to the task session.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Activity inbox (category 05)",
+   "Shared reply in Session Core",
+   "Adoption plan S4.5 unified Work cockpit"
+  ],
+  "planeOwner": "Model Plane",
+  "risks": "Overlap with Lists (F-t1-058 (R-t1-08-06)); keep agent-owned tasks separate from human-owned list items and link them by ref. The task registry semantics (types.go describes a seeded catalog) need confirming.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 1,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-08-025"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-056",
+    "status": "partial",
+    "exactGap": "A durable task registry already exists (capability-core TasksHandler over the tasks table: run_id, kind, title, assignee, priority and a free-form status that PATCH accepts, produced by the cron sweeper and the API, proxied by model-gateway /v1/tasks), but it is org-scoped with no space_ref or thread_ref, no Control decision on read or write, no agent-run producer, no caller in verevonv3, and no needs-input state or agent pause to feed one; the internal/tasks/types.go the item cites is only a seeded read-only catalog. The Work tab (SpaceWorkPanel) lists runs and schedules with awaiting_approval as its only needs-a-human state, per-thread todos live in session-core, and unread is a room-level last-read marker rather than per-task.",
+    "evidence": [
+     "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:618-700 (TasksHandler, taskRow, org-scoped list)",
+     "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:768-800 (PATCH accepts any non-empty status or assignee)",
+     "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:244 (only internal producer of task rows)",
+     "apps/Model Plane/go/services/capability-core/internal/tasks/types.go:1-30 (seeded read-only catalog, no space or thread field)",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:345-347,5341-5360 (task proxy forwards org_id and status only)",
+     "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:2399-2450 (gRPC CreateTask and ListTasks proxy to capability-core)",
+     "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:17-40 (tasks table: run_id, status text, no space column)",
+     "apps/Model Plane/rust/services/session-core/migrations/0003_orchestration_tables.sql:89-104 (todos with thread_id and status)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:66-69 (per-thread todos route)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:1-60 (runs and schedules only)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:118-137 (awaiting_approval critical; no needs-input)",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts:23-45 (unread vs a room read marker)",
+     "apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts:536-550 (AG-UI interrupt handled client-side only)",
+     "apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:2220-2231 (S4.5 unified Work cockpit planned)",
+     "apps/Model Plane (grep: no needs_input, input_required or ask-user pause anywhere; no /v1/tasks caller in verevonv3 src or gateway)"
+    ],
+    "reuse": [
+     "capability-core tasks table and TasksHandler (status is free text, so a needs_input value needs no migration; run_id already links a task to a run, its thread and Space)",
+     "session-core threads and runs carrying Space context, so a task thread can be an ordinary Space thread created under a Control thread decision",
+     "session-core todos and plans for per-thread task steps",
+     "activity-grammar RUN_STATUS and buildSpaceWork plus SpaceWorkPanel gap rendering",
+     "Convex space read marker for unread",
+     "gateway run_watchers for notify-when-finished"
+    ],
+    "constraints": "Task rows are org-scoped and the list is not filtered by Space authority, so adding a free space_ref column that any org caller can set or read would leak private rooms; follow the Space cron pattern (Control decision on create, space_ref only as a filter, never a grant) or derive the Space from run_id through Session Core, and project to the Work tab only after a Space read decision. State stays in the Model Plane and Application Plane only projects it. A real needs-input state needs a Model-side clarification pause that does not exist, so this is not a frontend-only change. ZDR runs must not persist task content.",
+    "approachAdjustment": "Reword to: link tasks to runs and threads through run_id plus a Control-bound space_ref, add needs_input as a status value together with a Model-side ask-the-human pause, and reuse the Space thread of the run and the existing todos before inventing per-task threads. Keep agent-owned tasks separate from human Lists (F-t1-058) and link by ref. Remove the quick-win label.",
+    "effortRevised": "L",
+    "effortNote": "Was M and a quick win. There is no agent producer, no Space authority on tasks and no clarification pause, so L.",
+    "verdict": "reword",
+    "verdictReason": "The cited file is a seeded catalog; the live registry is different and more capable, but it has no Space authority. The item should say what exists (registry, status text, run link) and place the real work on authority and the pause primitive.",
+    "confidence": "medium"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-057",
+  "title": "Artifact sharing: edit role, Space-as-subject grants, general access and access requests",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 33,
+  "wave": "W2",
+  "quickWin": true,
+  "summary": "Extend the single resource_grants authority in Control Plane user-core with an edit role, a Space subject type (evaluated as the Space decision intersected with the resource grant), a general-access setting that defaults off per org, and an access-request flow with a human-only approve action. Extend ShareDialog to cover canvases, files and artifacts, not just documents. Phase 1 (edit role plus Space subject) must land together with the canvas and file library.",
+  "whyItMatters": "Every artifact type in a room needs its own grants so sharing into a Space never widens the owner ACL, and the access-request loop routes the decision through a human owner. Without an edit role other members cannot co-author the canvas.",
+  "referenceBestPractice": {
+   "bestSource": "QM (SRC): Google-Docs-style dialog with request access and approve or decline from chat after an owner/manager check",
+   "others": [
+    "Slack canvas sharing (DOC): view/edit grants independent of conversation membership, mentions notify only people with access",
+    "Grok Bot visibility tiers PRIVATE|TEAM_VIEW|PUBLIC (SRC)",
+    "Teams delegates to SharePoint permissions (REA)"
+   ],
+   "prevalence": "4 of 5 sources; table-stakes",
+   "mechanism": "Grant rows {resource, subject (user|group|space), role (view|edit), granted_by}; a general_access enum on the resource; request_access creates a pending item delivered to the owner; the decide endpoint verifies the decider manages the resource's home scope, then grants (never downgrading an existing higher role) or sends a deduplicated decline notice; mentions inside an artifact notify only subjects with access."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:1-44",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:90-130",
+    "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:60-70"
+   ],
+   "gap": "Shares are view-only and user-only: create_share hard-codes role view and subject_type user (shares.rs:114-115), the list and revoke routes are keyed to documents, and the only other surface is a shared-with-me list. There is no edit role, no group or Space subject, no general access, no access-request or approval flow, and no sharing for non-document artifacts."
+  },
+  "approachOriginal": "Control Plane user-core: add role edit, subject_type space (grant effective only when the current Space decision also allows, per the ADR intersection rule at SPACE_AUTHORITY_ADR_2026-08-13.md:64-70), a general_access field defaulting to restricted, and an access_requests table whose approve action is human-only and not model-eligible. Gateway shares.rs: generalize routes from documents/{id}/shares to resource_type and resource_id. Frontend: extend ShareDialog and deliver requests through the activity inbox (category 05). Keep resource_grants as the only grant store.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "Activity inbox (category 05) for request delivery",
+   "ADR-0001 intersection rule",
+   "Resource types for canvas and file artifacts (F-t1-015 (R-t1-08-01), F-t1-013 (R-t1-08-03))"
+  ],
+  "planeOwner": "Control Plane (user-core)",
+  "risks": "A Space-subject grant must not become an ACL-widening path. Link access conflicts with ZDR and data residency, so keep it off by default per org. Hidden dependency: F-t1-015 (R-t1-08-01) and F-t1-013 (R-t1-08-03) cannot safely ship without phase 1.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 1,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-08-009"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-057",
+    "status": "partial",
+    "exactGap": "Control resource_grants already supports role edit (DB CHECK, AclRepository normalizeRole, authz check returns view or edit) and reserves a team subject, so only the gateway shares.rs hard-coding of document, user and view (lines 111-115) and the document-only, view-only ShareDialog behind the ownership gate stand between the UI and an edit role; \"document\" is the only ownable type in resource_taxonomy.json, a space subject_type does not exist (CHECK allows user and team), and no access-request flow exists (negative grep). Blocking finding (SRC): user-core mounts POST/DELETE /authz/grant and GET /authz/grants behind requireVerifiedAuthzDelegation, which only admits GET /authz/visible and /authz/check with a v2 ZDR-bounded delegation, while the gateway signs v1 delegation for every user-core call, so the share write path is fenced off in Control today (\"Disabled until verified delegation exists\" in server.go). Documents already have a Space edge (documents.space_ref plus Control retrieval decision), which overlaps with a Space-subject grant for documents.",
+    "evidence": [
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/012_resource_grants.up.sql:15-40",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/users/acl_repository.go:14-24,58-100",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/authztaxonomy/resource_taxonomy.json:1-16",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/authztaxonomy/taxonomy.go:84-103",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/authz_facade.go:25-72,150-175",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/server.go:384-400",
+     "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/authz_facade_test.go:430-480",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:1-130",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs:348-375,533-560",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/knowledge/components/ShareDialog.tsx:1-60",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/context/ownership-gate.ts:1-30",
+     "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:1713-1731",
+     "C:/dev/CoresSystem/apps/SPACE_AUTHORITY_ADR_2026-08-13.md:62-76"
+    ],
+    "reuse": [
+     "resource_grants and AclRepository (edit role, team subject slot, ListVisible and Check)",
+     "authz facade /visible and /check with the Data Plane v2 delegation clients",
+     "documents.space_ref and Control retrieval-decision for Space-bound documents (spaces.rs space_knowledge)",
+     "Control space_memberships in the same user-core database for a Space-to-member join without cross-plane access",
+     "ShareDialog, ownership-gate honesty gate and the shared-with-me list",
+     "ADR-0001 intersection rule as the evaluation contract"
+    ],
+    "constraints": "ADR-0001: effective access is Space decision AND recipient audience AND owner-plane authorization, and Space membership never widens a resource ACL, so a Space-subject grant must only narrow or co-require, never add an independent path (SRC). Both resource_grants and space_memberships live in user-core, so the membership join is possible in-plane, but Space privacy, entitlement, ZDR and legal-hold conditions cannot be evaluated by a visible-ids query, so the owner plane needs a Control read-time decision as retrieval already does (INF). Every new resource type (canvas, file, artifact) must be classified in resource_taxonomy.json and its Rust mirror in retrieval-engine passes a parity lint, otherwise ValidateUserGrant rejects it. The access-request approve action must be human-only: grant a Control scope that no agent or Model service principal holds. General access conflicts with ZDR and residency, so default off per org. Agents (service principals) must never gain access through a Space subject grant. Grant administration requires the owning service to prove the actor administers the resource (SRC authz_facade.go:29-33 comment).",
+    "approachAdjustment": "First unblock the write path: either add a verified resource-owner delegation (owner plane proves the actor administers the resource) or a dedicated gateway-to-Control grant-admin scope, because POST/DELETE /authz/grant and GET /authz/grants are currently rejected by requireVerifiedAuthzDelegation. Then expose the edit role (Control already supports it; only shares.rs:114-115 hard-codes view), add subject_type space with a CHECK migration, classify new resource types in the taxonomy with the Rust mirror, and build access requests on the activity inbox. For documents reuse documents.space_ref rather than duplicating it with Space-subject grants. Generalize the gateway routes to resource_type and resource_id only after the owner planes for canvas and files exist.",
+    "effortRevised": "L",
+    "effortNote": "M to L: the grant write surface is fenced off in Control and needs a new reviewed delegation mode, the taxonomy has a Go/Rust parity lint, and Space-subject evaluation needs a Control read-time decision. Drop the quick-win flag.",
+    "verdict": "reword",
+    "verdictReason": "Premise \"shares are view-only\" is incomplete: the edit role already exists in Control and the real blocker is the disabled grant write surface; Space-as-subject partly duplicates documents.space_ref. Keep, but re-scope and raise effort.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ },
+ {
+  "finalId": "F-t1-058",
+  "title": "Typed room records and Lists: one revisioned work-object substrate with a table view, assignees and item threads",
+  "originalTier": "recommended",
+  "finalTier": "recommended",
+  "rank": 34,
+  "wave": "W4",
+  "quickWin": false,
+  "summary": "Build a generic Space record primitive (stable id, namespaced type, body, prev-revision CAS, idempotent resubmit) in the Application Plane, then ship Lists on top of it: typed columns, a table view first (board later), assignees, saved views and an item thread. Agents create and update records through a Model Plane tool that proposes, with authority-bearing fields staying human-only.",
+  "whyItMatters": "Slack and Teams both give rooms lists, and a list is the natural place to assign work to humans and agents and see status, which is the core of humans and agents cooperating on work. One substrate avoids building tasks, decisions and checklists separately and keeps edits out of chat unread counts.",
+  "referenceBestPractice": {
+   "bestSource": "Slack Lists (DOC) for the user model; Buzz NIP-AR (SRC) for the record substrate",
+   "others": [
+    "Teams Lists, Planner and Wiki tabs (REA)",
+    "Buzz project issues (SRC); no board"
+   ],
+   "prevalence": "lists: 3 of 5, common; typed-record substrate: 1 of 5, unique",
+   "mechanism": "Record = full snapshot {id (stable UUID), home_space, type (namespaced), title, body JSON, op (create|update|move|delete|restore), prev revision, optional root thread}; tables heads(id to head) and revisions; head advance is an atomic CAS on prev; resubmitting an accepted revision is idempotent; revisions never count toward unread or notifications; read access equals the room decision. A list is a record collection with a column schema {name, type: text|select|people|date|checkbox}; views store filter, sort, group and an optional default flag; assignment emits an activity item to the assignee; add message to list copies a message ref into an item."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Application Plane/convex-core/convex/schema.ts:277-304",
+    "apps/Application Plane/convex-core/convex/schema.ts:530-546",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:66-69",
+    "apps/Frontend Plane/verevonv3/src/app/App.tsx:183-188",
+    "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:84-85"
+   ],
+   "gap": "No Space-scoped record type, list or board. Planner documents in Convex are keyed by a legacy workspaceId (an ADR resource-local partition) and orchestration todos are per thread. Tickets are a separate route unlinked from Spaces. Humans cannot edit tasks in the room and there are no assignees, views or item threads."
+  },
+  "approachOriginal": "Application Plane (Convex) owns space_records and space_record_revisions keyed by spaceRef with a registered schema per record type and prev-CAS; Control read and write decisions gate every query and mutation. Do not create another generic project authority (ADR row 84 treats the Convex projects table as a migration candidate), so records hang off the Space aggregate. Frontend: Lists tab in SpaceCockpit, table view first, board later. Model Plane: list read and update tools calling the Application API under the run's delegated decision. Assignment events feed the planned activity inbox; allow linking a ticket ref into a list item.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "ADR-0001 migration of planner documents",
+   "Activity inbox (category 05)",
+   "F-t1-057 (R-t1-08-04) phase 1"
+  ],
+  "planeOwner": "Application Plane",
+  "risks": "Scope creep toward a full Planner; ship one table view and a few field types first. Generic schemas drift, so keep a registry of record types shared by UI and agent tools.",
+  "significance": 4,
+  "confidence": "medium",
+  "provenanceMix": {
+   "REA": 1,
+   "SRC": 3,
+   "DOC": 1,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": false,
+   "where": ""
+  },
+  "sourceClusters": [
+   "C-t1-08-003",
+   "C-t1-08-004"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t1-058",
+    "status": "absent",
+    "exactGap": "No Space-scoped record, list or board exists: convex-core has no space_records tables (the Space tables are spaces, bindings, lifecycle, deletion, grants, readMarkers, audiences, presence), spaces.rs routes 649-731 have no records route, and the cockpit tabs are chat, work, knowledge, activity, agent, members. Only adjacent scaffolding exists: plannerDocuments (workspaceId-keyed BlockSuite metadata with no gateway or frontend consumer), thread-scoped Model Plane todos (todo.rs; read-only in the chat run panel with a status-update proxy), org-scoped capability-core /api/v1/tasks, and support tickets with saved ticket-views. The item's agent-write path is not a simple tool: Control currently supports exactly one agent owner action (tickets.create), so a records write is a new owner-action vertical.",
+    "evidence": [
+     "apps/Application Plane/convex-core/convex/schema.ts:277-304",
+     "apps/Application Plane/convex-core/convex/schema.ts:546-604",
+     "apps/Application Plane/convex-core/convex/schema.ts:838-851",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:649-731",
+     "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-115",
+     "apps/Frontend Plane/verevonv3/src/app/App.tsx:175-195",
+     "apps/Model Plane/rust/crates/mp-orchestration/src/todo.rs:1-101",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:66-69",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:515-530",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1038-1047",
+     "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:617-660",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/tickets.rs:94-100",
+     "apps/SPACE_AUTHORITY_ADR_2026-08-13.md:84-85",
+     "apps/Control Plane/user-core/internal/spaces/model_action_view.go:12-26",
+     "apps/Control Plane/user-core/migrations/017_space_authority.up.sql:53-64",
+     "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts:104-123",
+     "apps/Application Plane/convex-core/convex/spaces.ts:1517-1531"
+    ],
+    "reuse": [
+     "Convex spaceRef-keyed projection pattern with service key plus requireGatewayMember (spaceReadMarkers.ts, spacePresence.ts, spaces.ts setInstructionsForGateway)",
+     "Control effect-policy pattern for new record read and write effects: a deny-by-default *_entitled column on space_effect_policies plus a decision issuer in user-core/internal/spaces (migrations 019-028)",
+     "Model Plane Todo state vocabulary (pending, in_progress, blocked, completed, cancelled; blocked_by; assignee user or agent) as the item status model",
+     "ticket-views saved-view routes in tickets.rs as the shape of saved views",
+     "activity-grammar.ts verb/object/outcome grammar for record-change rows in the Space Activity tab",
+     "SpaceCockpit tab list as the host for a Lists tab"
+    ],
+    "constraints": "Convex does not evaluate Space roles (spaces.ts says Space roles are not a Convex-tracked concept; the gateway verifies live Control membership and Convex only re-verifies org membership with the service key), so 'Control decisions gate every query and mutation' must be implemented as gateway-side Control decisions for new record read/write effects, not inside convex-core. Records are content, so the new table must join the Space deletion owner-receipt flow and the ZDR rule, unlike presence and read markers which are content-free. ADR rows 84-85 forbid a second generic project authority and treat planner workspaceId as a resource-local partition, so records must hang off spaceRef and not reuse plannerDocuments, workspaceId or the Convex projects table. Assignees must be Control subject ids (space_memberships allows user and service subjects); ticket or document links must be refs whose access is rechecked by the owner plane on read, since Space access never widens an owner ACL. Model proposes, owner executes: an agent may only propose record changes, and Control resolves a single supported owner action today (model_action_view.go), with the browser Model allowlist still empty.",
+    "approachAdjustment": "Ship human-edited records first (table view, typed columns, assignees, saved views, per-record thread later) with gateway-side Control decisions, and take the agent create/update path out of this item: it needs a new owner-action vertical (schema hash, run-bound decision with payload digest, owner verifier, approval continuation) like tickets.create. Reuse the Todo status vocabulary instead of inventing a new one, register the table in the Space deletion flow, and keep authority-bearing fields human-only.",
+    "effortRevised": "L",
+    "effortNote": "L holds only for the human-edited table, assignees and saved views; the agent write path is a separate L-to-XL vertical blocked on the S2 owner-action framework, so bundling it makes this XL.",
+    "verdict": "reword",
+    "verdictReason": "Status is absent (confirmed in schema, route table and cockpit tabs), but the approach misstates how agents write records and where Space authority is enforced, and bundles an owner-action vertical into a table feature.",
+    "confidence": "high"
+   },
+   "reference": null
+  }
+ }
+]

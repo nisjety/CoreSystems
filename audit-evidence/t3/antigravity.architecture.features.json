@@ -1,0 +1,1969 @@
+[
+ {
+  "id": "antigravity-architecture-001",
+  "category": "Platform architecture",
+  "name": "Agent hub decoupled from the editor",
+  "what": "The installed Antigravity 2.11.0 is an agent-first desktop hub (agent manager, chat canvas, side panes) that runs agents independently of any IDE; the VS Code-based editor ships as a separate app and is offered through a first-run wizard.",
+  "how": "package.json describes it as an agentic desktop application. ideInstall/constants.js hard-codes the separate IDE install path (Programs/Antigravity IDE). An embedded self-documentation skill states the hub is an Electron app that launches and monitors agents independently of an IDE. The hub reuses the data dir (~/.gemini/antigravity) the old IDE used; the IDE is migrated to ~/.gemini/antigravity-ide.",
+  "evidence": [
+   "extract/antigravity/package.json:1-20",
+   "extract/antigravity/dist/ideInstall/constants.js:84-98",
+   "extract/antigravity/dist/paths.js:17-52",
+   "language_server.exe@49171262 (embedded Antigravity 2.0 Reference)",
+   "PowerShell: Programs dir lists antigravity but no 'Antigravity IDE' folder"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon is not an IDE; an agent hub whose backend is reused by CLI, SDK and IDE is the closest published analogue to Model Plane plus the chat/agent pages.",
+  "notes": "IMPORTANT CORRECTION to the brief: this machine has the agent hub, not the VS Code fork. The editor (product.json, extensions, workbench) was NOT inspected; only its bridge into the backend (ExtensionServerService) and the IDE-facing UI mode are visible."
+ },
+ {
+  "id": "antigravity-architecture-002",
+  "category": "Platform architecture",
+  "name": "Three-tier process topology: Electron shell, Go language server, LS-served web UI",
+  "what": "The desktop app is a thin Electron main process that spawns a 153 MB Go backend; the window then loads the web UI from the backend over https://127.0.0.1:<dynamic port>.",
+  "how": "main.js generates a per-launch csrf UUID, starts the host-bridge server, spawns language_server.exe with --standalone --subclient_type hub --https_server_port 0 --csrf_token ... --enable_sidecars, waits for a stdout banner, then BrowserWindow.loadURL(https://127.0.0.1:<port>/). nodeIntegration is off and contextIsolation on; the renderer has no app UI code of its own. Shell source is ~2.5k lines of TypeScript-compiled CommonJS.",
+  "evidence": [
+   "extract/antigravity/dist/main.js:195-249",
+   "extract/antigravity/dist/languageServer.js:186-239",
+   "extract/antigravity/dist/utils.js:104-189",
+   "extract/antigravity/dist/constants.js:1-7",
+   "REA analyze_javascript_application ev_07f3b30797b1ab05de8887e6262b25e5409b2d05896c0e698bd33b9ef65a7ddc: 561 modules, 2 browser windows, 0 utility processes, 0 native addons"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Mirrors the target shape for Verevon: all agent logic lives in one backend process with a replaceable thin client (here Electron, for Verevon the Rust gateway plus SolidJS app).",
+  "notes": "Because the shell owns nothing but window/update/tray, any other client (web, CLI, IDE webview, phone) can attach to the same backend."
+ },
+ {
+  "id": "antigravity-architecture-003",
+  "category": "Platform architecture",
+  "name": "Backend port discovery and crash supervision",
+  "what": "The shell starts the backend on port 0, reads the real port from its log banner, and silently restarts it up to 3 times per minute if it crashes; windows reload on the new port.",
+  "how": "languageServer.js: PORT_PATTERN regex over merged stdout/stderr, 60 s startup timeout, stderr ring buffer (100 kB) scanned for Go crash phrases (panic:, fatal error:, unexpected fault address, running GoogleExitFunction), restart window 60 s, MAX_RESTARTS 3, cooldown 2 s, onPortChanged callback reloads every BrowserWindow and re-applies cert trust. After 3 crashes it only logs 'Giving up' - there is no user-facing error state.",
+  "evidence": [
+   "extract/antigravity/dist/languageServer.js:62-77",
+   "extract/antigravity/dist/languageServer.js:105-108",
+   "extract/antigravity/dist/languageServer.js:339-386",
+   "extract/antigravity/dist/main.js:219-231"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Copy the restart-with-backoff and port-change reload, but add a visible degraded state; Verevon's agent runtime must not fail silently.",
+  "notes": "Weakness: in-flight runs die with the LS; run recovery relies on trajectory rehydration (see trajectory persistence record)."
+ },
+ {
+  "id": "antigravity-architecture-004",
+  "category": "Platform architecture",
+  "name": "One Go binary, many roles (hub backend, agentapi CLI, SDK runtime, remote LS)",
+  "what": "The same language_server binary serves the hub UI, the agy CLI/agentapi, the Python SDK runtime and remote-machine servers, selected by flags and routing code.",
+  "how": "Go symbols cmd/routing.MaybeRoute and cmd/agentapi.HandleAgentAPI choose a mode; cortex/sdk/sdkprocess runs the harness as a child for the SDK; flags --standalone, --subclient_type hub, --headless, --stamp, remoting server banner. SDK docs say pip wheels contain a compiled runtime binary. The deprecated flag text 'Use --subclient_type=hub instead' shows subclient identity is a runtime flag.",
+  "evidence": [
+   "language_server.exe@78261081 (cmd/routing.MaybeRoute)",
+   "language_server.exe@78260770 (agentapi.HandleAgentAPI)",
+   "language_server.exe@72932063 (cortex/sdk/sdkprocess)",
+   "language_server.exe@49053252 (Python SDK doc: wheels carry a compiled runtime)",
+   "extract/antigravity/dist/languageServer.js:191-212"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Strong precedent for Model Plane: one Rust runtime binary exposed as service, CLI and embeddable SDK avoids three divergent agent implementations.",
+  "notes": "Symbols are Go pclntab names (SRC-STR); behaviour of MaybeRoute inferred from name plus flag handling."
+ },
+ {
+  "id": "antigravity-architecture-005",
+  "category": "Platform architecture",
+  "name": "Connect RPC over protobuf as the single API contract",
+  "what": "Every client talks to the backend with Connect (gRPC-compatible HTTP) using one proto namespace (exa.*, ~3,000 names) for chat, agent state, settings, projects, plugins, analytics and IDE callbacks.",
+  "how": "UI sets Connect-Protocol-Version 1 with application/proto or application/json for unary and application/connect+proto|json for streams; supports idempotent unary over GET. Go side uses connectrpc.com/connect; shell uses @connectrpc/connect(-node) for the host bridge. Proto packages include language_server_pb, cortex_pb, jetski_cortex_pb, extension_server_pb, api_server_pb, config_pb, remoting_pb, host_bridge_pb.",
+  "evidence": [
+   "LS-embedded-UI main.js@1994832 (Connect headers)",
+   "LS-embedded-UI main.js@3060243 (client factory)",
+   "tmp/ls_exa_names.txt (2,989 exa.* names)",
+   "tmp/agarch/ls_go_pkgs.txt (connectrpc Go package refs)",
+   "extract/antigravity/dist/hostBridgeServer.js:39-40"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "common",
+  "verevonRelevance": "Gateway-friendly choice: Connect keeps browsers, CLIs and Rust gateway on one typed contract; Verevon could generate it from protos instead of hand-written JSON APIs.",
+  "notes": "Quality note: schema-first with generated clients on both sides; the cost is a very large proto surface mixing product, Google-internal and legacy Codeium messages."
+ },
+ {
+  "id": "antigravity-architecture-006",
+  "category": "Platform architecture",
+  "name": "WebSocket-multiplexed Connect transport for constrained clients",
+  "what": "When the UI runs inside an IDE webview or with ?useWebSocket=true it tunnels all unary and streaming RPCs over one WebSocket instead of fetch.",
+  "how": "The dSa transport sends JSON frames {streamId, type: start|cancel|data|end, procedure: '/<service>/<method>', stream, headers, payload, statusCode, error}; URL is ws(s)://<host>:<port>/connect-websocket; carries the x-codeium-csrf-token header inside the frame headers; maps Connect error names to codes; cancel frames on abort. Chosen via forceWebSocket or extensionView plus useWebSocket query param.",
+  "evidence": [
+   "LS-embedded-UI main.js@3048200-3053800 (dSa transport)",
+   "LS-embedded-UI main.js@3060177-3060500 (selection logic)",
+   "LS-embedded-UI main.js@3049377 (x-codeium-csrf-token)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A multiplexed stream-per-RPC socket is a clean answer to proxies, webviews and mobile where HTTP/2 server streaming is unreliable; relevant to Verevon agent-run streaming.",
+  "notes": "LS-side handler for /connect-websocket not located by string (INF it exists because the client path is constructed). The reason for using it in webviews is INF (self-signed https and CORS limits). REA string trace for '/connect-websocket' returned no match because the main.js semantic pass was truncated; direct grep confirms the literal."
+ },
+ {
+  "id": "antigravity-architecture-007",
+  "category": "Platform architecture",
+  "name": "Reactive agent-state streaming instead of polling",
+  "what": "The UI subscribes to a server stream of typed state deltas (trajectory, steps, queued messages, background tasks, artifact snapshots, file diffs) and a generic reactive-component stream.",
+  "how": "StreamAgentStateUpdates carries TrajectoryUpdate, StepsUpdate, PendingAgentMessagesUpdate, QueuedStepsUpdate, BackgroundTasksUpdate, ArtifactSnapshotsUpdate, TrajectoryFileDiffsUpdate; also reactive_component_pb and unified state sync topics. The UI keeps a ring buffer of the last 50 RPCs (globalThis.__rpcdb) and can rehydrate.",
+  "evidence": [
+   "LS-embedded-UI main.js@1077300 (StreamAgentStateUpdates)",
+   "LS-embedded-UI main.js@1546888 (__rpcdb)",
+   "tmp/ls_exa_names.txt (jetski_cortex_pb, reactive_component_pb, unified_state_sync_pb)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon's Application Plane projections could use the same pattern: one typed delta stream per run rather than many endpoints.",
+  "notes": "Message-level semantics are from names; payload shapes not decoded."
+ },
+ {
+  "id": "antigravity-architecture-008",
+  "category": "Platform architecture",
+  "name": "UI bundle embedded inside the backend binary",
+  "what": "The web UI (index.html, an 8.9 MB main.js, Tailwind CSS, Prism, diff worker, audio worklet, sounds, icon theme) is a zip appended inside language_server.exe and served by it.",
+  "how": "A 300-entry zip (10.5 MB uncompressed, EOCD at file offset 130,646,139, base 127,470,842) is embedded; Go package agy_hub_web_bundle serves it; strings 'Serving UI bundle from filesystem' and 'Failed to open index.html in zip' plus a web_bundle_path flag give a disk override for development. index.html title is 'Jetski Web'. REA parsed 4 JS files (1.58M AST nodes) but the semantic pass hit the 2 GB heap on main.js (partial).",
+  "evidence": [
+   "language_server.exe@130646139 (zip EOCD)",
+   "language_server.exe@75621064 (agy_hub_web_bundle)",
+   "language_server.exe@47699595 and 47834789 (zip/filesystem serving strings)",
+   "tmp/agarch/ls_zip.130646139.txt (entry list)",
+   "REA analyze_javascript_application ev_9747fee31ae5b005202688ad8f139eb4d66a752463d27017054f318551802660 (summary view ev_7a45aa009ea96174a81fce93d221646ec014ef03296b4bec260ee206c8c8c351)"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A Rust gateway can embed the SolidJS build the same way (rust-embed) so backend and UI versions can never drift, which also solves cache-busting.",
+  "notes": "The 8.9 MB main.js is Google Closure Compiler advanced-mode output (obfuscated identifiers) over React; the scout's note that the framework was unverified is resolved (React plus Closure)."
+ },
+ {
+  "id": "antigravity-architecture-009",
+  "category": "Platform architecture",
+  "name": "One UI, many hosts: feature-manager dependency injection and app variants",
+  "what": "The same UI build runs as Electron app, web app, PWA, remote-control view and IDE-extension webview by receiving host capabilities as injected feature providers.",
+  "how": "The composition root builds appVariant (internal vs external, product, binaryType), featureManager/featureManagerV2 objects (fileTree, electronNative, banners, titleSync, multiConversation, sideQuestion, trajectorySteering, battleMode, commandPalette, customModels, worktreeEnabled, codeSearch, addWorkspace, devTooling...), services (clipboard, workbench), update service, RPC clients, and an aux-pane registry (skills, browser preview, codeSearch). Shell types.js documents that update-state strings are a wire contract parsed by agent_ui_toolkit/dev/providers/createAppUpdateService.ts.",
+  "evidence": [
+   "LS-embedded-UI main.js@8914500-8925616 (composition root)",
+   "LS-embedded-UI main.js@4016684 (commandPaletteFeature)",
+   "LS-embedded-UI main.js@6275425 (worktreeEnabled)",
+   "extract/antigravity/dist/types.js:4-26"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "The provider-injection pattern is directly transferable to Verevon's SolidJS app so chat/agent pages can run in gateway, embedded or partner hosts.",
+  "notes": "Shows disciplined separation (agent_ui_toolkit) but also feature-flag sprawl (dozens of optional features wired in one function)."
+ },
+ {
+  "id": "antigravity-architecture-010",
+  "category": "Platform architecture",
+  "name": "Client surface taxonomy: Electron, Web (desktop/mobile, remote-control, PWA), IDE extensions",
+  "what": "The UI knows an explicit set of client surfaces including Electron, Web.Desktop/Mobile with RemoteControl and Pwa variants, and Extension.Cider/VsCode/VisualStudio/Eclipse.",
+  "how": "Surface strings are built as dotted ids (e.g. web.mobile.remote-control.pwa, extension.vs-code) and used with prefix matching to gate features; extensionView=true switches to in-memory routing and an editor RPC router; isRemoteControl adds a /web/<id> (or /jetski-devs/web/<id>) path prefix.",
+  "evidence": [
+   "LS-embedded-UI main.js@1547143 (surface taxonomy)",
+   "LS-embedded-UI main.js@1571688-1572300 (extensionView, isRemoteControl, path prefix)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Verevon should name its client surfaces up front (web, mobile, embedded, partner) and gate features by surface rather than by ad-hoc flags.",
+  "notes": "Cider is Google's internal cloud IDE; the Eclipse and Visual Studio surfaces are names only (no extension code available here)."
+ },
+ {
+  "id": "antigravity-architecture-011",
+  "category": "Platform architecture",
+  "name": "Loopback host bridge: backend-to-shell callbacks with layered checks",
+  "what": "A Connect server inside the Electron main process lets the backend ask for update status and request an update even when no window exists.",
+  "how": "hostBridgeServer.js binds 127.0.0.1 on an ephemeral port, rejects non-loopback peers, requires Host header == 127.0.0.1:<port> (DNS-rebinding guard), requires a 32-byte random bearer token compared with timingSafeEqual, returns generic 403/401 bodies and logs the reason. Service HostBridgeService exposes GetUpdateStatus and ApplyUpdate only. Token and URL reach the LS as command-line flags --host_bridge_url/--host_bridge_token.",
+  "evidence": [
+   "extract/antigravity/dist/hostBridgeServer.js:54-141",
+   "extract/antigravity/dist/hostBridgeServer.js:143-211",
+   "extract/antigravity/dist/languageServer.js:213-217",
+   "extract/antigravity/dist/main.js:195-211"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A narrow, token-gated callback channel from runtime to host is the right pattern for letting an agent trigger updates or OS actions without a renderer.",
+  "notes": "Weakness: secrets on argv are visible to other local processes (see token model record)."
+ },
+ {
+  "id": "antigravity-architecture-012",
+  "category": "Platform architecture",
+  "name": "Per-launch CSRF token and separate host-bridge token",
+  "what": "Renderer-to-backend calls are authorised by a random per-launch CSRF token injected into the page; the shell-callback channel uses a different token so a compromised page cannot trigger updates.",
+  "how": "crypto.randomUUID() csrf is passed as --csrf_token and exposed to the page via window.__APP_CONFIG__.csrfToken (the UI also accepts a csrfToken cookie as fallback); UI sends it as x-codeium-csrf-token (header, WebSocket frame header) and as ?csrf= on /static/artifacts URLs; on auth error the UI refetches index.html and regex-extracts a fresh token. LS rejects with 'invalid CSRF token'. Host bridge uses crypto.randomBytes(32) separately (main.js comment states this is deliberate).",
+  "evidence": [
+   "extract/antigravity/dist/main.js:195-211",
+   "extract/antigravity/dist/languageServer.js:203-204",
+   "LS-embedded-UI main.js@8405917-8406600 (token acquisition/refresh)",
+   "LS-embedded-UI main.js@4470176 (/static/artifacts/?csrf=)",
+   "language_server.exe@46996314 (invalid CSRF token)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Per-run capability tokens are reusable; avoid putting them on argv or in artifact URLs as Antigravity does.",
+  "notes": "Weakness (INF, medium): --csrf_token and --host_bridge_token are visible in process listings; csrf in artifact URLs can leak via logs/referrers."
+ },
+ {
+  "id": "antigravity-architecture-013",
+  "category": "Platform architecture",
+  "name": "Minimal contextBridge surface and 28 main-process IPC handlers",
+  "what": "The renderer gets 10 small APIs (updater, dialogs, notifications, storage, logs, sidecar authorities, deep links, agent count, window/zoom/shell, IDE check) and the main process registers 28 handlers.",
+  "how": "preload.js exposes electronUpdater, dialog, nativeNotifications, nativeStorage, logs, extensions, deepLink, agent, electronNative, ide via contextBridge; REA found 61 IPC operations, 33 literal channels, 28 main handlers, 28 paired renderer sends, 0 dynamic channels. shell:open-external allows only http(s) and antigravity-ide://; window.open is denied and routed to the system browser; devTools disabled when packaged.",
+  "evidence": [
+   "extract/antigravity/dist/preload.js:9-109",
+   "extract/antigravity/dist/ipcHandlers.js:53-274",
+   "REA ev_07f3b30797b1ab05de8887e6262b25e5409b2d05896c0e698bd33b9ef65a7ddc (ipc statistics)",
+   "extract/antigravity/dist/utils.js:127-145"
+  ],
+  "provenance": "REA",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Keep native bridges this small; for Verevon's web-first product the equivalent is a tiny capability surface for desktop wrappers.",
+  "notes": "Correction to REA summary: REA reports 33 sender_validation_observations, but a direct source read finds no senderFrame/origin/webContents checks in any handler (grep of non-test dist files). Treat handlers as unvalidated; trust rests on the renderer only loading the LS origin."
+ },
+ {
+  "id": "antigravity-architecture-014",
+  "category": "Platform architecture",
+  "name": "Three-tier state storage: shell KV, backend config, backend trajectory DB",
+  "what": "UI/shell prefs live in a small JSON file; user settings in ~/.gemini/config/config.json (proto-JSON); conversations in a SQLite DB via GORM plus per-feature files.",
+  "how": "StorageManager writes userData/app_storage.json with read-modify-write (not atomic, no lock) and broadcasts storage:changed to all windows; settingsService adds three app settings (runInBackground, keepComputerAwake, autoCheckForUpdates). The backend uses gorm with the sqlite driver (tables such as trajectory_meta, generator metadata, parent refs), ls_<id>.json instance files, .pb snapshots, transcript.jsonl and transcript_full.jsonl exports, mcp_oauth_tokens.json.",
+  "evidence": [
+   "extract/antigravity/dist/storage.js:1-128",
+   "extract/antigravity/dist/services/settingsService.js:1-70",
+   "extract/antigravity/dist/paths.js:17-45",
+   "language_server.exe@72197975 (gorm sqlite driver)",
+   "language_server.exe@46791185 and 47135146 (trajectory_meta SQL strings)",
+   "language_server.exe@47190515 (mcp_oauth_tokens.json)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already separates planes; the useful idea is giving each run a transcript export (jsonl) that hooks and sub-agents can read.",
+  "notes": "Scout's low-confidence SQLite note upgraded: GORM sqlite driver symbols and trajectory_meta strings are present. Exact schema not decoded."
+ },
+ {
+  "id": "antigravity-architecture-015",
+  "category": "Platform architecture",
+  "name": "Auto-update architecture: electron-updater generic feed plus backend-initiated apply",
+  "what": "The app checks a Cloud Run manifest 10 s after start then hourly, downloads automatically and installs on quit; the backend can also ask the shell to apply an update.",
+  "how": "app-update.yml: provider generic, Cloud Run manifest URL, updaterCacheDirName antigravity-updater. updater.js sets channel latest-<arch>(-win), autoDownload true, autoInstallOnAppQuit when packaged, broadcasts update states over IPC and via the host bridge; headless Linux builds replace the AppImage with a detached sh script and relaunch with headless flags.",
+  "evidence": [
+   "extract/antigravity/dist/updater.js:67-69",
+   "extract/antigravity/dist/updater.js:145-243",
+   "extract/antigravity/dist/updater.js:253-310",
+   "extract/antigravity/dist/updater.js:316-356",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app-update.yml"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Having the agent runtime able to request an update (so CLI/headless installs self-heal) is worth copying; the delivery path itself is conventional.",
+  "notes": "See the separate record on missing signature verification."
+ },
+ {
+  "id": "antigravity-architecture-016",
+  "category": "Platform architecture",
+  "name": "First-run IDE installer wizard with data-dir migration",
+  "what": "A modal wizard copies old IDE data into antigravity-ide and a backup dir, and optionally downloads and silently installs the separate IDE.",
+  "how": "wizard.js shows a window once (WIZARD_SHOWN_KEY) if ~/.gemini/antigravity exists and antigravity-ide does not; doSetup copies the data dir; on consent downloadAndInstallIde fetches a URL from a Cloud Run JSON endpoint, saves to os.tmpdir()/antigravity-ide-download.exe and runs it with /VERYSILENT (macOS unzip+mv, Linux tar).",
+  "evidence": [
+   "extract/antigravity/dist/ideInstall/constants.js:59-131",
+   "extract/antigravity/dist/ideInstall/service.js:58-197",
+   "extract/antigravity/dist/ideInstall/wizard.js:56-155"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Migration of user data between product generations is a real deployment need; do it with explicit versioned migrations.",
+  "notes": "Weakness: no checksum or signature check on the downloaded installer, fixed temp filename, http redirects allowed by downloadFile."
+ },
+ {
+  "id": "antigravity-architecture-017",
+  "category": "Platform architecture",
+  "name": "Headless daemon mode with stdin passthrough",
+  "what": "Setting ELECTRON_OZONE_PLATFORM_HINT=headless runs the hub with no windows or tray, forwards terminal stdin to the backend (for pasting OAuth codes) and auto-installs updates.",
+  "how": "main.js adds ozone-platform headless, disable-gpu and no-sandbox switches, readline on stdin writing to LS stdin, passes --headless to the LS; the updater skips UI and uses quitAndInstall or the Linux relaunch script. The LS prints the Google OAuth URL and waits for a pasted code.",
+  "evidence": [
+   "extract/antigravity/dist/main.js:75-89",
+   "extract/antigravity/dist/main.js:250-266",
+   "extract/antigravity/dist/languageServer.js:291-298",
+   "extract/antigravity/dist/updater.js:203-219"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon agents will need an unattended server mode; note that headless disables the Chromium sandbox here (no-sandbox).",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-018",
+  "category": "Platform architecture",
+  "name": "Deep links, single instance and the plugin:// proxy scheme",
+  "what": "antigravity:// URLs focus the running app and reach the renderer; sidecar/extension UIs are exposed to the page through a privileged plugin:// scheme that proxies to local ports.",
+  "how": "requestSingleInstanceLock, setAsDefaultProtocolClient, second-instance and open-url handlers; pending link stored for cold start (deep-link:get-stored). registerSchemesAsPrivileged plugin (standard, secure, fetch, CORS, service workers, code cache); protocol.handle fetches whatever origin the renderer registered via extensions:send-authorities (authority map).",
+  "evidence": [
+   "extract/antigravity/dist/main.js:57-61",
+   "extract/antigravity/dist/main.js:93-137",
+   "extract/antigravity/dist/customScheme.js:1-55",
+   "extract/antigravity/dist/ipcHandlers.js:160-166"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A custom-scheme reverse proxy is a neat way to host third-party agent UIs in an app shell with their own origin; validate target hosts (here the map accepts any URL).",
+  "notes": "Weakness (INF): authority map values are not validated to be localhost, so a compromised renderer can make main-process net.fetch hit arbitrary hosts."
+ },
+ {
+  "id": "antigravity-architecture-019",
+  "category": "Platform architecture",
+  "name": "Remote control over WebRTC with device-bound signatures",
+  "what": "The backend implements a remote-control stack so a web or phone client can drive local agents without opening an inbound port.",
+  "how": "Go package language_server/remotecontrol contains pion/webrtc, ICE/STUN/DTLS/SCTP, DataChannelConn, WebChannelTransport, TransportMultiplexer, NewMeshDaemon, canonicalizeDTLSFingerprint, BuildChannelBindingPayload, VerifyECDSAP256Signature, a signaling poll loop and maintainRemoteControlConnectionV2. Settings keys remoteControlEnabled and remoteControlHostname; the UI treats this as the Web.*.RemoteControl surface. Public docs: the web dashboard pairs by signing in with the same Google account and picking the machine in an instance switcher; the 2.0 app must be enabled in Settings, stay online and awake; CLI instances use a reverse tunnel (interactive) or a background daemon; the web UI reconnects automatically while tasks keep running.",
+  "evidence": [
+   "language_server.exe@76630225 (remotecontrol.NewMeshDaemon)",
+   "language_server.exe@76463152 (pion/webrtc)",
+   "LS-embedded-UI main.js@1550812-1550900 (remoteControl settings)",
+   "LS-embedded-UI main.js@1571798 (isRemoteControl)",
+   "https://antigravity.google/docs/remote-control"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Mobile/remote supervision of long-running agents is a differentiator Verevon lacks; WebRTC data channels with channel-binding signatures avoid a public relay.",
+  "notes": "Transport details (WebRTC data channel, DTLS fingerprint binding, ECDSA P-256 signatures) are from Go symbols (SRC-STR); the docs describe pairing and daemon behaviour but not the transport."
+ },
+ {
+  "id": "antigravity-architecture-020",
+  "category": "Platform architecture",
+  "name": "Remote machine language servers over SSH with reverse tunnel",
+  "what": "The hub can start a backend on a remote host via SSH, read its port from a banner and attach through a SOCKS/forwarded tunnel.",
+  "how": "Embedded init scripts start the remote binary on port 0, poll stderr up to 15 s for 'Remoting server listening on', print REMOTE_LS_PORT=<n> and hold the shell open so the SSH connection and SOCKS proxy stay alive; remoting_pb RemotingService (ConnectRemote, ListRemotes, RespondToPrompt), packages remoting/ssh and reversetunnel, ExitOnForwardFailure, askpass script support; a Google-internal variant installs from a shared release tree.",
+  "evidence": [
+   "language_server.exe@48723272 (init script)",
+   "language_server.exe@47181806 (ExitOnForwardFailure)",
+   "language_server.exe@78079082 (remoting/ssh)",
+   "language_server.exe@47643451 (reversetunnel)",
+   "tmp/agarch/ls_docs_48M.txt:89099-89215"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's sandboxes are server-side, but SSH-attach to customer-owned machines (agent on the user's box, UI in the cloud) is an enterprise option.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-021",
+  "category": "Platform architecture",
+  "name": "Hub Chromium reused as a headless video encoder",
+  "what": "Browser-session recordings are produced by a small Go helper that drives a hidden tab of the hub's own Chromium to encode screenshot frames into WebM (VP9).",
+  "how": "main.js force-adds --remote-debugging-port=0; paths.js documents DevToolsActivePort as the port file for the recording encoder; the LS sets AGY_BROWSER_ACTIVE_PORT_FILE and carries the string 'connect CDP to hidden tab'. webm_encoder.exe embeds a Go-template JS: canvas.captureStream(0) + MediaRecorder(video/webm;codecs=vp9), addFrame(dataURL) draws each screenshot and calls requestFrame(), chunks return through a CDP runtime binding as base64. The LS embeds and installs the encoder binary itself.",
+  "evidence": [
+   "extract/antigravity/dist/main.js:87-89",
+   "extract/antigravity/dist/paths.js:37-43",
+   "language_server.exe@48141173 (Installing/updating embedded webm_encoder)",
+   "language_server.exe@140941735 (connect CDP to hidden tab)",
+   "webm_encoder.exe@5956500-5961500 (embedded JS template)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "No ffmpeg dependency and cross-platform output; but note the exposure of an unauthenticated CDP port on the host app.",
+  "notes": "Semantics are INF from three co-located facts (port file comment, hidden-tab string, MediaRecorder template). Security consequence: any local process can attach to the hub's CDP port (see governance record)."
+ },
+ {
+  "id": "antigravity-architecture-022",
+  "category": "Platform architecture",
+  "name": "Self-documenting agent: embedded guide skill with offline references and live sitemap",
+  "what": "The backend ships a skill (antigravity-guide) plus per-surface reference docs so the agent can answer how-to questions offline and fetch the live docs when needed.",
+  "how": "Embedded markdown skill lists references/cli.md, ide.md, app.md, sdk.md and a 'smart hybrid retrieval' rule: use offline docs first, fetch the sitemap pages (skills, rules, hooks, plugins, sidecars, MCP, browser, permissions, changelog) for latest info; related embedded skills: agy-customizations, generative_ui, migrate-workflows, permissioned-github.",
+  "evidence": [
+   "language_server.exe@49019843 (antigravity-guide)",
+   "language_server.exe@49359284 (agy-customizations)",
+   "language_server.exe@49375929 (generative_ui)",
+   "language_server.exe@49574343 (permissioned-github)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Ship Verevon's own product docs as an agent skill so chat/agent pages can help users configure Verevon, with a live-docs fallback.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-023",
+  "category": "Platform architecture",
+  "name": "Experiment and feature-flag plumbing (Unleash proxy, Mendel, tiered configs)",
+  "what": "Rollouts are server-driven: the backend proxies an Unleash flag service to the UI and the UI reads Mendel-style flags (enable-agent-team, enable-battle-mode...).",
+  "how": "LS strings: /proxy/unleash, disable_unleash flag, GetUnleashContextFields RPC, ExperimentConfig/ExperimentKey; the UI uses mendelProvider (checks 'enable-agent-team') and a customFlags list for dev mode.",
+  "evidence": [
+   "language_server.exe@46704852 (/proxy/unleash)",
+   "LS-embedded-UI main.js@8918679 (agentTeamFeature gated by flag)",
+   "tmp/ls_exa_names.txt (ExperimentConfig)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Per-org gating of agent features (battle mode, agent teams) is needed for Verevon's enterprise rollout; keep flags out of the UI bundle.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-024",
+  "category": "Platform architecture",
+  "name": "Telemetry pipeline: Clearcut proxy in the backend, CEL-filtered events, opt-outs for bundled tools",
+  "what": "UI and backend events go through a backend-hosted Clearcut proxy to Google logging; the bundled chrome-devtools-mcp is launched with usage statistics and CrUX disabled.",
+  "how": "LS string 'clearcut_proxy: upstream Clearcut returned %d', playlog client-analytics protos, a telemetry/cel package, UI gilLogging {lsBaseUrl, csrfToken, logSource 2999}, a disableCodeSnippetTelemetry setting, AnalyticsService Record* RPCs. The LS passes --no-usage-statistics and --no-performance-crux to the MCP server (adjacent strings). The MCP server itself (if not disabled) logs only tool name, bucketed latency and length-bucketed params.",
+  "evidence": [
+   "language_server.exe@46782965 (clearcut_proxy)",
+   "LS-embedded-UI main.js@1551688 (disableCodeSnippetTelemetry)",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/telemetry/transformation.js:1-133",
+   "LS string '--no-usage-statistics--no-performance-crux' (tmp/agarch/ls_strings.txt)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Route all UI telemetry through the platform's own proxy (so ZDR and consent can be enforced centrally) and strip telemetry from bundled third-party servers.",
+  "notes": "Defaults for the first-party telemetry opt-out are unknown; no ZDR identifier found."
+ },
+ {
+  "id": "antigravity-architecture-025",
+  "category": "Platform architecture",
+  "name": "Built-in diagnostics: RPC ring buffer, debug bundle, pprof and flight recorder",
+  "what": "Users and support can export diagnostics without attaching a debugger.",
+  "how": "The UI keeps the last 50 RPC calls (request, response, duration) in globalThis.__rpcdb and exposes agent-window console logs and a diagnostics service; backend RPCs CreateDebugBundle, DumpPprof, DumpFlightRecorder; electron-log file plus language_server.log; a crashreporter package; --stamp returns the build CL.",
+  "evidence": [
+   "LS-embedded-UI main.js@1546888 (RpcDebugBuffer)",
+   "LS-embedded-UI main.js@8814555 (diagnostics service)",
+   "extract/antigravity/dist/languageServer.js:87-103",
+   "tmp/ls_exa_names.txt (CreateDebugBundle, DumpPprof, DumpFlightRecorder)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A one-click redacted debug bundle plus an in-app RPC buffer would cut Verevon support time for agent runs.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-026",
+  "category": "Platform architecture",
+  "name": "Product lineage and layering: Codeium/Windsurf heritage, Google Jetski, gemini_coder framework",
+  "what": "The code base layers an older Codeium language-server lineage (exa.* protos, x-codeium-csrf-token, CODEIUM_LANGUAGE_SERVER_BIN, SWE-1 aliases) under a Google agent product (Jetski, Cascade trajectories) and a reusable gemini_coder framework.",
+  "how": "Go packages third_party/jetski/** (cortex agent, language_server, fs, vcs, terminal, remoting) and third_party/gemini_coder/framework/{core,agent,executor,registry,stepmanager,task,tracer,handlers}; shell env names JETSKI_LS_PORT and CODEIUM_LANGUAGE_SERVER_BIN; internal vs external app variants and the Cider surface.",
+  "evidence": [
+   "tmp/agarch/ls_go_pkgs.txt (first-party package list)",
+   "extract/antigravity/dist/main.js:213",
+   "extract/antigravity/dist/languageServer.js:80-83",
+   "LS-embedded-UI main.js@8918679"
+  ],
+  "provenance": "INF",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Useful for competitive mapping only: much of the proto surface is legacy and Google-internal, so do not copy its shape wholesale.",
+  "notes": "INF basis: naming evidence in shipped binaries, not documentation."
+ },
+ {
+  "id": "antigravity-architecture-027",
+  "category": "Platform architecture",
+  "name": "Multiple backend instances per UI (local, machine, selectable)",
+  "what": "The UI is built to talk to more than one backend: a local LS client manager, a machine LS client manager and an instance selector component.",
+  "how": "The composition root creates localLsClientManager and machineLsClientManager; windowType Manager; flags cloudAgentsEnabled, useMachineLSEnabled and sidecarMode are all false in this build; instanceSelectorComponent is passed to the feature set.",
+  "evidence": [
+   "LS-embedded-UI main.js@8914500-8925616",
+   "LS-embedded-UI main.js@8916419 (cloudAgentsEnabled)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Planning for a UI that can attach to local, remote and cloud runtimes from day one avoids rewrites; Verevon's cloud-only runtime could add 'bring your own machine'.",
+  "notes": "Flags are off in this build, so cloud agents are not active here."
+ },
+ {
+  "id": "antigravity-architecture-028",
+  "category": "Platform architecture",
+  "name": "Background-resident host with tray, sleep blocker and quit guard",
+  "what": "The app can stay alive with no windows, shows a running-agent count in the tray, blocks display sleep on request and warns before quitting with agents active.",
+  "how": "runInBackground defaults to false on Windows and true elsewhere; keepComputerAwake uses powerSaveBlocker prevent-display-sleep; the renderer reports the active agent count via agent:update-active-count to update the tray label; before-quit shows 'There may be agents or background tasks running' unless the quit path is the tray; Cmd/Ctrl+Q is intercepted.",
+  "evidence": [
+   "extract/antigravity/dist/services/settingsService.js:12-26",
+   "extract/antigravity/dist/utils.js:207-232",
+   "extract/antigravity/dist/tray.js:1-79",
+   "extract/antigravity/dist/main.js:312-393",
+   "extract/antigravity/dist/ipcHandlers.js:167-170"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Long-running agents need exactly these host behaviours on desktop; a web product replaces them with notifications and server-side runs.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-029",
+  "category": "Platform architecture",
+  "name": "Developer overrides and build stamping",
+  "what": "Developers can point the shell at a URL, fix the backend port or swap the backend binary without rebuilding.",
+  "how": "Env DEV_URL (skip LS start), JETSKI_LS_PORT, CODEIUM_LANGUAGE_SERVER_BIN, dev data dir antigravity-dev, dev-app-update.yml with forceDevUpdateConfig; LS --stamp prints 'Built at CL: n' shown in the About panel.",
+  "evidence": [
+   "extract/antigravity/dist/main.js:79-80",
+   "extract/antigravity/dist/main.js:213",
+   "extract/antigravity/dist/languageServer.js:80-103",
+   "extract/antigravity/dist/paths.js:17-22",
+   "extract/antigravity/dist/updater.js:148-151"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Low direct relevance; shows a clean split that makes backend and UI iterate independently.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-030",
+  "category": "Platform architecture",
+  "name": "Electron hardening level and fuse wire",
+  "what": "Renderer isolation is default-good but host fuses are at Electron defaults (RunAsNode on, cookie encryption off, asar integrity validation off).",
+  "how": "Fuse wire read from the exe sentinel: 1,0,1,1,0,0,0,1,1 (RunAsNode on, EnableCookieEncryption off, NodeOptionsEnvVar on, NodeCliInspectArguments on, EmbeddedAsarIntegrityValidation off, OnlyLoadAppFromAsar off, V8 snapshot off, FileProtocolExtraPrivileges on, WasmTrapHandlers on). RunAsNode must stay on because the agy-node wrapper runs the exe as Node. Windows binaries are not Authenticode signed.",
+  "evidence": [
+   "Antigravity.exe@185458272 (fuse sentinel, wire 101100011)",
+   "PowerShell Get-AuthenticodeSignature: Antigravity.exe, language_server.exe, webm_encoder.exe, elevate.exe, Uninstall Antigravity.exe all NotSigned",
+   "extract/antigravity/dist/utils.js:253-296"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "For Verevon desktop wrappers (if any) enable asar integrity and cookie encryption and sign every binary.",
+  "notes": "Fuse mapping uses the documented Electron v1 order (DOC electronjs.org fuses). Unsigned status may reflect a pre-release/dogfood channel."
+ },
+ {
+  "id": "antigravity-architecture-031",
+  "category": "Agent runtime",
+  "name": "Two-layer agent framework: generic gemini_coder core plus Jetski cortex",
+  "what": "The agent loop is built from a reusable framework (core, agent, executor, registry, step manager, task, tracer, handlers) with product logic layered in a separate cortex package of tools, handlers, executors and customizations.",
+  "how": "Go packages gemini_coder/framework/{core (GenerateFullResponse(+WithRetry), InvocationContext, Toolbox, RenderSystemPrompt, Run), agent (step handlers, PreInvocationHook/PostInvocationHook/StopHook, ToolConverter, ModelAPI.ClassifyError), executor/agentexecutor, registry, stepmanager, task, tracer, handlers/checkpoint, handlers/applyedit, core/integration} and third_party/jetski/cortex/{tools (browser, code, knowledge, subagent, notebook), handlers, executors (prehooks, posthooks, stophooks, pretoolhooks, posttoolhooks), customizations, agentapi, sdk, trajectory, cost, tokens, slashcommands}.",
+  "evidence": [
+   "tmp/agarch/ls_go_pkgs.txt (package list with symbol counts)",
+   "tmp/ls_cortex_step_types.txt (122 step types)",
+   "language_server.exe@72846787 (cortex/revert), 72788374 (slashcommands), 71540359 (tokens), 70170472 (cost)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Model Plane should likewise keep a product-agnostic loop/executor/tracer core and put tools, hooks and agent personas in a separate layer so partners can embed the core.",
+  "notes": "Evidence is Go pclntab symbol names (SRC-STR) and proto/step names; control flow was not decompiled."
+ },
+ {
+  "id": "antigravity-architecture-032",
+  "category": "Agent runtime",
+  "name": "Trajectory and step data model (122 step types, status machine)",
+  "what": "A conversation is a trajectory of typed steps (planner response, tool calls, browser actions, commands, subagent invocations, checkpoints, notifications, questions, system/ephemeral messages) each with a status, persisted and replayable.",
+  "how": "CORTEX_STEP_TYPE enum has 122 values; step statuses seen in embedded Go templates: PENDING, RUNNING, WAITING (for user approval), DONE, ERROR, INVALID, CANCELED. Trajectory types include CASCADE, INTERACTIVE_CASCADE, USER_MAINLINE, USER_GRANULAR, SIDE_QUESTION, BACKGROUND_RESEARCH, DEEP_THINK, AUTO_CASCADE(_MANAGER), SUPERCOMPLETE, KNOWLEDGE_GENERATION. Persisted by cortex/trajectory/dbtrajectory over gorm+sqlite (trajectory_meta, parent refs, generator metadata, executor metadata); rehydration and fork packages restore or branch them.",
+  "evidence": [
+   "tmp/ls_cortex_step_types.txt",
+   "tmp/ls_exa_names.txt (CortexTrajectoryType)",
+   "language_server.exe@72211606 (dbtrajectory)",
+   "language_server.exe@67111303 (cortex/rehydration)",
+   "language_server.exe@73050969 (cortex/fork)",
+   "tmp/agarch/ls_docs_48M.txt:16050-16080 (step status template)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "The trajectory-of-typed-steps model with an explicit WAITING-for-approval state is a good template for Verevon's run/session records and approval UX.",
+  "notes": "Step list is from the scout's extraction of the binary; names only."
+ },
+ {
+  "id": "antigravity-architecture-033",
+  "category": "Agent runtime",
+  "name": "Lifecycle hook pipeline (PreToolUse, PostToolUse, PreInvocation, PostInvocation, Stop)",
+  "what": "Users and plugins can attach shell commands to five points of the loop to gate tools, inject messages/steps, force continuation or block stopping.",
+  "how": "hooks.json maps hook names to events; PreToolUse/PostToolUse use matcher regex over tool names (step type lowercased without CORTEX_STEP_TYPE_), others are flat lists; handlers run via sh -c or cmd /c with the hooks.json folder as cwd, 30 s default timeout; stdin/stdout JSON in protojson camelCase; PreToolUse returns decision allow|deny|ask with reason and permissionOverrides (e.g. command(npm test)); PostInvocation can return injectSteps and terminationBehavior force_continue|terminate; Stop can return decision continue (blocks stopping, reason injected). Only command hooks exist and they are synchronous. Go: jsonhook, hookcaller, executors/{prehooks,posthooks,stophooks,pretoolhooks,posttoolhooks}.",
+  "evidence": [
+   "language_server.exe@49647918 (embedded Lifecycle Hooks doc)",
+   "tmp/agarch/ls_docs_48M.txt:131700-132000",
+   "language_server.exe@47130566 (jsonhook)",
+   "language_server.exe@49257664 (exa.hooks_pb, SessionStartHookArgs)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Same shape as Claude Code hooks; Verevon should expose equivalent run hooks (tool gate, post-tool, stop guard) over its plugin system with HTTP hooks added.",
+  "notes": "Docs list SessionStart in hooks_pb but not in hooks.json event table (not exposed yet). 'No async hooks, no HTTP/prompt hooks' is a stated limitation."
+ },
+ {
+  "id": "antigravity-architecture-034",
+  "category": "Agent runtime",
+  "name": "Customization mixin architecture for agent behaviour",
+  "what": "Skills, rules, plugins, MCP servers and custom agents are composed into the loop through a wrapper that contributes system prompt text, tool options, step renderers, handler decorators and hooks.",
+  "how": "cortex/sdk.CustomizationMixinWrapper implements GetSystemPrompt, GetToolOptions, GetStepStringConverters, HandlerDecorators, PreInvocationHooks, PostInvocationHooks, StopHooks; also NewMcpCustomizationClient, OverrideMCPAccessor, CustomAgentSpecToCascadeConfig, AdjustCascadeConfigForSubagent, ResolveCustomAgentSpec, ParseAgentConfigFromURI.",
+  "evidence": [
+   "language_server.exe@72932063 (cortex/sdk symbols)",
+   "tmp/agarch/ls_go_pkgs.txt (customizations, hooks, sdk)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "One composition point for all extension types keeps Model Plane agents consistent between chat, scheduled and sub-agent runs.",
+  "notes": "Symbol-level evidence only. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-035",
+  "category": "Agent runtime",
+  "name": "Alternative harness variants for experimentation",
+  "what": "The runtime ships multiple agent harness variants (lean/risky/safe 'rsi', mini-SWE-agent, minimal agent, a no-search-tools variant, prod variants) selected by an experiment key.",
+  "how": "Packages cortex/core/contrib/variants/{rsi_lean_di/{safe,risky,shared}, minisweagent, minimalagent, google_no_search_tools, prodvariants} and the string 'contrib-experiment-variant'/'unknown contrib variant %q'; flags such as use-component-rewrite and battle-mode-max-turns.",
+  "evidence": [
+   "language_server.exe@46924365 (rsi_lean_di)",
+   "language_server.exe@46617677 (minimalagent)",
+   "language_server.exe@47306062 (google_no_search_tools)",
+   "language_server.exe@72891262 (prodvariants)",
+   "language_server.exe@47472280 (contrib-experiment-variant)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "A pluggable harness-variant slot (with A/B routing per org) is how Model Plane can evaluate new loop designs against production safely.",
+  "notes": "Variant behaviour is unknown; names suggest research/eval harnesses. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-036",
+  "category": "Agent runtime",
+  "name": "Built-in delegation routine with hidden subagents and solo/delegate decision",
+  "what": "A built-in 'owl' agent decides per request between solo execution and delegating to hidden specialist subagents (DeepCoder for coding, DeepInvestigator for investigation) spawned with the inherited workspace.",
+  "how": "Embedded prompt: 'Routines: Solo vs Delegation', table of subagents with invoke_subagent(TypeName=...,Workspace='inherit'); Go packages customizations/builtin/owl/{deepcoder,deepinvestigator,hooks,common}, builtin/search, builtin/teamwork; tools/subagent and a subagent management (kill) tool; Browser subagent as a separate step type.",
+  "evidence": [
+   "language_server.exe@48744771 (Routines prompt)",
+   "language_server.exe@71906398 (owl/deepcoder)",
+   "language_server.exe@71906984 (owl/deepinvestigator)",
+   "tmp/agarch/ls_docs_48M.txt:16095-16120"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A cheap router step (solo vs delegate) in front of specialised workers is directly implementable in Model Plane sessions/runs.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-037",
+  "category": "Agent runtime",
+  "name": "Teamwork: pipeline and swarm multi-agent coordination through blackboard files",
+  "what": "Longer tasks run as pipelines (conductor, sentinel, stages) or swarms (orchestrator, workers, synthesizer) that coordinate through messages plus markdown blackboards in the workspace.",
+  "how": "Embedded role prompts: Teamwork swarm_follower/pipeline_conductor/critic_orchestrator; stigmergic orientation (.pipeline_progress_<task>.md, .swarm_blackboard_<task>.md), event-driven reactive wakeup (no polling), liveness cron timers only for conductor/orchestrator, task-scoped filenames to avoid collisions; worker workspace modes: branch (isolated clone) vs inherit (shared, new files only, output_<worker>.md); synthesizer consolidates; critic orchestrator spawns one verifier subswarm per manuscript section plus a full-scope one to avoid review fatigue.",
+  "evidence": [
+   "language_server.exe@48609767 (Teamwork Reminder)",
+   "language_server.exe@49303539 (Branched Workspace Collaboration)",
+   "language_server.exe@49323413 (Pipeline Blackboard)",
+   "language_server.exe@49348756 (Swarm Blackboard)",
+   "language_server.exe@49558683 (Critic Orchestration)",
+   "language_server.exe@71907808 (builtin/teamwork)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "File-based blackboards plus message wakeups are a robust, inspectable multi-agent substrate; Verevon could back them with Data Plane documents instead of workspace files.",
+  "notes": "Parts of the prompts are Google-internal (CitC/google3) and gated by the enable-agent-team flag; effectiveness not testable here."
+ },
+ {
+  "id": "antigravity-architecture-038",
+  "category": "Agent runtime",
+  "name": "Battle Mode: best-of-N parallel arms with forks and isolated workspaces",
+  "what": "One prompt can be run as several competing arms (optionally different models) in separate cloned workspaces; a winner is picked and applied, losers eliminated.",
+  "how": "RPCs StartBattleMode, EndBattleMode, EliminateBattleModeArm, DetectBattleModeAutoTrigger; ForkConversation with a per-workspace-type fork limit; packages cortex/battlemode, battleworkspace, permissions.NewBattleModePermissionManager; git clone --local based workspace copies; settings maxClonedWorkspaces, maxClonesPerWorkspace, disableEagerCloning, bestOfNFullVcsClone, bestOfNGitFullClone; flag battle-mode-max-turns; error text 'got %d models for %d arms'.",
+  "evidence": [
+   "LS-embedded-UI main.js@2423999 (startBattleMode)",
+   "language_server.exe@48256223 (battleworkspace)",
+   "LS-embedded-UI main.js@1548896-1551700 (user settings key enum incl. maxClonedWorkspaces, bestOfNFullVcsClone)",
+   "tmp/ls_exa_names.txt (BattleMode*)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Parallel attempts with isolated workspaces and an explicit pick/apply step is a strong long-task pattern; Verevon sandboxes make isolation cheaper than local clones.",
+  "notes": "Auto-trigger heuristics unknown."
+ },
+ {
+  "id": "antigravity-architecture-039",
+  "category": "Agent runtime",
+  "name": "Queued messages with selectable delivery strategy and steering",
+  "what": "While the agent is working, new user messages can be queued until the turn ends or interrupt immediately; a trajectory-steering feature exists.",
+  "how": "Setting queuedMessageDeliveryStrategy with WHEN_IDLE ('Queue') vs NEXT_INVOCATION ('Send Immediately: interrupt the agent and send immediately'); QueuedStepsUpdate/DeleteQueuedUserInputStep RPCs; trajectorySteeringFeature in the feature manager.",
+  "evidence": [
+   "LS-embedded-UI main.js@3072792-3078114 (queued message setting)",
+   "LS-embedded-UI main.js@4657088 (trajectorySteeringFeature)",
+   "LS-embedded-UI main.js@1014424 (MessageDeliveryStrategy)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Make 'queue vs interrupt' a user setting; Model Plane needs a mid-run message inbox either way.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-040",
+  "category": "Agent runtime",
+  "name": "Background tasks, idle signaling and stop-guard semantics",
+  "what": "Long-running commands and MCP tools can run in the background; the loop knows when it is 'fully idle' and hooks can refuse to let the agent stop while work is pending.",
+  "how": "BackgroundTasksUpdate with fullyIdle; MCP tool background mode OFF/ALWAYS; tool manage_task; Stop hook input includes fullyIdle and terminationReason (model_stop, max_steps_exceeded, error); agentapi RPC SignalExecutableIdle; checkpoints record running background tasks.",
+  "evidence": [
+   "tmp/ls_exa_names.txt (BackgroundTasksUpdate)",
+   "language_server.exe@49647918 (Stop contract)",
+   "language_server.exe@46996314 (agentapi RPC name list incl. SignalExecutableIdle, StreamTerminalOutput)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Model Plane runs need an explicit idle notion (no pending tools/children) before declaring completion.",
+  "notes": "Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-041",
+  "category": "Agent runtime",
+  "name": "Checkpoint and revert through git snapshots and bundles",
+  "what": "The agent snapshots workspace state at checkpoints and can revert to a step; snapshots are stored as git refs and can be exported as git bundles.",
+  "how": "Packages cortex/snapshot_recorder (gitclient, gitbundle), cortex/revert, handlers/checkpoint; strings refs/snapshots/, 'failed to create git bundle', 'failed to verify git bundle', 'git bundle sync failed', cortex-snapshot-revert marker; UI getRevertPreviews/revertToIndex.",
+  "evidence": [
+   "language_server.exe@46787555 (refs/snapshots/)",
+   "language_server.exe@72424460 (snapshot_recorder/gitbundle)",
+   "language_server.exe@72846787 (cortex/revert)",
+   "LS-embedded-UI main.js@4491643 (revertToIndex/getRevertPreviews stubs)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Git-ref snapshots give cheap, inspectable rewind; for Verevon sandboxes a similar content-addressed snapshot of the workspace volume is the equivalent.",
+  "notes": "Git must be available/usable in the workspace; behaviour for non-git folders not seen. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-042",
+  "category": "Agent runtime",
+  "name": "Sidecars: directory-defined background scripts and built-in cron scheduler",
+  "what": "Recurring or event-driven automation is defined as sidecars: a folder with sidecar.json (command or built-in schedule), supervised, hot-reloaded, with logs and per-call event records, able to create conversations through agentapi.",
+  "how": "sidecar.json {command,args,restart_policy always|on-failure|never,description} or {builtin:'schedule', args:[cron|@hourly|@every 30m, 'agentapi','new-conversation',prompt]}; directory watched (add/edit restarts, delete kills); env ANTIGRAVITY_SIDECAR_WEB_PORT and ANTIGRAVITY_EXECUTABLE_DATA_DIR; sidecar_data/<id>/{data,logs,events}; disabled by default and enabled in user config.json; the hub UI lists 'Scheduled Tasks' and hosts sidecar UIs (FULL_PANE/AUX_PANE) via plugin://.",
+  "evidence": [
+   "language_server.exe@49031695 (sidecar prompt/doc)",
+   "https://antigravity.google/docs/sidecars",
+   "tmp/agarch/ls_docs_48M.txt:21336 (exa.config_pb.UserConfig.SidecarsEntry)",
+   "extract/antigravity/dist/customScheme.js:1-55"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "A supervised-process automation primitive is a pragmatic substitute for a workflow engine; Verevon's Application Plane scheduling could expose the same 'run agent on cron' contract.",
+  "notes": "Public docs confirm disabled-by-default and restart policies; run history and failure notification UX not seen."
+ },
+ {
+  "id": "antigravity-architecture-043",
+  "category": "Agent runtime",
+  "name": "agentapi: scriptable control plane for agents",
+  "what": "A CLI/RPC front end lets scripts, sidecars and the CLI start conversations, send messages, stream terminal output, signal idle, fetch trajectories/artifacts and install customizations on a running backend.",
+  "how": "cmd/agentapi.HandleAgentAPI with csrfUnaryInterceptor; RPC list includes GetRemoteControlInfo, ResolveSidecarConfig, AcceptTermsOfService, LoadSharedTrajectory, ForceStopCascadeTree, SignalExecutableIdle, StreamTerminalOutput, ScanSkillsConfigFile, GetCascadeTrajectory, GetArtifactSnapshots, ImportProjectFromUrl, InstallCascadePlugin, InstallCustomization, StartScreenRecording, GetAgentTeamMetadata, ProjectUpdatesStream; every call logged as an event file for sidecars.",
+  "evidence": [
+   "language_server.exe@78260770 (HandleAgentAPI)",
+   "language_server.exe@46996314 (RPC name list)",
+   "language_server.exe@49031695 (sidecar doc: agentapi semantics)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon needs the same: a stable machine API (and CLI) for starting and steering runs, separate from the chat UI.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-044",
+  "category": "Agent runtime",
+  "name": "Context management: compaction, summaries, knowledge items and transcripts",
+  "what": "Long conversations are kept workable through compaction notices, context summaries, a persistent knowledge-item (KI) store the agent retrieves from, and transcript files the agent can read.",
+  "how": "CompactionInfo/ContextWindowMetadata, UI enableCompactionNotification, KI system and 'KI Retrieval Workflow' prompts, conversationHistoryEnabled and knowledgeEnabled settings, cumulative_prompt_handler, core/serializers/truncation, TruncateOutput for commands, transcript.jsonl/transcript_full.jsonl and a 'How to use transcripts' prompt, conversationsearch package.",
+  "evidence": [
+   "language_server.exe@48919542 (Knowledge Items system)",
+   "language_server.exe@48606614 (KI Retrieval Workflow)",
+   "language_server.exe@49146795 (How to use transcripts)",
+   "LS-embedded-UI main.js@3072792 (conversationHistoryEnabled/knowledgeEnabled settings)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "KI-style background distillation plus transcript files are a ready memory design for Model Plane; ties into the Hermes memory goals.",
+  "notes": "Compaction algorithm not observed. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-045",
+  "category": "Agent runtime",
+  "name": "Planning mode artifacts and review gates",
+  "what": "In planning mode the agent produces reviewable documents (task list, implementation plan, walkthrough, URL bookmarks, scratch scripts) as first-class artifacts with approval state.",
+  "how": "Embedded prompts '# Planning Mode Artifacts', 'Implementation Plan' (Goal Description, User Review Required, Open Questions, Proposed Changes, Verification Plan) and 'Walkthrough'; artifact approval status and review modes; Proceed with Plan keybinding; artifact snapshots streamed to the UI.",
+  "evidence": [
+   "language_server.exe@49157678 (Planning Mode Artifacts)",
+   "LS-embedded-UI main.js@3060498 (ArtifactReviewMode)",
+   "LS-embedded-UI main.js@4518077 (Proceed with Plan action)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Typed plan/walkthrough artifacts with an approval gate belong in Verevon's agent page as run outputs.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-046",
+  "category": "Agent runtime",
+  "name": "Self-healing edit application via a repair model call",
+  "what": "When a code edit fails to apply, a dedicated prompt asks a model to fix the failed search/replace chunks minimally and retry.",
+  "how": "Embedded prompt 'expert code-editing assistant specializing in debugging and correcting failed code edit operations' with replacement_chunk schema and XML output; packages handlers/applyedit, cortex/fastapply, utils/go_sed (sed-style edit tool with bottom-to-top line rule); failure text 'Failed Replacements'.",
+  "evidence": [
+   "language_server.exe@49126621 (edit repair prompt)",
+   "language_server.exe@72791993 (cortex/fastapply)",
+   "language_server.exe@72842806 (go_sed)",
+   "tmp/agarch/ls_docs_48M.txt:64603-64640"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "An automatic repair pass for failed patches cuts agent retries; cheap to add to any editing tool in Model Plane.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-047",
+  "category": "Agent runtime",
+  "name": "Retries, error classification and quota-aware failures",
+  "what": "Model calls are retried with classified errors; user-visible errors distinguish low credits from quota exhaustion; capacity-exhausted is a first-class model state.",
+  "how": "GenerateFullResponseWithRetry, ModelAPI.ClassifyError, CortexErrorDetails; UI error mapper returns LOW_CREDITS vs MODEL_QUOTA_LIMIT_EXCEEDED using quotaInfo.remainingFraction, structured error parts and error ids; MODEL_CAPACITY_EXHAUSTED; Connect code mapping (unauthenticated triggers CSRF refresh).",
+  "evidence": [
+   "LS-embedded-UI main.js@3048200-3049300 (sJ/tJ error mapping)",
+   "tmp/ls_exa_names.txt (CortexErrorDetails)",
+   "tmp/ls_model_enums.txt (MODEL_CAPACITY_EXHAUSTED)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Typed error taxonomy with user-actionable messages (credits vs quota vs capacity) should be mirrored in Model Plane cost/quota errors.",
+  "notes": "Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-048",
+  "category": "Agent runtime",
+  "name": "Step renderers as templates: tool results converted to model text by Go templates",
+  "what": "Each step type has a text/template converter that renders what the model sees (status, errors, waiting-for-approval) separately from what the UI shows.",
+  "how": "Embedded Go templates define defaultStatusOutputString and templateError and per-step converters; ToolConverter and GetStepStringConverters in the mixin; StepRenderInfo for the UI.",
+  "evidence": [
+   "tmp/agarch/ls_docs_48M.txt:16050-16075",
+   "tmp/ls_exa_names.txt (StepRenderInfo)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Separating model-facing and user-facing renderings of the same step (templated, overridable by plugins) helps cost control and transparency.",
+  "notes": "Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-049",
+  "category": "Agent runtime",
+  "name": "SDK runtime: headless harness with read-only default capabilities",
+  "what": "The public Python SDK (google-antigravity) spawns the same runtime, wires tools and hooks, and defaults to read-only capabilities until write tools are enabled.",
+  "how": "Doc: pip install google-antigravity (wheels contain a compiled runtime binary); Agent/LocalAgentConfig/CapabilitiesConfig; async context manager manages binary discovery, tool wiring, hook registration and policy defaults; response streams tokens, thoughts and typed ToolCall events; interactive loop helper. LS: cortex/sdk/sdkprocess, language_server/sdk_executor.",
+  "evidence": [
+   "language_server.exe@49053252 (Python SDK doc)",
+   "language_server.exe@72932063 (sdkprocess)",
+   "https://github.com/google-antigravity/antigravity-sdk-python (as cited in the embedded doc; not fetched)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A read-only-by-default embeddable SDK is the right default for Model Plane's partner API.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-050",
+  "category": "Tools, plugins & extensibility",
+  "name": "Customization discovery, inheritance and plugin bundles",
+  "what": "Skills, rules, hooks, MCP servers and sidecars are discovered from workspace and global roots, can be registered through skills.json/plugins.json with inheritance and regex include/exclude, and are shipped as plugin bundles with a plugin.json manifest.",
+  "how": "Roots: <repo>/.agents/ and ~/.gemini/config/; rules via GEMINI.md/AGENTS.md walking up to the repo root with dedup per conversation; skills in .agents/skills/<name>/SKILL.md; plugins/<name>/{plugin.json, mcp_config.json, hooks.json, rules/, skills/, sidecars/}; skills.json/plugins.json schema {inherits[{path,include_only,exclude}], entries[{path,exclude}]}; path resolution absolute, ~-relative or repo-relative; team sharing via a committed .agents/skills.json; marketplace install from Customizations tab, /plugin or agy plugin (official marketplace, GitHub repo or local dir). Workflows are being migrated to skills by a built-in migrate-workflows skill.",
+  "evidence": [
+   "language_server.exe@49190935 (JSON Configuration Files)",
+   "language_server.exe@49133526 (Plugins doc)",
+   "language_server.exe@48705754 (Workspace Rules)",
+   "https://antigravity.google/docs/plugins",
+   "language_server.exe@49387338 (migrate-workflows)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A layered, committed-to-repo customization root with inheritance is a strong model for Verevon org/team/project scopes.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-051",
+  "category": "Tools, plugins & extensibility",
+  "name": "MCP integration: stdio, SSE and UNIX-socket servers, OAuth, admin gating",
+  "what": "The backend is an MCP client (and SDK-based server) supporting stdio and SSE servers from a global or per-plugin mcp_config.json, remote OAuth, per-tool background mode and admin-disabled states.",
+  "how": "Docs: mcp_config.json {mcpServers:{name:{command,args,env}|{serverUrl}}} at ~/.gemini/config/ or plugin folders; Go uses modelcontextprotocol/go-sdk with cortex/utils/mcp and mcpcore; strings 'detected UNIX socket', 'fileSystem is required when MCP servers are configured', MCP_SERVER_INIT_ERROR, mcp_oauth_tokens.json; DISABLED_BY_ADMIN status; CompleteMcpOAuth/DisconnectMcpOAuth RPCs; @-mention of MCP servers/tools in chat.",
+  "evidence": [
+   "language_server.exe@49022794 (MCP Servers doc)",
+   "language_server.exe@70919112 (go-sdk mcp)",
+   "language_server.exe@47190515 (mcp_oauth_tokens.json)",
+   "tmp/agarch/ls_docs_48M.txt:51132-51200"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Standard MCP surface; the extra value to copy is admin disable per server and OAuth token handling inside the runtime.",
+  "notes": "OAuth tokens are kept in a JSON file (permissions unknown); Google credentials use the OS keyring instead."
+ },
+ {
+  "id": "antigravity-architecture-052",
+  "category": "Computer & environment control",
+  "name": "Agent browser = separate real Chrome driven over CDP by a browser subagent",
+  "what": "Web tasks run in the user's installed Chrome but in a dedicated profile and debugging port; a Browser Subagent operates tabs while the main agent continues.",
+  "how": "Settings: Enable Browser Tools, Chrome Binary Path (auto-detect if empty), Browser User Profile Path (default ~/.gemini/antigravity-browser-profile), Browser CDP Port (default 9222). Go side: language_server/browser/{launchmanager, local, state, browserabstractions/cdp_client}, cortex/tools/browser, handlers/browser, chatconverters/browser, go cdp protocol bindings (page, network, storage, audits); RPCs CheckDevToolsActivePort and GetBrowserOnboardingPort drive an onboarding flow. Public docs: Browser Subagent, separate Chrome profile, screenshots and recordings saved as artifacts; connection method not stated in the docs.",
+  "evidence": [
+   "LS-embedded-UI main.js@3084306 and 1548896-1549000 (browser settings keys and labels)",
+   "tmp/agarch/ls_go_pkgs.txt (browser packages)",
+   "language_server.exe@70315354 (cdp/protocol/page)",
+   "https://antigravity.google/docs/ide/browser",
+   "tmp/ls_exa_names.txt (CheckDevToolsActivePort, GetBrowserOnboardingPort)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon's browser is server-side (Quarry executes, Model proposes), but the 'dedicated profile, explicit CDP port, subagent per browsing task' model maps directly; the user-profile separation maps to per-run browser contexts.",
+  "notes": "No Chrome extension channel exists in this 2.x build: automation is pure CDP (no nativeMessaging/chrome.debugger strings found)."
+ },
+ {
+  "id": "antigravity-architecture-053",
+  "category": "Computer & environment control",
+  "name": "Bundled chrome-devtools-mcp as the browser tool server, run on Electron-as-Node",
+  "what": "The browser toolset is Google's open-source chrome-devtools-mcp 1.1.0, shipped unpacked and launched by the backend through a bundled Node shim.",
+  "how": "Shell sets CHROME_DEVTOOLS_MCP_JS to app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js and prepends userData/bin to PATH where setupNodeWrapper writes agy-node (.cmd on Windows: set ELECTRON_RUN_AS_NODE=1 then Antigravity.exe %*); LS passes --no-usage-statistics --no-performance-crux and an ANTIGRAVITY_NODE_PATH env. Telemetry client names antigravity as a known MCP client.",
+  "evidence": [
+   "extract/antigravity/dist/languageServer.js:166-177",
+   "extract/antigravity/dist/languageServer.js:224-235",
+   "extract/antigravity/dist/utils.js:234-311",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/telemetry/ClearcutLogger.js:47-72",
+   "language_server.exe@50886041 (CHROME_DEVTOOLS_MCP_JS)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Reusing an upstream MCP browser server avoids building a CDP toolset; running it on the app's own runtime removes a Node install requirement (Verevon can do the same with a bundled runtime in the sandbox image).",
+  "notes": "Exact argv for the child is not visible (Go builds it); that the MCP child runs through agy-node is INF; the two opt-out flags are adjacent strings in the Go binary (medium confidence)."
+ },
+ {
+  "id": "antigravity-architecture-054",
+  "category": "Computer & environment control",
+  "name": "DevTools MCP internals: serialized tool calls, page routing, roots-confined paths",
+  "what": "The browser server executes one tool call at a time, can route calls by page id for concurrent agents, redacts network headers on request, and confines file paths to the client's workspace roots.",
+  "how": "ToolHandler wraps every tool in a global Mutex; pageScoped tools take pageId only with --experimentalPageIdRouting; categories (emulation, performance, network, extensions, third-party) can be disabled; --slim exposes 3 tools; --experimentalVision enables click_at(x,y); --experimentalNavigationAllowlist adds an allowList parameter on navigation tools; --redactNetworkHeaders; McpContext.validatePath canonicalizes paths and requires them under MCP roots (plus os tmpdir); connection modes: launch with pipe (profile under ~/.cache), browserUrl, wsEndpoint, autoConnect via DevToolsActivePort; a daemon and a chrome-devtools CLI exist in the package.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/ToolHandler.js:1-216",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/McpContext.js:95-150",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp-cli-options.js:20-250",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/browser.js:30-237",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/tools/pages.js:135-215"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "The roots-confined path check and per-page routing are worth copying into Verevon's browser tool contract; the global mutex shows a throughput limit for parallel browsing agents.",
+  "notes": "Single mutex means one browser action at a time per server instance."
+ },
+ {
+  "id": "antigravity-architecture-055",
+  "category": "Computer & environment control",
+  "name": "Browser tool vocabulary: DOM, accessibility snapshot, pixel actions, JS, network, state diffs",
+  "what": "The agent can open and list pages, click elements or pixels, type, drag, scroll, press keys, read DOM/accessibility text, capture console and network, evaluate JS, screenshot and record, with a state-diffing mode that reports only what changed.",
+  "how": "Step types BROWSER_* (about 25) plus OPEN_BROWSER_URL, READ_BROWSER_PAGE, LIST_BROWSER_PAGES, CAPTURE_BROWSER_CONSOLE_LOGS, CAPTURE_BROWSER_SCREENSHOT, CLICK_BROWSER_PIXEL, EXECUTE_BROWSER_JAVASCRIPT; MCP tools navigate_page, new_page, click, click_at, fill, fill_form, hover, drag, press_key, type_text, upload_file, take_snapshot, take_screenshot, evaluate_script, list_network_requests, performance_*, lighthouse_audit, take_heapsnapshot, screencast_*; modes BrowserVerifyCompletenessMode, BrowserVerifyScreenshotsMode, BrowserToolSetMode, BrowserStateDiffingConfig; output 'Browser State / Pages Changed / Pages Removed / Viewport' diffs.",
+  "evidence": [
+   "tmp/ls_cortex_step_types.txt",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/tools/input.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/tools/snapshot.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/tools/performance.js",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/tools/screencast.js",
+   "language_server.exe@46710460 (Browser State / Pages Changed strings)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "State-diff reporting (only changed pages/DOM) is a token-saving technique Quarry/Model should adopt for browser observations.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-056",
+  "category": "Computer & environment control",
+  "name": "WebMCP and agent-managed Chrome extensions",
+  "what": "The browser server can discover and call tools that a web page itself exposes (WebMCP) and can install, reload and trigger Chrome extensions during a session.",
+  "how": "tools/webmcp.js: list_webmcp_tools and execute_webmcp_tool (requires Chrome 149+ with WebMCPTesting flags and categoryExperimentalWebmcp); tools/extensions.js: install_extension, list_extensions, reload_extension, trigger_extension_action, uninstall_extension (categoryExtensions off by default, pipe connection only); third-party developer tools category exposes page-provided tools.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/tools/webmcp.js:1-63",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/tools/extensions.js:1-97",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app.asar.unpacked/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp-cli-options.js:180-215"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "Page-declared tools (WebMCP) could let Verevon agents act on sites through site-owned affordances instead of DOM scraping; keep behind an off-by-default category like here.",
+  "notes": "Both categories are experimental and off by default; whether the hub enables them is unknown."
+ },
+ {
+  "id": "antigravity-architecture-057",
+  "category": "Computer & environment control",
+  "name": "In-app web preview pane with slow-load detection",
+  "what": "A 'Preview' auxiliary pane renders a URL (dev server or doc) inside the hub with tabs, reload and open-in-browser, and flags pages that load slowly.",
+  "how": "Aux pane descriptor 'browser' (tab id, initial URL, page title) renders an iframe-style preview; a hook starts a 15 s timer on navigation and shows a 'slow' state; opens externally with noopener; telemetry event browser_url_visit sends url_type (google/external/unknown) and host.",
+  "evidence": [
+   "LS-embedded-UI main.js@6248465-6275425 (preview pane, browser_url_visit, slow timer)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "A preview pane for artifacts/web apps produced by agents is expected in the Verevon agent page; avoid sending hosts in telemetry.",
+  "notes": "Distinct from the agent's controlled Chrome; this is user-side preview only."
+ },
+ {
+  "id": "antigravity-architecture-058",
+  "category": "Computer & environment control",
+  "name": "Terminal execution owned by the backend: shell parsing, background commands, setup script",
+  "what": "Commands run in a backend-managed shell (not the IDE terminal unless shell integration is enabled), are parsed with a real shell grammar for allow/deny matching, can run in the background and have output truncated.",
+  "how": "Packages jetski/terminal, cortex/command (Manager, DefaultRunner, TruncateOutput, ShouldAutoRun, CheckCommandLists, IsDangerousBinary, SuggestAllowAlwaysPattern, autoRunDecisionForPowershell/UnixShell), utils/commandutils, mvdan/sh/syntax and antlr parsers; setting Command Setup Script (a shell script run before every command) and Enable Shell Integration; RunCommand/SendCommandInput/CommandStatus/ReadTerminal steps; PowerShell matching uses contiguous token subsequences, Unix shells prefix tokens.",
+  "evidence": [
+   "language_server.exe@64830975 (mvdan/sh/syntax)",
+   "tmp/agarch/ls_go_pkgs.txt (command, terminal)",
+   "LS-embedded-UI main.js@3072792-3076000 (command setup script, shell integration, allow/deny list descriptions)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Parsing commands with a real shell grammar (not regex) before policy decisions is a requirement for Verevon's sandbox exec tool.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-059",
+  "category": "Computer & environment control",
+  "name": "Terminal sandbox: exebox (Windows AppContainer + job + desktop) with sandbox network proxy",
+  "what": "Commands can run in a restricted sandbox limited to workspace/temp paths with no network except allowed domains; on Windows the backend contains its own sandbox implementation.",
+  "how": "Go package google3/devtools/ai/sandbox/exebox (Box, Cmd, startNewJob, startProcess, setLoopbackSIDs/removeLoopbackSID, pathCapSid per-path capability SIDs, ntSetSecurityObject, CreateDesktop, firewallapi.dll, named pipe exebox-admin broker, exebox-cert-*.crt and npm_config_cafile for a local CA) plus sandbox/{sbox, proxy, urpc, localcert} and cortex/command/sandboxproxy; settings enableTerminalSandbox, sandboxAllowNetwork, terminal auto-execution PROCEED_IN_SANDBOX; docs: Default preset runs commands in the sandbox (workspace+temp, no network), granted read/write paths extend allowlists and granted domains define egress; commands needing network or host access run outside after approval; a per-command BypassSandbox flag exists. No seatbelt/landlock/bubblewrap identifiers were found (one bwrap string).",
+  "evidence": [
+   "language_server.exe@67034445 (exebox.newBox)",
+   "language_server.exe@67716485 (sandbox/proxy)",
+   "language_server.exe@67034211 (sandbox/localcert)",
+   "language_server.exe@68386380 (sandboxproxy)",
+   "https://antigravity.google/docs/permissions",
+   "LS-embedded-UI main.js@1549868 (enableTerminalSandbox)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "The design (capability-SID path grants + local TLS-intercepting proxy for domain-level egress + approval escape hatch) is the right reference for Verevon sandboxes; Linux isolation for Verevon would use microVM/gVisor instead.",
+  "notes": "Public docs say Windows still uses the older permission system until updated, so the new sandbox may not be active on this machine; the cross-platform story for macOS/Linux is not visible in this Windows build."
+ },
+ {
+  "id": "antigravity-architecture-060",
+  "category": "Computer & environment control",
+  "name": "Workspace, project, clone and worktree management",
+  "what": "Projects group workspaces; the backend can create scratch projects, tracked workspaces, git worktrees and clones for parallel agents, and supports several VCS back ends in the UI.",
+  "how": "Packages fs/workspace_manager, language_server/{worktree, vcsdriver, projects, projectsmigration}, jetski/vcs, git_utils (go-git) with RPCs CreateProject, AddTrackedWorkspace, CreateScratchProjectFolder, CreateWorktree/CheckoutWorktree/DeleteWorktree, GenerateCommitMessage; UI worktreeEnabled=true and VCS UI strategies for git, jj, fig, gob-repo, gob-cog; settings magicWorkspaceVcs, maxClonedWorkspaces, maxClonesPerWorkspace; a retroactive 'migrate conversations into projects' feature.",
+  "evidence": [
+   "LS-embedded-UI main.js@6275425 (worktreeEnabled)",
+   "LS-embedded-UI main.js@8914500-8925616 (vcs strategies)",
+   "tmp/agarch/ls_go_pkgs.txt (fs/workspace_manager, worktree, vcs)",
+   "tmp/ls_exa_names.txt (CreateWorktree...)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Project-scoped workspaces with per-run isolation (clone/worktree) correspond to Verevon Spaces plus sandbox volumes.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-061",
+  "category": "Computer & environment control",
+  "name": "File watching, ignore rules and non-workspace file policy",
+  "what": "The agent respects .gitignore and an .antigravityignore file by default and needs an explicit opt-in to touch ignored files or files outside the workspace.",
+  "how": "Packages fs/file_watcher, gitignore (go-git gitignore), string .antigravityignore; settings allowCascadeAccessGitignoreFiles, allowAgentAccessNonWorkspaceFiles, nonWorkspaceFileAccessPolicy (allow/ask/deny), allowTabAccessGitignoreFiles; UI warns that outside-workspace access can reach credential files and prompt-injection targets.",
+  "evidence": [
+   "LS-embedded-UI main.js@1550598 (nonWorkspaceFileAccessPolicy)",
+   "LS-embedded-UI main.js@3073375-3076000 (descriptions)",
+   "language_server.exe@46996314 (.antigravityignore)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Default-deny outside the workspace with a visible warning is the posture to keep for Verevon file tools.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-062",
+  "category": "Computer & environment control",
+  "name": "IDE bridge: reverse RPC from backend into the editor",
+  "what": "When running under an IDE, the backend calls back into the editor for terminals, definitions/references, lint, diff zones, saving, running extension code and secrets.",
+  "how": "ExtensionServerService methods (ReadTerminal, ShowTerminal, SendTerminalInput, GetDefinition, FindAllReferences, GetLintErrors, OpenDiffZones, InsertCodeAtCursor, SaveDocument, ExecuteCommand, RunExtensionCode, GetSecretValue/StoreSecretValue, FocusIDEWindow), Go extension_server_client and lsp/ciderlsp packages; UI extensionView mode uses an editor RPC router (setEditorState, getEditorState, onAntigravityReady) and in-memory routing; RunExtensionCode has its own auto-run decision.",
+  "evidence": [
+   "tmp/ls_exa_names.txt (exa.extension_server_pb)",
+   "LS-embedded-UI main.js@8914500-8925616 (extensionApi router)",
+   "language_server.exe@70099980 (language_server/extension_server_client)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon is not an IDE, but the bridge shows how to let one runtime borrow host capabilities (terminal, diagnostics) when embedded in partner tools.",
+  "notes": "The editor side (VS Code fork) was not inspected. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-063",
+  "category": "Computer & environment control",
+  "name": "Environment inheritance and Electron-as-Node PATH shim",
+  "what": "The backend inherits the user's full login-shell environment so agents find the user's tools, and gets a PATH-injected agy-node shim to run JS tools without a system Node.",
+  "how": "shell-env shellEnvSync merged over process.env before spawn; setupNodeWrapper writes agy-node(.cmd) into userData/bin and prepends it to PATH; relies on the RunAsNode fuse; on macOS it uses the Helper app to avoid a Dock icon.",
+  "evidence": [
+   "extract/antigravity/dist/languageServer.js:222-235",
+   "extract/antigravity/dist/utils.js:234-311",
+   "Antigravity.exe@185458272 (fuse wire: RunAsNode enabled)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Environment passthrough is convenient but leaks secrets into agent-run processes; Verevon sandboxes should construct an explicit env instead.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-064",
+  "category": "Computer & environment control",
+  "name": "Deploy and dev-server steps (Firebase, Netlify, Cloud SQL, applets)",
+  "what": "Agents can set up Firebase, deploy web apps, restart dev servers, run Cloud SQL statements and compile small mini-apps (applets).",
+  "how": "Step types DEPLOY_WEB_APP, DEPLOY_FIREBASE, SET_UP_FIREBASE, RESTART_DEV_SERVER, CLOUD_SQL_EXECUTE_SQL, CLOUD_SQL_UPDATE_SCHEMA, SET_UP_CLOUD_SQL, COMPILE_APPLET, INSTALL_APPLET_DEPENDENCIES; seat_management RPCs ConnectNetlifyAccount/ConnectGithubAccount.",
+  "evidence": [
+   "tmp/ls_cortex_step_types.txt",
+   "tmp/ls_exa_names.txt (ConnectNetlifyAccount)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Provider-account connections (GitHub, Netlify) with agent-callable deploy steps are a typical 'ship it' loop for Verevon's code/app generation.",
+  "notes": "Names only; deployment runs are not verifiable offline."
+ },
+ {
+  "id": "antigravity-architecture-065",
+  "category": "Computer & environment control",
+  "name": "Desktop-wide computer use is not present; a computer-use model enum exists",
+  "what": "No mouse/keyboard control of the whole desktop was found: automation is scoped to the browser; only a computer-use model enum name appears.",
+  "how": "Absence search over the Go binary found no desktop input tools beyond BROWSER_* steps and the CDP/vision click_at tool; enum GOOGLE_GEMINI_COMPUTER_USE_EXPERIMENTAL exists (name only).",
+  "evidence": [
+   "tmp/ls_enums_misc.txt (computer use enum)",
+   "tmp/ls_cortex_step_types.txt (no desktop steps)"
+  ],
+  "provenance": "INF",
+  "confidence": "low",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Gap versus Manus-style computer control: Antigravity does not offer a general desktop agent here, so Verevon's sandbox desktop is a differentiator.",
+  "notes": "Absence evidence from string search only."
+ },
+ {
+  "id": "antigravity-architecture-066",
+  "category": "Safety, permissions & governance",
+  "name": "Permission engine: action(target) grants with Deny over Ask over Allow",
+  "what": "Every sensitive action is expressed as action(target) (e.g. read_url, execute_url, write_file, unsandboxed) and checked against deny, ask and allow lists from global, project and conversation scopes; deny wins over ask, ask over allow.",
+  "how": "Public docs describe the rule grammar and precedence; Go package cortex/permissions provides PermissionManager, PermissionGrantStore, handler decorators that wrap tool handlers, hardcoded grants, per-conversation grants (getConversationGrants, RecordStepGrants), isOverridableAskSource, BattleModePermissionManager; strings read_url(*), execute_url(*), write_file(%s), unsandboxed(*); settings permissionGrantsGlobal and per-project grants; PreToolUse hooks can override with permissionOverrides. Granting write implies read; denying read implies denying write; domain rules cover subdomains.",
+  "evidence": [
+   "https://antigravity.google/docs/permissions",
+   "language_server.exe@71864260 (NewPermissionGrantStore)",
+   "language_server.exe@46440096 and 46710460 (read_url(*), execute_url(*), unsandboxed(*))",
+   "LS-embedded-UI main.js@1550427 (permissionGrantsGlobal)",
+   "LS-embedded-UI main.js@3060000-3085000 (settings registry)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A uniform action(target) grammar with scoped grants and fixed precedence is the cleanest policy model seen; Verevon should adopt it for tool permissions across chat, agent and scheduled runs.",
+  "notes": "Public docs state Windows still uses the older system until updated, so on this install the grant engine may not be fully live."
+ },
+ {
+  "id": "antigravity-architecture-067",
+  "category": "Safety, permissions & governance",
+  "name": "Permission presets and terminal auto-execution modes",
+  "what": "Users pick an overall posture (Default, Request Review, Turbo; the enum also has Vetted and None) and a terminal policy (Always Proceed, Request Review, Proceed in Sandbox, Auto) with project overrides.",
+  "how": "AgentPermissionPreset enum {UNSPECIFIED, REQUEST_REVIEW, DEFAULT, VETTED, TURBO, NONE}; CascadeCommandsAutoExecution {OFF=Request Review, AUTO, EAGER=Always Proceed, PROCEED_IN_SANDBOX}; UI copy warns EAGER has the highest risk of unsafe commands and that policy changes only apply to new messages; Default preset = sandboxed commands, ask for anything outside; Turbo = no prompts and full filesystem; Request Review = ask for every command and limit files to the workspace; project-level override of file access, internet, sandbox, auto-execution, artifact review and grants.",
+  "evidence": [
+   "LS-embedded-UI main.js@469936-470100 (enums)",
+   "LS-embedded-UI main.js@3078114 (terminal policy options)",
+   "https://antigravity.google/docs/permissions",
+   "language_server.exe@49171262 (Antigravity 2.0 Reference: policy list)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Presets plus per-project overrides are what Verevon orgs will expect; 'applies to new messages only' is a useful rule for mid-run policy changes.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-068",
+  "category": "Safety, permissions & governance",
+  "name": "Command allow/deny lists with shell-aware matching and allow-always suggestions",
+  "what": "Users maintain allow and deny lists for terminal commands; matching is token-based and shell-aware, deny beats allow, and the UI can suggest an allow-always pattern when approving.",
+  "how": "Unix shells: an entry matches when its space-separated tokens are a prefix of the command tokens; PowerShell: entry tokens may match any contiguous subsequence; deny list takes precedence; cortex/command exposes CheckCommandLists, IsDangerousBinary, SuggestAllowAlwaysPattern, isDangerousSubcommand; AutoRunDecision records the source (default/model/system/user x allow/deny); CommandAssessorConfig holds rule text and examples (remote execution via ssh/nc/scp/rsync flagged).",
+  "evidence": [
+   "LS-embedded-UI main.js@3072792-3073800 (allow/deny descriptions)",
+   "language_server.exe@71586965 (IsDangerousBinary)",
+   "language_server.exe@71587458 (ShouldAutoRun)",
+   "language_server.exe@52665931 (CommandAssessorConfig)",
+   "language_server.exe@52696607 (AllowAlways config)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Prefix-token matching is simple but bypassable via interpreters; Verevon should combine it with the data-flow vetting below rather than rely on lists.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-069",
+  "category": "Safety, permissions & governance",
+  "name": "Strict Mode and organization-managed setting locks",
+  "what": "A Strict Mode switch forces human review for agent actions, disables the most autonomous options (e.g. artifact Always Proceed) and settings can show as locked by strict mode or by the organization.",
+  "how": "Setting secureModeEnabled ('Strict Mode: enforce settings that prevent the agent from autonomously running targeted exploits and require human review for all agent actions'); options carry disabledInSecureMode; lock messages 'cannot be changed while strict mode is enabled' and 'managed by your organization'; the tool-execution policy list also includes 'strict'. The public permissions page does not mention strict mode.",
+  "evidence": [
+   "LS-embedded-UI main.js@1547903-1548200 (lock messages)",
+   "LS-embedded-UI main.js@3060726 (disabledInSecureMode)",
+   "LS-embedded-UI main.js@3073375-3075500 (Strict Mode description)",
+   "https://antigravity.google/docs/permissions (no mention of strict mode)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A single org-enforceable 'strict' switch that disables autonomy options and locks UI is what Verevon admins will want for regulated tenants.",
+  "notes": "Enforcement is probably client plus backend; server-side enforcement not verified."
+ },
+ {
+  "id": "antigravity-architecture-070",
+  "category": "Safety, permissions & governance",
+  "name": "Policy Guardian: tool-based vetting layer (data flow, content, dependency, shell change, unknown behaviour)",
+  "what": "A security layer vets each risky step with specialised vetting tools: data movement between endpoints, file/script content, package dependencies, shell configuration changes and opaque behaviour, with fail-closed or fail-open degradation.",
+  "how": "Embedded prompts define vet_data_flow, vet_content, vet_dependency, vet_shell_change and vet_unknown_behavior; Go packages cortex/policyguardian (+vetting, +telemetry), executors posthooks (policy_guardian_post_tool); log '[PolicyGuardian] Step %d: tool=%s skipped (not in vetted tools list)'; strings 'Denied by vetting tools', '[Degraded (FAIL-CLOSED)]', 'safebrowsing_configured [Degraded (FAIL-OPEN)]', 'Package is malicious (%s)', 'Version is malicious', 'Unsupported ecosystem', 'Antivirus check failed', allowlisted registries (npmjs, GitHub raw, DuckDuckGo) and a VETTED permission preset.",
+  "evidence": [
+   "language_server.exe@72480557 (policyguardian/vetting)",
+   "language_server.exe@49130300 (vet_data_flow tool description)",
+   "language_server.exe@47411382 (not in vetted tools list)",
+   "language_server.exe@47460858 (malicious package strings)",
+   "language_server.exe@47362799 (safebrowsing degraded)",
+   "tmp/agarch/ls_docs_48M.txt:64640-64700"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "This is the most advanced agent-side safety design observed: Model Plane could run a comparable guardian over tool calls, with Quarry/integration actions as the vetted effects.",
+  "notes": "Likely Google-internal or enterprise-gated (Archboard/datapol strings, internal hosts); whether it runs for external users under the VETTED preset is unverified. Quality capped at 4: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-071",
+  "category": "Safety, permissions & governance",
+  "name": "Data-flow taint tracking for downloads and exfiltration",
+  "what": "Command arguments are mapped to explicit data flows (source, destination, intent read/persist/transmit/execute, data type e.g. secrets/infrastructure) and files fetched from the network are tracked as untrusted so later execution of them is flagged.",
+  "how": "vet_data_flow prompt rules: extract real paths from cp/mv/cat/scp/rsync, map downloads (remote URL is source), mark credential files as data_type=secrets, treat git push as transmit and read-only git as local, audit security-disabling and port-binding flags (--remote-debugging-port, --inspect, --listen), host/IP overrides and firewall edits; env_state.untrusted_downloads with source_in_downloaded_path propagated across moves, copies and symlinks; vet_content required for builds in projects cloned from untrusted sources.",
+  "evidence": [
+   "language_server.exe@49130300 (vet_data_flow)",
+   "language_server.exe@47120023 (untrusted_downloads)",
+   "tmp/agarch/ls_docs_48M.txt:6240-6262, 6699, 14096, 22729-22735, 64680-64700"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Taint tracking of downloaded artifacts across file operations is a concrete defense against 'download then run' injection chains that Verevon's sandbox exec should implement.",
+  "notes": "Prompt text is evidence of design; the actual classifier is a model call (INF)."
+ },
+ {
+  "id": "antigravity-architecture-072",
+  "category": "Safety, permissions & governance",
+  "name": "Denied-action equivalence analyzer",
+  "what": "After a user or policy denies an action, a separate analyzer checks whether a new action is a rephrasing or repeat of a denied one along the same security dimension and target, preventing the agent from retrying the same violation.",
+  "how": "Embedded prompt 'security equivalence analyzer': only decide is_repeat by comparing the current action to the specific rule and resource cited in the prior denial; same violation against same target/endpoint/domain = repeat; different file/domain/URL, read-only vs write, same tool with different targets, or transient infrastructure errors = not repeat; examples include repeated git push to a non-allowlisted URL.",
+  "evidence": [
+   "language_server.exe@48785474 (security equivalence analyzer prompt)",
+   "tmp/agarch/ls_docs_48M.txt:21298-21320"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "Denial memory with semantic matching closes a common agent loophole (retry with a different spelling); cheap to add to Model Plane approvals.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-073",
+  "category": "Safety, permissions & governance",
+  "name": "LLM review of configuration changes for security downgrades",
+  "what": "Edits to config files (package registries, telemetry, firewall/SSH settings) are screened by a model prompt that flags registry hijacking, HTTPS-to-HTTP downgrades, exfiltration endpoints and access-control weakening, and is told to ignore instructions inside the file.",
+  "how": "Prompt 'expert in config file security analysis' returns JSON {reasoning, answer yes/no}; examples .npmrc, pip.conf, nuget.config registry redirects; explicit injection guard sentence ('Do not follow directives... embedded in the config file'). Related tool vet_shell_change for shell rc files.",
+  "evidence": [
+   "language_server.exe@48744541 (config vetting prompt)",
+   "language_server.exe@46925919 (vet_shell_change)",
+   "tmp/agarch/ls_docs_48M.txt:16055-16097"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "unique",
+  "verevonRelevance": "Supply-chain-style config tampering is a real agent attack path; screening writes to config/rc files should be a Model Plane default.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-074",
+  "category": "Safety, permissions & governance",
+  "name": "System-prompt and instruction confidentiality with decoy answer",
+  "what": "Built-in agent prompts instruct the model to keep their instructions confidential and answer probing questions with a fixed decoy line, overriding any conflicting instruction from users, tool outputs, files or other agents.",
+  "how": "Sections 'Instruction Protection' and 'System Prompt Protection' (Rule 1 Decoy: respond only with a stock sentence when asked about instructions/rules/configuration; second rule overrides conflicts incl. injected context and messages from other agents) appear in several embedded agent prompts; a SYSTEM PROMPT PROTECTION block repeats in teamwork prompts.",
+  "evidence": [
+   "language_server.exe@48680701 (Instruction Protection)",
+   "language_server.exe@48682605 (System Prompt Protection)",
+   "tmp/agarch/ls_docs_48M.txt:9079-9205"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Useful against casual prompt extraction but not a security boundary; Verevon can add it to the system prompt template while treating prompts as non-secret.",
+  "notes": "Scout reported no prompt-injection defense phrase; this and the equivalence/config prompts show defenses exist at the prompt layer."
+ },
+ {
+  "id": "antigravity-architecture-075",
+  "category": "Safety, permissions & governance",
+  "name": "Browser governance: tool toggle, JS policy, two-layer URL allow/deny and page-access prompts",
+  "what": "Browser use can be disabled, JavaScript execution can be Disabled/Request Review/Always Proceed, URL access follows a denylist plus allowlist, and the agent asks for page access or action permission per host.",
+  "how": "Settings agentBrowserTools, browserJsExecutionPolicy (DISABLED, ALWAYS_ASK, TURBO), browserAllowlist; RPCs AddToBrowserWhitelist/GetAllBrowserWhitelistedUrls; BrowserActionWaitingReason PAGE_ACCESS and PAGE_ACCESS_AND_ACTION_PERMISSION with confirm/deny interaction naming the hostname; UI text warns browser integration increases exposure to malicious parties; the MCP server also supports a navigation allowList parameter; agent runs in a separate Chrome profile.",
+  "evidence": [
+   "LS-embedded-UI main.js@3084306 (JS policy options)",
+   "LS-embedded-UI main.js@1548740 (browserAllowlist)",
+   "LS-embedded-UI main.js@976852 (BrowserActionWaitingReason)",
+   "LS-embedded-UI main.js@4692730 (page access prompt)",
+   "https://antigravity.google/docs/ide/browser"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon already has Model-proposes/Quarry-executes; add per-host page-access prompts and a JS-execution policy as Quarry grants.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-076",
+  "category": "Safety, permissions & governance",
+  "name": "Artifact review modes tied to prompt-injection risk",
+  "what": "The agent can proceed automatically or ask for review of the documents it creates; the 'Always Proceed' option is labelled as risking operation over injected content and is disabled in strict mode.",
+  "how": "ArtifactReviewMode {ALWAYS, TURBO, AUTO}; UI options Always Proceed vs Always Ask with the injected-content warning and disabledInSecureMode; docs also list agent-decides.",
+  "evidence": [
+   "LS-embedded-UI main.js@3060498-3060900",
+   "LS-embedded-UI main.js@470100 (ArtifactReviewMode enum)",
+   "language_server.exe@49171262 (policy list incl. Artifact Review Mode)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Treating agent-authored documents as an injection channel (future runs re-read them) is a good insight for Verevon artifacts and memory.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-077",
+  "category": "Safety, permissions & governance",
+  "name": "Resource-scoped permissions for credentialed CLIs via sandbox network proxy",
+  "what": "GitHub access from sandboxed commands is brokered: the agent must request fine-grained grants like gh.update({org,repo,pr}) and only gh/git over HTTPS are supported, so the agent never holds a GitHub token.",
+  "how": "Embedded 'permissioned-github' skill defines the format <binary>.<action>(<resource_json>) with org/repo mandatory and optional pr/issue/contents/branch/path/ref and actions read/create/update/approve/merge/dispatch/delete; says other operations are unsupported and the agent must stop; Go symbols command.buildGitHubNetboxConfig, configureTrustedCLIs, buildTrustedCLIArgv, initCA, hostFromRequest, collectBlockedRequestMessage and sandbox/proxy indicate enforcement at a TLS-intercepting egress proxy.",
+  "evidence": [
+   "language_server.exe@49574343 (permissioned-github skill)",
+   "language_server.exe@71591471 (configureTrustedCLIs)",
+   "language_server.exe@67716485 (sandbox/proxy)",
+   "tmp/agarch/ls_docs_48M.txt:122300-122450"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 5,
+  "uniqueness": "unique",
+  "verevonRelevance": "This is the pattern for Verevon integration-corev2: agents request typed, resource-scoped grants and credentials stay in the proxy/integration layer.",
+  "notes": "Enforcement mechanism is INF from symbols; skill text is the direct evidence."
+ },
+ {
+  "id": "antigravity-architecture-078",
+  "category": "Safety, permissions & governance",
+  "name": "Escalation from sandbox with reason and approval",
+  "what": "A command that cannot run inside the sandbox must be re-requested outside it with a stated reason, which the user approves.",
+  "how": "Per-command BypassSandbox in the run-command tool, string 'Reason for escalation', docs: commands needing network or host resources can run outside the sandbox but still require approval; unsandboxed(*) is a permission target.",
+  "evidence": [
+   "language_server.exe@46629184 (BypassSandbox)",
+   "language_server.exe@47190515 (Reason for escalation)",
+   "https://antigravity.google/docs/permissions"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Require a model-written justification for every sandbox escape so reviewers see why; log it for audit.",
+  "notes": "Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-079",
+  "category": "Safety, permissions & governance",
+  "name": "Credential storage in the OS keyring with environment-aware fallbacks",
+  "what": "Google OAuth credentials are kept in the OS credential store; the backend detects WSL, SSH, D-Bus and container situations where the keyring is unavailable.",
+  "how": "Go uses zalando/go-keyring and danieljoos/wincred; code_assist_client has keyring_detector_{wsl,ssh,dbus,container}.go; MCP OAuth tokens are separately kept in mcp_oauth_tokens.json; headless mode uses an OAuth code paste flow; ssoclient/authclient packages.",
+  "evidence": [
+   "language_server.exe@67032595 (go-keyring)",
+   "language_server.exe@79030364 (keyring_detector_wsl)",
+   "language_server.exe@47190515 (mcp_oauth_tokens.json)",
+   "language_server.exe@78097403 (auth_client)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Environment-aware keyring detection is a detail Verevon desktop/CLI clients will need; do not store MCP tokens in plain JSON.",
+  "notes": "File mode of mcp_oauth_tokens.json not inspected (user-data store skipped). Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-080",
+  "category": "Safety, permissions & governance",
+  "name": "Enterprise admin controls, SSO and team policy plumbing",
+  "what": "Org admins can disable features (e.g. MCP, conversation sharing), manage roles and domains, and configure SSO/OIDC; controls reach the client as FetchAdminControls.",
+  "how": "RPCs FetchAdminControls, TeamOrganizationalControls (get/delete), IsConversationSharingBlocked, GetSSOProvider, GetTeamOidcProviders, ExchangeOidcCode, role and domain management, team API secret storage; MCP status DISABLED_BY_ADMIN; Go package admin_controls and ssoclient.",
+  "evidence": [
+   "language_server.exe@46997322 (FetchAdminControls)",
+   "language_server.exe@46711175 (GetSSOProvider)",
+   "language_server.exe@71220092 (admincontrols)",
+   "language_server.exe@67699950 (ssoclient)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Admin-controls-as-RPC with UI lock states is the pattern for Verevon org policy to reach the chat/agent pages.",
+  "notes": "Names only; enforcement semantics not observable offline."
+ },
+ {
+  "id": "antigravity-architecture-081",
+  "category": "Safety, permissions & governance",
+  "name": "Local attack surface: loopback HTTPS backend, unauthenticated CDP port, unvalidated IPC",
+  "what": "The desktop app exposes a CSRF-protected loopback HTTPS API, an unauthenticated Chromium DevTools port, and IPC handlers that do not check the sender.",
+  "how": "main.js always adds --remote-debugging-port=0 to the hub's own Chromium (Chromium binds loopback and writes DevToolsActivePort to userData); setCertificateVerifyProc accepts any certificate for 127.0.0.1/localhost for the whole default session; no senderFrame/origin checks in ipcHandlers; no will-navigate/permission handlers; extensions:send-authorities accepts arbitrary targets; tokens passed as argv.",
+  "evidence": [
+   "extract/antigravity/dist/main.js:87-89",
+   "extract/antigravity/dist/languageServer.js:422-431",
+   "extract/antigravity/dist/ipcHandlers.js:53-274",
+   "extract/antigravity/dist/customScheme.js:27-55",
+   "extract/antigravity/dist/paths.js:37-43"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Do not copy: a same-user process that reads the hub's DevToolsActivePort can drive the renderer (and via the CSRF token the agent runtime). Verevon should keep control channels authenticated and never expose browser debug ports.",
+  "notes": "Severity assessment is INF; no exploit was attempted (read-only audit)."
+ },
+ {
+  "id": "antigravity-architecture-082",
+  "category": "Safety, permissions & governance",
+  "name": "Update and installer integrity gaps",
+  "what": "Windows binaries are unsigned and the updater does not verify a publisher signature; the IDE installer is downloaded and executed without a hash check.",
+  "how": "app-update.yml has no publisherName so electron-updater NsisUpdater.verifySignature returns null (skips Authenticode verification); only the manifest's own sha512 over TLS protects the download; Get-AuthenticodeSignature reports NotSigned for the main exe, language server, encoder, elevate helper and uninstaller; downloadFile follows redirects and allows http; installer saved at a fixed temp path.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity/resources/app-update.yml",
+   "extract/antigravity/node_modules/electron-updater/out/NsisUpdater.js:83-99",
+   "extract/antigravity/dist/ideInstall/service.js:58-197",
+   "PowerShell Get-AuthenticodeSignature (5 binaries NotSigned)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 2,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon distribution (CLI, desktop wrapper, sandbox images) should sign artifacts and pin hashes out of band.",
+  "notes": "May be a pre-release/dogfood build; macOS notarization status unknown."
+ },
+ {
+  "id": "antigravity-architecture-083",
+  "category": "Safety, permissions & governance",
+  "name": "Privacy and data-use controls: training restrictions, snippet telemetry opt-out, no ZDR",
+  "what": "Model access statuses distinguish training-restricted models; a snippet-telemetry opt-out exists; no zero-data-retention concept was found.",
+  "how": "Enums UNRESTRICTED / RESTRICTED_FOR_TRAINING / RESTRICTED_GENERALLY, MODEL_TRAINING_PRIVACY_CONTROL, GEMINI_API_LOGGING_RESTRICTIONS_STORE; setting disableCodeSnippetTelemetry; devtools-mcp telemetry hashes params to lengths; no ZDR identifier in the binary.",
+  "evidence": [
+   "language_server.exe@49605864 (MODEL_TRAINING_PRIVACY_CONTROL)",
+   "LS-embedded-UI main.js@1551688 (disableCodeSnippetTelemetry)",
+   "tmp/ls_enums_misc.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon must propagate ZDR end-to-end; Antigravity shows per-model training restrictions as a user-visible attribute worth mirroring in the model picker.",
+  "notes": "Absence of ZDR is from string search only."
+ },
+ {
+  "id": "antigravity-architecture-084",
+  "category": "Models & routing",
+  "name": "Provider-neutral model API layer with Gemini-first backends and OpenAI/Anthropic adapters",
+  "what": "The runtime converts a neutral request/response model to several backends: Gemini API, Vertex AI, Cloud Code private API, OpenAI Responses/Realtime (via openai-go v2) and Anthropic-via-Vertex, with bring-your-own-key and compatible-endpoint enums.",
+  "how": "Go packages model_api/backends/geminiapi, modelapiinterface, cortex/modelapi/{genairequest, genairesponse}, cortex/shared/providers, models/{geminimodels, model_config, defaults}, openai_go (responses, realtime), aiplatform v1beta1/master prediction services, google/internal/cloud/code/v1internal; enums API_PROVIDER_GOOGLE_GEMINI, GOOGLE_VERTEX, ANTHROPIC_VERTEX, OPENAI_VERTEX, *_COMPATIBLE (anthropic, azure, bedrock, openai), BYOM; LS launched with --api_server_url https://generativelanguage.googleapis.com and --cloud_code_endpoint https://daily-cloudcode-pa.googleapis.com.",
+  "evidence": [
+   "language_server.exe@75487385 (model_api/backends/geminiapi)",
+   "language_server.exe@75485081 (genairerequest)",
+   "language_server.exe@73893096 (openai_go responses)",
+   "language_server.exe@52617089 (API_PROVIDER enums)",
+   "language_server.exe@52600755 (OPENAI_COMPATIBLE)",
+   "extract/antigravity/dist/languageServer.js:207-210"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Confirms a backend-agnostic conversion layer is practical; Verevon Model Plane should keep provider adapters behind one request model rather than leaking provider fields into sessions.",
+  "notes": "Exact model ids in the binary are noisy (concatenated strings); availability per plan unknown. Ollama/LM Studio identifiers: 0 hits."
+ },
+ {
+  "id": "antigravity-architecture-085",
+  "category": "Models & routing",
+  "name": "Model aliases, tiered configs, status and capacity signals",
+  "what": "Users pick models or aliases (auto, recommended), the backend exposes model configs/status/capacity, and the plan model and tool-use variants are configured per cascade.",
+  "how": "MODEL_ALIAS_AUTO/_RECOMMENDED/_CASCADE_BASE, CascadePlannerConfig with PlanModel, RPCs GetCascadeModelConfigs, GetCommandModelConfigs, GetModelInfos, GetModelStatuses; 'tiered model config is nil' check; MODEL_CAPACITY_EXHAUSTED; custom models feature in UI (customModelsFeature) and CustomModels sync topic; Go templates branch on plan model placeholders.",
+  "evidence": [
+   "tmp/ls_model_enums.txt",
+   "tmp/ls_exa_names.txt (GetCascadeModelConfigs)",
+   "LS-embedded-UI main.js@8918679 (customModelsFeature)",
+   "language_server.exe@67105607 (models/model_config)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Per-run plan-model vs worker-model configuration with a server-published status/capacity feed is the right shape for Model Plane routing.",
+  "notes": "Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-086",
+  "category": "Models & routing",
+  "name": "Prompt caching and structured tool schemas in the request layer",
+  "what": "Requests carry cache breakpoints and cache-control options, and tool schemas are converted from JSON Schema with validation.",
+  "how": "CacheRequestOptions and CacheBreakpointMetadata messages, CACHE_CONTROL_TYPE_EPHEMERAL string, ToolConverter, loadRefJSONSchema failed / invalid JSON schema errors, json_schema/json_object response formats.",
+  "evidence": [
+   "language_server.exe@52658786 (CacheBreakpointMetadata)",
+   "language_server.exe@46440096 (json_schema, json_object)",
+   "tmp/ls_exa_names.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Cache breakpoints at stable prefix boundaries (system prompt, KI/knowledge, tool list) cut Model Plane cost; worth designing into the session prompt builder.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-087",
+  "category": "Models & routing",
+  "name": "Credits, pricing and per-turn cost accounting",
+  "what": "The runtime computes turn and conversation cost summaries with per-model pricing info and credit reasons; the UI gates usage by available credits and a minimum credit amount.",
+  "how": "Messages TurnCostSummary, ConversationCostSummary, CostCategory, CostDisplaySection, ModelPricingInfo, CreditUsageSummary, ConsumedCredits; package cortex/cost; UI settings useAICredits, availableCredits, minimumCreditAmountForUsage (50 in the stub provider); RecordCascadeUsage telemetry.",
+  "evidence": [
+   "language_server.exe@49961518 (ModelPricingInfo)",
+   "language_server.exe@49962665 (TurnCostSummary)",
+   "LS-embedded-UI main.js@4491811 (minimumCreditAmountForUsage)",
+   "language_server.exe@70170472 (cortex/cost)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Per-turn cost summaries rendered in the chat are a transparency feature Verevon's cost plane can feed directly.",
+  "notes": "Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-088",
+  "category": "Transparency, observability & control",
+  "name": "Transparency surface: verbose agent chat, step render info and tool-call inspection",
+  "what": "Users can show and keep the agent's intermediate thinking steps, inspect tool calls and approvals, and see changed files and costs.",
+  "how": "Setting verboseAgentChat ('Display and preserve intermediate thinking steps', default true in the stub config); StepRenderInfo/AccumulatedSections/ActionDebugInfo messages; TOOL_CALL_PROPOSAL/CHOICE steps; Auxiliary pane sections Subagents, Background Tasks, Artifacts, Files Changed, Terminals; Review Changes diff view; in-app diagnostics.",
+  "evidence": [
+   "LS-embedded-UI main.js@1550546 (verboseAgentChat)",
+   "LS-embedded-UI main.js@4491643 (chatParams.verboseAgentChat)",
+   "language_server.exe@49019843 (antigravity-guide: app.md aux pane sections)",
+   "tmp/ls_exa_names.txt (StepRenderInfo)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Aux-pane decomposition (subagents, tasks, artifacts, files, terminals) is a good layout for Verevon's agent page where users supervise runs.",
+  "notes": "Compared with DeepSeek-harness style full transparency, token-level traces are not evident here. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-089",
+  "category": "UI/UX & product design",
+  "name": "Hub UI structure: sidebar, chat canvas, @mentions, slash commands, HTML aux pane",
+  "what": "The 2.0 hub has a left sidebar (new conversation, projects, scheduled tasks, skills/customizations, settings), a chat canvas with slash commands, @ mentions (files, conversations, terminals, rules, MCP servers/tools) and media drag-drop, and an HTML auxiliary pane.",
+  "how": "Described in the embedded Antigravity 2.0 Reference; UI features commandPaletteFeature, customAuxPanes (skills, browser preview, codeSearch), sidebarItemsFeature, supportsImageDragDrop, markdownTextToLinkFeature, latexFeature, Mermaid component, Prism highlighting, xterm terminal rendering.",
+  "evidence": [
+   "language_server.exe@49171262 (Antigravity 2.0 Reference)",
+   "LS-embedded-UI main.js@8914500-8925616 (feature wiring)",
+   "LS-embedded-UI main.js@3936330 (Mermaid)",
+   "LS-embedded-UI main.js@3523881 (xterm)",
+   "LS-embedded-UI main.js@4467585 (latexFeature)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Closest structural reference for Verevon's agent page; Verevon should add the missing remote/mobile surface and keep the aux-pane idea.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-090",
+  "category": "UI/UX & product design",
+  "name": "Onboarding state machine and agent-event sounds/notifications",
+  "what": "First run walks through welcome, theme, auth, usage mode, terms and a 'build with Google' step; agent completion and action-required events play sounds and raise native notifications.",
+  "how": "Onboarding step enum WELCOME, THEME, AUTH, SUMMARY, FINISHED, SETTING_UP, USAGE_MODE, TERMS, BUILD_WITH_GOOGLE; settings enableSoundsForSpecialEvents and enableNotificationsForSpecialEvents; bundled antigravityCascadeDone.mp3 and antigravityActionRequired.mp3; shell notification:send IPC with click payload routing to the renderer.",
+  "evidence": [
+   "LS-embedded-UI main.js@1551853 (onboarding steps)",
+   "tmp/agarch/ls_zip.130646139.txt (two mp3 entries)",
+   "extract/antigravity/dist/ipcHandlers.js:91-112"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Distinct sounds for 'done' vs 'needs you' matter for long runs; replicate with web push for Verevon.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-091",
+  "category": "UI/UX & product design",
+  "name": "Client performance techniques: virtualization, workers and AudioWorklet",
+  "what": "The UI offloads diff stats to a Web Worker, streams microphone PCM through an AudioWorklet and uses a virtualization library for long lists.",
+  "how": "diff_worker.js computes line-level additions/deletions (jsdiff diffLines semantics) off-thread with id-multiplexed messages; audio_processor.js downsamples to 16 kHz mono PCM16 in 40 ms chunks; index.html polyfills process for TanStack Virtual and sets color-scheme early from a hostTheme query to avoid iframe flash; compiled Tailwind CSS plus Prism highlighting.",
+  "evidence": [
+   "tmp/agarch/ui/diff_worker.js:1-60",
+   "tmp/agarch/ui/audio_processor.js:1-60",
+   "tmp/agarch/ui/index.html:10-70",
+   "LS-embedded-UI main.js@6221391 (getWorkerDiffFeature)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "Same techniques apply to Verevon's SolidJS agent page: worker diffing, windowed lists, host-theme boot hint for embeds.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-092",
+  "category": "Multimodal & creation",
+  "name": "Voice dictation and streaming audio path",
+  "what": "Microphone audio is captured in the browser, downsampled and streamed to the backend, which transcribes it (Cloud Speech) and returns text; a streaming-audio feature and TTS setting also exist.",
+  "how": "UI streamingAudioFeature with AudioContext(48 kHz) and audio_processor worklet; backend GetTranscription, StartAudioRecording/EndAudioRecording RPCs and cloud speech v1p1beta1 protos; enableMicrophone feature flag; openai-go realtime package present; 'GEMINI_TTS_VOICE_REPLICATION' env name (scout).",
+  "evidence": [
+   "LS-embedded-UI main.js@2925083 (streamingAudioFeature)",
+   "LS-embedded-UI main.js@8820523 (AudioContext setup)",
+   "language_server.exe@46859023 (GetTranscription)",
+   "language_server.exe@65516425 (cloud_speech proto)",
+   "tmp/agarch/ui/audio_processor.js:1-40"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Browser-side PCM capture to a backend transcription RPC is a simple pattern for Verevon chat voice input.",
+  "notes": "Realtime/live voice output path not verified."
+ },
+ {
+  "id": "antigravity-architecture-093",
+  "category": "Coding capability",
+  "name": "Code indexing, retrieval and completion services inside the backend",
+  "what": "The backend hosts codebase indexing (embeddings, graph and hybrid search), a completion provider with a tab-model flow, code search and symbol navigation.",
+  "how": "IndexService/IndexManagementService (AddRepository, EnableIndexing, GetRemoteIndexStats), GetEmbeddings/GetNearestCCIsFromEmbedding, CodeIndexService GraphSearch/HybridSearch, SEARCH_MODE_APPROXIMATE_KNN and BRUTE_FORCE_KNN, Go packages language_server/{search, completion_provider}, devtools/ai/flow/autocomplete, context_module events (active document, cursor, pinned context).",
+  "evidence": [
+   "language_server.exe@47423508 (index_pb)",
+   "language_server.exe@75606452 (language_server/search)",
+   "language_server.exe@75528458 (completion_provider)",
+   "language_server.exe@48517018 (autocomplete flow)",
+   "tmp/ls_exa_names.txt (IndexService, CodeIndexService)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Verevon is not an IDE, but retrieval over user repositories for agent runs maps to Data Plane retrieval; the hybrid/graph split is a reference.",
+  "notes": "Index lives partly server-side (opensearch clients); local-only operation not verified. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-094",
+  "category": "Research & web",
+  "name": "Connectors and knowledge-base ingestion pipeline",
+  "what": "A knowledge base service ingests GitHub, Google Drive, Jira, Slack and email with job states, scope items, webhooks and forwarded Slack payloads, and the agent can search it.",
+  "how": "KnowledgeBaseService: ConnectKnowledgeBaseAccount, IngestGithubData/GoogleDriveData/JiraData/SlackData, ForwardSlackPayload, GetKnowledgeBaseWebhookUrl, UpdateConnectorConfig, KnowledgeBaseSearch, GetKnowledgeBaseJobStates, CancelKnowledgeBaseJobs; steps LookupKnowledgeBase/SearchKnowledgeBase.",
+  "evidence": [
+   "language_server.exe@46787555 (IngestSlackData string block)",
+   "language_server.exe@47068476 (KnowledgeBaseSearch)",
+   "tmp/ls_exa_names.txt (opensearch_clients_pb)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Maps to Verevon integration-corev2 plus Data Plane ingestion; the job-state/cancel RPC shape is a reusable contract.",
+  "notes": "Likely server-hosted enterprise feature; not exercised in the hub build."
+ },
+ {
+  "id": "antigravity-architecture-095",
+  "category": "Memory, learning & personalization",
+  "name": "Memory scopes, Brain entries and Knowledge Items",
+  "what": "The agent keeps memories with global/local/project scope, a 'brain' of learned entries updated after turns, and knowledge items generated in the background and retrieved by workflow.",
+  "how": "CortexMemory (scopes GLOBAL, LOCAL, PROJECT, ALL; source/trigger metadata), steps MEMORY, RETRIEVE_MEMORY, BRAIN_UPDATE, KI_INSERTION, KNOWLEDGE_GENERATION; BrainEntry/BrainEntryDelta/BrainUpdateTrigger; settings knowledgeEnabled and conversationHistoryEnabled; KI system prompt defines when to create/retrieve KIs; DeleteCascadeMemory RPC.",
+  "evidence": [
+   "language_server.exe@52389533 (CortexMemory)",
+   "language_server.exe@52762417 (BrainEntry)",
+   "language_server.exe@48919542 (KI system prompt)",
+   "LS-embedded-UI main.js@3072792 (knowledge settings)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Scoped memory plus background KI distillation maps to the Hermes-style memory goal; Antigravity's explicit user switches (knowledge, history) are good controls.",
+  "notes": "Learning quality cannot be judged offline. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-096",
+  "category": "Chat experience",
+  "name": "Conversation share, export, fork and import as backend primitives",
+  "what": "Conversations can be shared by link, exported to Markdown, forked at a step, loaded from a shared trajectory and imported projects.",
+  "how": "RPCs CreateTrajectoryShare/FetchTrajectoryShare/DeleteTrajectoryShare, ConvertTrajectoryToMarkdown, ForkConversation (fork_at_step_index), LoadSharedTrajectory, ImportProjectFromUrl; admin gate IsConversationSharingBlocked; UI feature multiConversationFeature and side-question feature.",
+  "evidence": [
+   "language_server.exe@47186147 (CreateTrajectoryShare)",
+   "language_server.exe@47511358 (ConvertTrajectoryToMarkdown)",
+   "LS-embedded-UI main.js@5606302 (sideQuestionFeature)",
+   "tmp/ls_exa_names.txt"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Sharing/forking belong in the run API from the start so Verevon's Space-level ACLs can gate them.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-097",
+  "category": "Tools, plugins & extensibility",
+  "name": "Agent skills as the unifying instruction format; workflows folded in",
+  "what": "Skills (SKILL.md folders) are the primary reusable-procedure format with workspace, global and plugin scopes; legacy workflows are migrated into skills by a built-in skill.",
+  "how": "Docs: Workspace Skills directory structure and SKILL.md frontmatter; Skills & Customizations sidebar; skills.json registry; RPCs GetAllSkills, ScanSkillsConfigFile, InstallCustomization; migrate-workflows skill moves .agents/workflows and ~/.gemini/config/workflows to skills and archives the originals; UI aux pane 'skills'.",
+  "evidence": [
+   "language_server.exe@49387338 (migrate-workflows)",
+   "tmp/agarch/ls_docs_48M.txt:43155-43225 (Workspace Skills)",
+   "language_server.exe@49359284 (agy-customizations)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "common",
+  "verevonRelevance": "One procedure format (skills) instead of workflows plus commands keeps Verevon's extensibility surface small.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-098",
+  "category": "Chat experience",
+  "name": "Generative UI: agent-authored HTML artifacts embedded inline with host theme tokens and CSP",
+  "what": "The agent can write a self-contained HTML file as a user-facing artifact and embed it inline in the chat with an agent-embed tag; it renders in an isolated iframe that receives the app's design tokens.",
+  "how": "Embedded generative_ui skill: write_to_file of an .html artifact with ArtifactMetadata UserFacing true, then <agent-embed src='file:///.../widget.html'>; external CDNs are blocked by CSP except one allowlisted gstatic Tailwind script; the iframe injects semantic CSS variables (--background, --card, --foreground, --primary...) so widgets match light/dark and custom themes; UI resolves artifact URLs via /static/artifacts/<id>?csrf=<token> and uses hostTheme boot hints for cross-origin iframe colour-scheme.",
+  "evidence": [
+   "language_server.exe@49375929 (generative_ui skill)",
+   "LS-embedded-UI main.js@4470176 (/static/artifacts/ resolver)",
+   "LS-embedded-UI main.js@3301278 (hostTheme)",
+   "tmp/agarch/ui/index.html:50-70"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "A theme-token-injected sandboxed iframe plus a CSP allowlist is a cheap way to give Verevon chat inline interactive artifacts without opening script injection risks.",
+  "notes": "CSP header contents are described by the prompt, not observed in HTTP responses."
+ },
+ {
+  "id": "antigravity-architecture-099",
+  "category": "Platform architecture",
+  "name": "Agent-facing capability gating by surface: CLI, 2.0 app and IDE share one backend with product-specific data dirs",
+  "what": "The CLI, the 2.0 app and the IDE use separate data directories and settings files but the same runtime and customization formats, so plugins and skills installed on one surface appear on the others.",
+  "how": "Hooks payload paths differ by surface: antigravity-cli/, antigravity/, antigravity-ide/ for transcriptPath and artifactDirectoryPath; CLI settings in ~/.gemini/antigravity-cli/settings.json; shared global customization root ~/.gemini/config/ (skills, workflows, plugins, mcp_config.json, hooks.json); public docs say plugins installed on one surface appear on the others and the CLI stages plugin assets under ~/.gemini/antigravity-cli/plugins/.",
+  "evidence": [
+   "language_server.exe@49647918 (hooks doc: per-surface directory note)",
+   "tmp/agarch/ls_docs_48M.txt:23702 (CLI settings.json path)",
+   "https://antigravity.google/docs/plugins",
+   "language_server.exe@49190935 (config root description)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon should decide early which assets are cross-surface (skills, hooks, MCP, plugins) versus per-surface (transcripts, settings), and keep the same file formats across web, CLI and SDK.",
+  "notes": ""
+ },
+ {
+  "id": "antigravity-architecture-100",
+  "category": "Platform architecture",
+  "name": "CLI instances as OS-level background daemons",
+  "what": "The agy CLI can run as a persistent background daemon (so remote control and scheduled work survive the terminal), installed as a systemd user service, macOS LaunchAgent or Windows Scheduled Task.",
+  "how": "Public docs: daemon uses the CLI sign-in credentials (separate from the editor); Linux keeps running after sign-out, macOS stops at sign-out, Windows starts at boot only if installed from an Administrator prompt; interactive CLI sessions instead open a reverse tunnel that closes with the terminal; the hub also has a headless mode. Binary evidence: standalone/headless flags, persistent_mode flag, reversetunnel package, remotecontrol mesh daemon.",
+  "evidence": [
+   "https://antigravity.google/docs/remote-control",
+   "language_server.exe@47643451 (reversetunnel)",
+   "language_server.exe@76630225 (NewMeshDaemon)",
+   "language_server.exe flag string persistent_mode (tmp/agarch/ls_strings.txt)"
+  ],
+  "provenance": "DOC",
+  "confidence": "high",
+  "quality": 4,
+  "uniqueness": "uncommon",
+  "verevonRelevance": "Verevon agents are cloud-run, but customer-hosted runners (daemonized, account-paired) would need this lifecycle model.",
+  "notes": "Not installed or exercised here; DOC-only for OS service wiring."
+ },
+ {
+  "id": "antigravity-architecture-101",
+  "category": "Tools, plugins & extensibility",
+  "name": "Editor-extension fan-out: one backend, thin extensions for VS Code, Visual Studio, JetBrains, Zed and Xcode",
+  "what": "Besides its own VS Code-based IDE, the backend is offered to other editors through extensions, all using the same IDE-bridge contract.",
+  "how": "Public docs navigation lists IDE extensions for Visual Studio Code, Visual Studio, JetBrains, Zed and Xcode; the UI surface taxonomy names Extension.VsCode, VisualStudio, Eclipse and Cider; the backend's ExtensionServerService is the reverse-RPC contract an editor must implement (terminal, diagnostics, diff zones, definitions, secrets).",
+  "evidence": [
+   "https://antigravity.google/docs/getting-started (navigation titles)",
+   "LS-embedded-UI main.js@1547143 (surface taxonomy)",
+   "tmp/ls_exa_names.txt (exa.extension_server_pb)"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "unique",
+  "verevonRelevance": "If Verevon ever needs partner-tool embeds, a small reverse-RPC contract (host implements terminal/diagnostics) lets one runtime serve many hosts.",
+  "notes": "Only navigation titles were seen; extension implementations were not inspected. Quality capped at 3: evidence is symbol names or prompts, behaviour was not observed."
+ },
+ {
+  "id": "antigravity-architecture-102",
+  "category": "UI/UX & product design",
+  "name": "Mode and workflow slash commands (boost, plan, teamwork preview, agents, code search, diff)",
+  "what": "Slash commands switch the agent into specialised behaviours or launch dedicated subagents (Boost, Plan, Teamwork preview, Agents manager, Code search, Diff).",
+  "how": "Public docs navigation lists /boost, /plan, /teamwork-preview, /agents, /codesearch and /diff under slash commands; the embedded 2.0 reference says slash commands trigger specialised behaviours or dedicated subagents and each has a menu description; UI commandPaletteFeature and a cortex/slashcommands package exist.",
+  "evidence": [
+   "https://antigravity.google/docs/getting-started (navigation titles)",
+   "language_server.exe@49171262 (slash commands description)",
+   "language_server.exe@72788374 (cortex/slashcommands)",
+   "LS-embedded-UI main.js@4016684 (commandPaletteFeature)"
+  ],
+  "provenance": "DOC",
+  "confidence": "medium",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Mode-switching commands that map to different harness configurations (plan, teamwork) are a cheap UX for exposing Model Plane agent variants.",
+  "notes": "Command behaviours beyond titles not verified."
+ },
+ {
+  "id": "antigravity-architecture-103",
+  "category": "Platform architecture",
+  "name": "Install footprint and bundled binary inventory",
+  "what": "The Windows install is about 523 MiB: Electron shell, a 153 MB Go backend, a 13.6 MB encoder, a 4.5 MB app bundle and an unpacked 16 MB DevTools MCP with bundled Lighthouse and DevTools workers.",
+  "how": "Antigravity.exe 222,848,000 B (Electron 41 / Chromium 146 per scout strings), resources/bin/language_server.exe 153,057,280 B, resources/bin/webm_encoder.exe 13,615,104 B, resources/app.asar 4,526,306 B, app.asar.unpacked/chrome-devtools-mcp (third_party bundle 16.4 MB: bundled-packages.json, lighthouse bundle, devtools formatter/heap-snapshot workers), elevate.exe 107,520 B (INF: electron-builder installer helper), 55 Chromium locale paks, ffmpeg.dll, SwiftShader/Vulkan/ANGLE libs; Squirrel-aware installer; no separate agent extension folders exist in this build.",
+  "evidence": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/antigravity (directory listing, du 536,145 KB)",
+   "REA inspect_pe_resources (scout): ELECTRONASAR integrity resource in Antigravity.exe, no resources in language_server.exe/webm_encoder.exe",
+   "findings/t3/antigravity.inventory.md section 2a (scout inventory)"
+  ],
+  "provenance": "SRC",
+  "confidence": "high",
+  "quality": 3,
+  "uniqueness": "common",
+  "verevonRelevance": "Shows the cost of shipping browser tooling and a full Electron runtime; Verevon's server-side runners avoid per-user footprint.",
+  "notes": "Electron/Chromium versions come from the scout's string markers, not re-verified."
+ },
+ {
+  "id": "antigravity-architecture-104",
+  "category": "Agent runtime",
+  "name": "Gamification and internal-only code paths in shipped backend",
+  "what": "The shipped backend contains internal-only modules (badge granting, Google source-control/build steps, internal search/query tools) that are dormant for external users.",
+  "how": "Go symbols cortex/gamification (MaybeGrantMomaBadgeAsync, badges_external.go), Cog/Fig/CitC VCS steps, BLAZE_* steps, MQUERY/INTERNAL_SEARCH steps, GOOGLE_TRAINING_JUDGE/LLM_JUDGE trajectory types, Archboard/datapol data-governance protos; UI appType internal vs external branches.",
+  "evidence": [
+   "language_server.exe@74986174 (gamification)",
+   "tmp/ls_cortex_step_types.txt (BLAZE_*, MQUERY)",
+   "LS-embedded-UI main.js@8914500-8925616 (appType internal/external)"
+  ],
+  "provenance": "SRC",
+  "confidence": "medium",
+  "quality": 2,
+  "uniqueness": "unique",
+  "verevonRelevance": "Shows the cost of one binary serving internal and external variants (attack surface, size, confusing feature set); Verevon should compile out internal variants.",
+  "notes": "Names only; dormancy for external builds is INF."
+ }
+]

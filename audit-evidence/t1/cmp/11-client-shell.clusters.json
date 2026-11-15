@@ -1,0 +1,2340 @@
+{
+  "category": "Client shell",
+  "excluded": [
+    {
+      "id": "teams-shell-and-native-007",
+      "reason": "INF-only internal state architecture of the C++ shell (rx subjects, cross-cloud stores); implementation trivia with no user- or developer-facing capability."
+    },
+    {
+      "id": "teams-shell-and-native-121",
+      "reason": "PE manifest flags (DPI awareness, segment heap, asInvoker); Windows build trivia with no product relevance for Verevon."
+    },
+    {
+      "id": "teams-shell-and-native-123",
+      "reason": "Microsoft work/consumer (\"Teams for Life\") product-line convergence and migration; specific to Microsoft's app portfolio."
+    }
+  ],
+  "clusters": [
+    {
+      "id": "C-t1-11-001",
+      "name": "Native desktop shell wrapping the web client",
+      "description": "An installable desktop app (Electron, Tauri or WebView2) that hosts the same web UI and adds OS integration: tray, native notifications, protocol links, auto-update, window state.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 5,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-architecture-094",
+        "buzz-product-162",
+        "grokbot-agent-product-102",
+        "qm-architecture-112",
+        "qm-product-121",
+        "slack-product-surface-133",
+        "teams-product-surface-142",
+        "teams-shell-and-native-001"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-001",
+          "teams-product-surface-142"
+        ],
+        "why": "Cleanest thin-shell split at scale: native code owns windows, tray, toasts, updates, media and crash recovery while the whole UI stays a web client; it detects a missing/old WebView and has a web fallback. buzz-product-162 (Tauri 2, Rust-owned state) is the closest stack fit for Verevon; qm-architecture-112 is the most locked-down minimal variant."
+      },
+      "mechanism": "Shell process loads the remote web app (or a bundled copy) in a system WebView; renderer is sandboxed (no Node, contextIsolation), gets a narrow typed bridge; native side owns tray/badge/notifications/deep links/updates. Tauri 2 equivalent: tauri plugins single-instance, deep-link, window-state, updater, notification, global-shortcut; Rust commands as the bridge; CSP locked to the gateway origin.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/index.html:1-15",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:192"
+        ],
+        "gap": "Verevon v3 is a web SPA only; no Electron/Tauri/MSIX package. No tray, native notifications, protocol handler or OS presence.",
+        "strengths": ""
+      },
+      "benefit": "Teams/Slack-grade presence: Space messages and agent completions reach the user when the tab is closed; tray showing running agents; protocol links from email/Office. Keeps all authority in the gateway (shell is just another same-origin client).",
+      "approach": "Phase 1 = installable PWA (see Multi-surface cluster) to get most of the value cheaply. Phase 2 = Tauri 2 shell (Rust, matches gateway stack) loading the gateway origin, no local tokens (reuse BFF cookie in an isolated partition), narrow command set (notify, badge, open-external, deep-link). Owned by Frontend Plane.",
+      "effort": "L",
+      "dependencies": [
+        "PWA/web push first",
+        "Desktop sign-in handoff",
+        "Auto-update + signing pipeline",
+        "Typed native bridge"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Signing/notarisation and update infrastructure cost; a second client to test; must not cache Space content locally in ways that break ZDR (no offline message store without retention policy).",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "All five references ship one, but Verevon can capture most of the user-visible value (notifications, install, badge) with a PWA first; a native shell becomes necessary for tray/global hotkeys/quick composer.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-002",
+      "name": "Narrow, typed and validated web-to-native bridge",
+      "description": "The renderer reaches native capabilities only through a small, schema-validated, versioned API (allowlisted methods, sender checks, opaque payloads).",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "grokbot-agent-runtime-143",
+        "qm-architecture-115",
+        "slack-product-surface-146",
+        "slack-shell-and-native-017",
+        "slack-shell-and-native-041",
+        "teams-shell-and-native-004",
+        "teams-shell-and-native-005",
+        "teams-shell-and-native-134"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-004",
+          "teams-shell-and-native-005"
+        ],
+        "why": "PIE is a uniform versioned RPC (invokables, host events, host-initiated calls, sync calls, batching) over a capability-per-module catalog (53 namespaces); Slack adds per-channel Joi schemas with validation-failure beacons (slack-product-surface-146) and qm adds sender/frame/origin checks (qm-architecture-115)."
+      },
+      "mechanism": "Single message envelope {messageName, messageId, isInvokable, args}; each namespace registers methods with a schema; host validates sender origin + schema, rejects and reports drift; web-defined state passes as opaque blobs so schema changes do not need a native release. In Tauri: one #[tauri::command] per capability with serde-validated args + capability ACL file; reject unknown origins.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "No native shell, so no bridge. (Verevon's typed ActionDescriptor/zod action contract is the analogous pattern on the web side.)",
+        "strengths": ""
+      },
+      "benefit": "If a shell is built, a narrow validated bridge keeps the authority model intact: the web app cannot escalate to OS powers beyond an allowlist.",
+      "approach": "Define the bridge as a versioned schema in packages/ (shared TS + Rust serde types), ≤15 commands initially; sender-origin check to the gateway origin; telemetry on validation failures.",
+      "effort": "M",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Bridge sprawl (Slack 122 channels, Teams ~545 methods) increases attack surface; keep it minimal.",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Only relevant together with the desktop shell; when built it is a security requirement, not an option.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-003",
+      "name": "Multi-process isolation, native helper modules and supervision",
+      "description": "UI, agent coordination, local execution and risky native code run in separate processes that crash independently and are restarted with backoff.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "teams",
+          "slack"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "grokbot-agent-runtime-076",
+        "grokbot-agent-runtime-145",
+        "teams-shell-and-native-006",
+        "slack-shell-and-native-126"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-006"
+        ],
+        "why": "Runs the calling engine and other risky modules in a low-privilege AppContainer process (q5); grokbot-agent-runtime-145 adds relaunch with exponential backoff and a renderer crash-loop guard."
+      },
+      "mechanism": "Main process + utility processes (coordinator, local-exec daemon) + sandboxed remote-module container; supervisor relaunches with 250 ms initial delay x2 up to 10 s, classifies exit codes, only prompts the user after repeated crashes.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "No desktop process model. Verevon isolates agent execution server-side (Model Plane sandboxes, Quarry browser), which covers most of this need by design.",
+        "strengths": "Server-side isolation of agent computers avoids client-side process supervision entirely."
+      },
+      "benefit": "Low for Verevon: agent work is server-side.",
+      "approach": "Only if a desktop shell hosts local helpers; keep shell single-process plus WebView.",
+      "effort": "M",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Complexity without a local runtime to justify it.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Verevon's architecture (Model proposes, Quarry executes, sandboxes in Model Plane) puts the risky work server-side.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-004",
+      "name": "OS protocol handler with single-instance link forwarding",
+      "description": "A custom URL scheme (slack://, msteams:, buzz://, qm-desktop://) opens the right workspace/channel/message in the already running app, including links that arrive before the UI is ready.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 5,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-architecture-095",
+        "buzz-product-163",
+        "grokbot-agent-product-110",
+        "grokbot-agent-runtime-082",
+        "qm-architecture-114",
+        "slack-product-surface-134",
+        "slack-shell-and-native-002",
+        "slack-shell-and-native-003",
+        "slack-shell-and-native-004",
+        "teams-shell-and-native-019",
+        "teams-shell-and-native-036",
+        "teams-shell-and-native-124"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-002",
+          "slack-shell-and-native-003",
+          "slack-shell-and-native-004"
+        ],
+        "why": "One documented grammar (channel, open, app, setting, login-v2, magic-login) registered on Win32, MSIX and macOS with a single-instance lock and a protocol-activation sanity check; buzz adds a de-duplicated cold-start pending queue (buzz-architecture-095)."
+      },
+      "mechanism": "Register scheme; requestSingleInstanceLock; second-instance/open-url events push the URL into a queue that drains once the renderer reports ready; parser maps cmd+params to typed routes with allowlists. PWA alternative: manifest protocol_handlers (\"web+verevon\") mapped to /open?u=%s.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-103",
+          "v-space-ui-109"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:150-151"
+        ],
+        "gap": "Only HTTPS routes (/spaces/:spaceId + hash tabs). No custom scheme, no PWA protocol_handlers, so links from mail/Office/other apps always open a browser tab.",
+        "strengths": "HTTPS deep links already work everywhere a browser does."
+      },
+      "benefit": "Links to a Space, message or agent run open in the installed app instead of a new tab; needed for Teams-like \"chat with\" actions.",
+      "approach": "Interim: PWA protocol_handlers + URL handling on the gateway origin. With the Tauri shell: deep-link plugin + cold-start queue; parse into the same typed route table as the SPA router.",
+      "effort": "S",
+      "dependencies": [
+        "PWA manifest or desktop shell",
+        "Entity deep-link routing"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Link parsing is an injection surface; allowlist commands and never execute actions from a link without user confirmation.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Table-stakes for native clients, but meaningless until Verevon is installable; low effort once it is.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-005",
+      "name": "Entity deep-link routing and URL-synced view state",
+      "description": "Every view, conversation, thread, message and agent task has a stable link; links are resolved against the viewer's own membership and routed through one command path shared by toasts, links and notifications.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack",
+          "grokbot",
+          "qm",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "slack-shell-and-native-005",
+        "grokbot-agent-product-154",
+        "qm-product-124",
+        "teams-shell-and-native-020"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-020"
+        ],
+        "why": "Toast clicks, deep links and lifecycle events are normalised into one (entity, action) command the web UI executes (q5). Slack-shell-and-native-005 adds mapping the team in a link to a workspace the user actually belongs to and holding links until the web app has loaded; qm-product-124 pages older history until a ?seq= target message is present and highlights it."
+      },
+      "mechanism": "Route table: entity types (space, thread, message, agent, run, task) x actions (open, reply, join); resolver checks membership before navigation (fails closed with an explanation); message links load the transcript window around the target id and scroll/highlight; notifications reuse the same command.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-ui-103"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/app/App.tsx:181-182",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:114-164"
+        ],
+        "gap": "Space + tab are linkable (hash tabs), but no code was found for message/thread permalinks, agent-run links inside a Space, or a single command router shared with notifications (grep for permalink/?message=/messageId= found nothing). Notification click-through path should be verified.",
+        "strengths": "Clean /spaces/:spaceId routes with hash tabs and roving tablist."
+      },
+      "benefit": "Humans and agents can cite exact messages, decisions and runs (\"see this run\"), which is how cooperation is coordinated in Slack/Teams; agents can post links that humans open in-place.",
+      "approach": "Add /spaces/:spaceId/m/:messageId and /spaces/:spaceId/runs/:runId routes in the Solid router; Application Plane projection exposes a \"window around message id\" read; resolver asks the gateway for access (never widens owner-plane ACL); notifications emit the same route objects.",
+      "effort": "M",
+      "dependencies": [
+        "Application Plane read-around-id API",
+        "Notification payload carrying entity refs"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Links must not leak titles/previews to non-members (unfurl only after an ACL check); ZDR Spaces must not keep resolvable message ids beyond retention.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Message/run permalinks are a daily collaboration primitive in every reference; Verevon already has the routing base so the gap is small and very visible.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-006",
+      "name": "Settings and housekeeping actions via deep link (allowlisted)",
+      "description": "Support links flip selected settings or run local actions (reset window, clear cache, reveal logs) through a validated allowlist.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "slack-shell-and-native-006",
+        "slack-shell-and-native-007"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-006"
+        ],
+        "why": "Only source; allowlist of 31 keys validated by schema, rejects environment changes."
+      },
+      "mechanism": "slack://setting?payload=JSON -> pick allowlisted keys -> schema validate -> apply; slack://app/?action=... maps to fixed dispatches, feature-gated.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not present; not needed for a web app.",
+        "strengths": ""
+      },
+      "benefit": "Marginal support convenience.",
+      "approach": "None now.",
+      "effort": "S",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Links that change client state are a phishing surface.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Support convenience for a native client; low value and a social-engineering risk.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-007",
+      "name": "Auto-update with release channels and safe install timing",
+      "description": "The desktop app updates itself in the background, on selectable tracks (stable/beta/nightly), and applies updates only when safe (idle, not during a call, upload or agent run).",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "slack",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-product-164",
+        "grokbot-agent-product-104",
+        "grokbot-agent-runtime-078",
+        "slack-product-surface-137",
+        "slack-shell-and-native-019",
+        "slack-shell-and-native-021",
+        "slack-shell-and-native-022",
+        "slack-shell-and-native-023",
+        "teams-product-surface-144",
+        "teams-shell-and-native-003",
+        "teams-shell-and-native-021"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-019",
+          "slack-shell-and-native-022"
+        ],
+        "why": "Server decides whether a client should update (should-i-update with platform, version, channel, installer type), hourly checks, and update-failure attribution via the expected next version (q5). grokbot-agent-product-104 adds the agent-specific rule: never install while an agent is working, install while the user is away. Teams-shell-and-native-003 updates web assets separately from the native shell."
+      },
+      "mechanism": "State machine idle -> checking -> staging -> ready; feed URL from track+version+platform; 204 = none; signed artifacts; apply on idle/quit; block while calls/uploads/agent runs are active; record expected version to classify a crash-on-launch as update failure.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "No desktop client. For the web SPA, deploys replace the bundle but open tabs keep the old one (see Client version gating).",
+        "strengths": "Web deploys give instant updates without installer infrastructure."
+      },
+      "benefit": "Required once a shell exists; the agent-aware \"do not restart while an agent is running\" rule matters for long agent runs streamed into a Space.",
+      "approach": "tauri-plugin-updater with a gateway-served manifest (server decides per org/channel), stable/beta tracks, idle install, block while a run is streaming in the window.",
+      "effort": "M",
+      "dependencies": [
+        "Native desktop shell",
+        "Release pipeline with signing"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Broken update channel strands users; needs rollback.",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Mandatory part of the shell, not independent value.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 11,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-008",
+      "name": "Client version gating: minimum versions, staleness nags, update-required hints",
+      "description": "The server can require a newer client for specific features and the UI nags, then blocks, when the client is too old.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "teams"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "grokbot-agent-runtime-079",
+        "teams-shell-and-native-022"
+      ],
+      "bestInClass": {
+        "source": "grokbot",
+        "recordIds": [
+          "grokbot-agent-runtime-079"
+        ],
+        "why": "Per-feature minimum client versions with a machine-readable update-required hint the UI can act on (SRC q4); Teams documents a staged nag-then-block policy (DOC only)."
+      },
+      "mechanism": "Remote config {min_version, feature_min_versions, max_age_days}; API responses carry CLIENT_UPDATE_REQUIRED when a stale client calls a feature; UI shows a reload/update banner.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/index.html:1-15"
+        ],
+        "gap": "No build id/version is exposed to the client (grep for buildId/__APP_VERSION__/version.json found nothing), so a tab open across a deploy keeps running the old bundle against a newer gateway contract with no \"new version, reload\" prompt; lazy-chunk 404s after deploy are not handled (no root error boundary).",
+        "strengths": ""
+      },
+      "benefit": "Prevents subtle breakage when gateway/Space contracts change (Space event schemas, action registry ids) while users keep long-lived Space tabs open; essential for a realtime workroom left open all day.",
+      "approach": "Gateway adds an X-Verevon-Client-Min header and /version endpoint; Vite injects the build id; the SPA compares on visibility change and SSE reconnect, shows a non-blocking reload banner, and forces reload on contract-version mismatch.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Forced reloads during typing lose drafts; persist composer drafts first.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Cheap and prevents a real class of production bugs for long-lived realtime tabs.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-009",
+      "name": "Signed packaging, multi-format distribution and release engineering",
+      "description": "Signed/notarised installers in several formats and architectures, declared OS capabilities, and auditable release lanes with canaries.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-architecture-096",
+        "qm-architecture-117",
+        "slack-shell-and-native-037",
+        "slack-shell-and-native-039",
+        "teams-shell-and-native-037",
+        "teams-shell-and-native-038",
+        "teams-shell-and-native-125"
+      ],
+      "bestInClass": {
+        "source": "buzz",
+        "recordIds": [
+          "buzz-architecture-096"
+        ],
+        "why": "Immutable release candidates where PR merge is the authorization event, signed canary then promote, separate desktop/relay/mobile lanes; Slack (slack-shell-and-native-039) covers the widest format matrix; Teams declares capabilities explicitly in the manifest."
+      },
+      "mechanism": "One deterministic candidate commit per release; CI builds signed artifacts per OS/arch (MSIX/MSI/DMG/AppImage); canary channel, then promote; installer type reported in the user agent so the update service can branch.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "No desktop artifacts; web deploy only (Dockerfile, nginx).",
+        "strengths": "Single web deploy pipeline is simpler."
+      },
+      "benefit": "Prerequisite for enterprise desktop rollout (MSI/MSIX for IT).",
+      "approach": "Tauri bundler for MSIX/MSI + DMG; reuse buzz's candidate-PR pattern in CoresSystem CI.",
+      "effort": "M",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Code-signing certificate custody.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Only after the shell decision; part of its cost.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-010",
+      "name": "Feature flags, remote config, preview rings and experiments",
+      "description": "Behaviour is toggled remotely by layered config (ring, tenant, user), users can opt into preview/labs features, and experiments run with fallbacks.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "slack",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-architecture-099",
+        "grokbot-agent-product-109",
+        "slack-shell-and-native-042",
+        "slack-shell-and-native-043",
+        "teams-product-surface-149",
+        "teams-shell-and-native-027",
+        "teams-shell-and-native-122"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-027",
+          "teams-product-surface-149"
+        ],
+        "why": "Layered providers resolved by ring, tenant and account with local override and an editor page (q5), plus user-facing Labs/Insider/Public preview programmes; grokbot-agent-product-109 shows typed dynamic configs with fallback values and validators (e.g. group-chat discouragement policy)."
+      },
+      "mechanism": "Config service returns typed values per (org, ring, user); client caches with fallbacks and validators; preview programme = per-org/per-user ring; feature descriptions shown in a Labs panel.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/billing/lib/api.ts:9"
+        ],
+        "gap": "Only plan entitlement booleans (feature_flags in the billing payload) were found; no remote-config/ring system, no user-facing preview programme, no per-org staged rollout of Space/agent features. Verify Control Plane for an org feature-flag service.",
+        "strengths": "Entitlements come from the Control Plane rather than client constants."
+      },
+      "benefit": "Staged rollout of new agent capabilities per org (and kill switches) reduces risk of agent misbehaviour in shared Spaces; a Labs opt-in suits an AI-first product.",
+      "approach": "Control Plane owns a typed flag/ring registry per org (audited), exposed through the gateway navbar/bootstrap payload; Model Plane reads the same flags for agent capabilities; client never decides authority from flags alone.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane org settings"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Flag debt; flags must not be used as an authorization mechanism.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Four of five references rely on it; Verevon needs kill switches for agent features in multi-party Spaces.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-011",
+      "name": "Tray, jump list and taskbar/dock badges",
+      "description": "A tray/menu-bar icon with unread/highlight/presence state, quick actions (status, new chat, workspaces, running agents) and taskbar badges.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "slack",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "buzz-architecture-102",
+        "slack-product-surface-136",
+        "slack-shell-and-native-008",
+        "slack-shell-and-native-009",
+        "teams-product-surface-143",
+        "teams-shell-and-native-009",
+        "teams-shell-and-native-010",
+        "teams-shell-and-native-011"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-009"
+        ],
+        "why": "Clear three-state icon (rest/unread/highlight) derived from aggregated unreads with a count tooltip and launch-control menu; Teams adds presence-aware icon and a jump list with status changes and \"Up next\" meetings (teams-shell-and-native-010); buzz shows running agents in the tray (INF, buzz-architecture-102)."
+      },
+      "mechanism": "Aggregate unread/mention counts per workspace -> tray state + tooltip + OS badge; menu built from workspaces and quick actions; refresh on unread or locale change.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:280-290",
+          "apps/Frontend Plane/verevonv3/index.html:10"
+        ],
+        "gap": "Unread counts exist only inside the navbar; the document title is static (\"verevonv3\") and no Badging API / favicon badge is used, so a background tab shows nothing.",
+        "strengths": "Navbar already has message and notification unread counts to feed a badge."
+      },
+      "benefit": "Users see Space mentions and finished agent runs without switching tabs; a tray list of running agents makes \"agents work like colleagues\" tangible.",
+      "approach": "Now: set document.title \"(n) Verevon\" and navigator.setAppBadge from the navbar unread counts (S). Later in the shell: tray with unread state and running-agent list fed by Model Plane run status via the gateway.",
+      "effort": "S",
+      "dependencies": [
+        "PWA install for setAppBadge"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Badge counts must respect per-Space mute settings.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "The web part (title/app badge) is a few hours of work with immediate user value; the native tray waits for the shell.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 1
+      }
+    },
+    {
+      "id": "C-t1-11-012",
+      "name": "Native application menu",
+      "description": "OS menu bar with settings, view, help and update items, keyboard mnemonics.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "slack"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "grokbot-agent-product-155",
+        "slack-shell-and-native-013"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-013"
+        ],
+        "why": "Full menu set with Alt-mnemonics on a custom title bar and workspace accelerators."
+      },
+      "mechanism": "Menu template built from ordered items with an extension API; popup on keyboard invocation.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "No native client.",
+        "strengths": ""
+      },
+      "benefit": "Low; comes with the shell.",
+      "approach": "Default Tauri menu with Settings/Help/Reload.",
+      "effort": "S",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "None notable.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Commodity part of any shell; no standalone value.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-013",
+      "name": "Window management: placement memory, multi-display healing, custom chrome, close semantics",
+      "description": "Windows reopen where they were (pulled back on-screen if a monitor vanished), custom themed title bars, and close can hide/minimise/prompt (e.g. unsent message or active call).",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "slack",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "grokbot-agent-product-156",
+        "slack-product-surface-139",
+        "slack-shell-and-native-014",
+        "slack-shell-and-native-015",
+        "slack-shell-and-native-016",
+        "teams-shell-and-native-013",
+        "teams-shell-and-native-016"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-015",
+          "slack-shell-and-native-014"
+        ],
+        "why": "Bounds clamped to a live display work area, DPI healing after dock/undock, title bar themed by the active workspace; Teams adds close prompts for unsent pop-out messages and calls (teams-shell-and-native-013)."
+      },
+      "mechanism": "Persist bounds per window type; validate against screen.getAllDisplays; debounce re-apply scale on display/resume events; WindowCloseAction policy with prompt cases.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "No native windows. Web equivalent of the close prompt (beforeunload on unsent composer text or a running agent) was not verified.",
+        "strengths": ""
+      },
+      "benefit": "Mostly shell polish; the \"unsent draft / running run\" close prompt is the one piece with web value.",
+      "approach": "With the shell: tauri-plugin-window-state. Web now: beforeunload guard when the Space composer has text.",
+      "effort": "S",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Over-eager beforeunload prompts annoy users.",
+      "tier": "nice-to-have",
+      "significance": 1,
+      "rationale": "Shell polish.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-014",
+      "name": "Pop-out windows for chats, channels and calls",
+      "description": "Any conversation, call or tool can be torn off into its own OS window with remembered placement and protections against losing unsent messages.",
+      "prevalence": {
+        "sourcesWith": [
+          "teams",
+          "slack"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "teams-product-surface-146",
+        "teams-shell-and-native-014",
+        "teams-shell-and-native-015",
+        "slack-shell-and-native-018"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-014"
+        ],
+        "why": "Window manager with tagged windows, per-type persisted placement, named mutations and docking (q5, 65 endpoints); Slack-shell-and-native-018 shows the safe way to let the web app open native child windows (option allowlist, minimal preload)."
+      },
+      "mechanism": "Window tags (ChatPopout, Meeting, Presenter); open via a bridge call with allowlisted options; each window loads the same SPA route in a compact layout; shared state via the server stream.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No pop-out found in the Space UI; check whether a Space thread or an agent run console can be opened as a standalone compact route (window.open is used only for search results and OAuth popups).",
+        "strengths": ""
+      },
+      "benefit": "Watching an agent work (run console, browser view) in a side window while chatting in the Space is a natural agent-cooperation pattern.",
+      "approach": "Web first: compact routes (/spaces/:id/thread/:tid?popout=1, /runs/:id?popout=1) opened with window.open; each window has its own SSE subscription; shell later adds placement memory.",
+      "effort": "M",
+      "dependencies": [
+        "Entity deep-link routing"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Multiple SSE connections per user increase gateway load; consider a SharedWorker multiplexer.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "Teams-only differentiator; valuable for agent watching but not blocking.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-015",
+      "name": "App-controlled zoom levels",
+      "description": "Zoom steps controlled by the app (pinch disabled), shared across windows, exposed as a CSS variable.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack",
+          "teams"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "slack-shell-and-native-029",
+        "teams-shell-and-native-017"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-029"
+        ],
+        "why": "Clamped levels mapped to fixed factors and a --zoom-factor variable for layout code."
+      },
+      "mechanism": "Intercept zoom shortcuts, clamp level, set webFrame zoom, publish factor.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Browser zoom applies; no app zoom (not needed on the web).",
+        "strengths": "Browser zoom is sufficient for a web client."
+      },
+      "benefit": "None for the web client.",
+      "approach": "None.",
+      "effort": "S",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "None.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Browser already provides it.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-016",
+      "name": "In-app keyboard shortcuts and command palette",
+      "description": "Registered commands with ids and hotkeys (new chat, switch conversation, find, back/forward), a command palette, user-assignable shortcuts and quick switching between conversations.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot",
+          "teams",
+          "qm"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-product-165",
+        "grokbot-agent-product-103",
+        "teams-product-surface-147",
+        "teams-shell-and-native-018",
+        "qm-architecture-116"
+      ],
+      "bestInClass": {
+        "source": "grokbot",
+        "recordIds": [
+          "grokbot-agent-product-103"
+        ],
+        "why": "Every shell action is a registered command (id, hotkey, enabled-in-editor flag) consumed by one hotkey layer and a mod+K palette, including previous/next Bot; Teams adds user-assignable custom shortcuts and a slash menu that doubles as a palette (teams-product-surface-147); qm adds hold-Cmd to reveal 1-9 session shortcuts (qm-architecture-116)."
+      },
+      "mechanism": "Command registry {id, label, hotkey, when, run}; one keydown handler resolves hotkeys (capture phase for global ones); palette fuzzy-searches commands + entities (Spaces, people, agents); custom bindings stored per user.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-ui-104",
+          "v-space-ui-108"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:170-179",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:338-367",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:11",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/types.ts:15-25"
+        ],
+        "gap": "Basic keys (tablist roving focus, picker arrows, Enter-to-send) exist, but no quick switcher between Spaces, no command palette (Cmd/Ctrl+K opens web search), no shortcut help or custom bindings.",
+        "strengths": "Verevon already has a typed ActionDescriptor registry (id, label, risk, requiresApproval, zod schemas) used by both human clicks and model-initiated actions; a palette can sit on top of it."
+      },
+      "benefit": "A palette that lists the same typed actions agents can call (with risk/approval badges) gives humans and agents one action vocabulary in a Space, which no reference does; quick switching is table stakes for chat power users.",
+      "approach": "Frontend: command registry wrapping shared/actions descriptors + navigation commands; Cmd/Ctrl+K = palette (move web search into it as one provider), Cmd/Ctrl+1-9 Space switching, \"?\" shortcut sheet; execution via ActionCommand preview/approval path so authority stays in the owning plane.",
+      "effort": "M",
+      "dependencies": [
+        "Action registry",
+        "Space list API"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Rebinding Cmd+K changes an existing habit (web search); approval-required actions must never execute directly from the palette.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "4 of 5 sources have shortcuts and two have palettes; Verevon's action registry makes this a cheap differentiator.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-017",
+      "name": "OS-wide global shortcuts and push-to-talk",
+      "description": "Shortcuts that work while another app is focused (mute, open command center, push-to-talk), keyboard-layout aware.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "slack-product-surface-135",
+        "slack-shell-and-native-045"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-product-surface-135"
+        ],
+        "why": "Validated registration API for combos and modifier double-presses with key-down/key-up events (enables push-to-talk), plus layout tracking (slack-shell-and-native-045). buzz also binds push-to-talk (buzz-architecture-102, INF)."
+      },
+      "mechanism": "Native global-shortcut registration with validation; key-up events for hold-to-talk; keyboard layout change hook remaps accelerators.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "Not possible in a browser tab; Verevon has a voice feature that would benefit from push-to-talk.",
+        "strengths": ""
+      },
+      "benefit": "Push-to-talk to a voice agent from any app; summon an agent quickly.",
+      "approach": "tauri-plugin-global-shortcut in the shell, routed to the voice feature.",
+      "effort": "S",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Shortcut collisions with other apps.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Only with a shell; useful for voice agents.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-018",
+      "name": "Floating quick composer / command center over any app",
+      "description": "A small always-on-top panel or tray-summoned overlay lets the user prompt an agent without opening the main window.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "slack"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "grokbot-agent-product-106",
+        "slack-shell-and-native-010"
+      ],
+      "bestInClass": {
+        "source": "grokbot",
+        "recordIds": [
+          "grokbot-agent-product-106"
+        ],
+        "why": "Transparent always-on-top 320x176 panel on all workspaces: click to compose, switch Bots from a menu, drag, unmount; prompt goes to the selected Bot (macOS/Linux only). Slack gates a tray-click \"Slackbot Mini\" overlay behind a flag (slack-shell-and-native-010)."
+      },
+      "mechanism": "Frameless transparent window loading a minimal composer page with its own preload; typed IPC to submit a prompt to the selected agent; window visible on all workspaces.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "No equivalent; requires a native shell.",
+        "strengths": ""
+      },
+      "benefit": "Makes personal agents feel like a colleague one keystroke away; aligned with the Grok Bot reference in Verevon's vision.",
+      "approach": "Tauri secondary window + global shortcut; posts to the same gateway run endpoint as the Space composer (prompt lands in the user's personal Space so it is auditable).",
+      "effort": "M",
+      "dependencies": [
+        "Native desktop shell",
+        "Global shortcuts"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Prompts typed outside a Space must still carry ZDR and org context.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "Agent-native differentiator, but gated on the shell decision.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-019",
+      "name": "Theming, high contrast, custom palettes, org branding and density",
+      "description": "System/light/dark themes, high-contrast and reduced-transparency support, custom or imported palettes, operator branding and density tiers.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-product-168",
+        "qm-architecture-118",
+        "qm-product-123",
+        "slack-product-surface-142",
+        "slack-shell-and-native-030",
+        "teams-shell-and-native-034",
+        "teams-product-surface-148"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-product-surface-148",
+          "teams-shell-and-native-034"
+        ],
+        "why": "Custom themes with accent colours, high-contrast icon sets, OS theme and text-scale propagation at scale (q5). qm imports iTerm2/VS Code palettes with contrast checks and adapts panes to four density tiers (qm-product-123); buzz derives the whole UI from a code-editor theme (buzz-product-168)."
+      },
+      "mechanism": "Tokens as CSS variables; theme = system|light|dark|contrast; derive palette from a few key colours with contrast enforcement; observe prefers-color-scheme / forced-colors / text scale; org branding (name, accent, mark) from config.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-ui-107"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts:53-56",
+          "apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts:114",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx:51-55",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx:191-193",
+          "apps/Frontend Plane/verevonv3/src/styles/global.css:44084-44110"
+        ],
+        "gap": "System/light/dark preference is saved server-side and applied, with an accent colorScheme; no forced-colors/high-contrast handling (grep found no prefers-contrast/forced-colors), no org branding (name/mark/accent per org), no density setting.",
+        "strengths": "Theme preference persisted per user on the server (follows the user across devices), dark workroom styling shipped."
+      },
+      "benefit": "High contrast is an accessibility requirement for enterprise buyers; org branding helps multi-company Spaces show whose space it is.",
+      "approach": "Add forced-colors media rules for status marks and focus rings; Control Plane org branding fields (accent, mark) surfaced through the navbar payload; density as a CSS variable.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Brand colours with poor contrast; enforce contrast at save time.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Core theming exists; remaining items are polish except high contrast.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-020",
+      "name": "Typed, versioned preference store with effective-value view",
+      "description": "All user preferences (theme, language, notifications, model, time zone, startup behaviour) live in one validated, versioned store; advanced views show effective value and which layer set it.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "slack",
+          "qm"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "grokbot-agent-product-107",
+        "grokbot-agent-runtime-080",
+        "slack-product-surface-147",
+        "slack-shell-and-native-026",
+        "qm-product-126"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-026",
+          "slack-product-surface-147"
+        ],
+        "why": "One Joi-validated settings object with four layers and a Settings Editor showing each row's effective value and source; preferences are edited in the web UI and validated again by the shell. grokbot exposes agent-relevant settings (model, schedule time zone, microphone, per-Bot colour) in a zod-versioned file that refuses bad files rather than resetting (grokbot-agent-runtime-080)."
+      },
+      "mechanism": "Schema (zod/serde) with version and migrations; layers default < org policy < user < device; read API returns value + source; writes validated server-side.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts:114",
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1-5"
+        ],
+        "gap": "Theme is saved server-side but locale lives in localStorage (verevon.locale), so preferences are split across stores; no layered org-policy vs user view, no per-agent preferences (time zone for scheduled agent work, default model) verified. Check src/features/settings for a unified store.",
+        "strengths": "A settings feature area exists and theme follows the user across devices."
+      },
+      "benefit": "Agents acting for a user need user preferences (time zone, language, model) server-side, not in browser storage; admins need org-policy layering.",
+      "approach": "Control Plane user/org preference document with schema version and layered resolution; gateway exposes effective values; Model Plane reads time zone/language for agent runs.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane user profile"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Migration of existing localStorage values.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Useful consolidation; not user-visible on its own.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-021",
+      "name": "Localization with many locales, ICU plurals and RTL",
+      "description": "Translated UI with message catalogs, plural rules, regional fallbacks and right-to-left support; buzz (and qm, see accessibility cluster) ship English only.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "slack",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "grokbot-agent-runtime-085",
+        "slack-product-surface-140",
+        "slack-shell-and-native-031",
+        "teams-shell-and-native-033",
+        "buzz-product-170"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-033"
+        ],
+        "why": "63 locales with a regional fallback map, app locale independent of OS locale, host notifies the web client on locale/input-language change; grokbot adds RTL and native endonyms in 35 locales (grokbot-agent-runtime-085)."
+      },
+      "mechanism": "Message catalogs keyed by id (Lingui/ICU), plural/select formatting, fallback chain (en-au -> en-gb -> en), dir=rtl on html, Intl for dates in the user locale.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-ui-106"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1-20",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:122-137",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-thread-presentation.ts:71-93",
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts:1-30"
+        ],
+        "gap": "Two locales via inline tr(no, en) pairs; Space activity grammar labels hard-coded Norwegian and dates forced to nb-NO; no catalog extraction, plurals or third language path.",
+        "strengths": "Ahead of buzz and qm (English only): Norwegian-first with English, and a code-keyed bilingual error catalog."
+      },
+      "benefit": "Correct language for each participant in a mixed Norwegian/English Space; agents' activity lines read naturally; a path to Swedish/Danish markets.",
+      "approach": "Fix activity grammar and date formatting to use the active locale (S); then move tr() pairs to ICU catalogs keyed by id (e.g. Lingui works with Solid) when a third locale is planned.",
+      "effort": "M",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Agent-generated text is in the model's language, not the UI locale; pass the viewer locale to the Model Plane.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "The hard-coded Norwegian in activity grammar is a visible bug for English users; full catalogs can wait.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 1
+      }
+    },
+    {
+      "id": "C-t1-11-022",
+      "name": "Accessibility: screen readers, keyboard regions, reduced motion, high contrast",
+      "description": "ARIA coverage, focus management, reduced-motion gating, assistive-technology detection, F6 region cycling and high-contrast support.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "qm",
+          "slack",
+          "teams"
+        ],
+        "n": 4,
+        "of": 5,
+        "cls": "table-stakes"
+      },
+      "members": [
+        "buzz-product-169",
+        "qm-architecture-119",
+        "qm-product-125",
+        "slack-product-surface-141",
+        "slack-shell-and-native-028",
+        "slack-shell-and-native-032",
+        "teams-shell-and-native-035"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-product-surface-141",
+          "slack-shell-and-native-028"
+        ],
+        "why": "Detects assistive technology and high contrast at the OS level, follows text preferences, cycles app regions with F6/Shift+F6; buzz is the best web-side discipline: e2e tests assert accessible names and screen-reader status text (buzz-product-169)."
+      },
+      "mechanism": "Landmark regions with F6 cycling; dialogs trap and restore focus; aria-live for streaming content; prefers-reduced-motion gates; tests assert accessible names.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-space-ui-104",
+          "v-space-ui-105"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1387-1397",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityFeed.tsx:79-112",
+          "apps/Frontend Plane/verevonv3/src/styles/global.css:4630"
+        ],
+        "gap": "Small gaps: no forced-colors/high-contrast rules and no F6-style region cycling were found.",
+        "strengths": "aria-live rows for streaming agent activity, colour-independent status marks, roving-focus tablist and reduced-motion queries: at or above buzz/qm level for the Space surface."
+      },
+      "benefit": "Already a strength; agent activity announced to screen readers is ahead of the chat-only references.",
+      "approach": "Keep; add forced-colors rules and region cycling; add accessible-name assertions to Playwright Space tests (buzz pattern).",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Regressions without tests.",
+      "tier": "n/a",
+      "significance": 2,
+      "rationale": "Verevon is equal or ahead on the Space surface; keep and add tests.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-023",
+      "name": "Spellcheck dictionaries and editing context menu",
+      "description": "Selectable spellcheck languages with downloadable dictionaries and a native context menu.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "slack-product-surface-143"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-product-surface-143"
+        ],
+        "why": "Only source with a record."
+      },
+      "mechanism": "setSpellCheckerLanguages + dictionary download + context menu handlers.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Browser spellcheck covers the web client.",
+        "strengths": "Browser-native spellcheck."
+      },
+      "benefit": "None for web.",
+      "approach": "None.",
+      "effort": "S",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "None.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Provided by the browser.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-024",
+      "name": "Crash, hang and load-failure recovery (error curtain, watchdogs, restore orchestration)",
+      "description": "When the UI fails to load, hangs or crashes, the client explains the likely cause and offers wait/reload/restart/repair/open-on-web; startup restore is watched for stuck stages.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack",
+          "teams",
+          "grokbot"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "slack-product-surface-144",
+        "slack-shell-and-native-035",
+        "slack-shell-and-native-036",
+        "slack-shell-and-native-044",
+        "teams-product-surface-145",
+        "teams-shell-and-native-023",
+        "teams-shell-and-native-024",
+        "teams-shell-and-native-030",
+        "grokbot-agent-product-170"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-023",
+          "slack-shell-and-native-035"
+        ],
+        "why": "Diagnosis-specific error curtain (certificate, proxy auth, policy, damaged package, low memory, outdated WebView) with Restart/Repair/Open on web (q5); Slack's fatal-exception and unresponsive dialogs with telemetry flush (q5); grokbot restores the session as one lifecycle with a 30 s stuck detector reporting the stage reached (grokbot-agent-product-170)."
+      },
+      "mechanism": "Root boundary catches render/chunk-load failures -> curtain with classified cause + actions; watchdog timers on boot stages emit \"stuck at stage X\" telemetry; hang detection offers wait/reload; safe-mode switches (disable GPU).",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts:5",
+          "apps/Frontend Plane/verevonv3/src/demo/fixtures/fjordform-home.ts:8",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:546-550"
+        ],
+        "gap": "Code comments state the app has zero Suspense/ErrorBoundary and no root ErrorBoundary, so a render exception can blank the whole SPA; no boot watchdog or classified failure screen; per-feature error states (e.g. budget_exceeded in the Space composer) exist.",
+        "strengths": "Per-feature typed error states with translated copy."
+      },
+      "benefit": "A Space left open all day must survive a render bug or a lazy-chunk 404 after deploy; showing \"reconnecting / reload\" instead of a blank page protects trust in agents working in the background.",
+      "approach": "Add a root Solid ErrorBoundary per shell region (navbar, Space, side panels) with reload/report actions and chunk-load-error auto-reload; a boot watchdog that records the stage reached (session, navbar, Space projection, SSE) to gateway observability.",
+      "effort": "S",
+      "dependencies": [
+        "Client version gating"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Boundaries that swallow errors silently; always report with a request id.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Small effort, removes a whole-app failure mode in a realtime workroom; every native reference invests heavily here.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 9,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-025",
+      "name": "Coded error registry with retryability",
+      "description": "Every client error has a stable code, domain, retryable flag, one-line summary and source anchor.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "grokbot-agent-product-120"
+      ],
+      "bestInClass": {
+        "source": "grokbot",
+        "recordIds": [
+          "grokbot-agent-product-120"
+        ],
+        "why": "108 coded errors (SAND-E0001..E0812) grouped by domain with retryable flags and the code location that raises them (q5)."
+      },
+      "mechanism": "Central registry object {code: {name, domain, retryable, summary, payload, seededFrom}}; UI and telemetry key on the code; retry logic reads retryable.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/envelope.rs:11-45",
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts:1-30"
+        ],
+        "gap": "The gateway returns {code, message} on every error and the client maps ~100 codes to Norwegian/English copy (plus the ZDR refusal catalogue), but there is no retryable flag, domain grouping or coverage check that every emitted code is catalogued.",
+        "strengths": "Code-keyed envelope + bilingual copy + ZDR refusal catalogue is close to the grokbot pattern and better than buzz/qm/slack/teams records show."
+      },
+      "benefit": "Agents and the UI can decide retry vs ask-the-user from the code; support can search by code.",
+      "approach": "Extend errors.ts entries with domain and retryable; add a gateway test that every code in envelope::error call sites exists in the catalogue.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Catalogue drift without the coverage test.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Verevon is most of the way there; small hardening.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-026",
+      "name": "Self-healing client health agent and production chaos drills",
+      "description": "A local agent watches scenario signals, detects anomalies and repairs/restarts; controlled failure drills verify recovery paths in production rings.",
+      "prevalence": {
+        "sourcesWith": [
+          "teams"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "teams-shell-and-native-025",
+        "teams-shell-and-native-026"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-025"
+        ],
+        "why": "Only source: closed-loop diagnostics with repair actions and Yes/No toasts, plus GameDay drills."
+      },
+      "mechanism": "Signal stream -> anomaly rules -> action (repair, restart, GC, terminate) with user consent toast; ECS-gated deliberate failures with max counts.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not present.",
+        "strengths": ""
+      },
+      "benefit": "Low at Verevon's scale.",
+      "approach": "None now; reconsider after a desktop shell has users.",
+      "effort": "L",
+      "dependencies": [
+        "Native desktop shell",
+        "Feature flags"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Complex and opaque behaviour.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Microsoft-scale reliability engineering; not proportionate.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-027",
+      "name": "Diagnostics and support kit (logs, net log, report a problem)",
+      "description": "Users or support capture logs, network logs, traces and screenshots and upload them from inside the app; a settings editor shows effective values.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack",
+          "teams"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "slack-product-surface-138",
+        "slack-shell-and-native-033",
+        "slack-shell-and-native-034",
+        "teams-shell-and-native-029"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-033",
+          "slack-shell-and-native-034"
+        ],
+        "why": "Self-service kit (net log, verbose restart, tracing UI, cache reset, installation id) and per-surface rotating logs with zipped upload; Teams adds report-a-problem with screenshots, heap snapshots and chunked upload (teams-shell-and-native-029)."
+      },
+      "mechanism": "Per-window rotating console logs with truncation; one action zips logs + state + ids and uploads to a support endpoint; report-a-problem form attaches recent request/trace ids and an optional screenshot.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "No report-a-problem flow found by name (reportProblem/sendFeedback grep empty); check src/features/support and gateway observability.rs for a user-facing \"report this\" that attaches request ids.",
+        "strengths": ""
+      },
+      "benefit": "\"Report this agent run\" with the run id, request ids and Space id lets support reproduce agent misbehaviour without screenshots of private content.",
+      "approach": "Report dialog in the Space and run console that sends ids and client errors (no message bodies by default; respects ZDR) to a Support Plane ticket via the gateway.",
+      "effort": "M",
+      "dependencies": [
+        "Request id propagation in gateway"
+      ],
+      "planeOwner": "Support Plane",
+      "risks": "Uploading content from ZDR Spaces; default to ids only.",
+      "tier": "recommended",
+      "significance": 3,
+      "rationale": "Agent-heavy collaboration produces hard-to-reproduce issues; ids-only reporting fits ZDR.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-028",
+      "name": "Enterprise network compatibility: proxies, private CAs, streaming diagnostics",
+      "description": "The client works behind corporate proxies and TLS inspection and tells IT exactly which domains and streaming settings to allow.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "slack"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "grokbot-agent-product-108",
+        "grokbot-agent-runtime-081",
+        "slack-product-surface-145"
+      ],
+      "bestInClass": {
+        "source": "grokbot",
+        "recordIds": [
+          "grokbot-agent-product-108",
+          "grokbot-agent-runtime-081"
+        ],
+        "why": "In-app Network Debugger plus copy that tells IT to allow specific domains and disable SSL inspection/DLP/proxy buffering so HTTP/2, SSE and long connections work; all child processes inherit the system CA and proxy."
+      },
+      "mechanism": "Connectivity probe classes (DNS, TLS, proxy, stream stall) run against each endpoint; results shown with remediation text; proxy/CA inherited from the OS.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Browser handles proxy/CA, but Space realtime and agent runs stream over SSE through the gateway; no connectivity self-test or IT guidance was checked. Verify whether the SSE path detects buffering proxies (e.g. heartbeat stall detection).",
+        "strengths": ""
+      },
+      "benefit": "Enterprise customers behind buffering proxies otherwise see agent runs \"hang\"; a self-test turns a support ticket into a checklist.",
+      "approach": "Gateway /diagnostics/stream endpoint that emits timed heartbeats; client measures stall and shows IT guidance; publish an allowlist document.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Low.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Cheap insurance for enterprise rollouts of streaming agent UIs.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-029",
+      "name": "Developer/QA affordances and end-to-end test harness",
+      "description": "Isolated profiles, pointing a shipped client at a local/dev build, gated dev tools, a local developer box, and e2e tests that mock the native/relay layer.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "slack",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "buzz-architecture-098",
+        "slack-shell-and-native-001",
+        "slack-shell-and-native-038",
+        "teams-shell-and-native-028"
+      ],
+      "bestInClass": {
+        "source": "buzz",
+        "recordIds": [
+          "buzz-architecture-098"
+        ],
+        "why": "E2E bridge mocks IPC and relay subscriptions; ~189 Playwright files; review standard requires tests that bind production seams and are falsifiable."
+      },
+      "mechanism": "Test bridge replaces transport with scripted fixtures; Playwright drives the real UI; dev flags select web sources only when unpackaged or explicitly allowed.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/playwright.config.ts",
+          "apps/Frontend Plane/verevonv3/playwright.real-authority.config.ts",
+          "apps/Frontend Plane/verevonv3/src/demo/product-demo/guard.ts:241"
+        ],
+        "gap": "Playwright configs (incl. a real-authority config) and a product demo mode exist; Space-specific e2e coverage and a mock realtime bridge were not assessed here.",
+        "strengths": "Real-authority Playwright config tests against real planes rather than mocks only."
+      },
+      "benefit": "Developer productivity; keeps Space realtime behaviour verifiable.",
+      "approach": "Add a scripted SSE fixture for Space events so e2e tests can assert agent activity rendering deterministically.",
+      "effort": "M",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Mock drift from real contracts.",
+      "tier": "nice-to-have",
+      "significance": 1,
+      "rationale": "Developer-facing; Verevon already has the base.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-030",
+      "name": "Startup performance: bundled assets, prewarm, code cache, perf telemetry",
+      "description": "Fast first paint from locally bundled web assets, prewarmed runtimes, split bundles with code cache, and shared performance scenarios/responsiveness telemetry.",
+      "prevalence": {
+        "sourcesWith": [
+          "grokbot",
+          "teams"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "grokbot-agent-runtime-077",
+        "grokbot-agent-runtime-084",
+        "teams-shell-and-native-002",
+        "teams-shell-and-native-031",
+        "teams-shell-and-native-032"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-002",
+          "teams-shell-and-native-031"
+        ],
+        "why": "Serves a bundled copy of the web client from disk with a version floor and CDN fallback (q5) and shares scenario marks plus INP-style responsiveness telemetry between shell and web (q5)."
+      },
+      "mechanism": "Intercept static requests and serve local copies keyed by an asset manifest; scenarioStart/Mark/Stop API emitting success/failure/abandoned; long-input-delay events; prewarm expensive engines at idle.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not assessed: check vite.config.ts chunking, whether route-level lazy loading is used for Spaces, and whether web-vitals/INP are reported to gateway observability.",
+        "strengths": ""
+      },
+      "benefit": "Space open time and composer latency are what users feel; scenario telemetry (open Space -> first event rendered) gives a measurable target.",
+      "approach": "Web: service-worker app-shell cache (with the PWA), route-level code splitting, web-vitals INP/LCP + custom \"space_open\" scenario marks sent to gateway observability.",
+      "effort": "M",
+      "dependencies": [
+        "PWA service worker"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Stale service-worker caches; pair with version gating.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Worth doing once the PWA exists; no evidence of a current problem.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-031",
+      "name": "Multi-workspace and multi-account switching with cross-workspace unread",
+      "description": "Several workspaces/communities/tenants in one window with a rail, keyboard switching and unread across all of them; Teams keeps several signed-in accounts isolated at once.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "slack",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "buzz-architecture-097",
+        "slack-shell-and-native-040",
+        "teams-shell-and-native-008"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-008"
+        ],
+        "why": "One isolated web instance per account/tenant with shared notifications and calling state (guest tenants work side by side); Slack-shell-and-native-040 is the best switching UX (rail, Ctrl/Cmd+1..9, tray, jump list, swipe)."
+      },
+      "mechanism": "Per-account isolated session partitions; an aggregator polls/streams unread per account; switching swaps the active session without re-login.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:695-729"
+        ],
+        "gap": "Org switching exists (one active org at a time via switchOrganization); no cross-org unread indicator, no simultaneous sessions, no keyboard switching.",
+        "strengths": "Server-side active-org switch keeps ACLs per org (no client-side mixing)."
+      },
+      "benefit": "Guests from partner companies (Teams-style external collaboration in Spaces) need to see activity in their home org and the host org without re-switching.",
+      "approach": "Gateway endpoint returning unread counts for all orgs the user belongs to (each computed under that org's own ACL); org rail with badges; switch remains a server-side active-org change.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane membership list",
+        "Application Plane unread per org"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Must not leak another org's Space names into the current org context; counts only.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "rationale": "Real need for cross-company Spaces, but the core switch exists.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-032",
+      "name": "Desktop sign-in via the system browser (PKCE / device-code handoff)",
+      "description": "The desktop app never sees passwords: sign-in happens in the real browser (SSO, passkeys), and a single-use code bound to a proof key returns to the app.",
+      "prevalence": {
+        "sourcesWith": [
+          "qm",
+          "grokbot",
+          "teams"
+        ],
+        "n": 3,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "qm-architecture-113",
+        "qm-product-122",
+        "grokbot-agent-runtime-138",
+        "teams-product-surface-165"
+      ],
+      "bestInClass": {
+        "source": "qm",
+        "recordIds": [
+          "qm-architecture-113",
+          "qm-product-122"
+        ],
+        "why": "Two-minute single-use code via qm-desktop:// redeemed with an S256 proof key, replay prevented across portal instances, isolated cookie partition per instance; grokbot uses a polling variant (grokbot-agent-runtime-138)."
+      },
+      "mechanism": "App creates verifier+state, opens /auth/desktop?challenge=..; portal mints sealed code bound to challenge/state/audience; deep link returns code; app redeems with verifier for a session cookie in its own partition.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-backend-106"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:736"
+        ],
+        "gap": "No desktop client, so no handoff; the web BFF session model is already the right target for it.",
+        "strengths": "BFF cookie session means the handoff only has to mint the same cookie."
+      },
+      "benefit": "Required for any native shell without weakening the BFF model.",
+      "approach": "Gateway /auth/desktop PKCE endpoint minting the same HttpOnly session in the shell partition; reuse Control Plane identity.",
+      "effort": "M",
+      "dependencies": [
+        "Native desktop shell",
+        "Protocol handler"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Code interception; keep TTL short and single-use.",
+      "tier": "recommended",
+      "significance": 2,
+      "rationale": "Security-critical part of the shell, not standalone.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-033",
+      "name": "Thin client behind a server-side identity holder (BFF, no tokens in the browser)",
+      "description": "The browser holds only an HttpOnly session; a server process injects identity and relays a fixed set of routes with signed requests.",
+      "prevalence": {
+        "sourcesWith": [
+          "qm"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "qm-architecture-158"
+      ],
+      "bestInClass": {
+        "source": "qm",
+        "recordIds": [
+          "qm-architecture-158"
+        ],
+        "why": "Only reference record: node server verifies identity, proxies ~150 routes with signed requests, SSE with polling fallback."
+      },
+      "mechanism": "Same-origin BFF terminates the session cookie, injects principal, signs upstream calls; browser never holds bearer tokens.",
+      "verevon": {
+        "status": "shipped",
+        "baselineIds": [
+          "v-space-backend-106"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:736"
+        ],
+        "gap": "",
+        "strengths": "Rust gateway is a same-origin BFF for all Space routes; the browser holds no upstream credential. Equal to qm and stronger than Electron shells that hold tokens locally."
+      },
+      "benefit": "Keep: foundation for ZDR propagation and the authority model.",
+      "approach": "Keep; any desktop shell must reuse it rather than store tokens.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "None new.",
+      "tier": "n/a",
+      "significance": 3,
+      "rationale": "Verevon strength.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-034",
+      "name": "Authenticated, cacheable media in the client",
+      "description": "Private images/video/avatars load with per-request authorization, seek correctly and stay cached without exposing credentials.",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "buzz-architecture-112",
+        "grokbot-agent-runtime-142"
+      ],
+      "bestInClass": {
+        "source": "buzz",
+        "recordIds": [
+          "buzz-architecture-112"
+        ],
+        "why": "Custom URI scheme plus loopback proxy that mints a fresh per-request media grant, supports range requests and caches across channel switches; grokbot uses content-addressed avatar files behind a token-guarded protocol."
+      },
+      "mechanism": "Media URLs point to a local scheme/proxy that adds short-lived authorization and forwards Range headers; cache keyed by content hash.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not checked: how Space attachments and avatars are served (likely same-origin through the gateway with the session cookie, which would make the custom-scheme trick unnecessary). Verify Range support and cache headers on the gateway media route.",
+        "strengths": ""
+      },
+      "benefit": "Fast, private media in Spaces (screenshots from agent browser sessions, files).",
+      "approach": "Gateway media route with cookie auth, Range, ETag and private cache-control; signed short-lived URLs only for <video>.",
+      "effort": "S",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Caching private media on shared machines; honour ZDR (no-store for ZDR Spaces).",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "The BFF likely solves most of it; verify.",
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-035",
+      "name": "Multi-surface reach: installable PWA, phone layout and mobile apps",
+      "description": "The same product is usable on phones (responsive web or native mobile) and installable to home screen/desktop; buzz's browser client is only a repo browser and invite page.",
+      "prevalence": {
+        "sourcesWith": [
+          "qm",
+          "buzz"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "qm-architecture-159",
+        "buzz-architecture-101",
+        "buzz-product-166",
+        "buzz-product-167"
+      ],
+      "bestInClass": {
+        "source": "qm",
+        "recordIds": [
+          "qm-architecture-159"
+        ],
+        "why": "One web build with a phone mode below 860 px (drawer sidebar, bottom sheets, 44 px targets, composer kept above the keyboard via visualViewport), installable, but no service worker/push. buzz has full native mobile (Flutter, biometrics, badges; buzz-product-166) but its web client cannot chat (buzz-product-167)."
+      },
+      "mechanism": "Shared breakpoint constant for CSS and JS; visualViewport listener for the composer; web app manifest; service worker for app shell + Web Push; Badging API.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [
+          "v-space-ui-107"
+        ],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/styles/global.css:44084-44110",
+          "apps/Frontend Plane/verevonv3/index.html:1-15",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:101"
+        ],
+        "gap": "Responsive workroom layout and dark theme ship, but there is no web app manifest, no service worker and no Web Push, so Verevon cannot be installed and cannot notify when the tab is closed; no native mobile app.",
+        "strengths": "Single responsive web build already covers phone and desktop browsers (better than buzz, whose web client cannot chat)."
+      },
+      "benefit": "Installable app with push for Space mentions and finished agent runs gives most of Teams/Slack desktop+mobile presence at a fraction of a native shell; agents that work while the user is away need a way to reach the user.",
+      "approach": "Add manifest (name, icons, display standalone, protocol_handlers, share_target), a minimal service worker (app shell cache + push handler), Web Push subscriptions stored by the Application Plane notifications service and sent per user preference; setAppBadge from unread counts. Push payloads carry ids only (fetch content after open) to respect ZDR.",
+      "effort": "M",
+      "dependencies": [
+        "Application Plane notification fan-out",
+        "Client version gating (SW cache invalidation)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Stale SW caches; iOS push limits (installed PWAs only); push payloads must not contain message text from ZDR Spaces.",
+      "tier": "priority",
+      "significance": 4,
+      "rationale": "Highest value-per-effort path to Teams/Slack-level presence; unblocks notifications for agent work done while the user is away.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-036",
+      "name": "OS signals and permissions (idle, lock, network, screen capture, activity history)",
+      "description": "The shell feeds the client OS lock/idle/network/display signals, manages screen-capture permission and reports user activity to the OS.",
+      "prevalence": {
+        "sourcesWith": [
+          "teams"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "teams-shell-and-native-043",
+        "teams-shell-and-native-044",
+        "teams-shell-and-native-039"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-043"
+        ],
+        "why": "Only source: session lock/unlock/suspend, system idle time, network level and display topology exposed to the web client."
+      },
+      "mechanism": "Native event subscriptions forwarded as host events; idle time polled; permission checks with deep links to OS privacy panes.",
+      "verevon": {
+        "status": "partial",
+        "baselineIds": [],
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx:60-81"
+        ],
+        "gap": "Only document visibility is used (to slow navbar polling when hidden); no idle-based presence (away) and no online/offline handling verified.",
+        "strengths": "Visibility-aware polling already reduces load."
+      },
+      "benefit": "Accurate human presence (active/away) in a Space tells agents and colleagues who is available, which matters for routing approvals to a present human.",
+      "approach": "Web: visibility + input-idle timer (and Idle Detection API where permitted) feeding presence heartbeats to the Application Plane; navigator.onLine + SSE health for a reconnect banner.",
+      "effort": "S",
+      "dependencies": [
+        "Presence model in Application Plane"
+      ],
+      "planeOwner": "Application Plane",
+      "risks": "Presence is personal data; make it org-scoped and optional.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "rationale": "Presence itself belongs to another category; the client signal part is cheap.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-037",
+      "name": "Native downloads, link-open preferences and recent files",
+      "description": "A native download manager with pause/resume, open-in-desktop-Office preferences and admin link policies.",
+      "prevalence": {
+        "sourcesWith": [
+          "teams"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "teams-shell-and-native-040",
+        "teams-shell-and-native-041"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-040"
+        ],
+        "why": "Only source."
+      },
+      "mechanism": "files.* download events and preferences; M365 link policy with browser choice.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Browser downloads cover the web client.",
+        "strengths": ""
+      },
+      "benefit": "None for web.",
+      "approach": "None.",
+      "effort": "M",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "None.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Browser-provided; Office-specific.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-038",
+      "name": "Desktop-local agent execution runtime and its OS limits",
+      "description": "The desktop app bundles agent runtimes (sidecars, multicall binary, local-exec daemon, local Docker box) so agents run on the user's machine; both sources show platform gaps (Windows needs Git Bash, several features macOS/Linux only).",
+      "prevalence": {
+        "sourcesWith": [
+          "buzz",
+          "grokbot"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "differentiator"
+      },
+      "members": [
+        "buzz-architecture-100",
+        "grokbot-agent-runtime-083",
+        "grokbot-agent-product-105",
+        "buzz-product-171"
+      ],
+      "bestInClass": {
+        "source": "buzz",
+        "recordIds": [
+          "buzz-architecture-100"
+        ],
+        "why": "One small multicall binary acts as ACP adapter, agent, dev MCP server and git helpers by argv[0]; grokbot shows the cost: features like desktop mount, cookie import and computer-use helper are macOS/Linux only (grokbot-agent-product-105)."
+      },
+      "mechanism": "Sidecar binaries shipped in the app bundle and launched by the shell; agent tools execute locally against the user's files and shell.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "By design, agents run in Model Plane sandboxes and browser actions are executed by Quarry; nothing runs on the user's device.",
+        "strengths": "Server-side agent computers are OS-independent (no Windows gap) and keep every action under the gateway authority model and audit."
+      },
+      "benefit": "Low and conflicting: local execution bypasses \"Model proposes, Quarry executes\" and makes ZDR/audit guarantees device-dependent.",
+      "approach": "Do not build. If \"use my own machine\" is ever required, model it as a registered connector that executes proposals under the same approval/audit flow.",
+      "effort": "XL",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Authority bypass, unaudited actions, endpoint security exposure.",
+      "tier": "skip",
+      "significance": 2,
+      "rationale": "Conflicts with Verevon's execution and audit architecture; Verevon's server-side model is a strength here.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-039",
+      "name": "VDI media optimisation",
+      "description": "Detects Citrix/AVD/Omnissa virtual desktops and switches media optimisation stacks.",
+      "prevalence": {
+        "sourcesWith": [
+          "teams"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "teams-product-surface-150",
+        "teams-shell-and-native-042"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-042"
+        ],
+        "why": "Only source."
+      },
+      "mechanism": "Vendor/policy detection and runtime optimisation-stack switching.",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not relevant without native calling.",
+        "strengths": ""
+      },
+      "benefit": "None now.",
+      "approach": "None.",
+      "effort": "XL",
+      "dependencies": [
+        "Native calling"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "None.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Calling-in-VDI niche specific to Microsoft's enterprise base.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-040",
+      "name": "Launch at login / auto-start",
+      "description": "The app starts with the OS, honouring user opt-out and machine policy, and adapts to device class.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack",
+          "teams"
+        ],
+        "n": 2,
+        "of": 5,
+        "cls": "common"
+      },
+      "members": [
+        "slack-shell-and-native-024",
+        "teams-shell-and-native-012"
+      ],
+      "bestInClass": {
+        "source": "teams",
+        "recordIds": [
+          "teams-shell-and-native-012"
+        ],
+        "why": "Auto-start decided by launch-count heuristics, suppressed on low-spec devices, respects explicit opt-out and group policy; Slack respects machine-enforced launch."
+      },
+      "mechanism": "OS startup task/registry Run key with states (enabled, disabled by user, disabled for low-spec, policy).",
+      "verevon": {
+        "status": "absent",
+        "baselineIds": [
+          "v-space-ui-109"
+        ],
+        "evidence": [],
+        "gap": "No desktop client.",
+        "strengths": ""
+      },
+      "benefit": "Low until a shell exists.",
+      "approach": "tauri-plugin-autostart, off by default.",
+      "effort": "S",
+      "dependencies": [
+        "Native desktop shell"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "None.",
+      "tier": "skip",
+      "significance": 1,
+      "rationale": "Shell detail.",
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "C-t1-11-041",
+      "name": "About, What's New and release notes",
+      "description": "Version info, release notes and acknowledgements reachable from Help.",
+      "prevalence": {
+        "sourcesWith": [
+          "slack"
+        ],
+        "n": 1,
+        "of": 5,
+        "cls": "unique"
+      },
+      "members": [
+        "slack-shell-and-native-125"
+      ],
+      "bestInClass": {
+        "source": "slack",
+        "recordIds": [
+          "slack-shell-and-native-125"
+        ],
+        "why": "Only source with a record."
+      },
+      "mechanism": "Component windows/pages for about and release notes; What's New entry.",
+      "verevon": {
+        "status": "unknown",
+        "baselineIds": [],
+        "evidence": [],
+        "gap": "Not checked; no build version is exposed to the client (see version gating).",
+        "strengths": ""
+      },
+      "benefit": "Telling users what new agent capabilities they have drives adoption.",
+      "approach": "Release-notes page fed from the deploy pipeline, shown once per version.",
+      "effort": "S",
+      "dependencies": [
+        "Client version gating"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "None.",
+      "tier": "nice-to-have",
+      "significance": 1,
+      "rationale": "Low-cost adoption aid.",
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    }
+  ]
+}

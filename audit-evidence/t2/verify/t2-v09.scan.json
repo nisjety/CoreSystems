@@ -1,0 +1,928 @@
+[
+  {
+    "finalId": "F-t2-032",
+    "title": "Per-origin agent consent and action-class grants: child grants, run modes, typed denials, org origin policy and a browser settings hub",
+    "searches": [
+      "rg -i parent_grant_id|parentGrantId|child.?grant|childGrant (code and proto)",
+      "rg -i action.?class|actionClass|action_class (code, excluding md)",
+      "rg -i decision.?source|decisionSource|decision_source (no hits)",
+      "rg -i denial.?reason|DenialReason|denial_reason|denial_code|denial_source",
+      "rg -i run.?mode|runMode|run_mode (browser paths: no background or interactive run mode)",
+      "rg -i origin.?polic|originPolic|domain.?polic|allowed.?domain (Control, Model, Frontend)",
+      "rg -i ensure_command_allowed|ensureCommandAllowed|ensure_access|ensureAccess (no hits)",
+      "rg -i site.?rule|siteRule|site_policy|sitePolicy|per.?site|perSite (no hits)",
+      "rg -i approve.?for.?session|saved_user_permission|decided_by|approval_mode|risk.?gate",
+      "rg -i always.?allow|allow.?this.?site|alltid tillat|for dette nettstedet (no hits)",
+      "rg -i browser_polic|browserSetting; settings feature Browser section check (none)",
+      "rg -i takeover|controlMode|agent_control|human_takeover (gateway and SPA)",
+      "rg -i browser.{0,20}approv|approv.{0,20}browser (code and docs)",
+      "rg -i consent in browser-related rs, ts, tsx and go files"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go",
+        "line": 54,
+        "why": "ParentGrantID binds a sensitive approval to one ordinary run grant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go",
+        "line": 32,
+        "why": "Sensitive action allow-list is only respond_dialog, upload_ref and download_ref.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go",
+        "line": 304,
+        "why": "Host allowlist rejects wildcards, URLs and IPs; conflicts with proposed wildcard patterns.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/server/server.go",
+        "line": 83,
+        "why": "Sensitive approvals need parent_grant_id and are issued as scoped child grants.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/server/server.go",
+        "line": 170,
+        "why": "Proto mode is local or cloud browser location, not an agent run mode.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/proto/model_plane/v1/browser.proto",
+        "line": 29,
+        "why": "Mode field documented as local or cloud; no run-mode or action-class scopes.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant_test.go",
+        "line": 80,
+        "why": "Test rejects unbounded or non-host allowed_domains policy.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs",
+        "line": 10,
+        "why": "Typed ErrorCode enum exists, including SecurityBlocked and ChallengeDetected.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs",
+        "line": 70,
+        "why": "QuarryError already has a retryable flag; only decision_source is missing.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1131,
+        "why": "Fail-closed gate: agent runs need isolated egress and current security evidence.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1180,
+        "why": "Missing driver flags return Unsupported with details.missing list.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2289,
+        "why": "One-shot sensitive approval reuse by the same run returns CONFLICT.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2302,
+        "why": "Domain denial is a generic FORBIDDEN string, not a reason enum.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs",
+        "line": 12,
+        "why": "Typed CrawlDenialReason enum exists for the crawl frontier only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs",
+        "line": 197,
+        "why": "Crawl frontier returns CrawlDenialReason; no browser-action equivalent.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+        "line": 182,
+        "why": "Run domain policy must exactly match the broker grant; start_url checked against it.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs",
+        "line": 25,
+        "why": "Per-action risk categories: login, checkout, posting, destructive, cross-domain.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs",
+        "line": 103,
+        "why": "Per-action HITL outcome Granted, Denied or TimedOut; no remembered approval.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+        "line": 6,
+        "why": "Tool-level Auto, Ask, Deny modes; no origin scope or persistence.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+        "line": 223,
+        "why": "External MCP tools are gated unconditionally under the ask posture.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1797,
+        "why": "Per-action Approve and Reject buttons; no always-allow-this-site option.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 263,
+        "why": "BrowserControlMode agent_control or human_takeover is the closest run-mode analogue.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 705,
+        "why": "Typed CONFLICT code browser_human_takeover_active refuses agent actions during takeover.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 5676,
+        "why": "Test pins the browser_human_takeover_active refusal code.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/tests/e2e/browser-workspace-hitl.spec.ts",
+        "line": 37,
+        "why": "E2E tests cover approving and rejecting gated browser actions.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 479,
+        "why": "Open decision OD13 recommends a start-host fence plus user-listed domains, broker as authority.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/CLAUDE.md",
+        "line": 34,
+        "why": "Architecture rule: Model proposes browser actions; Quarry executes or rejects them.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-066",
+    "title": "Policy-gated browsing preset limited to consent-banner handling and ad/tracker filtering (fingerprint masking deferred to an ADR)",
+    "searches": [
+      "rg -i STEALTH_SCRIPT|default_preamble|CONSENT_DISMISS|add_init_script|addScriptToEvaluateOnNewDocument",
+      "rg -i adblock|ad_block|easylist|block_ads|blockAds|ublock|tracker.?block (code, toml, json)",
+      "rg -i SetUserAgentOverride|set_user_agent|setTimezone|set_locale|Emulation domain calls (Quarry crates)",
+      "rg -i FingerprintRotator|fingerprint_rotation|is_block_status (Quarry crates)",
+      "rg -i stealth module imports and default_preamble call sites (caller check)",
+      "rg -i stealth_preset|stealth string literal|RunPolicy and Preset definitions",
+      "rg -i consent.?banner|cookie.?banner|consentBanner (frontend and Quarry)",
+      "rg -i TlsProfile|redirect (quarry-tls, driver_plan)",
+      "rg -i BlockPolicy|BlockTrigger|Six shipped presets (policy and presets)",
+      "rg -i fingerprint in docs (POLICY.md, SOVEREIGN_SCRAPING_RELIABILITY.md, improvements doc)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs",
+        "line": 52,
+        "why": "STEALTH_SCRIPT defined; no production injection path found.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs",
+        "line": 292,
+        "why": "CONSENT_DISMISS_SCRIPT defined for cookie banners; never injected in production.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs",
+        "line": 424,
+        "why": "default_preamble joins both scripts; its only caller is its own unit test.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs",
+        "line": 437,
+        "why": "Unit test asserts the preamble holds both scripts; no wiring test.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs",
+        "line": 164,
+        "why": "pub mod stealth is exported but no runtime path consumes it.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 226,
+        "why": "Chromium launch args cover crash, shm and QUIC only; no UA, locale or timezone.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs",
+        "line": 706,
+        "why": "install_network_guard is an existing CDP Fetch per-request hook a filter could reuse.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-tls/src/lib.rs",
+        "line": 34,
+        "why": "TlsProfile enum defines Chrome, Firefox and Safari fingerprints.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-tls/src/lib.rs",
+        "line": 259,
+        "why": "TLS adapter disables redirects deliberately until per-hop validation exists.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs",
+        "line": 46,
+        "why": "Planner always passes TlsProfile::default(); no per-site profile choice.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fingerprint_rotation.rs",
+        "line": 30,
+        "why": "FingerprintRotator struct; only is_block_status is used in drivers.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs",
+        "line": 96,
+        "why": "Block-status check drives fallback; rotator policy is not wired.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs",
+        "line": 14,
+        "why": "blockAds appears only in a module doc comment; no code path sets it.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/policy.rs",
+        "line": 80,
+        "why": "BlockPolicy handles challenges, not ad or tracker filtering.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/presets.rs",
+        "line": 5,
+        "why": "Six shipped presets are crawl-oriented; none for consent or ad filtering.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/SCRAPING_ENGINE_GAPS.md",
+        "line": 136,
+        "why": "Doc describes an adblock CDP task as fixed; no such code exists (stale doc).",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/SCRAPING_ENGINE_GAPS.md",
+        "line": 197,
+        "why": "Status row marks the adblock task fixed; contradicts current code.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md",
+        "line": 175,
+        "why": "Planned versioned fingerprint profile catalog; intent only, not implemented.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/POLICY.md",
+        "line": 38,
+        "why": "Fingerprint section means policy hashing, not browser identity masking.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md",
+        "line": 2335,
+        "why": "Doc warns stealth changes can conflict with Quarry evidence requirements.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-070",
+    "title": "Browser chrome polish in the SPA: tab menu, new-tab page, typed error cards, split view, keyboard commands, activity strip, reader view",
+    "searches": [
+      "rg -i duplicate|reopen|closed.?tab|recently.?closed|reorder|moveTab|copy.?url|open.?external|split.?view|activity.?strip|reader.?view (browser feature files)",
+      "rg -i keydown|keymap|shortcut|hotkey|keyboard (BrowserChrome, shared/ui; no shortcut registry)",
+      "rg -i navigation.?error|NAVIGATION_FAILED|ERR_NAME|egress.?denied|domain.?lock (no hits)",
+      "rg -i tab route names in quarry-edge and gateway (list, new, select, close)",
+      "rg -i Lesemodus|leservisning|reader.?(view|mode)|Ny fane|Åpne siden i ny fane (UI strings)",
+      "rg -i new.?tab|newTab|new_tab (BrowserChrome and dashboard home)",
+      "rg -i ChallengeDetected|SecurityBlocked|ErrorCode (typed error enum)",
+      "rg -i clipboard|writeText (copy actions in browser feature)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1083,
+        "why": "Tab strip lists Live and snapshot tabs only; no tab context menu.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 852,
+        "why": "New tab clears the address input and focuses it; no search-or-ask new-tab page.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1132,
+        "why": "New-tab button exists; reopen-closed, duplicate and reorder are absent.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 872,
+        "why": "Clipboard copy exists for profile id only, not the page URL.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1636,
+        "why": "Overflow menu has open-page-in-new-tab link; no open-in-system-browser action.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1057,
+        "why": "Only document keydown handler closes the popover on Escape; no command registry.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/ui/tab-keyboard.ts",
+        "line": 2,
+        "why": "Generic ARIA tablist arrow-key helper; not a browser shortcut registry.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 760,
+        "why": "Frame load errors set a broken-frame state; no typed navigation error card.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 582,
+        "why": "Loop errors appear as Feil text in the summary.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 1321,
+        "why": "Loop status chip has an error variant with an alert icon.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+        "line": 278,
+        "why": "Owner timeline shows raw errorCode text; no retry or reason guidance.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 3697,
+        "why": "Quarry tab routes: list, new, select and close only; no duplicate, reopen or reorder.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 386,
+        "why": "Gateway proxies tab list, new, select and close only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs",
+        "line": 10,
+        "why": "ErrorCode has ChallengeDetected and SecurityBlocked but no navigation-specific code.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeScrapePreview.tsx",
+        "line": 325,
+        "why": "Knowledge scrape preview renders the scraped page in a reader-style view.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/styles/global.css",
+        "line": 13861,
+        "why": "CSS comment for the knowledge-scrape-page class: scraped markdown as a reader-view page.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardWebHistory.tsx",
+        "line": 54,
+        "why": "History rows open pages in a new tab via target=_blank.",
+        "kind": "code"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-071",
+    "title": "Render MCP App (ui://) resources in an opaque-origin sandbox, and retire the permissive web-view iframe",
+    "searches": [
+      "rg -i ui://|mcp-app|McpApp|profile=mcp-app|resourceUri|resource_uri (all, excluding md; none in code)",
+      "rg -i WebPageViewer|allow-same-origin (frontend src and apps)",
+      "rg -i postMessage|addEventListener.message (frontend src, non-test)",
+      "rg -i sandbox=|srcdoc|connect-src 'none' (artifact and preview iframes)",
+      "rg -i resources/read|resources/list|tools/call (model-gateway, bridges, deploy)",
+      "rg -i SANDBOX_ORIGIN|sandboxOrigin|usercontent|preview.?origin (no hits)",
+      "rg -i mcp widget, iframe, ui_resource, renderToolHtml (no hits)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+        "line": 518,
+        "why": "Model HTML preview iframe uses sandbox allow-scripts with no allow-same-origin.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts",
+        "line": 10,
+        "why": "Strict preview CSP: connect-src, frame-src and form-action none; reusable for MCP frames.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx",
+        "line": 147,
+        "why": "WebPageViewer has no importers; its iframe keeps allow-scripts with allow-same-origin.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx",
+        "line": 184,
+        "why": "Unused iframe sandbox combines allow-scripts and allow-same-origin: the risky pattern to retire.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.test.tsx",
+        "line": 115,
+        "why": "Test pins artifact sandbox without allow-same-origin and CSP connect-src none.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/inbox/components/EmailBody.tsx",
+        "line": 129,
+        "why": "Email iframe keeps allow-same-origin but no scripts; context for sandbox policy.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/integrations/provider-auth-window.ts",
+        "line": 161,
+        "why": "Only postMessage listener is the OAuth popup flow, not a tool-call bridge.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs",
+        "line": 263,
+        "why": "MCP JSON-RPC support builds tools/call requests only; no resources/read.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs",
+        "line": 8,
+        "why": "MCP HTTP client covers tools/list and tools/call only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs",
+        "line": 171,
+        "why": "Only single text blocks unwrapped; resource and image result blocks are not handled.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/bridges/mcp-bridge/server.js",
+        "line": 5,
+        "why": "MCP bridge forwards tools/call over HTTP only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+        "line": 2165,
+        "why": "Doc notes MCP Apps (server-rendered UI) graduating as an opt-in extension in the spec.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-072",
+    "title": "Share an agent run and its evidence with Space members through the existing resource-grant authority",
+    "searches": [
+      "rg -i ShareDialog|resource_grants|resourceGrant (code)",
+      "rg -i share_run|shareRun|run_share|share_link|shareLink|share_token|signed_url|presign (no run-share hits)",
+      "rg -i quarry_run (taxonomy and authz mirrors)",
+      "rg -i ValidateUserGrant|IsOwnable|team-shared (user-core authztaxonomy)",
+      "rg -i run.?share|share.?run|shared_run|sharedRun (frontend, gateway, Application Plane)",
+      "rg -i get_artifact|owned_browser_artifact_run|artifact_url (browser artifact serving)",
+      "read: Ingestions feature folder and BrowserChrome for share controls (none)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/knowledge/components/ShareDialog.tsx",
+        "line": 22,
+        "why": "Existing ShareDialog shares documents only; no run-sharing control.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs",
+        "line": 1,
+        "why": "Share backend proxies user-core resource_grants for documents only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs",
+        "line": 111,
+        "why": "Share backend hard-codes resource_type document in its requests.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/migrations/012_resource_grants.up.sql",
+        "line": 20,
+        "why": "resource_grants is generic by resource_type; comment says document MVP only.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/authztaxonomy/resource_taxonomy.json",
+        "line": 13,
+        "why": "Taxonomy classes quarry_run as team-shared, so per-user run grants are blocked.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/authztaxonomy/resource_taxonomy.json",
+        "line": 4,
+        "why": "Only document is ownable in the taxonomy.",
+        "kind": "config"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/authztaxonomy/taxonomy.go",
+        "line": 91,
+        "why": "ValidateUserGrant rejects team-shared types; a run grant needs a taxonomy change.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/authztaxonomy/taxonomy_test.go",
+        "line": 47,
+        "why": "Test pins quarry_run as team-shared.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Data Plane v2/services/retrieval-engine-rs/src/authz/taxonomy.rs",
+        "line": 21,
+        "why": "Rust taxonomy mirror also lists quarry_run as team-shared.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/users/acl_repository.go",
+        "line": 67,
+        "why": "Grant write path calls ValidateUserGrant before inserting any grant.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 1466,
+        "why": "Browser artifacts are served only after the owner-gated run check.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 3004,
+        "why": "Artifact URLs are session-scoped gateway paths; no signed or per-viewer links.",
+        "kind": "code"
+      }
+    ],
+    "impression": "absent"
+  },
+  {
+    "finalId": "F-t2-073",
+    "title": "Control Plane governance extras: SIEM export, saved approval preferences and privacy-safe usage events",
+    "searches": [
+      "rg -i siem|splunk|syslog|LEEF|CEF:|sentinel.?export (code: none; docs only)",
+      "rg -i exporter|audit.?export|export.?audit|dead.?letter|DLQ (audit-core)",
+      "rg -i saved_user_permission|decided_by|approval_mode|approve.?for.?session|remember.?(decision|approval)",
+      "rg -i browser_prefs|approval_pref|approvalPref|auto.?approve|autoApprove (none for browser)",
+      "rg -i verevon.usage|usage_event|UsageEvent (audit-core and producers)",
+      "rg -i posthog|mixpanel|amplitude|segment|statsig|sentry (frontend src and package.json: none)",
+      "rg -i user.?settings|UserSettings|GetSettings (user-core settings categories)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber.go",
+        "line": 27,
+        "why": "Audit v2, usage v2 and DLQ NATS subjects exist; no export subject or sink.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/migrations/001_init.sql",
+        "line": 39,
+        "why": "usage_events table exists; browser product events are not written to it.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber_security_coverage_test.go",
+        "line": 55,
+        "why": "Tests cover usage message handling and malformed payloads.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
+        "line": 148,
+        "why": "Browser decided event leaves decided_by empty; no saved-preference path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+        "line": 827,
+        "why": "Durable approvals record decided_by; no remembered or saved rule.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+        "line": 6,
+        "why": "Auto, Ask and Deny modes per call; nothing persisted per user.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/users/types.go",
+        "line": 136,
+        "why": "Generic per-category settings row exists; no revision field and no browser category.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Control Plane/user-core/internal/http/handlers.go",
+        "line": 840,
+        "why": "Settings categories loaded: appearance, language, notifications, knowledge; no browser.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "line": 4485,
+        "why": "Space agent bindings carry approval_mode policy; partial analogue, not browser.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/MODEL_PLANE_ROADMAP.md",
+        "line": 417,
+        "why": "Roadmap lists export and SIEM under enterprise audit; not implemented.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Infra Plane/docs/SECURITY.md",
+        "line": 387,
+        "why": "Security doc names External SIEM for security-event retention; no exporter in code.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-074",
+    "title": "Quarry failure-mode and provider hardening: fail-open policy review, opaque provider errors, Postgres maintenance (verify first)",
+    "searches": [
+      "rg -i fail_open|fail-open|failOpen|fail_closed|fail-closed (Quarry)",
+      "rg -i ProviderError|provider_error (none typed; rerank degrade reason only)",
+      "rg -i live_view|liveView|live-view|refresh_live_view (Quarry and gateway)",
+      "rg -i autovacuum|VACUUM|REINDEX|pg_cron|maintenance (Quarry: no tuning found)",
+      "read: Quarry-v2 docs/RUNBOOKS.md failure sections",
+      "rg -i resp.text().await|details|body (Browserbase, Kernel, Browserless drivers)",
+      "rg -i BrowserbaseDriver|BrowserlessDriver|KernelDriver registration (main.rs and tests)",
+      "rg -i circuit.?breaker|breaker|retryable (retry and breaker)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs",
+        "line": 119,
+        "why": "Non-2xx Browserbase response: raw upstream body placed in error details.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs",
+        "line": 333,
+        "why": "Kernel error message embeds raw upstream body text.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs",
+        "line": 179,
+        "why": "Browserless non-success: raw upstream body returned in error details.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs",
+        "line": 216,
+        "why": "Live-view URL appends the provider token as a query parameter.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs",
+        "line": 248,
+        "why": "Live-view expiry set to 10 minutes though the URL is not formally time-limited.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1116,
+        "why": "driver_err serializes the whole QuarryError, details included, to callers.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/envelope.rs",
+        "line": 42,
+        "why": "Envelope::err carries the full error, so provider bodies reach clients.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs",
+        "line": 1597,
+        "why": "Gateway proxy returns upstream JSON unchanged to the SPA; no error redaction.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+        "line": 309,
+        "why": "Among cloud providers only Browserbase is registered in main, gated on keys.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs",
+        "line": 341,
+        "why": "Browserless driver is constructed only in unit tests; not wired in production.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/retry.rs",
+        "line": 39,
+        "why": "Transient or permanent retry classes keyed on the retryable flag.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/rerank.rs",
+        "line": 55,
+        "why": "Circuit breaker exists for the rerank path only, not browser providers.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 2608,
+        "why": "Live-view route exists; refresh on expiry via the driver refresh method.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs",
+        "line": 421,
+        "why": "Driver trait live_view and refresh_live_view methods carry expiring references.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs",
+        "line": 96,
+        "why": "Fallback driver switches on block status; no fail-open policy is written down.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md",
+        "line": 5,
+        "why": "Runbook covers the driver failure cascade; no Control Plane or billing outage matrix.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md",
+        "line": 17,
+        "why": "Runbook says route via fallback chain; no per-dependency failure policy.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "partial"
+  },
+  {
+    "finalId": "F-t2-077",
+    "title": "Design spike only: drive the user's own signed-in Chrome through an attested extension backend, behind per-tab consent",
+    "searches": [
+      "rg -i manifest_version|chrome.debugger|nativeMessaging|native_messaging|connectNative (repo: none for browser)",
+      "rg -i user_browser|UserBrowser|BrowserBackend|backend_kind|lease.?provider (none for user browser)",
+      "rg -i device.?key|deviceKey|attest(ation|ed) (LLM capability attestation only)",
+      "rg -i isolated_egress|security_evidence|BrowserDriverCapabilities (Quarry)",
+      "rg -i takeover|controlMode|human_takeover (gateway and SPA)",
+      "rg -i own chrome|browser extension|extension bridge|user's own chrome (docs)",
+      "rg -i persistent profile|ProfileStore|profile_routes (login persistence)"
+    ],
+    "hits": [
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs",
+        "line": 269,
+        "why": "Provider-neutral BrowserDriverCapabilities, deny by default, incl. isolated_egress and security_evidence.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1131,
+        "why": "Agent runs refused unless the driver has isolated egress and security evidence.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+        "line": 1180,
+        "why": "Capability requirements check isolated_egress and security_evidence per request.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/browser_egress_boundary.rs",
+        "line": 128,
+        "why": "Egress boundary test asserts the driver isolated_egress capability.",
+        "kind": "test"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 5,
+        "why": "Gateway rule: SPA never sees raw CDP or Quarry tokens.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+        "line": 263,
+        "why": "BrowserControlMode enum; HumanTakeover drives the leased hosted Chromium, no local-Chrome path.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/persistent_session.rs",
+        "line": 28,
+        "why": "Persistent sessions exist; hand-off from a user browser profile is not shipped.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/profile_routes.rs",
+        "line": 3,
+        "why": "Profile CRUD stores cookies and storage snapshots; no extension hand-off.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs",
+        "line": 237,
+        "why": "Browser tool calls route to Quarry; no extension or user-browser executor.",
+        "kind": "code"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PAGE_GAP_PLAN_2026-09-28.md",
+        "line": 263,
+        "why": "Owner ruling 2026-09-28: hosted governed browser first; the user's own Chrome is not driven.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PAGE_GAP_PLAN_2026-09-28.md",
+        "line": 88,
+        "why": "Gap plan: Verevon controls only its hosted Chromium, unlike competitors.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+        "line": 54,
+        "why": "Parity audit: user Chrome bridge parked or ruled out; plan text contradicts itself.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md",
+        "line": 479,
+        "why": "OD13 recommendation says the user's own Chrome is never used.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md",
+        "line": 2400,
+        "why": "Doc lists browser extensions under Poor fit today for the Quarry approach.",
+        "kind": "doc"
+      },
+      {
+        "path": "C:/dev/CoresSystem/CLAUDE.md",
+        "line": 34,
+        "why": "Architecture rule: Model proposes browser actions; Quarry executes or rejects them.",
+        "kind": "doc"
+      }
+    ],
+    "impression": "absent"
+  }
+]

@@ -1,0 +1,1043 @@
+[
+ {
+  "finalId": "F-t3-001",
+  "title": "One server-assembled run context for Do, Plan and scheduled runs: instruction stack, thread history, persona, memory and run notes",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 1,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Extract the ADR-0003 resolver (platform, org, Space, persona, summoned agent) that Ask turns already use into one shared function, add the missing fields to RunAgentRequest, and seed every Do, Plan and scheduled run with the resolved instructions, prior thread turns under the compaction budget, memory prefetch and attachments, with completeness flags on the run record. Automations later get a per-schedule notes block.",
+  "whyItMatters": "Three consolidators found the same defect from different angles (runtime, extensibility, memory): the governed agent loop starts from a preamble plus the goal, so org policy, Space instructions, persona and memory are silently ignored exactly where the agent can take actions. Every reference agent inherits its conversation and instructions. It is the cheapest high-impact fix in the audit and it is a governance gap, not only a quality gap.",
+  "referenceBestPractice": {
+   "bestSource": "Cursor (typed RequestContext with hydration flags and a component-tree system prompt) ; Cursor (rule types always / model-decision / glob / manual from project files, team and user rules; SRC) plus ChatGPT web (custom instructions with workspace policy, project overriding global; DOC) ; claude (instruction scopes); cursor (automation memory)",
+   "others": [
+    "Codex (typed turn context)",
+    "DeepSeek (workspace instruction chain with a byte budget)",
+    "Claude desktop",
+    "Hermes",
+    "Antigravity",
+    "codexagent",
+    "web-chatgpt",
+    "web-claudeai"
+   ],
+   "prevalence": "R-t3-04-01: 3 of 12 sources name it explicitly; a differentiator in the reference set, but every reference agent run inherits the conversation, and Verevon's own plain chat loop already assembles context | R-t3-05-04: 5 of 12 sources; common (Verevon's four-level hierarchy is already richer than ChatGPT's two levels) | R-t3-08-01: Layered instructions: 8 of 12 sources (table-stakes). Memory in agent tasks: 3 of 12 (common).",
+   "mechanism": "Sections are typed components rendered to role messages. Instruction sources are ordered org > Space/project > agent persona > user, each with an activation mode (always, model_decision with description listed and body fetched on demand, manual); Claude resolves seven instruction scopes with documented org > user precedence and per-scope character budgets in one assembler used by chat and agents;"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:926 (top-level Do run calls run_rounds with req.goal only)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1172-1200 (fresh history: system preamble plus goal; comment says isolation is deliberate for subagents)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3159 (subagent child calls the same run_rounds)",
+    "apps/Model Plane/proto/model_plane/v1/execution.proto:76-154 (RunAgentRequest fields: goal, tools, plan_mode, autonomy_rung, space_id; no history, persona or instruction field)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9120-9150 (gateway builds RunAgentRequest; only addition to goal is the approved-plan block)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1161 (grounding_conversation counts every non-system message as grounding text)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6368-6400",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6838-6856",
+    "apps/Model Plane/proto/model_plane/v1/execution.proto:76-135",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:208"
+   ],
+   "gap": "R-t3-04-01: SRC-verified: a top-level Do run starts from a preamble plus the goal (plus skills and an approved plan prepended to the goal). | R-t3-05-04: Ask turns get platform, org, Space and persona layers (authored_instructions_message). | R-t3-08-01: Do runs and scheduled runs ignore org, Space and persona instructions (B3 is planned but not in the built list), get no memory prefetch, no prior thread turns and no persona at run start, and automations keep no notes between runs."
+  },
+  "approachOriginal": "Step 1 (plan B3): move authored_instructions_message into a shared crate used by invoke_stream_sse and agentic_run_stream; add instruction, persona and space_id fields to execution.proto RunAgentRequest (buf generate plus the orchestration shim). Step 2: reuse session-core GetContextAssembly to hydrate prior turns under the Do-loop compaction budget, call the existing memory prefetch, and stamp completeness flags (instructions, history, memory) on the run. Step 3: place volatile parts in the append-only tail defined by F-t3-022 so the cached prefix stays stable. Step 4: add run notes for automations once F-t3-018 lands.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "F-t3-022",
+   "F-t3-020",
+   "ADR-0003 precedence sign-off (OD19)",
+   "execution.proto steward"
+  ],
+  "planeOwner": "Model Plane (model-gateway resolver, execution-core loop, session-core assembly)",
+  "risks": "Larger prompts raise cost per run unless the cache tiers of F-t3-022 are respected; memory must honour pause/off (F-t3-020) and ZDR; Space instructions must be resolved from a Control-signed Space decision so Space membership never widens what the run may read.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 28,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-05-04: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:109 (task B3, Wave 1: pass persona, org and Space instructions into agentic runs; sized M). Not built in this tree: execution.proto has no instruction fields. | R-t3-08-01: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:109 (B3 instructions into agentic runs) and :110 (B4 hook_context), Wave 1. Memory prefetch at run start and per-task notes are not in that plan."
+  },
+  "sourceClusters": [
+   "C-t3-04-018",
+   "C-t3-05-034",
+   "C-t3-08-009",
+   "C-t3-08-014"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-001",
+    "status": "partial",
+    "exactGap": "Ask turns compose platform, org, Space and persona instructions (authored_instructions_message, sse.rs:6375) and prefetch memory (sse.rs:1655), but the agentic branch returns at sse.rs:1491 before either runs and passes only req.content plus an approved-plan block as the goal (sse.rs:9145). RunAgentRequest (execution.proto:76-168) has no history, instruction, persona or memory field and run_rounds seeds a fresh [preamble, goal] history (agent.rs:1185), with only skills (agent.rs:1210) and a model-callable recall_memory tool as extras. The BFF already injects org, Space and persona text onto the same InvokeRequest for the agentic path (ag_ui.rs:101, streams.rs:70), so the data reaches model-gateway and is dropped there.",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:926 (top-level run_rounds called with req.goal only)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1161-1170 (grounding text counts every non-system message)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1185-1226 (isolated fresh history; skills inserted once at index 1)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3150-3165 (subagent child calls the same run_rounds, isolation intended)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:77 and :2362 (recall_memory is a model-callable tool; memory tools fail closed for scheduled steps with no thread)",
+     "apps/Model Plane/proto/model_plane/v1/execution.proto:76-200 (RunAgentRequest fields; space_id and plan_mode present)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1405-1500 (vision, image-gen and agentic branches return before context assembly)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1560 and :4808-4906 (context assembly and per-thread persona_enabled loaded only after the agentic return)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1655 and :5150-5180 (memory prefetch, 400 ms bound, SSE chat path only)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6360-6420 (ADR-0003 composer: platform, org, Space, persona, summoned agent)",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9118-9190 (build_run_agent_request: goal is approved-plan block plus content)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4270-4325 (inject_authored_instructions: client values discarded, Space layer gated on live Control membership)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs:85-130 and apps/gateway/src/domains/chat/streams.rs:55-100 (both ingress paths inject instructions and persona before forwarding)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:109-110 (B3 persona, org and Space instructions into agentic runs, M; B4 hook_context, S)"
+    ],
+    "reuse": [
+     "authored_instructions_message and its unit tests (compose once, hand the finished text to the run)",
+     "load_context_assembly_messages and session-core GetContextAssembly for prior turns and the per-thread persona toggle",
+     "fetch_chat_memory_context, memory_provenance block and the 400 ms bound for memory prefetch",
+     "compaction.rs token-budget planner for the Do-loop history budget",
+     "existing RunAgentRequest.space_id and plan_mode fields",
+     "BFF inject_authored_instructions and inject_persona_instructions (already on both ingress paths)"
+    ],
+    "constraints": "Instruction text is resolved in the Frontend Plane BFF (client values stripped, Space layer gated on live Control membership before it is read) and arrives as InvokeRequest fields, so execution-core must receive resolved text and never re-resolve or read Space data; Space access must not widen an owner-plane ACL and no cross-plane DB access is allowed. Memory prefetch must honour ZDR (session-core refuses ZDR memory credentials) and per-thread pause or off, and the per-thread persona toggle comes from the context-assembly response that is loaded after the agentic branch today. History hydration is best done in model-gateway (it already holds the verified user bearers) rather than giving execution-core a second session-core read path; subagents must keep isolated history but should inherit instructions.",
+    "approachAdjustment": "Step 1 is smaller and different from stated: the resolver is not in Model Plane. The BFF resolves and model-gateway composes, so add a single composed authored-instructions string field plus bounded prior-turn messages to RunAgentRequest, produced in model-gateway by calling the existing composer and context-assembly load before the agentic return, and insert them in run_rounds; moving the composer into a shared crate is only needed if execution-core must compose. Plan rows B3 and B4 cover instructions and hook_context only, so memory prefetch, history, completeness flags and automation run notes are the net-new parts. Sequence with F-t3-022 so volatile blocks go in the tail.",
+    "effortRevised": "M",
+    "effortNote": "Unchanged. Proto field and gateway composition are S; history under the compaction budget, memory prefetch and completeness flags keep it M.",
+    "verdict": "keep",
+    "verdictReason": "Verified in code: a Do run ignores org, Space and persona instructions, prior turns and memory although they are already resolved and present on the request; it is unbuilt (plan B3 not in the tree) and the approach only needs the placement correction.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-001",
+    "verdict": "partial",
+    "checked": [
+     "scratchpad/tmp/cursor-h/beaut/exec_main.js:27235-27239 (fileGlobbed/agentFetched/manuallyAttached), 32936-32946 (renderToMessages JSX renderer), always_applied/agent_requestable_workspace_rules",
+     "C:/Program Files/WindowsApps/Claude_2.31226.1.0_x64__pzs8sxrjxfjjc/app/resources/ion-dist/i18n/en-US.json (Global/Folder/Space/Project/Channel/Profile/Organization instructions labels; kv+Lgc6/Rd org instructions take priority over personal preferences; 0uyYAhQ84d/XkmtHJY+Jq/qE9OVDqx5N/0CJp8pLsKe character limits)",
+     "scratchpad/findings/t3 records cursor-harness-architecture-121/124, antigravity-agent-ux-and-gemini-050, deepseek-harness-architecture-019, web-chatgpt-web-product-073 (evidence lists re-read)"
+    ],
+    "corrections": "(1) Claude does have seven instruction-scope labels (Global, Folder, Space, Project, Channel, Profile, Organization), but the only documented precedence is 'organization takes priority over users' personal preferences'. Ordering among the other scopes is not documented. (2) The character limits are generic 'shorten to {max} characters' messages; the per-scope budget values were not observed, except organizationInstructions max 3000 (SRC). (3) 'One assembler used by chat and agents' is inference from shared labels; no code path was observed. (4) The ordering 'org > Space/project > agent persona > user' is Verevon's proposed design and should not be attributed to a reference. (5) Cursor's activation modes are confirmed in source (always/glob/agent-fetched/manual). 'Hydration flags' on RequestContext rests on field lists, and I did not re-verify them. (6) 'Every reference agent run inherits the conversation' is INF.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "ChatGPT, Claude.ai, Manus and Perplexity layered-instruction support is DOC-only",
+     "Claude scope list is from i18n labels (strings), not runtime assembly code",
+     "Automation memory in Cursor is SRC/medium from service names; sand_memory_dreaming behaviour unobserved"
+    ],
+    "confidence": "medium"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-002",
+  "title": "Durable agent loop: checkpoint every round and pause, resume in place after approval, answer or crash, close dangling tool calls, effect ledger",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 2,
+  "wave": "W1",
+  "quickWin": false,
+  "summary": "Persist the Do loop's fold inputs in session-core at every round and before each effectful call, and add a continuation worker that re-enters the loop at the checkpoint when an approval, a clarifying answer or a crash recovery arrives, instead of re-executing three whitelisted effects from a cold descriptor. Close tool calls that never returned with typed closers, record effects in an exactly-once ledger, park turns whose providers are exhausted, and replay open interaction requests on reconnect.",
+  "whyItMatters": "Today the LLM loop does not resume reasoning after an approval: only execute_provider_action, book_shipment and tickets.create are re-run from a descriptor. That makes every approval a dead end for multi-step tasks and blocks plan-continue, ask_user, scheduled runs with approvals, goals and the computer-use loop. Five of twelve references have durable resume; DeepSeek and Hermes show the exact mechanism.",
+  "referenceBestPractice": {
+   "bestSource": "DeepSeek (checkpoint before model requests, tool effects and next steps; cold resume repairs the log tail) ; Hermes Agent",
+   "others": [
+    "Hermes (refreshed turn lease with stall watchdog; about 30 failover reasons with a parked-turn countdown)",
+    "Cursor (auto-continue of interrupted agents, durable question delivery)",
+    "Manus (action ledger keyed by sessionUid and actionId with payload digest and replay horizon; only source)",
+    "Claude Desktop, Codex (visible reconnect, per-step model switch)",
+    "DeepSeek harness",
+    "Claude desktop app"
+   ],
+   "prevalence": "R-t3-04-02: 5 of 12 sources for durable resume (common), 6 of 12 for provider retry and failover (common), 1 of 12 for the exactly-once ledger (unique to Manus) | R-t3-13-02: 3 of 12 (differentiator)",
+   "mechanism": "Persist before each model call and before each effectful tool. Hermes: the runtime sends a blocking request {id, method, payload, deadline} and the agent thread awaits the answer;"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-40 (post-approval worker re-executes only execute_provider_action, book_shipment and tickets.create from an encrypted descriptor; any other tool fails closed as invalid_continuation; browser_agent and MCP deliberately not resumed)",
+    "apps/Model Plane/rust/services/session-core/src/continuation_crypto.rs:6-14 (descriptor key read from SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY)",
+    "apps/Model Plane/deploy/docker-compose.yml:755 (key defaults to empty on the default stack) versus apps/Model Plane/deploy/docker-compose.production.yml:70 (required in production)",
+    "apps/Model Plane/rust/services/session-core/src/terminalization.rs:1-8 and apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20 (receipts and drain on redeploy exist)",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:75 (FallbackChain: ordered providers, bounded retries, rate-limit wait, privacy-tier and residency gates; no stream-stall detector or parked-turn state found)",
+    "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:58 and cancel_registry.rs (in-memory cancel; persistence of the interrupted partial answer and synthetic tool results not verified)",
+    "apps/Model Plane/rust/services/execution-core/src/postcondition.rs:1-10 (postcondition verification after effects)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476-4500",
+    "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-33",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:213-214"
+   ],
+   "gap": "R-t3-04-02: Terminalization receipts, a recovery worker, drain on redeploy and stream resume are shipped, and provider fallback with bounded retry exists. | R-t3-13-02: SRC: approvals are durable (encrypted continuation descriptors, delivery outbox, leased worker) and plan approval exists, but the worker only resumes execute_provider_action, book_shipment and tickets.create from a cold descriptor;"
+  },
+  "approachOriginal": "Define a run-state schema in session-core (round cursor, message fold, pending interaction, effect ledger keyed by action id). Execution-core writes it before model requests, tool effects and pauses; a leased continuation worker resumes on decision events from the existing durable approval outbox. Implement typed closers (aborted-before-dispatch, not-started, outcome-unknown) so the model is told the truth about interrupted calls. Reuse Quarry-style receipts for the ledger. Depends on the renewable delegated credential (OD8) because the 300 s bearer expires during long pauses.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-016",
+   "OD8 renewable delegated bearer",
+   "Control-plane reauthorizer"
+  ],
+  "planeOwner": "Model Plane (execution-core loop and continuation worker, session-core run state)",
+  "risks": "Resuming with a stale or expired delegated bearer would either fail or tempt a service-principal shortcut: resume must re-authorise through Control. Exactly-once semantics for external effects are only as good as provider idempotency keys. ZDR runs must keep checkpoints content-free or memory-only.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 35,
+   "DOC": 0,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-13-02: CHAT_GAP_CLOSURE_PLAN_2026-10-01.md OD6 (open decision on how a plan continues after an approval pause); approval continuation worker shipped for three action kinds only"
+  },
+  "sourceClusters": [
+   "C-t3-04-005",
+   "C-t3-04-006",
+   "C-t3-04-004",
+   "C-t3-04-007",
+   "C-t3-13-041"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-002",
+    "status": "partial",
+    "exactGap": "A Do run that needs approval pauses durably but throws its in-memory message fold away: pause_for_approval (agent.rs:4476) writes an approval with an encrypted descriptor and returns, and the only continuation is approval_delivery_worker.rs, which re-executes just execute_provider_action, book_shipment and tickets.create and fails any other tool closed. ResumeRun with an approval id is a stub (grpc.rs:706 always answers unavailable) and model-gateway deliberately never resumes the loop (approvals.rs:255-275). No per-round fold checkpoint, ask_user tool, typed dangling-call closers, parked-turn state or effect ledger (beyond the three-kind continuation receipts) exists; pending approvals rehydrate and SSE replay already exist.",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:926-936 (RoundsOutcome::Paused returned; comment says resume re-invokes run_agent)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1185-1200 (history is a local Vec created per run_rounds call)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2096-2113 (pause_for_approval call site inside the round loop)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4376-4398 and :309 (durable step record is truncated to 2000 chars and content-redacted under ZDR)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476-4560 (pause_for_approval: CreateApproval with continuation_descriptor_json, run flipped to AwaitingApproval in memory)",
+     "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60 (three resumable kinds; browser_agent and MCP excluded; other tools fail closed as invalid_continuation)",
+     "apps/Model Plane/rust/services/execution-core/src/grpc.rs:706-713 (resume_durable_approval_continuation always returns unavailable)",
+     "apps/Model Plane/rust/services/execution-core/src/grpc.rs:1020-1070 (SaveCheckpoint written once per ExecuteStep, scrubbed step summary only)",
+     "apps/Model Plane/rust/services/execution-core/src/grpc.rs:1090-1150 (resume_run flips in-memory paused state only)",
+     "apps/Model Plane/rust/services/execution-core/src/state.rs:1-40 and :147-156 (run state store is in-memory)",
+     "apps/Model Plane/rust/services/model-gateway/src/approvals.rs:255-275 (grant never turned into ResumeRun; quarantine helper)",
+     "apps/Model Plane/rust/services/model-gateway/src/approvals.rs:935-950 and :1040-1060 (list pending approvals, rehydrate from session-core)",
+     "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:1-30 (Last-Event-Id replay, Redis or memory)",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:80 and :4872-4946 (checkpoints table, SaveCheckpoint RPC, 4 MiB state cap)",
+     "apps/Model Plane/rust/services/session-core/src/terminalization.rs:1-30 (recovery loop records outcome_unknown for producer-lost managed runs)",
+     "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:75 (FallbackChain exists; grep for parked or stall-watchdog found nothing)",
+     "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go:52-55 and :130-149 (Temporal approval signal and resume of step loop)",
+     "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/step_loop.go:1-64 (per-turn ExecuteStep activities as checkpoints; drives ExecuteStep, not RunAgent)",
+     "apps/Model Plane/deploy/docker-compose.yml:753-755 and deploy/docker-compose.production.yml:70 (descriptor key optional by default, required in production)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:436-446 (OD6: how a plan continues after an approval pause; B7 manual Fortsett planen)"
+    ],
+    "reuse": [
+     "session-core checkpoints table and SaveCheckpoint RPC (4 MiB cap) as the fold store",
+     "approval_delivery_outbox, approval_continuation_receipts and the worker protocol (Started, Outcome, Acknowledge) as the lease and receipt pattern",
+     "encrypted continuation descriptors (continuation_crypto.rs) for the pending tool call",
+     "terminalization recovery loop (outcome_unknown) for crash recovery",
+     "orchestrator-core Temporal workflows (approval signal, per-turn activities) as an alternative host",
+     "model-gateway approval rehydration and stream_buffer replay for reconnect"
+    ],
+    "constraints": "ZDR: durable step records are content-redacted under ZDR and truncated to 2000 chars otherwise, so the fold cannot be rebuilt from step records and a ZDR run must not checkpoint content durably (refuse resume or keep it memory-only). Resume must re-authorize through Control with a fresh delegated bearer (OD8); a service-principal shortcut would break the delegated-identity rule. Model proposes / Quarry executes: browser_agent resumption stays excluded until a browser run itself survives a pause, and MCP tools have unknown idempotency so no exactly-once promise can be made for them. Fallback exhaustion handling lives in inference-core (FallbackChain), so parking is a gateway or run-state concern, not a provider change.",
+    "approachAdjustment": "The item assumes an execution-core continuation worker re-entering the loop. The repo already has Temporal workflows with approval signals and per-turn checkpointed activities, but they drive ExecuteStep, and the chat Do path (model-gateway agentic_run_stream to RunAgent) bypasses Temporal; the item should state the host decision explicitly. Stage it: first a manual or automatic continue that starts a fresh run seeded by F-t3-001 context plus completed step summaries (plan B7 and OD6), then true in-place resume from a scrubbed fold checkpoint. Do not list replaying open interaction requests as new work (approvals already rehydrate, SSE replay exists); ask_user and park-on-provider-exhaustion are separable smaller items.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged for the core slice (fold checkpoint plus in-place resume using the existing outbox and checkpoints table). If closers, effect ledger, parking, ask_user and credential renewal stay in one item it is XL, so split it.",
+    "verdict": "reword",
+    "verdictReason": "The gap is real and verified (the Do loop cannot continue after an approval), but the item under-states what exists (outbox, descriptor worker, checkpoints table, rehydration, Temporal) and bundles at least four separable pieces.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-002",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/deepseek-harness/packages/session/session-checkpoint-policy/src/index.ts:20-60 (checkpoint before model dispatch, before tool body, at next request boundary; fail-closed)",
+     "C:/dev/deepseek-harness/packages/session/session-checkpoint-policy/README.md:105-125 (Known Limitations: durable intent not exactly-once; no checkpoint inside active model attempt; unknown outcome, no auto retry)",
+     "C:/dev/deepseek-harness/packages/core/agent-loop/src/index.ts:845-895 (resume with ownership)",
+     "C:/dev/deepseek-harness/packages/interaction/user-approval/README.md:153 (durable out-of-turn approval workflow deferred)",
+     "C:/dev/hermes-agent/tui_gateway/AGENTS.md:19-35 (server->client requests; send() blocks the agent thread; open_requests replayed on session.resume)",
+     "C:/dev/hermes-agent/tui_gateway/server_requests.py:71,189 (threading.Event in memory, wait(timeout))",
+     "C:/dev/hermes-agent/agent/turn_facade_lease.py:1-30 (row lease, TTL 300s, refresher, stall watchdog)",
+     "C:/dev/hermes-agent/agent/error_classifier.py:34-90 (FailoverReason: 29 values)",
+     "C:/dev/hermes-agent/agent/turn_recovery_autorecover.py:1-14 (park with visible countdown, 5 cycles, 15/30/60/60/60s)",
+     "extract/manus/node_modules/@next-agent/browser-runtime/src/BrowserMcpServer.ts:44-120,254-300 (in-memory Map actionLedger, max 4096 entries, digest conflict -> replay-conflict result)",
+     "extract/manus/node_modules/@next-agent/browser-runtime/src/contract/browserContract.ts:10 (10-minute horizon)",
+     "findings/t3/cursor.ai-features.features.json#cursor-ai-features-045 (flags)"
+    ],
+    "corrections": "1) 'Pause, resume in place after approval' as a crash-durable continuation is not shown by any reference. Hermes blocks the agent thread on an in-memory threading.Event with a deadline, and replays open requests only to reconnecting clients while the process lives. DeepSeek requests are valid only inside an open turn, and its README defers a durable out-of-turn approval workflow. Present durable approval pauses as a Verevon design synthesis (INF) built from DeepSeek checkpoints, not as a reference behavior. 2) The Manus 'exactly-once ledger' is a process-local, in-memory Map (max 4096 entries, 10-minute horizon) scoped to browser MCP side-effect actions only. It deduplicates retries within a live process; it is not a durable cross-crash ledger. Mismatched digests return a replay-conflict result (confirmed). 3) DeepSeek explicitly disclaims exactly-once: it records dispatch intent, writes an unknown-outcome closer instead of retrying, and recommends forwarding exec.callId as an idempotency key. It has no checkpoint inside an active model attempt. 4) Cursor auto-continue and durable question delivery are server-flag-gated (glass_auto_continue_*, ask_question_durable_delivery fallback default off). 5) Hermes failover reasons: 29, so 'about 30' is fine. Lease TTL is 300s. The parked-turn countdown is confirmed. 6) Server-to-client-requests prevalence 3 of 12 includes a low-confidence Claude record (claude-product-ux-122); treat as 2 confirmed (Hermes, DeepSeek).",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Manus ledger: browser-runtime only, in-memory (SRC).",
+     "Cursor recovery behavior is flag-gated with server-controlled values (SRC strings/flags only).",
+     "Claude desktop auto-resume (claude-product-ux-087) is medium confidence and was not exercised at runtime.",
+     "Durable approval pause and resume across crashes is INF (synthesis), not observed in any reference."
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-003",
+  "title": "Declared tool side-effect classes, a never-auto set and per-tool allow/ask/never policy, so MCP tools become callable through the signed gate",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 3,
+  "wave": "W1",
+  "quickWin": false,
+  "summary": "Replace the substring classifier is_risky_tool with a declared SideEffectClass (read, read_sensitive, local_mutation, open_world_mutation, external_effect) bound in capability-core's trusted map for every built-in, provider action and discovered MCP tool (unknown defaults to external_effect), add a non-delegable never-auto set, and expose per-connector and per-tool allow/ask/never policy. With registry-owned capability bindings, MCP tools stop being refused by the gate and become usable in Do and, read-only, in Ask.",
+  "whyItMatters": "The model cannot call any MCP tool today (plain chat strips mcp__ names; Do mode offers them but trusted_capability_id returns None so the gate refuses). MCP is table-stakes (6 of 12) and per-tool policy is the standard way references keep it safe. The substring classifier is also the weakest link in an otherwise strong signed-gate design: risk should be declared data, not guessed from names.",
+  "referenceBestPractice": {
+   "bestSource": "Hermes (MCP runtime: supervision and recovery, SRC) plus Perplexity web (per-tool allow/ask/never with thread grants, DOC) ; Manus (five declared side-effect levels plus MCP annotations drive policy) for the taxonomy; ChatGPT (graduated Always ask / read / low-risk / all app permissions) with Claude (per-connector never-allow set, Microsoft 365 write-path throttles) for connector policy",
+   "others": [
+    "Claude desktop (direct MCP host, per-server process isolation)",
+    "Codex (richest per-server and per-tool config)",
+    "Cursor (OAuth refresh leases)",
+    "Antigravity",
+    "DeepSeek harness",
+    "claude (static never-auto set, mode-rank ratchet)",
+    "cursor",
+    "web-claudeai",
+    "codexagent (shared vs personal connections)",
+    "web-manus"
+   ],
+   "prevalence": "R-t3-05-01: MCP client runtime: 6 of 12 sources, table-stakes; per-tool approval policy: 3 of 12, differentiator | R-t3-11-03: connector policy 5 of 12 (common); write-path safeguards 4 of 12 (common); taxonomy 1 of 12 (unique); never-auto set 1 of 12 (unique)",
+   "mechanism": "Hermes: each server is a supervised task owning one MCP session and exposing call(tool,args); Static map tool -> {side_effect_class, readOnly/destructive/idempotent/openWorld hints};"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:636-644",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:2014-2018",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:836-838",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:965",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:654-658",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3520",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:1089-1110",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:223-229",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:280"
+   ],
+   "gap": "R-t3-05-01: Registration, OAuth, SSRF/DNS guards and staged disclosure (mcp_catalog/mcp_call) exist, but calls cannot succeed (SRC, re-read in this audit): (a) inline_tool_allowed refuses mcp__*, mcp_call and mcp_catalog in plain chat/Ask; | R-t3-11-03: execution-core classifies by substring (permission/mod.rs:229-260, verified) with argument-aware nuance only for execute_provider_action via operation_is_write;"
+  },
+  "approachOriginal": "Add side_effect_class and MCP annotation hints to capability-core rows; derive MCP tool rows at discovery (readOnlyHint, destructiveHint) as children of the mcp_server capability with a durable digest so a changed tool list needs re-approval. Execution-core and model-gateway read the class instead of substrings; the autonomy rung table maps classes to allow/ask. Ship a per-tool policy store (allow, ask, never) at user and org scope, enforced in EvaluatePolicy, and a forged-call denial test.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY provisioned",
+   "integration-corev2 catalogue metadata"
+  ],
+  "planeOwner": "Model Plane (capability-core registry and policy, execution-core and model-gateway enforcement)",
+  "risks": "Mis-declared classes become silent over-permission, so unknown must default to the strictest class and declarations need review. MCP tool lists can change after approval (rug-pull); pin by digest. ZDR: MCP servers outside the attestation boundary must be refused for ZDR turns.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 43,
+   "DOC": 8,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-11-03: Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md G8 (always-ask in front of every provider write) and G10 (per-bundle consent) cover the write default but not a declared taxonomy or a user/admin per-tool policy"
+  },
+  "sourceClusters": [
+   "C-t3-05-001",
+   "C-t3-05-012",
+   "C-t3-11-061",
+   "C-t3-11-018",
+   "C-t3-11-060",
+   "C-t3-11-038",
+   "C-t3-11-039"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-003",
+    "status": "partial",
+    "exactGap": "Tool risk is judged by two undeclared mechanisms: execution-core matches name substrings and treats every mcp__ name as risky (permission/mod.rs:195-293), and capability-core rows carry only a 3-level risk_level that EvaluatePolicy consumes (models/capability.go:23-37; policy/engine.go:112-152), with no per-tool side-effect class. MCP tools are offered to Do runs but trusted_capability_id is a static map that returns None for them (capability_policy.rs:741-840), so execute_step_inner refuses every call before dispatch (runtime_loop/mod.rs:502; capability_policy.rs:361-362), and the inline Ask path refuses them by design (tool_loop.rs:625-642). The MCP annotation classifier McpToolAnnotations::side_effect exists with no production consumer (mcp_jsonrpc.rs:65-125), the static never-auto set is only tickets.create (permission/mod.rs:72-79), and there is no per-tool allow/ask/never store (hooks are an in-memory registry written only by gRPC RegisterHook).",
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:72-100",
+     "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:100-200",
+     "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:200-293",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:625-642",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:349-362",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:736-840",
+     "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:960-985",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:495-565",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:1075-1115",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:640-690",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3505-3525",
+     "apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs:55-125",
+     "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:1995-2090",
+     "apps/Model Plane/rust/services/model-gateway/src/state.rs:317,460",
+     "apps/Model Plane/go/services/capability-core/internal/models/capability.go:1-60",
+     "apps/Model Plane/go/services/capability-core/internal/policy/engine.go:105-155",
+     "apps/Model Plane/go/services/capability-core/internal/api/capabilities.go:120-140",
+     "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs:150-185",
+     "apps/Model Plane/proto/model_plane/v1/execution.proto:100-110"
+    ],
+    "reuse": [
+     "capability-core capability rows (Kind mcp_server and risk_level low/medium/high), the policy engine and the protected-risk floor (capabilities.go:126-138) as the home of declared class, instead of a new table",
+     "McpToolAnnotations::side_effect() (ReadOnly, Destructive, NonDestructiveWrite, Undeclared) as the discovery-time input for MCP tool rows",
+     "The existing autonomy rung ladder: rung_required_for and check_autonomy_rung (permission/mod.rs:100-140) so classes map to rungs instead of adding a second table",
+     "requires_durable_owner_approval and requires_consent_to_disclose as the seed of the non-delegable never-auto set",
+     "integration_tools::operation_is_write (unknown fails safe to write) as the model for default-strictest classification",
+     "The PreToolUse hook engine for ask/deny rules that match mcp__* names, once hooks have a durable store"
+    ],
+    "constraints": "Model Plane owns capabilities, so declared classes and MCP tool rows must be registry-owned in capability-core and bound server-side; the binding may never be synthesised from a model-supplied name (capability_policy.rs:836-838), and trusted_capability_id is a synchronous static map today, so dynamic rows need an async registry lookup in execution-core. The code states that two risk tables would diverge (permission/mod.rs:81-92), so the declared class must replace is_risky_call as the input to rung_required_for rather than sit beside it. The inline loop has no continuation contract and the code says a gateway proxy for Ask would be an authority bypass until one exists (tool_loop.rs:625-638), so Ask-mode MCP reads are a later, separate contract. ZDR must propagate: ZDR turns run no inline tool loop (zdr_features.rs:150-185) and agentic runs carry zdr (execution.proto:100-107), so MCP servers outside the attestation boundary must be refused there. Hooks are an in-memory registry in model-gateway (state.rs:317, runtime_registries.rs:2003) with no gateway or SPA write path found, so they are not a policy store.",
+    "approachAdjustment": "Reuse capability-core risk_level and the rung ladder: add a side_effect_class (or map risk_level plus annotations) on the capability row, derive MCP tool rows at discovery as children of the mcp_server row with a digest, make trusted_capability_id resolve dynamic mcp__server__tool names through the registry, and have rung_required_for and the permission engine read the class. Deliver Do-mode first; treat \"read-only in Ask\" as a follow-on that needs the inline continuation contract. Store per-tool allow/ask/never in capability-core (durable, user and org scope), not in the hook registry.",
+    "effortRevised": "L",
+    "effortNote": "L holds for Do mode (registry rows, async binding, class-driven rung mapping, policy store, forged-call test). Adding Ask-mode MCP reads would push it toward XL and should be split out.",
+    "verdict": "reword",
+    "verdictReason": "The central claim is confirmed (MCP tools are offered but always refused, risk is name-guessed), but the item should build on the existing risk_level, rung ladder and McpSideEffect type, correct \"unknown defaults\" wording against those, and separate Ask-mode MCP into a later step.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-003",
+    "verdict": "partial",
+    "checked": [
+     "C:/dev/hermes-agent/tools/mcp_tool_handlers.py:53-110 (_tool_is_read_only, _trust_gate_check, _check_circuit_breaker), :192-272 (recovery handlers), :581-604 (readOnlyHint-only replay); tools/mcp_tool.py:307 (MCPServerTask)",
+     "extract/manus/node_modules/@next-agent/browser-runtime/src/contract/browserContract.ts:710-725,1298-1321 and BrowserMcpServer.ts:245-265,529-533",
+     "scratchpad/tmp/claude-ext/pretty/core.js:16515-16555 (aOe ask defaults, oOe 8-tool never-allow sets for microsoft365/github, sOe stricter-wins, cOe readOnlyHint skip)",
+     "scratchpad/tmp/claude-ext/pretty/o365.js:140755-140790 (sliding-window write/send/recipient buckets)",
+     "https://www.perplexity.ai/changelog/computer-in-email-gpt-5-6-terra-luna-and-grok-4-6 (live)",
+     "scratchpad/tmp/gpt/06-20001495-managing-app-permissions-in-chatgpt.txt:28-40,58,102-108",
+     "records antigravity-agent-ux-and-gemini-058, cursor-harness-architecture-093, manus-product-ux-072"
+    ],
+    "corrections": "(1) Manus is over-reached. The five-level side-effect map covers only its 22 browser MCP tools. In code it drives only the replay/idempotency action ledger (hasExternalSideEffect -> action key plus digest dedupe) and the MCP annotations. It does not drive approvals or policy. Making 'declared side-effect class drives approval policy' the reference practice is a Verevon synthesis (INF). The closest real references are Hermes (a binary readOnlyHint check, only on servers marked untrusted, asked once per call with no stored allow/ask/never), Claude (a per-tool toolPolicy for its two built-in connectors, with code-defined ask defaults and readOnlyHint skipping) and ChatGPT (DOC, opaque risk tiers). (2) Hermes has a per-SERVER trust tier, not a per-tool allow/ask/never store. (3) In Perplexity, the 'Always allow / Always ask / Never allow' labels appear only in image alt text; the body copy describes Always ask plus once / thread / deny, and recurring runs inheriting thread grants. (4) Claude's never-allow set is 8 tools per BUILT-IN connector (GitHub and Microsoft 365 only), not a general MCP feature. The 'static never-auto set, mode-rank ratchet' is a separate Claude mechanism (claude-extensibility-and-safety-002) and should be labelled that way. (5) The 'per-tool approval policy 3 of 12' figure is inconsistent. antigravity-058 is GitHub per-repository scopes, not per-tool approval. Claude (toolPolicy), Cursor (server:tool allowlist) and ChatGPT (per app and account) do have per-tool or per-app policies but sit in another cluster. Manus team connector 'Requires approval from a team admin' means admin approval to enable a connector, not per-call approval.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Perplexity and ChatGPT parts are DOC-only",
+     "Claude evidence comes from prettified copies of shipped bundles made earlier in this audit (SRC); the M365 server may apply only to org or enterprise connector setups (not verified)",
+     "Hermes trust gate applies only to servers configured trust: untrusted; the default is full trust",
+     "No REA tool was used for this item; files were read directly"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-004",
+  "title": "Deliver the AI-action audit trail, then make it tamper-evident with a compliance query API and SIEM export",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 4,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Deploy the built-but-undeployed session-core audit outbox fixes from postmortem 0002 (publisher fix, requeue function, metrics), replay the 4,992 stuck governed-action events into audit-core and alert on the terminal-row gauge. Then add a per-org hash chain with a verifier, time-range export and a scoped compliance read API with webhook/SIEM fan-out in Control Plane Audit Core.",
+  "whyItMatters": "Two categories flagged the same fact: governed agent actions were recorded but never reached the audit store. For a B2B agent product that takes actions on behalf of users this is a live compliance gap, and every enterprise reference (ChatGPT Compliance API, Claude, Perplexity) offers an exportable audit trail.",
+  "referenceBestPractice": {
+   "bestSource": "claude ; ChatGPT (immutable Compliance Logs Platform plus a stateful API with per-category admin keys) and Perplexity (audit JSON streamed by webhook to Splunk/Slack); Cursor for breadth of recorded events (tool, hook, sandbox, classifier)",
+   "others": [
+    "web-claudeai (180-day admin export with actor, IP and device, content excluded; compliance API)",
+    "web-manus (audit and activity export)",
+    "cursor",
+    "deepseek (counter-example: approvals recorded without actor identity)",
+    "web-chatgpt",
+    "web-perplexity"
+   ],
+   "prevalence": "R-t3-10-02: 3 of 12 sources; differentiator | R-t3-11-06: 4 of 12 sources (common)",
+   "mechanism": "Claude writes a per-session append-only audit.jsonl in which every entry carries an HMAC chained to the previous entry's hash, plus a verifier that reports the first broken entry. Transactional outbox per service -> audit core (append-only, hash-chained) -> query API with scoped admin keys plus webhook/SIEM fan-out;"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md:1-10",
+    "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:1-40",
+    "apps/Model Plane/rust/services/session-core/migrations/0043_audit_outbox_requeue.sql",
+    "apps/Control Plane/audit-core/internal/api/api.go:106-116",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx:218-240",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:1554",
+    "Model Plane/rust/services/session-core/src/audit_publisher.rs:1-8",
+    "Model Plane/rust/services/session-core/migrations/0043_audit_outbox_requeue.sql",
+    "Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md",
+    "Model Plane/go/services/capability-core/internal/registry/capabilities_store.go:553"
+   ],
+   "gap": "R-t3-10-02: SRC/DOC: the postmortem (dated 2026-10-06) states the broker side is fixed and deployed but the publisher fix, requeue function and metrics are built and not deployed, and the 4,992 stuck rows are not replayed (commit b9ed9197 landed the fix in the repo on 2026-10-08; | R-t3-11-06: The postmortem (2026-10-06) shows 4,992 governed-action events queued in session_audit_outbox never reached audit-core because the broker had no stream for the subject;"
+  },
+  "approachOriginal": "Phase 0 (days): follow the postmortem runbook, deploy, replay and prove rows in audit_events, add the alert. Phase 1: per-org append-only hash chain in audit-core with a key in the secret store and a verifier job. Phase 2: compliance read API with per-category admin keys and a webhook/SIEM fan-out owned by Control Plane; events stay content-free so ZDR is preserved.",
+  "effortOriginal": "M",
+  "dependencies": [
+   "nats-provisioner stream manifest",
+   "F-t3-039"
+  ],
+  "planeOwner": "Model Plane (session-core outbox) and Control Plane (audit-core, compliance API)",
+  "risks": "Replay ordering and duplicates (use the existing idempotency index). Exporting audit data creates a new egress path that must be declared and scoped. Content must never enter audit rows on ZDR runs.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 6,
+   "DOC": 8,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-10-02: apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md (deploy and replay runbook only; hash chain, export and compliance API are not planned) | R-t3-11-06: Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md (fix built, not deployed, replay not run); the compliance API and SIEM export are not planned"
+  },
+  "sourceClusters": [
+   "C-t3-10-034",
+   "C-t3-11-047"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-004",
+    "status": "partial",
+    "exactGap": "The producer-side fixes from postmortem 0002 are in the repo (audit_publisher.rs subject derivation and failure/terminal metrics, migration 0043 requeue_session_audit_terminal; commit b9ed9197, 2026-10-08), but the postmortem says they were undeployed and the 4,992 rows unreplayed, deployment cannot be verified from code, and no alert-rule file exists for the terminal gauges. audit-core (Control Plane) has only a per-row sha256 payload_hash (replay idempotency), a hard-delete retention Purge, and an internal-auth GET /v1/audit capped at 500 rows with since/until/event/user_id filters. No hash chain, verifier, export, compliance read API, per-category keys or webhook/SIEM fan-out exists.",
+    "evidence": [
+     "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md:1-10,26-27,98-117,260-291",
+     "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:1-40,432-480",
+     "apps/Model Plane/rust/services/session-core/migrations/0043_audit_outbox_requeue.sql:1-60",
+     "apps/Control Plane/audit-core/internal/api/api.go:106-116,197-225",
+     "apps/Control Plane/audit-core/internal/store/store.go:85-140,225-325",
+     "apps/Control Plane/audit-core/internal/store/schema.sql:11-33",
+     "apps/Control Plane/audit-core/internal/api/service_auth.go:20-60",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs:1-40",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx:205-245",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:1262-1272,1550-1558",
+     "apps/Frontend Plane/verevonv3/src/shared/api/audit-client.ts:15-40,95-126"
+    ],
+    "reuse": [
+     "audit-core unique indexes on (source_bus, source_producer, event_id) and payload_hash conflict handling for replay idempotency",
+     "audit-core service credentials with Principal, Scopes and Planes for per-category read keys",
+     "session-core outbox gauges and the terminal-by-subject metric for the alert",
+     "nats-provisioner manifest_contract_test and publishers_registry_test as the delivery-contract pattern",
+     "gateway audit.rs org-scoped proxy and the Trust Center tool-action aggregation"
+    ],
+    "constraints": "audit-core and the compliance API are Control Plane; Model Plane may only deliver events through its outbox and NATS, never touch audit-core's database. Audit rows must stay content-free (tool name, data category, zdr flag) so ZDR is preserved. audit-core's Purge hard-deletes rows after the retention window, so a hash chain needs retention checkpoints (a signed head per pruned segment) or the verifier will fail on legitimate retention, and events arrive from several buses and producers so per-org ordering needs a serialised insert path. Export is a new egress path that must be declared and org-scoped. The same failure class is documented on the Application Plane bus (audit-core stream not found) and in auth-core's outbox, so 'deliver the audit trail' is wider than the model bus.",
+    "approachAdjustment": "Treat Phase 0 as an operations closure with evidence (deploy session-core, canary replay, add alert rules to the infra monitoring config, then re-read the trust claim), not as a feature; also schedule the two other broken audit paths in the postmortem table. Build the chain inside audit-core's insert path with a per-org sequence and retention checkpoints, add a new read scope on the existing service-credential model for the compliance API, and make SIEM fan-out an audit-core consumer with the destination configured through org-core.",
+    "effortRevised": "L",
+    "effortNote": "Raised from M: Phase 0 is S, but the chain with retention checkpoints and multi-bus ordering plus the compliance API and fan-out is M to L.",
+    "verdict": "reword",
+    "verdictReason": "The built-not-deployed fix is now in the repo and its deployment is an ops task whose state cannot be proven from code; the new build (chain, verifier, compliance API, SIEM) is genuinely absent but must account for retention purge and multi-producer ordering.",
+    "confidence": "medium"
+   },
+   "reference": {
+    "finalId": "F-t3-004",
+    "verdict": "partial",
+    "checked": [
+     "extract/claude/.vite/build/index.chunk-DBiWryPP.js (pretty: scratchpad/tmp/claude-ext/pretty/cDBiW.js:27-156): 'audit-chain-genesis', createHmac sha256 chain, .audit-key via safeStorage (unsigned with warning if unavailable), verify -> {valid, entries, brokenAt}, audit.jsonl - SRC confirmed",
+     "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/cursor/resources/app/out/main.js: sand_action_audit_logs {client:true, default:false}; workbench.desktop.main.js: team admin setting sand_action_audit_settings",
+     "https://support.claude.com/en/articles/9970975-access-audit-logs (Enterprise only; 180 days; actor/IP/device; content excluded; no agent-action events listed; no tamper-evidence or SIEM)",
+     "https://www.perplexity.ai/help-center/en/articles/11652747-audit-logs (real-time webhook, Splunk HEC and Slack formatting; 50+ seats or Enterprise Max; comet_agent_action and computer_agent_action events; no query API; no tamper-evidence)",
+     "https://help.openai.com/en/articles/9261474-... (HTTP 403, could not re-verify 'immutable' or per-category keys)",
+     "records claude-extensibility-and-safety-094, web-claudeai-web-product-090/091, web-manus-web-product-076, cursor-ai-features-095, deepseek-transparency-and-customization-049, web-chatgpt-web-product-127, web-perplexity-web-product-098/102"
+    ],
+    "corrections": "(1) Claude's HMAC-chained audit.jsonl is a LOCAL per-session Cowork log in the desktop app. Its key sits beside the log under the same OS user, so it detects naive or partial edits, not a same-user attacker, and it falls back to unsigned entries when safeStorage is unavailable. It is not a server-side compliance store and must not be presented as the 'tamper-evident compliance' reference. No reference was verified to hash-chain a hosted audit store. (2) No inspected source combines hash-chaining with a compliance query API and SIEM export. That combination is a Verevon synthesis. (3) Claude.ai enterprise audit logs list no agent/AI-action events, so the cluster text 'AI actions incl. browser actions' comes from Manus' Browser Operator doc, not from Claude. (4) Prevalence: DeepSeek is counted in C-11-047 although it is a counter-example (approval events without actor identity), and Perplexity record 102 (Comet browser telemetry) is not an AI-action audit log. Cursor's action audit log is a team-admin setting with client flag default off, plus telemetry. The real count is closer to 5 vendors (Anthropic, OpenAI, Perplexity, Manus, Cursor-flagged), and the two clusters should be merged rather than reported separately as 3/12 and 4/12. (5) The ChatGPT 'immutable Compliance Logs Platform' and its per-category admin keys could not be re-verified (403), so keep them as DOC, unverified.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "All hosted audit/compliance features are enterprise-only (Claude Enterprise; ChatGPT Enterprise/Edu; Perplexity 50+ seats or Enterprise Max; Manus compliance API gated by customer success)",
+     "ChatGPT logs exclude agent-mode internal actions (per record notes)",
+     "Cursor action audit logs flag-gated (client default off)",
+     "Claude HMAC chain is local and same-user-forgeable; the unsigned fallback exists",
+     "ChatGPT claims DOC-only and not re-verified (HTTP 403)"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-005",
+  "title": "Unblock Zero Data Retention: attest one provider and run the live proof",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 5,
+  "wave": "W1",
+  "quickWin": true,
+  "summary": "Complete the operator step Z-40: attest one ZDR-capable provider surface in inference-core with contract evidence and a review-by date (Azure OpenAI and Azure AI Foundry carry separate attestations), run the live proof Z-60 for the org ZDR switch, ship the gateway ZDR notice and SPA wording (Z-41b, Z-20), and only then enable Temporary chat. Keep the own-connection waiver enforcement (Z-15) held until reviewed.",
+  "whyItMatters": "Verevon's ZDR design is the best seen in the comparison (one resolver, signed non-downgradable claim, evidence-bound provider attestation, typed localised refusals, fail-closed propagation across planes), but with no attested provider every ZDR turn is refused and Temporary chat is unavailable. A paper strength becomes a shipped differentiator, and ZDR orgs get service instead of refusals.",
+  "referenceBestPractice": {
+   "bestSource": "Claude (per-product ZDR toggle with propagation notice); ChatGPT and Claude.ai (documented lists of features excluded under ZDR). Verevon's own design already exceeds all three",
+   "others": [
+    "web-chatgpt",
+    "web-claudeai"
+   ],
+   "prevalence": "3 of 12 sources (differentiator)",
+   "mechanism": "Org or product flag; a feature matrix states what is disabled under ZDR; residency per tenant; admin UI notice that changes take minutes to propagate."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "Model Plane/rust/crates/mp-contracts/src/retention.rs:1-5",
+    "Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs:1-5",
+    "Model Plane/rust/services/inference-core/src/provider/zdr.rs:1-8",
+    "Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12",
+    "Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:35-118",
+    "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md:112,122",
+    "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/BUILD_PASS_6_8_2026-10-13.md:65"
+   ],
+   "gap": "The design is complete and mostly built dark, but no provider is attested on this stack (open operator and commercial step Z-40), so every ZDR request is refused; the org ZDR switch awaits the live proof; Temporary chat is gated off; the own-connection waiver is designed with Z-15 held 'do not ship'. Everything ships undeployed in a dirty tree."
+  },
+  "approachOriginal": "Operator and commercial step, not new code: collect contract evidence for one provider surface, set the attestation fields read by inference-core zdr.rs (artifact names plus review-by date), deploy the already-built Control, BFF and Model Plane waves in the order recorded in BUILD_PASS_6_8 (session-core, then execution-core, then model-gateway; inference-core before any waiver minter), run Z-60 with a ZDR test org, land Z-41b and Z-20 wording, then un-gate Temporary chat in the SPA (chat-retention.ts).",
+  "effortOriginal": "S",
+  "dependencies": [
+   "Provider contract evidence (owner and commercial step Z-40)"
+  ],
+  "planeOwner": "Model Plane (inference-core attestation); Control Plane (org switch)",
+  "risks": "Attesting without real contractual ZDR would be a compliance failure; attestation must name exact artifacts and expire. Do not enable ZDR orgs before the gateway notice ships.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 1,
+   "DOC": 4,
+   "INF": 0
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md (Z-40 operator action, Z-60 live proof) and BUILD_PASS_6_8_2026-10-13.md deploy order; all dark and undeployed"
+  },
+  "sourceClusters": [
+   "C-t3-11-044"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-005",
+    "status": "partial",
+    "exactGap": "Everything except the attestation is built and dark: inference-core zdr.rs validates evidence-bound AZURE_OPENAI_ZDR_* and AZURE_ANTHROPIC_ZDR_* fields (all empty by default in docker-compose.yml:936-951), the gateway refuses the org switch with 409 zdr_no_attested_provider (settings.rs:134), and Temporary chat availability already follows the live catalogue (DashboardComposer.tsx:1110, 1337). Remaining are the operator and commercial Z-40 evidence, an ordered deploy of uncommitted waves, the Z-60 live proof, and Z-41b and Z-20 work that BUILD_PASS_6_8 (open review findings) and BUILD_PASS_2 (Z-20 deferred) still list as open.",
+    "evidence": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/zdr.rs:1-160 (evidence-bound attestation, digest, review-by lapse, one attestation per provider surface)",
+     "apps/Model Plane/deploy/docker-compose.yml:927-951 (attestation env vars default empty; CONFIRMED booleans false)",
+     "apps/Model Plane/docs/ZDR.md:20-40 and :99 (state table: no provider attested, waiver designed not built)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs:120-185 (zdr_enable_refusal: 409 and 503 gates, off always allowed)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs:1-80 (server-side posture, fail closed)",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:1100-1113 and :1334-1340 (Temporary chat availability derived from the catalogue)",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:1-60 (local cache purge policy, not the availability gate)",
+     "apps/Frontend Plane/verevonv3/docs/ZDR_OPERATOR_SEED_RUNBOOK.md:19 and :127 (Z-60 test org switched on with nothing attested; gate opens by itself once attested)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md:112 and :122 (Z-20 held behind Z-14; Z-40 and Z-60 open)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/BUILD_PASS_2_2026-10-11.md:73 and :106 (Z-20 should land before the first attested ZDR answer)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/BUILD_PASS_6_8_2026-10-13.md:13,40,65 (Z-41b ship after fixes with open findings; deploy order; nothing committed or deployed)"
+    ],
+    "reuse": [
+     "zdr.rs digest recipe and the lapse and not-yet-effective checks",
+     "ZDR_OPERATOR_SEED_RUNBOOK.md, zdr-seed-test-org.mjs and the opt-in Playwright gate spec",
+     "BUILD_PASS_6_8 deploy order (session-core, execution-core, model-gateway, inference-core before any waiver minter)",
+     "typed ZDR refusal catalogue and SPA refusal rendering already built"
+    ],
+    "constraints": "Attesting without real contractual ZDR is a compliance failure, so the attestation must name exact resource and approval artifacts and carry a review-by date; separate attestations are needed for Azure OpenAI and Azure AI Foundry Claude. Z-60 as designed runs on a ZDR-TEST org switched on while nothing is attested (to prove fail-closed refusals), so the live proof order is the reverse of the item and a real-provider proof needs a second pass after Z-40. Z-20 is deferred behind Z-14 and Z-41b has open review findings, so wording is not a free step; waiver minting (Z-15) must stay off until reviewed. Plane ownership: attestation is Model Plane config, the org switch gate lives only in the Frontend gateway, org-core stays ungated by design.",
+    "approachAdjustment": "Do not change the SPA to un-gate Temporary chat: availability is catalogue-driven and opens by itself once a provider is attested; chat-retention.ts is the local-cache purge policy. Reorder to: Z-60 on a ZDR-TEST org with nothing attested, then Z-40 attestation, then a second live pass on the attested provider; land Z-41b fixes and Z-20 wording before the first attested ZDR answer. Describe it as an operator and release-management item, not engineering of new behavior.",
+    "effortRevised": "M",
+    "effortNote": "Attestation itself is S (set env fields and digest), but collecting contract evidence, deploying uncommitted multi-wave work in order, fixing Z-41b findings and doing two live passes make the unblock M.",
+    "verdict": "reword",
+    "verdictReason": "The conclusion (attest one provider and prove it) is right and the design is built, but the item mis-states the Temporary chat step, reverses the Z-60 order, and understates Z-20 and Z-41b dependencies.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-005",
+    "verdict": "partial",
+    "checked": [
+     "C:/Program Files/WindowsApps/Claude_2.31226.1.0_x64__pzs8sxrjxfjjc/app/resources/ion-dist/i18n/en-US.json (8NCPiYNAxr, 9DlWH0xonp, XBBpUQDi0z, sfg9n9BlRD, ktbgnbcRtH, uj5bRUiSC5, 9AHiT0gJ8z, VvL0ehC1yp, 3qvMQVWyxg, +oPUx1gtnD, 4O/7tjnT90 Data residency)",
+     "https://support.claude.com/en/articles/10440198-configure-custom-data-retention-controls-for-enterprise-plans (no ZDR mention; retention exclusions only)",
+     "https://support.claude.com/en/articles/17444462-set-up-and-manage-the-new-unified-claude-experience-for-your-enterprise-organization (unified experience unavailable to ZDR/HIPAA/CMEK orgs)",
+     "https://developers.openai.com/api/docs/guides/agents-api/overview (Agents API: US residency only, no ZDR; self-hosted sandbox does not make it ZDR-eligible)",
+     "https://help.openai.com/en/articles/20001548-agent-security-and-local-work-sync-in-chatgpt (HTTP 403, could not re-verify)"
+    ],
+    "corrections": "Claude desktop's 'per-product ZDR toggle' is specifically ZDR for Claude Code. The observed UI is a disable flow ('Disable Zero Data Retention' with an acknowledgement of terms and a 'may take a few minutes' notice). Enabling appears to be gated by contract or qualified account ('Claude Code with ZDR is available only for qualified accounts'), so this is not a self-serve per-product switch. Neither Claude nor Claude.ai has a documented full 'feature matrix of what ZDR disables'. Observed evidence is limited to point exclusions: analytics off under ZDR, sampling grants need ZDR off, the unified experience is unavailable to ZDR orgs, and the HIPAA BAA covers only Claude Code with ZDR. Cite ChatGPT's agent-feature ZDR exclusions to the developers.openai.com Agents API page (verified). The help.openai.com article returned 403. The cited Claude.ai retention article does not mention ZDR, so cite 17444462 instead.",
+    "prevalenceCorrect": true,
+    "caveats": [
+     "Enterprise-only in all three sources",
+     "claude and web-claudeai are the same vendor, so 3 of 12 spans only 2 vendors",
+     "ChatGPT residency matrix is DOC and partly unverifiable (403)",
+     "'Verevon design already exceeds all three' is a design claim, not shipped behaviour"
+    ],
+    "confidence": "medium"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-006",
+  "title": "Approvals v2: scoped decisions, typed cause codes, decision provenance, denial memory and step-up for high-risk effects",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 6,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Extend the approval decision from approve/reject to once, this run, this thread or always-as-a-reviewed-rule (an 'always' on a card is held at session scope until confirmed in settings), remember denials within a run, and compute a typed ApprovalCause at the point each permission, hook, capability or browser-risk decision is made. Carry {actor, verdict, cause, rule_id} in the approval event, the durable run log and audit, render a plain localised reason on every card, and require step-up for never-auto or high-risk effects.",
+  "whyItMatters": "Approvals are already durable and stronger than most references (encrypted exact-effect descriptors, postcondition re-checks), but the cards say only that a tool requires approval and every decision is single-use, which produces approval fatigue and teaches users to click through. Codex, Claude and Antigravity show scoped decisions and typed causes as the fix.",
+  "referenceBestPractice": {
+   "bestSource": "Codex (typed decisions approved / approved_for_session / approved_with_amendment / denied / abort and about 55 versioned card templates) combined with Claude (anti-decoy card, 'always' coerced to session scope, plan fingerprint re-checked at execution) ; claude",
+   "others": [
+    "deepseek (no answerer resolves to deny)",
+    "t3code",
+    "manus (permission-delta badges)",
+    "antigravity (denied-action equivalence)",
+    "web-chatgpt (passkey step-up documented)",
+    "antigravity (AutoRunDecision actor x verdict and a trigger_source on every permission prompt; running-hook indicator and per-step hook results)",
+    "cursor (hook results shown per step)"
+   ],
+   "prevalence": "R-t3-11-02: decision scopes 4 of 12 (common); card content 4 of 12 (common); denial equivalence 1 of 12 (unique); step-up 2 of 12 (differentiator) | R-t3-10-01: Cause codes: 2 of 12 sources (Claude, Antigravity); hook visibility: 2 of 12 (Antigravity, Cursor); differentiator",
+   "mechanism": "Request {kind, tool, args, reason_code, matched_rule, suggestions[]}; The permission broker computes a cause code next to the allow/ask/deny decision."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "Model Plane/rust/services/model-gateway/src/approvals.rs:1-14",
+    "Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:459-463",
+    "Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476,4558",
+    "Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60",
+    "Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1940",
+    "Model Plane/rust/services/session-core/src/continuation_crypto.rs:1-8",
+    "Control Plane/auth-core/src/auth/auth.ts:1379-1389",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4466-4474",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:229-260",
+    "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:1-30"
+   ],
+   "gap": "R-t3-11-02: Approvals are durable, restart-safe rows with encrypted exact-effect descriptors and postcondition re-checks (stronger than T3 Code's in-process approvals), but the decision body is only approve/reject with an optional reason (domains/orchestration.rs:459-463). | R-t3-10-01: SRC: approval_reason_for returns the generic sentence \"tool 'X' requires approval\" except for the consent-to-disclose case;"
+  },
+  "approachOriginal": "Proto change in orchestration and session-core store for the decision scope and cause; compute causes in capability-core EvaluatePolicy, the hook engine and the browser risk classifier; extend the SPA card with cause text, scope radio and anti-decoy layout (Claude). Grants for 'this run' are stored with the run and expire with it; 'always' becomes a rule in the F-t3-032 policy registry after confirmation.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-003",
+   "F-t3-002",
+   "F-t3-066"
+  ],
+  "planeOwner": "Model Plane (capability-core, model-gateway approvals, session-core) with Frontend Plane cards",
+  "risks": "Broader scopes reduce friction but widen authority; keep never-auto tools single-use and step-up for external effects. Rules written from cards must be reviewable and revocable.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 24,
+   "DOC": 2,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-11-02: Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md G8 (always-ask on provider writes, effect summaries); claude-hermes-deepseek.md section 13.3 lists editable don't-ask-again rules and a durable approval queue UI as open, not built"
+  },
+  "sourceClusters": [
+   "C-t3-11-014",
+   "C-t3-11-008",
+   "C-t3-11-015",
+   "C-t3-11-049",
+   "C-t3-10-032",
+   "C-t3-10-033"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-006",
+    "status": "partial",
+    "exactGap": "Approvals are durable rows with decided_by and a free-text decision_reason (orchestration.proto:340-381,738-757; approvals.rs:1-14), but the decide body is only approve/reject plus an optional reason (orchestration.rs:455-478), the chat card renders only Approve and Reject (ChatMessages.tsx:1889-1930) and the reason for ordinary tools is the generic sentence from approval_reason_for (agent.rs:4466-4474). Typed causes exist only for browser actions (RiskCategory in browser_risk.rs:25-45, localised in BrowserChrome.tsx:168) and as a coarse ApprovalKind enum (orchestration.proto:194-207); there is no decision scope, denial memory or step-up on approvals. In-run continuation after approval is still a stub (execution-core grpc.rs:706-713), so only three tool kinds resume, cold, through approval_delivery_worker.",
+    "evidence": [
+     "apps/Model Plane/proto/model_plane/v1/orchestration.proto:194-221,340-381,738-757",
+     "apps/Model Plane/rust/services/model-gateway/src/approvals.rs:1-60,100-135",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs:455-478",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1885-1945",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:168-170,347",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4440-4500",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:25-60,466-490",
+     "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-40",
+     "apps/Model Plane/rust/services/execution-core/src/grpc.rs:700-730",
+     "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:72-80,100-140",
+     "apps/Model Plane/proto/model_plane/v1/execution.proto:146-154",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs:3665-3690",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:242,244"
+    ],
+    "reuse": [
+     "Approval.context (google.protobuf.Struct) and ApprovalKind as the zero-proto-change carrier for a first cause code (orchestration.proto:340-381)",
+     "Browser RiskCategory and risk_reason plus the localised label map in BrowserChrome.tsx as the cause taxonomy template",
+     "The autonomy rung grant that plan approval already writes for a run (RunAgentRequest.autonomy_rung, check_autonomy_rung) as the existing \"this run\" scoped grant",
+     "requires_durable_owner_approval and requires_consent_to_disclose as the seed of the never-auto/step-up set",
+     "Account-erasure typed confirm plus step-up re-auth (dispatchers.rs:3665-3690) as the step-up UX precedent",
+     "approval_delivery_worker and the encrypted exact-effect descriptors for resumable effects"
+    ],
+    "constraints": "A \"this run\" grant only helps once the loop can continue after a decision: the loop returns at the first approval-gated tool and resume_durable_approval_continuation is an unavailable stub (grpc.rs:706-713), with only provider actions, book_shipment and tickets.create resumable (approval_delivery_worker.rs:1-40). \"This thread\" and always-as-reviewed-rule do not depend on that, so sequence them first. Browser risk causes are computed in execution-core as a gate on Model-proposed actions while Quarry still executes or rejects, so a cause for a Quarry rejection must be passed through, not recomputed. Never-auto is only tickets.create today (permission/mod.rs:77), so the step-up set depends on F-t3-003 declared classes. Broader grants widen authority: keep never-auto and external-effect approvals single-use and reviewable, and never let a Space or collaborator grant widen an owner-plane ACL.",
+    "approachAdjustment": "Start with typed cause carried in Approval.context and the SPA card (reuse the browser RiskCategory pattern for tools, hooks and capability decisions) before any proto change; then add decision scope (once, this thread, always-as-rule) and denial memory; defer \"this run\" scope until in-run continuation exists, or implement it on top of the existing autonomy-rung grant. State that the browser card already shows a typed risk label so the work is bringing the same to the chat card.",
+    "effortRevised": "L",
+    "effortNote": "L for typed causes plus thread/always scopes, denial memory and step-up. A \"this run\" scope adds a dependency on the in-run continuation work, which is a separate large item not included here.",
+    "verdict": "reword",
+    "verdictReason": "Core gap confirmed on the generic chat card and single-use decisions, but typed causes already exist for browser actions, a run-scoped rung grant exists for plans, and run scope is blocked by the continuation stub; the item should say so and re-sequence.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-006",
+    "verdict": "partial",
+    "checked": [
+     "scratchpad/tmp/codex_rt/codexexe.prose.txt:11177 (approved_with_amendment, approved_for_session, approved_mcp_policy_amendment, approved_with_network_policy_allow, denied_with_network_policy_deny, abort)",
+     "scratchpad/tmp/cxpe/codex_exe.strings.txt:1304554-1306500 (mcp_tool_approval_templates.rs, schema_version 4, 55 'template' entries, e.g. 'Allow {connector_name} to add a comment to a pull request?')",
+     "scratchpad/tmp/cxpe/codex_exe.strings.txt ('User verification is required' / 'is not available in this build or account' / 'unavailable for remote workspaces')",
+     "scratchpad/tmp/claude-ext/pretty/core.js:154868-154872 (Fya map, 33 cause-code sentences)",
+     "scratchpad/tmp/claude-ext/pretty/core.js:88348-88351 (yir: rewrites rule destinations to 'session'; exported as aO at :171948, call site in another chunk not traced)",
+     "scratchpad/tmp/ag2/protos/third_party__jetski__cortex_pb__cortex.proto.txt:68 (AutoRunDecision USER/SYSTEM/MODEL/DEFAULT x ALLOW/DENY), :1760 (trigger_source)",
+     "C:/dev/deepseek-harness/packages/interaction/user-approval/src/types.ts:32 (ApprovalOutcome = allowed-once | rejected | cancelled | unavailable)",
+     "scratchpad/tmp/t3code/recovered/server/packages/contracts/src/orchestration.ts:142 (acceptForSession)",
+     "findings/t3/manus.computer-control-architecture.features.json#manus-computer-control-architecture-056 (Allow once / for this task / Always allow / Deny)",
+     "findings/t3/web-chatgpt.web-product.features.json#web-chatgpt-web-product-130",
+     "findings/t3/antigravity.architecture.features.json#antigravity-architecture-072"
+    ],
+    "corrections": "1) Step-up: 'web-chatgpt (passkey step-up documented)' is wrong. The ChatGPT record covers Advanced Account Security: passkey-only sign-in, parental controls, age prediction. It is not a fresh proof bound to an approval. Step-up for sensitive approvals is 1 of 12 (Codex SRC), not 2. Codex strings also show it is build- or account-gated and unavailable for remote workspaces, and which approvals require it is not established. 2) Decision-scope prevalence: DeepSeek has no scopes (outcomes are allowed-once/rejected/cancelled/unavailable). It belongs only to the fail-closed point. Manus does have scopes (once / this task / always). The count stays near 4 (Claude, Codex, T3 Code, Manus), but the membership must change. 3) The Codex decision taxonomy is wider than listed: it also has approved_mcp_policy_amendment and network-policy allow/deny variants. The template example has no PR number in the sentence; parameters are separate labelled fields ('Allow {connector_name} to add a comment to a pull request?'). The '55 versioned templates' count is confirmed (schema_version 4). 4) Claude cause codes: 33 confirmed. The coercion of 'always' to session scope is a confirmed helper, but its call site was not traced, so keep medium confidence. 5) The request shape {kind, tool, args, reason_code, matched_rule, suggestions[]} is a synthesis (INF), not any single reference's schema.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Codex passkey verification: SRC strings only. Gated by build or account. Scope of applicable approvals unknown.",
+     "Claude 'always'->session coercion: function confirmed, invocation path not traced (medium).",
+     "Antigravity denied-action equivalence is an embedded prompt (single source). Runtime behavior not observed.",
+     "Approval card request schema in the doc is a synthesized design (INF)."
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-007",
+  "title": "Govern and prove the skill-learning loop: learned skills start as owner-scoped proposals, a seeded eval proves the loop, and a learning ledger supports undo",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 7,
+  "wave": "W1",
+  "quickWin": false,
+  "summary": "Make every skill written by the background review a proposal owned by the user whose run produced it and not matchable by anyone else, with a Settings > Learning inbox (diff, reason, source run); promotion to org scope needs an admin decision. Then prove the loop end to end with a seeded eval (a real Do run authors a skill a later turn uses) and cost controls, and project memory and skill lineage into a 'What Verevon learned' ledger with undo and rollback.",
+  "whyItMatters": "The learning loop runs by default and its candidates become org-wide matchable skills with no review, owner or scope. That is a data-governance risk (one user's run can change every colleague's agent) as well as a quality risk, and the loop has never been shown to produce a useful skill. Hermes, the reference for self-improvement, stages writes fail-closed and keeps a reversible ledger; Manus emits proposals.",
+  "referenceBestPractice": {
+   "bestSource": "manus (proposal events); hermes (fail-closed staging) ; hermes ; hermes",
+   "others": [
+    "claude",
+    "web-manus",
+    "cursor"
+   ],
+   "prevalence": "R-t3-08-04: 4 of 12 sources (common). | R-t3-08-03: 2 of 12 sources (differentiator). | R-t3-10-06: 1 of 12 sources; unique",
+   "mechanism": "Manus records each learning proposal as a KnowledgeEvent {CREATE/UPDATE/DELETE, PENDING/ACCEPTED/REJECTED, trigger, session_uid, session_event_uid} linked to the session event that produced it, and accepted items can later be enabled or disabled. Hermes forks a background review after the reply is delivered: only if a final response exists and the turn was not interrupted or unattended, it reviews a snapshot of the messages on a cheap model with whitelisted tools (memory, skill_manage) and read-before-write, capped at 16 iterations, with three prompt variants. A JSONL mutation ledger with a row per change {actor, entity, before_hash, after_hash, run_id};"
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto:842-854 (UpsertAgentSkillRequest: org_id, content, origin; no user, scope or status field)",
+    "apps/Model Plane/go/services/capability-core/internal/learning/learning.go:30-45 (OriginUser protected; OriginBackgroundReview; MinConfidence 0.5)",
+    "claude-hermes-deepseek.md:1352 (promotion gate deliberately not built; PromoteSkill RPC removed)",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/skill_promotion.go:14-27 (SkillPromotionWorkflow cannot persist a scope change: PromoteSkill was removed because Capability.Scope has no runtime-authorization effect)",
+    "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:212-232 (agent_memory already has a review_state column, a pattern to reuse)",
+    "apps/Model Plane/rust/services/session-core/src/learning_events.rs:1-12 (RUN_COMPLETED published through the audit outbox)",
+    "apps/Model Plane/rust/services/session-core/src/learning_events.rs:147 (envelope stamps zdr:false)",
+    "apps/Model Plane/rust/services/session-core/src/learning_events.rs:172-179 and 288-296 (ZDR, waived and unknown-class runs are never announced)",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/retention.go:60-80 (consumer fails closed unless zdr:false is declared)",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go:1-30 (durable consumer on MODEL_PLANE_RUN_EVENTS)"
+   ],
+   "gap": "R-t3-08-04: Background-review candidates become org-wide matchable skills with no review, no owner and no scope. | R-t3-08-03: No skill has been shown to be authored from a real run and used in a later turn (I23 deferred). | R-t3-10-06: SRC: memory writes already keep history (EXTEND and SUPERSEDE insert a new row and flip is_latest on the old one, with lineage markers in source_links), memory view/correct/forget and recall disclosure ship, and the skill learning loop runs after RUN_COMPLETED with quarantine on dissatisfaction."
+  },
+  "approachOriginal": "Ship the staging gate first (W1, before the loop is enabled for real orgs): proposal status on agent_skills, MatchSkills filters to accepted skills in the owner's scope, inbox UI. Then the seeded eval and review-selection settings (which runs are reviewed, cost caps). Then the ledger: project supersedes_id lineage for memory and add a skill revision table {actor, run_id, before_hash, after_hash} with rollback.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-020",
+   "Owner decision on the three-tier library",
+   "Control Plane decision signing"
+  ],
+  "planeOwner": "Model Plane (session-core learning loop, capability-core skills) with Control Plane (org promotion decision) and Frontend Plane (inbox, ledger)",
+  "risks": "Too much friction kills learning; default to user-scope auto-accept only after the eval shows quality. Learned skills are an injection persistence vector, so screening from F-t3-033 applies. ZDR and waived runs stay excluded.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 0,
+   "SRC": 21,
+   "DOC": 6,
+   "INF": 2
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-08-04: claude-hermes-deepseek.md:1352 (confirmed gap, deliberately not built pending a product/UX decision); apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md | R-t3-08-03: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:274 (I23 prove one skill from a real run; deferred to Wave 6) and :674 (reviewer route); LEARNING_SYSTEM_REDESIGN_2026-09-17.md | R-t3-10-06: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/LEARNING_SYSTEM_REDESIGN_2026-09-17.md:286 (skill-retirement/rollback, lowest priority, flag/log-only first)"
+  },
+  "sourceClusters": [
+   "C-t3-08-019",
+   "C-t3-08-017",
+   "C-t3-10-043"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-007",
+    "status": "partial",
+    "exactGap": "The learning loop is real and on by default (LEARNING_REVIEW_ENABLED unset means enabled in capability-core cmd/main.go; ZDR and waived runs are withheld) but it persists through UpsertAgentSkill, which carries only origin (no user, scope or status), so the DB defaults make every learned skill scope='org', enabled=true and matchable by the whole org, and a later same-name background_review upsert overwrites the row and re-enables it even if an admin disabled it. agent_skills has no proposal/status column or revision table, capability-core's skill list omits origin so the admin-only Settings > Skills page cannot label learned skills, the RUN_COMPLETED envelope carries user_id but SessionRef drops it, PromoteSkill and SkillPromotionWorkflow persist nothing, and the seeded eval (plan I23) is deferred. Memory already has lineage (supersedes_id, is_latest, review_state) that a ledger can project.",
+    "evidence": [
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:5075-5148",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs:5285-5345",
+     "apps/Model Plane/proto/model_plane/v1/sessions.proto:842-900",
+     "apps/Model Plane/rust/services/session-core/migrations/0031_agent_skills_ownership.sql:1-26",
+     "apps/Model Plane/rust/services/session-core/migrations/0006_agent_skills_origin.sql:1-26",
+     "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:185-232",
+     "apps/Model Plane/rust/services/session-core/migrations/0037_agent_memory_lineage.sql:27-74",
+     "apps/Model Plane/rust/services/session-core/src/dreaming.rs:860-930",
+     "apps/Model Plane/rust/services/session-core/src/learning_events.rs:1-30,130-185",
+     "apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go:36-65",
+     "apps/Model Plane/go/services/capability-core/internal/learning/learning.go:30-140",
+     "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go:36-120",
+     "apps/Model Plane/go/services/capability-core/internal/sessionreview/trigger.go:40-70",
+     "apps/Model Plane/go/services/capability-core/cmd/main.go:743-800",
+     "apps/Model Plane/go/pkg/envelope/envelope.go:30-67",
+     "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:100-260",
+     "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/skill_promotion.go:1-60",
+     "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:1702-1750",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5655-5715",
+     "apps/Model Plane/rust/services/model-gateway/src/skills.rs:78-120,235-252",
+     "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts:1-80",
+     "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx:1-60",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:274,432"
+    ],
+    "reuse": [
+     "agent_skills scope/owner_user_id/shared_with columns plus the gateway OwnershipStore and skill_ownership_entries (SKILL-1) as the owner-scope mechanism",
+     "envelope user_id already stamped on RUN_COMPLETED (learning_events.rs build_run_completed_envelope) to bind the owner",
+     "capability-core SkillsHandler admin-only org-skill creation as the promotion path (copy to org scope)",
+     "agent_memory review_state and 0037 lineage plus the write_lineage_memory transaction as the ledger pattern",
+     "existing ZDR and waived withholding in learning_events.rs and sessionreview/retention.go",
+     "SkillsSection.tsx and memory-client list/forget/correct as the inbox and ledger UI seeds"
+    ],
+    "constraints": "ZDR and waived runs must stay excluded (already enforced twice; keep). Owner scoping collides with the gateway skill cache: MatchSkills and fetch_skill_context pull ListAgentSkills once per org per TTL with the triggering caller's bearer, session-core filters that list by caller, and replace_learned prunes anything not in the pull, so user-scoped learned skills would flap or be missing for their owner unless the cache is pulled with a service-wide view (visibility stays per-caller in OwnershipStore) or keyed per user (INF from reading both paths). Skills only support scope org|user (CHECK constraint), so learning from a shared-Space thread has no Space scope to land in; exclude Space-audience runs or hold them as proposals. PromoteSkill was removed (SKILL-2) because Capability.Scope had no authorization effect; org promotion must go through the admin-only org-skill creation path, not a revived workflow. The review model call uses a service credential (owner decision OD4 is open).",
+    "approachAdjustment": "Do the cheap safe fix first: pass env.UserID through SessionRef, add scope, owner_user_id and a disabled-by-default or status field to UpsertAgentSkillRequest, write learned skills as user-scoped proposals, stop the upsert from re-enabling an admin-disabled row, and return origin from the capability-core list. Fix the gateway skill cache for per-user visibility before relying on owner scope. Then the inbox and org promotion as 'admin copies a proposal into an org skill', then the seeded eval and a skill_revisions table; do not revive SkillPromotionWorkflow.",
+    "effortRevised": "L",
+    "effortNote": "Unchanged; the staging-gate slice (owner scope, disabled by default, origin in list, cache fix) is about M and should ship first.",
+    "verdict": "keep",
+    "verdictReason": "The governance gap is real and directly confirmed in code (org-wide default scope, no status, no inbox, no eval); the approach needs the owner-scope plumbing and gateway cache constraint added, but the item stands.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-007",
+    "verdict": "partial",
+    "checked": [
+     "extract/manus/frontend/out/_next/static/chunks/*.js: KnowledgeEventStatus.PENDING/ACCEPTED/REJECTED, updateKnowledgeEventStatus({eventUid, status, sessionUid, scene}), 'Suggested knowledge' string - SRC confirmed",
+     "C:/dev/hermes-agent/agent/background_review.py:169-173 (_REVIEW_MAX_ITERATIONS = 16; default 'auto' routing runs the fork on the MAIN model for warm prompt cache; a different aux model is optional), :375/440/511 (three prompts), :1079-1119 (dispatch-side tool whitelist incl. read_file/search_files)",
+     "C:/dev/hermes-agent/agent/turn_finalizer.py:776-790 (spawn only if final_response, not interrupted, not skip_background_review)",
+     "C:/dev/hermes-agent/tools/memory_tool.py:171-212 (_background_delete_gate stages replace/remove from unattended review)",
+     "C:/dev/hermes-agent/hermes_cli/config_defaults.py:1318,1482 (write_approval default False)",
+     "C:/dev/hermes-agent/tools/skill_ledger.py:1-40,310-313 (actor in {curator, agent, user}; before/after manifests; 5 MB cap; 'telemetry, not a gate')",
+     "records manus-product-ux-097, web-manus-web-product-068, hermes-learning-and-memory-009/049/057/066/067/098/102, claude-product-ux-072, cursor-ai-features-068"
+    ],
+    "corrections": "(1) Hermes does NOT run the review on a cheap model by default. The default 'auto' routing forks on the main model to reuse the warm prompt cache, and routing to a different (cheaper) model is optional config. (2) The Hermes trigger is cadence-based (every 10 user turns for memory, 10 tool iterations for skills) and is skipped for cron via skip_background_review. 'Unattended' is not itself a spawn condition. (3) The Hermes ledger covers SKILL mutations only, not memory (memory edits and deletes are exposed via the journey view). Its actor is a coarse enum {curator, agent, user}, not a user identity, and it has no run_id. The mechanism's {actor, entity, before_hash, after_hash, run_id} row is a Verevon extension. (4) Hermes' skill write-approval gate is opt-in (skills.write_approval default False). Only unattended replace/remove of memory is fail-closed by default. (5) The 'seeded eval proves the loop' is not reference-derived: no reference evaluates learning outcomes (the Hermes record flags this as a weakness). (6) Claude's inclusion in the proposal cluster rests on lazy module names (tool_cell_skill_proposal/suggestion) and analytics events. That is a skill-authoring proposal UI, not evidence of an approval-gated learning loop. Cursor's Bugbot learned rules are PR-review specific.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Manus web self-updating Projects is DOC-only (blog)",
+     "Hermes write-approval staging is opt-in",
+     "Claude skill proposal is inferred from module/analytics names",
+     "Learning ledger and rollback is Hermes-only (1 of 12), local single-user scope",
+     "Outcome evaluation of learning is absent from all references"
+    ],
+    "confidence": "high"
+   }
+  }
+ },
+ {
+  "finalId": "F-t3-008",
+  "title": "Agent browser in chat and Do mode on real broker grants, with per-site read/act consent, admin allow/block lists and model-blind logins",
+  "originalTier": "priority",
+  "finalTier": "priority",
+  "rank": 8,
+  "wave": "W2",
+  "quickWin": false,
+  "summary": "Replace the placeholder grant id 'session:{id}' with a real browser-broker grant minted per run, whose AllowedDomains come from a per-user site table (control, read only, no access) intersected with admin allow/block lists and the Space decision (block wins). Then expose browser_agent to the model in web-enabled chat and Do mode as a browser subagent with its own profile, budget and recording reference, add a read-only browsing objective usable from Ask and as a deep-research fallback, per-action state diffs, and secret substitution so logins never reach the model.",
+  "whyItMatters": "Verevon already has the strongest browser contract in the comparison (revision-bound refs, risk-classified approvals, model proposes and Quarry executes), but it is unreachable from chat: agent browser runs fail closed because the broker only knows grants it minted. A working, governed agent browser is the first visible step toward the Manus-style 'acts like a PC' vision, and site governance is table-stakes (7 of 12).",
+  "referenceBestPractice": {
+   "bestSource": "Antigravity (widest browser vocabulary, DOM/pixel/hybrid modes, per-action state diffs, recorded browser subagent) plus Manus (hybrid accessibility+DOM snapshot, versioned 22-tool contract with snapshot/ref/revision binding) ; Claude (per-site consent, admin default site policy with allow/block lists, DNS-pinned private origins) plus Perplexity Comet's per-domain Control / Read only / No access model; Manus for model-blind secrets ; Antigravity (separate read_url and execute_url permissions with a fail-closed server denylist; recording stored as an artifact and embedded in walkthroughs) plus Claude (approvals batched by site with an explicit allow-all switch) ; Manus web (web-manus-web-product-024 and -025, DOC) for live view and take-over; Claude (claude-product-ux-079, SRC) for the consent model",
+   "others": [
+    "Cursor",
+    "Hermes (CDP supervisor for dialogs and cross-origin iframes)",
+    "T3 Code",
+    "Codex",
+    "antigravity",
+    "manus",
+    "web-claudeai",
+    "web-manus",
+    "web-perplexity",
+    "hermes (vault fill re-asserts origin in the injected script)",
+    "T3 Code (CDP screencast to MP4 or WebM)",
+    "Claude (SRC): default site policy, allow and block lists, local-network warning"
+   ],
+   "prevalence": "R-t3-06-01: 5 of 12 sources have a full agent browser toolset (common); the dedicated browser subagent with its own model is unique to Antigravity | R-t3-11-01: site governance 7 of 12 sources (table-stakes); model-blind credentials 4 of 12 (common) | R-t3-06-09: 2 of 12 sources each (differentiators) | R-t3-03-07: 2 of 11 sources; differentiator",
+   "mechanism": "A CDP session per tab; Per (org, user) site table: domain -> {control | read_only | no_access, source}; Navigation guard, then a denylist (fail closed), then an allowlist or prompt, then the action risk class, then an approval card listing sites and actions, then a remembered per-site choice. Browser session owned by an execution service."
+  },
+  "verevonTodayOriginal": {
+   "status": "partial",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:138-170",
+    "apps/Model Plane/go/services/browser-broker/internal/server/server.go:42",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:823",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:639",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3055-3099",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:972",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1030",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:121-122",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:267"
+   ],
+   "gap": "R-t3-06-01: Observed by reading code: the BFF sends grant_id 'session:{id}' (browser.rs:1235); | R-t3-11-01: The broker grant already carries a canonical AllowedDomains list (max 32) and execution-core classifies login/checkout/form-post/cross-domain/cookie actions into durable approvals, but the gateway sends grant_id 'session:{id}' (domains/browser.rs:1235, verified) so agent runs fail closed. | R-t3-06-09: Risk-classified durable approvals (login, checkout, form post, destructive, cross-domain, cookies) and Quarry allowed_domains with the SSRF guard exist, and the plan already gives the broker authority over a domain fence of at most 8 domains. | R-t3-03-07: SRC: model-proposes and Quarry-executes browser control exists with risk classes, cookie-use HITL and pause or resume, and the manual hosted browser with frames, tabs and human or agent control is shipped."
+  },
+  "approachOriginal": "Follow plan E1/E2/E4/E9-E12: the gateway calls AcquireGrant, the broker owns the domain fence, the planner fails closed. Add the per-host read vs act consent model (Comet, Antigravity), Claude-style batched site approvals and an admin default site policy in Control Plane. Keep the architecture rule intact: Model Plane proposes actions, Quarry executes or rejects them. Model-blind logins: the model references a vault secret by handle and Quarry substitutes it at execution.",
+  "effortOriginal": "L",
+  "dependencies": [
+   "F-t3-006",
+   "OD13 domain policy ownership",
+   "Plan E1/E2/E4 grant issuance"
+  ],
+  "planeOwner": "Model Plane (grant minting, browser subagent) with Ingestion Plane (Quarry execution, secret substitution), Control Plane (site policy)",
+  "risks": "Prompt injection from pages is the main attack surface: page text stays untrusted, act permissions are per host, and cross-domain actions need approval. Logged-in sessions carry personal data; recordings need retention rules. OD13 (domain scope ownership) must be decided first.",
+  "significance": 5,
+  "confidence": "high",
+  "provenanceMix": {
+   "REA": 2,
+   "SRC": 54,
+   "DOC": 12,
+   "INF": 1
+  },
+  "alreadyPlanned": {
+   "is": true,
+   "where": "R-t3-06-01: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md (E1 stop sending the fake session grant, E2 real grant issuer in model-gateway, E4 planner on, E9 chat bridge, E12 model-initiated browser_agent in Do runs, deferred to Wave 6). Code on 2026-10-10 still sends the fake grant, so the plan has not landed. | R-t3-11-01: Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md E1/E2/E11 and OD13 plan the real grant issuer and broker-owned domain policy but it is not built; the per-site consent table, admin allow/block lists and secret vault are not in the plan | R-t3-06-09: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md E2 covers a broker-owned domain policy (hard fence of the start host plus user-listed domains); the read versus act split and recordings are not planned. | R-t3-03-07: apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md rows E1, E2, E4, E9, E10, E11, E12. Read-only Ask-mode browsing, the deep research fallback and per-host read versus act consent are not in the plan."
+  },
+  "sourceClusters": [
+   "C-t3-06-023",
+   "C-t3-06-026",
+   "C-t3-11-012",
+   "C-t3-11-025",
+   "C-t3-11-027",
+   "C-t3-06-028",
+   "C-t3-06-027",
+   "C-t3-03-010"
+  ],
+  "verification": {
+   "verevon": {
+    "finalId": "F-t3-008",
+    "status": "partial",
+    "exactGap": "The BFF still sends the placeholder grant_id \"session:{id}\" (browser.rs:1235) while model-gateway validates grants with the broker and fails closed (browser_run.rs:138-150), and no Rust code outside a test double calls AcquireGrant, so no hosted-browser AI run is authorized. The Do loop already advertises browser.observe and browser.act (agent.rs:4204-4211) but dispatches them through execute_step_with_subagent, which carries no browser grant (mod.rs:402), so every call returns a broker-validated-grant error; inline chat refuses browser_agent (tool_loop.rs:639). Per-site read or act consent, admin allow or block lists, model-blind secret substitution and read-only Ask-mode browsing have no code; the only domain fence is the grant AllowedDomains list.",
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1195-1275 (grant_id session:{id}, start_ai_run; comment says real grant issuance unbuilt)",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:122,147,471 (profile scope ephemeral vs persistent, persistent profile forwarded only when genuinely persistent)",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:138-200 (resolve_browser_grant: ValidateGrant, canonical domains, request must match broker policy)",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:300-325 (browser run refused under ZDR with typed refusal)",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:808-826 (AcquireGrant appears only in a test double)",
+     "apps/Model Plane/go/services/browser-broker/internal/server/server.go:42-110 (AcquireGrant mints grants with bounded AllowedDomains and sensitive-action scopes)",
+     "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62-69 (grant Store is an in-memory map behind a mutex)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4204-4212 (browser.observe and browser.act offered to the model; observe/act on an existing run only)",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:395-460 (execute_step_with_subagent passes no browser grant)",
+     "apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs:40-70 and :237-262 (ValidatedBrowserGrant; call fails without one)",
+     "apps/Model Plane/rust/services/execution-core/src/grpc.rs:860-910 (only ExecuteStep demands the BrowserBroker audience bearer and validates the grant)",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:1-60 (planner loop, risk module)",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:630-646 and :3050-3100 (inline chat blocks browser_agent; legacy HTTP dispatch needs BROWSER_AGENT_URL)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs:15-30 (Browserbase allowedDomains not wired)",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1695-1715 (single live-frame screencast capture; no recording)",
+     "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:121-125,186-187,267 (E1, E2, E4, E9, E10, E12 rows)"
+    ],
+    "reuse": [
+     "browser-broker AcquireGrant, ValidateGrant and grant.NormalizeAllowedDomains",
+     "model-gateway resolve_browser_grant and VerifiedBrowserBearer plumbing",
+     "execution-core ValidatedBrowserGrant, risk classes and durable per-action approvals",
+     "browser.observe and browser.act tool definitions already offered in the Do tool list",
+     "BFF persistent hosted-browser profiles with the persistent_cookie_use approval gate",
+     "Quarry navigation guard, SSRF guard and network guard"
+    ],
+    "constraints": "Model proposes, Quarry executes: browser.act accepts only snapshot, generation and ref (no URLs, selectors or JS), so any browser-subagent step must keep Quarry as the final enforcer. Grant authority belongs to the broker and the gateway must mint it under the user delegated BrowserBroker bearer, never from request JSON; domain policy ownership is OD13 and admin allow or block lists belong to the Control Plane, with Space decisions only narrowing (block wins). The broker grant store is in-memory, so grants vanish on broker restart and cannot be shared across replicas, which matters for long agent runs. Browser runs are already refused under ZDR, and logged-in profile sessions carry personal data that needs retention rules.",
+    "approachAdjustment": "The first half of the item is already plan rows E1 (S), E2 (M), E4 (M), E9 (M), E10 (L) and E12 (L, model-initiated tool in Do), all unbuilt; state it as landing those, not as new work. The model does not get a browser_agent tool today but observe/act against an EXISTING Quarry run, so a browser-subagent step that opens the run and lease must be added with the grant. For model-blind logins, reuse persistent profiles plus human takeover (E10) before building a vault with handle substitution in Quarry, which should be a separate later item. Per-site read or act consent, admin allow or block lists and an Ask-mode read-only browsing objective are the genuinely net-new parts; existing web_fetch and web_search already cover static read-only browsing.",
+    "effortRevised": "XL",
+    "effortNote": "As bundled (grant issuer, broker persistence, Do-mode browser subagent, Control-owned site policy, vault substitution, state diffs) it sums E2 M + E4 M + E9 M + E10 L + E12 L plus net-new governance and vault work; split into grant plus Do tool (L) and site governance (L).",
+    "verdict": "reword",
+    "verdictReason": "The state description is accurate (fake grant, fail-closed, no governance) but most of the first half is already a planned, unbuilt row set, the Do loop advertises dead browser tools, and the vault and site-governance parts need a different ownership and sequencing.",
+    "confidence": "high"
+   },
+   "reference": {
+    "finalId": "F-t3-008",
+    "verdict": "partial",
+    "checked": [
+     "scratchpad/tmp/ag2/protos/third_party__jetski__cortex_pb__cortex.proto.txt:47 (BrowserActionWaitingReason PAGE_ACCESS|ACTION_PERMISSION|both)",
+     "scratchpad/tmp/ag2/protos/third_party__jetski__codeium_common_pb__codeium_common.proto.txt:73 (BrowserJsExecutionPolicy incl. MODEL_DECIDES)",
+     "scratchpad/tmp/ag2/protos/third_party__jetski__unified_state_sync_pb__unified_state_sync.proto.txt:39 (BrowserAllowlistConfig.allowlisted_urls)",
+     "scratchpad/tmp/ag/ui/main.js:9281-9364 (execute_url grants: Browser Actuation Permissions; admin-blocked state)",
+     "scratchpad/tmp/ag/ui_copy.txt:735-745 (Denied Sites / Site Allowlist / Add to allowlist)",
+     "https://antigravity.google/docs/ide/allowlist-denylist/ (Google-maintained BadUrlsChecker denylist, fails closed; local allowlist starting with localhost; denylist wins)",
+     "scratchpad/extract/manus/node_modules/@next-agent/browser-runtime/src/contract/browserContract.ts:7,105-107,511-513,760-778 (22 browser_* tools, BROWSER_MCP_PROTOCOL_VERSION, documentRevision/expectedDocumentRevision binding)",
+     "scratchpad/extract/manus/node_modules/@next-agent/browser-runtime/src/BrowserMcpServer.ts and browserDriver/BrowserDriverTextInput.ts (SECRET_ORIGIN_MISMATCH / SENSITIVE_INPUT_DENIED present)",
+     "C:/dev/hermes-agent/tools/browser_vault_tool.py:13-17,178-201 (origin pre-checked and re-asserted in fill script)",
+     "scratchpad/extract/claude/.vite/build/index.chunk-EzXl5k4A.js (builtinBrowserDefaultDomainPolicy/AllowedDomains/BlockedDomains, localhost never blocked, PreviewBlocklist failing open on timeout and missing token)",
+     "C:/Program Files/WindowsApps/Claude_2.31226.1.0_x64__pzs8sxrjxfjjc/app/resources/ion-dist/i18n/en-US.json (UoPPb2U8EW Default site policy, QKY/9Ra51f, SyVfZ0jYvT, BcwtcpU/GS, N0mmi7Llpp, CQ0oI7SpAv Allow all browser actions?, j3vtNF/fHl private-network read-only allow, ReEF2YWB4k)",
+     "https://www.perplexity.ai/help-center/en/articles/13531023-managing-comet-assistant-permissions"
+    ],
+    "corrections": "(1) Perplexity Comet levels are named Browser Control / Read Only / No Access and are set by Perplexity Enterprise org admins on the Comet Setup screen. The help page does not mention MDM, so remove 'policy pushed via MDM' from web-perplexity-web-product-096. (2) Do not present 'denylist fails closed' as the shared reference practice. Antigravity's Google-maintained denylist fails closed (DOC), and Claude's admin allow/block lists fall back to block when no policy is served. But Claude's site-category lookup (PreviewBlocklist) explicitly fails open on a timeout or a missing token. (3) The ordered six-step pipeline and the per-(org,user) table domain->{control|read_only|no_access, source} are a synthesis for Verevon (INF). No single reference implements the whole chain; label it as recommended design. (4) Antigravity's split between read and act is real in source: PAGE_ACCESS vs ACTION_PERMISSION waiting reasons and execute_url 'Browser Actuation' grants. However, the public allowlist doc describes a single navigation gate, and I found no 'read_url' permission resource in the UI bundle. (5) For Claude, 'approvals batched by site' is not shown. The strings give a per-site 'asked before each action on {site}' prompt and an 'Allow all browser actions' switch (Claude in Chrome); per-run lists of denied and un-allowlisted sites are Antigravity UI. (6) Prevalence of a 'full agent browser toolset' omits Claude desktop. Its model-driven built-in browser exposes navigate, computer, form_input, read_page, find and screenshot tools (claude-extensibility-and-safety-047/079), so the count is at least 6 of 12.",
+    "prevalenceCorrect": false,
+    "caveats": [
+     "Manus live view / take-over (web-manus-024/025) is DOC-only and was not re-verified; Browser Operator is described as beta",
+     "Perplexity Comet permissions are DOC-only and Enterprise-admin scoped",
+     "Antigravity denylist fail-closed behaviour is DOC (not observed in code)",
+     "Claude built-in browser site policy is an enterprise/admin setting; Claude in Chrome approvals live partly in the Chrome extension (not inspected)",
+     "Manus 'versioned' contract = MCP protocol version date string 2025-11-25, not a semver tool-contract version"
+    ],
+    "confidence": "high"
+   }
+  }
+ }
+]

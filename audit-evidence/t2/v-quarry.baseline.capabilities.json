@@ -1,0 +1,2186 @@
+[
+  {
+    "id": "v-quarry-001",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/scrape single-page scrape",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:131",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:345-375",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:398-530"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md"
+    ],
+    "notes": "SRC. Fields: url, prev_fingerprint, cache, zdr, privacy, signals, ingest, render.waitForSelector, prefer_http3. No formats/actions/onlyMainContent/headers/location/timeout/maxAge. Response = NormalizedOutput with artifact refs."
+  },
+  {
+    "id": "v-quarry-002",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/scrape/stream (SSE scrape)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:132",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:1067-1110"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Same request; emits result/done events."
+  },
+  {
+    "id": "v-quarry-003",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/crawl async crawl handoff",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:133",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-668",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-516"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md",
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "SRC. Request only url/max_pages/max_depth/ingest/zdr; returns job_id. No scope/include/exclude/robots/sitemap/webhook/scrapeOptions. Refused under ZDR."
+  },
+  {
+    "id": "v-quarry-004",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/batch batch scrape",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:134",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:670-726",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:359-394"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. urls/ingest/zdr only; sequential Temporal loop; no per-URL options."
+  },
+  {
+    "id": "v-quarry-005",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/map site URL discovery",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:132",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:170-260"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/PARITY_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "SRC. /sitemap.xml + <=5 nested, robots filter, seed-page links, lexical rank by search, limit<=1000, include_subdomains. No robots Sitemap: lines, no index assist."
+  },
+  {
+    "id": "v-quarry-006",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/extract multi-URL structured extraction",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:184",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:37-58",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:129-188"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "SRC. <=25 URLs sequential; schema via Model Plane (gated off by manifest, see Observability); prompt ignored (dead_code); no web-search/wildcard/async job."
+  },
+  {
+    "id": "v-quarry-007",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/search Tavily-style web search",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:50-160",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:665",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/smart_router.rs:241"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/TAVILY_PARITY.md"
+    ],
+    "notes": "SRC. topic, time_range/days, exact_match, chunks_per_source, include_answer, format=context, highlight, facets, include/exclude_domains, intent, score_kinds, allow_paid_providers."
+  },
+  {
+    "id": "v-quarry-008",
+    "category": "Acquisition API surface",
+    "name": "Search verticals: images, videos, similar, suggest",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:1092",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:1186",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:1360",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:1565"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Images/videos via SearXNG; similar via DP vector index; suggest via Model Plane (gated)."
+  },
+  {
+    "id": "v-quarry-009",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/answer (+/stream) cited answer",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_routes.rs:44",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_routes.rs:145",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:330"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Search->fetch->synthesis with citations; synthesis requires Model Plane which the shipped token manifest does not grant (dev bypass only)."
+  },
+  {
+    "id": "v-quarry-010",
+    "category": "Acquisition API surface",
+    "name": "Agent/interact browser API (/v1/agent/runs, /step, /interact)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3659-3729",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1273-1667",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2228-2410"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. One governed action per call; interact is an alias of step."
+  },
+  {
+    "id": "v-quarry-011",
+    "category": "Acquisition API surface",
+    "name": "POST /v1/audio TTS/STT proxy",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/audio_routes.rs:82",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/audio_routes.rs:241",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:36-37"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Routed but model-audio manifest row granted:false so it answers unavailable by default."
+  },
+  {
+    "id": "v-quarry-012",
+    "category": "Acquisition API surface",
+    "name": "Async job status / events read",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:192",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:976",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:1050-1057"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "SRC. /v1/:kind/jobs list and /v1/jobs/:id/events (SSE drain-and-close, not live tail). No GET /v1/crawl/:id, no result pagination."
+  },
+  {
+    "id": "v-quarry-013",
+    "category": "Acquisition API surface",
+    "name": "Crawl cancel/pause/resume public endpoints",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md",
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md"
+    ],
+    "notes": "Searched edge routes.rs/resource_routes.rs for crawl/:id, cancel, pause: none. Temporal signals exist but no public route sends them."
+  },
+  {
+    "id": "v-quarry-014",
+    "category": "Acquisition API surface",
+    "name": "Crawl errors endpoint",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "Searched for \"errors\" routes in edge: none; failures only appear as events."
+  },
+  {
+    "id": "v-quarry-015",
+    "category": "Acquisition API surface",
+    "name": "Tenant webhooks registration via public edge",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go:8-10",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:376-383"
+    ],
+    "plannedIn": [],
+    "notes": "Control has generic /v1/webhooks CRUD with no org_id field; edge does not forward /v1/webhooks (searched routes.rs). Per-crawl webhook param absent."
+  },
+  {
+    "id": "v-quarry-016",
+    "category": "Acquisition API surface",
+    "name": "Change-detected webhook emission",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_webhook.rs:36-60",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/change_webhook.go:52"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/CHANGE_TRACKING.md"
+    ],
+    "notes": "SRC. Edge signs and posts to control which fans out to webhooks + notification-core. Requires postgres-queue path."
+  },
+  {
+    "id": "v-quarry-017",
+    "category": "Acquisition API surface",
+    "name": "Webhook delivery with HMAC, backoff, DLQ",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-34",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:385-395"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Backoff 1s/5s/30s/5m/1h, 5 attempts, dlq status; deliveries retry route."
+  },
+  {
+    "id": "v-quarry-018",
+    "category": "Acquisition API surface",
+    "name": "GraphQL endpoint",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/graphql/schema.rs:71-95",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:251"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GRAPHQL.md"
+    ],
+    "notes": "SRC. Only jobs query, always returns empty page."
+  },
+  {
+    "id": "v-quarry-019",
+    "category": "Acquisition API surface",
+    "name": "OpenAPI spec + generated TS/Python SDKs",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml",
+      "apps/Ingestion Plane/Quarry-v2/sdks/typescript/src/apis/index.ts",
+      "apps/Ingestion Plane/Quarry-v2/sdks/python/quarry_client/api/__init__.py"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md"
+    ],
+    "notes": "SRC. 46 OpenAPI paths vs ~75 edge routes (missing profiles, answer, audio, search verticals, most agent browser routes, fleets). SDK package 0.1.0, unpublished."
+  },
+  {
+    "id": "v-quarry-020",
+    "category": "Acquisition API surface",
+    "name": "CLI",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/sdks"
+    ],
+    "plannedIn": [],
+    "notes": "Searched Quarry-v2 for a CLI binary/package (sdks, crates bins): only quarry-edge-rs server and lab eval bins."
+  },
+  {
+    "id": "v-quarry-021",
+    "category": "Acquisition API surface",
+    "name": "MCP server / agent skills for Quarry",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md"
+    ],
+    "notes": "Searched crates/services/sdks for \"mcp\": no server. Explicitly deferred in backlog."
+  },
+  {
+    "id": "v-quarry-022",
+    "category": "Acquisition API surface",
+    "name": "Service-principal route scopes",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Service tokens limited to scrape/search/extract/artifacts/:id/agent; map/crawl/answer are user-token-only."
+  },
+  {
+    "id": "v-quarry-023",
+    "category": "Acquisition API surface",
+    "name": "Internal page-execution and frontier bridge APIs",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:104-122",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:898-1066",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/queue_routes.rs:200-202"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. run_page with runtime token + HMAC org binding; queue enqueue/pop/ack."
+  },
+  {
+    "id": "v-quarry-024",
+    "category": "Acquisition API surface",
+    "name": "Fleets API (batch of agent runs with shared budget)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/fleet_routes.rs:219-222",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fleet.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md"
+    ],
+    "notes": "SRC. In-process registry only; Go internal/fleet not used by workflows."
+  },
+  {
+    "id": "v-quarry-025",
+    "category": "Output formats & content processing",
+    "name": "Readability main-content extraction to markdown",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/readability.rs:1-60",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/readability.rs:235",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:504"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Mozilla-Readability subset + html2md; strips nav/header/footer/aside/ARIA landmarks and images."
+  },
+  {
+    "id": "v-quarry-026",
+    "category": "Output formats & content processing",
+    "name": "Markdown/HTML formats (artifact-backed refs)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:599-690",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:131-147",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:140"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Returned as FormatRef{artifact_id,bytes}; text fetched via GET /v1/artifacts/:id. Not written under ZDR, so ZDR scrape returns no content."
+  },
+  {
+    "id": "v-quarry-027",
+    "category": "Output formats & content processing",
+    "name": "Links extraction",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/links.rs:8-23",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:505"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Absolute href/text/rel; no scoping."
+  },
+  {
+    "id": "v-quarry-028",
+    "category": "Output formats & content processing",
+    "name": "Page metadata (title/desc/author/dates/canonical/og/robots)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/metadata.rs:12",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:184-217"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Includes JSON-LD fallbacks; language detect via whatlang when lang missing."
+  },
+  {
+    "id": "v-quarry-029",
+    "category": "Output formats & content processing",
+    "name": "Branding extraction (static HTML)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/branding_rendered.rs:60",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:550-590"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "SRC. favicon, theme colour, palette, logo, font, og:image. Rendered/visual branding only via optional vision sidecar flag."
+  },
+  {
+    "id": "v-quarry-030",
+    "category": "Output formats & content processing",
+    "name": "Screenshot / PDF output on scrape",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:140-147",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:700-704",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:150-245"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md"
+    ],
+    "notes": "Searched pipeline.rs and browser_driver.rs: screenshot/pdf always None; signals.screenshot only forces browser driver. Available only via agent actions."
+  },
+  {
+    "id": "v-quarry-031",
+    "category": "Output formats & content processing",
+    "name": "Images and attributes formats",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/images.rs:27-121",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/attributes.rs:23-329"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md"
+    ],
+    "notes": "SRC. Library functions exist (srcset/lazy images, hreflang, Dublin Core, tables) but no scrape caller (grep)."
+  },
+  {
+    "id": "v-quarry-032",
+    "category": "Output formats & content processing",
+    "name": "LLM formats json/summary/query",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:1-260",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:207-232"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "SRC. json used by /v1/extract, summary by answer pipeline; not selectable on /v1/scrape; Model Plane rows not granted by default."
+  },
+  {
+    "id": "v-quarry-033",
+    "category": "Output formats & content processing",
+    "name": "Structured data harvest (JSON-LD/hydration/key figures/tables)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/structured.rs:343",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:161"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Non-LLM channel returned on extract items and answer citations."
+  },
+  {
+    "id": "v-quarry-034",
+    "category": "Output formats & content processing",
+    "name": "PDF parsing",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/pdf.rs:1-40",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:839"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/TAVILY_PARITY.md"
+    ],
+    "notes": "SRC. lopdf text + heading ranking used only in answer fetcher; scrape pipeline does not branch on PDF content-type."
+  },
+  {
+    "id": "v-quarry-035",
+    "category": "Output formats & content processing",
+    "name": "DOCX / Office parsing",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/docx.rs:1-30"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/PARITY_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "SRC. DOCX extract_text exists, no caller. No XLSX/PPTX parsing found (grep)."
+  },
+  {
+    "id": "v-quarry-036",
+    "category": "Output formats & content processing",
+    "name": "Chunking for ingest",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/chunk.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:858-866"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. 1000-char paragraph chunks sent to Data Plane ingest; not a client-facing format."
+  },
+  {
+    "id": "v-quarry-037",
+    "category": "Output formats & content processing",
+    "name": "Charset sniffing, soft-404 detection, body cap",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/charset.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/soft_404.rs:97",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:430-500"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-038",
+    "category": "Output formats & content processing",
+    "name": "Change tracking (baseline chain, fingerprint compare)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:82-121",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:459-560",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_baseline_store.rs:27",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/change_history.rs:29-60"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/CHANGE_TRACKING.md",
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Raw-byte blake3 compare; check needs caller fresh_fingerprint; needs postgres-queue; no JSON/git-diff output."
+  },
+  {
+    "id": "v-quarry-039",
+    "category": "Output formats & content processing",
+    "name": "Semantic paragraph diff for change",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/diff.rs:72"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. diff_paragraphs/SemanticDiff exist with no caller (grep)."
+  },
+  {
+    "id": "v-quarry-040",
+    "category": "Output formats & content processing",
+    "name": "Field-level source trace on ingest",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:868-896",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:891-906"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. title/description/content selectors recorded; transform/source_trace.rs builder itself is unused."
+  },
+  {
+    "id": "v-quarry-041",
+    "category": "Output formats & content processing",
+    "name": "Determinism/policy stamp on outputs",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:1-78",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:742-758"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/POLICY.md"
+    ],
+    "notes": "SRC. Audit stamp only; sub-policies not enforced."
+  },
+  {
+    "id": "v-quarry-042",
+    "category": "Output formats & content processing",
+    "name": "Deterministic extraction profiles in agent observations",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:259-300",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:2288"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. JSON-LD/DOM/AX sources; NetworkJson and Visual declared but skipped."
+  },
+  {
+    "id": "v-quarry-043",
+    "category": "Output formats & content processing",
+    "name": "Page title provenance + model title enrichment",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:54-104",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:776-818"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. html/model/host provenance; model hop gated off by default."
+  },
+  {
+    "id": "v-quarry-044",
+    "category": "Rendering & browser engines",
+    "name": "Typed driver waterfall static -> TLS -> browser with JS-shell escalation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:36-95",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:56-260",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:387"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ARCHITECTURE.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-045",
+    "category": "Rendering & browser engines",
+    "name": "Static HTTP driver with pinned DNS and per-hop redirect validation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fetch.rs:48",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fetch.rs:193-217"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-046",
+    "category": "Rendering & browser engines",
+    "name": "TLS/JA3/JA4/H2 impersonation driver (wreq/BoringSSL)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-tls/src/lib.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/tls_driver.rs:21",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:299-307"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md"
+    ],
+    "notes": "SRC. Only the Chrome profile is registered; no redirects followed by TLS driver."
+  },
+  {
+    "id": "v-quarry-047",
+    "category": "Rendering & browser engines",
+    "name": "HTTP/3 (QUIC) transport preference",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/http3.rs:47",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:38-56",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1250-1282"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Feature + env gated; no JA3 fingerprint on QUIC."
+  },
+  {
+    "id": "v-quarry-048",
+    "category": "Rendering & browser engines",
+    "name": "Local Chromium CDP driver (chromiumoxide)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:116-272",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1872-2000",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:331-340"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Shared process; one CDP BrowserContext per session. Viewport mismatch relaunches the whole browser and clears other sessions (INF from ensure_browser 194-226)."
+  },
+  {
+    "id": "v-quarry-049",
+    "category": "Rendering & browser engines",
+    "name": "Browserbase managed-browser driver",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs:243",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:309-328"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/DRIVER_MATRIX.md"
+    ],
+    "notes": "SRC. Registered for scrape when keys set (recording false); cannot run agent sessions (no isolated_egress)."
+  },
+  {
+    "id": "v-quarry-050",
+    "category": "Rendering & browser engines",
+    "name": "Kernel and Browserless cloud drivers",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:1-60",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:497",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs:193"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/DRIVER_MATRIX.md",
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Implemented in crate but not registered in edge/runtime (grep main.rs)."
+  },
+  {
+    "id": "v-quarry-051",
+    "category": "Rendering & browser engines",
+    "name": "Stealth pre-scripts (webdriver/canvas/WebGL/audio) and consent auto-dismiss",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:52",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:292",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:424"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md"
+    ],
+    "notes": "SRC. Defined, never injected by any driver (grep STEALTH_SCRIPT/preamble/addScriptToEvaluateOnNewDocument)."
+  },
+  {
+    "id": "v-quarry-052",
+    "category": "Rendering & browser engines",
+    "name": "Scrape-time wait-for-selector and hydration settle",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:209-245",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:377-396"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Only render hint available to scrape callers."
+  },
+  {
+    "id": "v-quarry-053",
+    "category": "Rendering & browser engines",
+    "name": "Firecrawl-style scrape actions script (ActionRuntime)",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_runtime.rs:1-200",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/actions.rs:7-78"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "SRC. Exists with on_error retry; no route invokes it."
+  },
+  {
+    "id": "v-quarry-054",
+    "category": "Rendering & browser engines",
+    "name": "Browser profiles CRUD + restore probe",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/profile_routes.rs:102-432",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:135-157"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/PROFILES.md"
+    ],
+    "notes": "SRC. save/create/list/load/patch/delete/restore_probe; scope ephemeral/user/org."
+  },
+  {
+    "id": "v-quarry-055",
+    "category": "Rendering & browser engines",
+    "name": "Session snapshot capture/restore (cookies + web storage)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:675",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1771-1832",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:925-968",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/session.rs:16-50"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md"
+    ],
+    "notes": "SRC. Cookie expiry dropped, storage only current origin, IndexedDB never captured, UA/locale/tz not reapplied."
+  },
+  {
+    "id": "v-quarry-056",
+    "category": "Rendering & browser engines",
+    "name": "Profile stores (memory/Postgres + Redis cache; S3)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:551-600",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/cached_profile_store.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/s3_profile_store.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/PROFILES.md"
+    ],
+    "notes": "SRC. S3ProfileStore unwired. No at-rest encryption of cookie snapshots (grep crypto in stores)."
+  },
+  {
+    "id": "v-quarry-057",
+    "category": "Rendering & browser engines",
+    "name": "Mobile emulation via viewport",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1851-1860",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/lease.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. is_mobile only; no device presets."
+  },
+  {
+    "id": "v-quarry-058",
+    "category": "Rendering & browser engines",
+    "name": "Geolocation / locale / timezone / UA emulation",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-244"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "Searched quarry-browser/runtime for geolocation, SetTimezoneOverride, locale override, UserAgentOverride: none."
+  },
+  {
+    "id": "v-quarry-059",
+    "category": "Rendering & browser engines",
+    "name": "Login/auth handling",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:158-230",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:236-257"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Login/consent detected as ChallengeSignal; handled by human takeover + persisted profile only; no auto-login."
+  },
+  {
+    "id": "v-quarry-060",
+    "category": "Rendering & browser engines",
+    "name": "Remote live-view URL support",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:421-440",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2608-2656"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Trait + endpoint; local Chromium returns None; remote providers not usable for agent runs."
+  },
+  {
+    "id": "v-quarry-061",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Proxy pool with sticky (org,host) affinity and privacy processor gating",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/proxy_pool.rs:1-40",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:267-294",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/egress_broker.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md"
+    ],
+    "notes": "SRC. socks5/socks5h/http/https; EgressBroker health ordering."
+  },
+  {
+    "id": "v-quarry-062",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Residential / geo-targeted proxies",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/proxy_pool.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md"
+    ],
+    "notes": "Searched for country/geo selection in proxy_pool/egress_broker: none; pool is a flat env list."
+  },
+  {
+    "id": "v-quarry-063",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Per-agent-run dedicated proxy identity",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/proxy_affinity.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1490-1500"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-064",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "CAPTCHA/WAF challenge detection (no solving)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:158-180",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:236-257"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md"
+    ],
+    "notes": "SRC. Detection only; solving out of scope by policy."
+  },
+  {
+    "id": "v-quarry-065",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Block-status driver rotation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fingerprint_rotation.rs:1-30",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:95-108"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. 401/403/407/429/503 fall through to next driver; single TLS profile."
+  },
+  {
+    "id": "v-quarry-066",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Per-host AIMD scheduler and global autoscaled concurrency",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/host_scheduler.rs:130-160",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/autoscale.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:330-400"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/POLICY.md"
+    ],
+    "notes": "SRC. Wired into PageRunner."
+  },
+  {
+    "id": "v-quarry-067",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "robots.txt enforcement on scrape/crawl",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/robots.rs:25-98",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/robots_cache.rs:49",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:60-78",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:170-260"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md",
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "Searched pipeline.rs, routes.rs, orchestrator Go for robots checks: only /v1/map filters; respect_robots is fingerprint-only."
+  },
+  {
+    "id": "v-quarry-068",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "SSRF preflight + DNS pinning + private-host guard",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs:104",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-security/src/heur.rs:15",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:304-330"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/POLICY.md"
+    ],
+    "notes": "SRC. /v1/extract and /v1/map skip SecurityEngine.preflight but drivers self-guard via DNS pin (INF)."
+  },
+  {
+    "id": "v-quarry-069",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Browser egress isolation (DNS-pinned proxy + CDP Fetch guard + receipts)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:37-70",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:706",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1053",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3515"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Redacted egress receipts per session; QUIC disabled; local Chromium only."
+  },
+  {
+    "id": "v-quarry-070",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Blocklists (security snapshot + control blocklists)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:342-360",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/blocklists.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-071",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Retry/backoff",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:94-104",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/retry.rs:15-60"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Temporal activity retry + fallback chain; RunPolicy retry executor exported but unused."
+  },
+  {
+    "id": "v-quarry-072",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Response cache",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs:1-7",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:430-436"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/PRESETS.md"
+    ],
+    "notes": "SRC. Redis keyed by content fingerprint, only when caller sends prev_fingerprint; no URL/maxAge cache; SWR not implemented."
+  },
+  {
+    "id": "v-quarry-073",
+    "category": "Anti-bot, proxies & reliability",
+    "name": "Search provider circuit breakers and TTL cache",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/smart_router.rs:28-36",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/smart_router.rs:241"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/TAVILY_PARITY.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-074",
+    "category": "Orchestration & scale",
+    "name": "Temporal workflows (Scrape/Crawl/Batch/ChangeMonitor) + jobs poller",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:94-151",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/jobs/dispatcher.go:128-313"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. 2s poll of control jobs."
+  },
+  {
+    "id": "v-quarry-075",
+    "category": "Orchestration & scale",
+    "name": "BFS crawl with depth/page caps, pause/resume/cancel signals, checkpoints",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-516",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md"
+    ],
+    "notes": "SRC. Sequential, one page at a time."
+  },
+  {
+    "id": "v-quarry-076",
+    "category": "Orchestration & scale",
+    "name": "Crawl scoping (same-domain/subdomain, include/exclude globs, denial reasons)",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs:54-380",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md",
+      "apps/Ingestion Plane/Quarry-v2/docs/PARITY_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "SRC. Rust CrawlFrontier has it but is not used by any live path; Go workflow enqueues all links unscoped."
+  },
+  {
+    "id": "v-quarry-077",
+    "category": "Orchestration & scale",
+    "name": "Sitemap-seeded crawl",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-516"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "Searched Go services for sitemap: none; only /v1/map uses sitemaps."
+  },
+  {
+    "id": "v-quarry-078",
+    "category": "Orchestration & scale",
+    "name": "Durable URL frontier (Postgres SKIP LOCKED queue)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_queue.rs:74",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:518-610",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/activities.go:67"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/QUEUE.md"
+    ],
+    "notes": "SRC. Active when orchestrator has edge URL/token/secret; otherwise in-workflow slice."
+  },
+  {
+    "id": "v-quarry-079",
+    "category": "Orchestration & scale",
+    "name": "Request queue with priority and visibility timeouts",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/request_queue.rs:44-150",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:757"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/QUEUE.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-080",
+    "category": "Orchestration & scale",
+    "name": "Schedules API (cron, one-shot, change-monitor presets)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:239-340",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/schedule_wire.go:39-51",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/schedules/schedules.go:104-330"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SCHEDULES.md"
+    ],
+    "notes": "SRC. Only change_monitor maps to a workflow; scrape/crawl/batch schedules never run."
+  },
+  {
+    "id": "v-quarry-081",
+    "category": "Orchestration & scale",
+    "name": "Schedule trigger/backfill",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:192",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/cycle23.go:278-322"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SCHEDULES.md"
+    ],
+    "notes": "SRC. Control mounted with nil Temporal client: always 501."
+  },
+  {
+    "id": "v-quarry-082",
+    "category": "Orchestration & scale",
+    "name": "Recurring change monitor (hourly/daily/weekly)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:305-357",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/activities.go:393-456"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/CHANGE_TRACKING.md"
+    ],
+    "notes": "SRC. Fetch via run_page, compare/record via edge; requires postgres-queue on edge."
+  },
+  {
+    "id": "v-quarry-083",
+    "category": "Orchestration & scale",
+    "name": "Agent run budgets (max_steps, max_cost_usd, max_runtime_s)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:433-440",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs:155-216"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md"
+    ],
+    "notes": "SRC. Only max_steps enforced on HTTP/WS step; AgentLoop enforcement unused; defaults unbounded."
+  },
+  {
+    "id": "v-quarry-084",
+    "category": "Orchestration & scale",
+    "name": "Idle agent run reaper / lease TTL enforcement",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:337-344",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446"
+    ],
+    "plannedIn": [],
+    "notes": "Searched agent_routes/main/state for reap/sweep/idle/expire: none; ttl_s set but not enforced."
+  },
+  {
+    "id": "v-quarry-085",
+    "category": "Orchestration & scale",
+    "name": "Distributed browser workers / pool scaling",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:331-340",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md"
+    ],
+    "notes": "SRC. Single-process Chromium per edge, lease pool of 2; agent runs in in-process map (not horizontally shareable)."
+  },
+  {
+    "id": "v-quarry-086",
+    "category": "Orchestration & scale",
+    "name": "Ad-hoc job dedup / idempotency",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/migrations/007_jobs_idempotency_key.sql",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:124-172"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Idempotency keys on jobs and deterministic event IDs."
+  },
+  {
+    "id": "v-quarry-087",
+    "category": "Platform & ecosystem",
+    "name": "Actor marketplace / store",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:150-194"
+    ],
+    "plannedIn": [],
+    "notes": "Searched for actor/store/marketplace concepts in Quarry: none."
+  },
+  {
+    "id": "v-quarry-088",
+    "category": "Platform & ecosystem",
+    "name": "Domain-specific collectors (NAV vacancies, TED/Doffin procurement, official stats, legal revisions, Data.norge catalog)",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/navacancies/navacancies.go:1-30",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/procurement/procurement.go:1-12",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/officialseries/series.go:1-12",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/revisions/revisions.go:1-15",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/catalogwatch/catalogwatch.go:1-25"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Library packages with no importer (grep); closest analogue to Apify actors."
+  },
+  {
+    "id": "v-quarry-089",
+    "category": "Platform & ecosystem",
+    "name": "Presets (RunPolicy catalog on control; Rust domain bundles)",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:26-60",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/presets.rs:1-60"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/PRESETS.md"
+    ],
+    "notes": "SRC. Control /v1/presets not exposed via edge; Rust presets unused."
+  },
+  {
+    "id": "v-quarry-090",
+    "category": "Platform & ecosystem",
+    "name": "Artifact storage backends (memory/FS/S3) + CAS",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs:171",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs:338",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs:483",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/cas_store.rs:32"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-091",
+    "category": "Platform & ecosystem",
+    "name": "Sources (\"tracked websites\") and snapshots resources",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:382-731",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:1003-1020"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Crawl run_page materialises Source rows."
+  },
+  {
+    "id": "v-quarry-092",
+    "category": "Platform & ecosystem",
+    "name": "Datasets / key-value store API",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293"
+    ],
+    "plannedIn": [],
+    "notes": "Searched edge routes for dataset/kv: none."
+  },
+  {
+    "id": "v-quarry-093",
+    "category": "Platform & ecosystem",
+    "name": "Local Tantivy corpus index (own-corpus search)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/local_index.rs:166",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:846-853"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Org-scoped; skipped under ZDR. INF: tension with no-retrieval-plane rule."
+  },
+  {
+    "id": "v-quarry-094",
+    "category": "Platform & ecosystem",
+    "name": "Data Plane ingest connector (HTTP/gRPC) with per-user ownership",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ingest_client.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grpc/ingest_adapter.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:845-883"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-095",
+    "category": "Platform & ecosystem",
+    "name": "Hybrid search via Data Plane vector retrieval + DP rerank",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/hybrid.rs:26",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vector_index.rs:316",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/rerank.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/PARITY_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "SRC. RRF fusion; ZDR/sovereign skip."
+  },
+  {
+    "id": "v-quarry-096",
+    "category": "Platform & ecosystem",
+    "name": "Search providers SearXNG/Stract/Brave/Serper",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/serp.rs:372",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/serp.rs:475",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/serp.rs:576",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/serp.rs:974",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:880-960"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/TAVILY_PARITY.md"
+    ],
+    "notes": "SRC. Paid providers need allow_paid_providers and non-ZDR; zero_saas_search switch."
+  },
+  {
+    "id": "v-quarry-097",
+    "category": "Platform & ecosystem",
+    "name": "Visual-RAG page-image producer to Data Plane",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/page_renderer.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/page_image.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. One PNG per document; ZDR no-op."
+  },
+  {
+    "id": "v-quarry-098",
+    "category": "Platform & ecosystem",
+    "name": "Usage metering to billing-core",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs:1-93",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:451-458"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/BILLING.md"
+    ],
+    "notes": "SRC. NATS usage.> events; no credit enforcement in Quarry."
+  },
+  {
+    "id": "v-quarry-099",
+    "category": "Platform & ecosystem",
+    "name": "Credits/billing enforcement inside Quarry",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/BILLING.md"
+    ],
+    "notes": "Searched for credit/quota checks on edge routes: none (metering only)."
+  },
+  {
+    "id": "v-quarry-100",
+    "category": "Platform & ecosystem",
+    "name": "Team/org usage aggregates",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:836-975"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Forward to control."
+  },
+  {
+    "id": "v-quarry-101",
+    "category": "Platform & ecosystem",
+    "name": "GDPR org-erasure purge consumer",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/gdpr/subscriber.go:48",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:206-227"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Off unless NATS_SHARED_URL set."
+  },
+  {
+    "id": "v-quarry-102",
+    "category": "Observability & operations",
+    "name": "Typed event bus (in-process + NATS) and durable event history",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/nats_event_bus.rs:79",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_event_history.rs:31",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:110-118"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/EVENT_HISTORY.md"
+    ],
+    "notes": "SRC. ZDR events live-only."
+  },
+  {
+    "id": "v-quarry-103",
+    "category": "Observability & operations",
+    "name": "Prometheus /metrics on edge",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:6-14"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/GAP.md"
+    ],
+    "notes": "SRC comment confirms exporter inert and no /metrics route; searched main.rs/routes.rs."
+  },
+  {
+    "id": "v-quarry-104",
+    "category": "Observability & operations",
+    "name": "OTLP tracing",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:1-25",
+      "apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/quarryotel.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Enabled when OTEL_EXPORTER_OTLP_ENDPOINT set."
+  },
+  {
+    "id": "v-quarry-105",
+    "category": "Observability & operations",
+    "name": "Readiness/durability gating and production refuse-to-start guards",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:312-334",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:690-704",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:63-117"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-106",
+    "category": "Observability & operations",
+    "name": "Self-host compose stack",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/deploy/compose/docker-compose.yml",
+      "apps/Ingestion Plane/Quarry-v2/deploy/compose/Dockerfile.edge:100-150"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SELF_HOST.md"
+    ],
+    "notes": "SRC. postgres, dragonfly, temporal, edge, vision-sidecar, control, orchestrator, searxng."
+  },
+  {
+    "id": "v-quarry-107",
+    "category": "Observability & operations",
+    "name": "Multi-tenant isolation (JWT org, actor-scoped runs, tenant-stamped artifacts)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:59-140",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:414-418",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:474-486"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/TENANCY.md"
+    ],
+    "notes": "SRC. Gap: control webhooks not org-scoped."
+  },
+  {
+    "id": "v-quarry-108",
+    "category": "Observability & operations",
+    "name": "Cross-plane token manifest gating Model Plane features",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:1-38"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. model-invoke/stream/audio granted:false: all Model-Plane-backed features off except dev bypass."
+  },
+  {
+    "id": "v-quarry-109",
+    "category": "Observability & operations",
+    "name": "Benchmarks / eval harness / scoreboard",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/lab/evals/src/main.rs",
+      "apps/Ingestion Plane/Quarry-v2/lab/evals/src/browser_benchmark.rs",
+      "apps/Ingestion Plane/Quarry-v2/lab/evals/src/web_rerank_gate.rs",
+      "apps/Ingestion Plane/Quarry-v2/docs/SCOREBOARD.md"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/SCOREBOARD.md",
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Harness exists; scoreboard all _pending_."
+  },
+  {
+    "id": "v-quarry-110",
+    "category": "Observability & operations",
+    "name": "Alerting",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs"
+    ],
+    "plannedIn": [],
+    "notes": "Searched Quarry for alert rules/alertmanager: none."
+  },
+  {
+    "id": "v-quarry-111",
+    "category": "Observability & operations",
+    "name": "Retention janitor",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/janitor/janitor.go:58-62"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Inert unless QUARRY_RETENTION_DAYS>0 and dry-run off."
+  },
+  {
+    "id": "v-quarry-112",
+    "category": "Observability & operations",
+    "name": "Canary splitter and A/B experiment tagging",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/canary.rs:1-15",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/experiments.rs:1-20"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-113",
+    "category": "Observability & operations",
+    "name": "Vision sidecar (OpenCV) for visual diff/preprocess",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-vision-sidecar/app/main.py:106",
+      "apps/Ingestion Plane/Quarry-v2/services/quarry-vision-sidecar/app/main.py:145",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1292-1340"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "SRC. Opt-in via vision flags."
+  },
+  {
+    "id": "v-quarry-114",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Browser chrome with tabs (list/new/select/close)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1083-1134",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:385-396",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3697-3702"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-115",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Address bar / omnibox",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-omnibox.ts:3-15"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Free text goes to a google.com search URL, not Quarry /v1/search."
+  },
+  {
+    "id": "v-quarry-116",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Back / forward / reload controls",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:824-825"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. aria labels Gå tilbake/Gå fremover/Last nettlesersiden på nytt."
+  },
+  {
+    "id": "v-quarry-117",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Interactive live page (click/scroll/keys over frame stream/WS)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1740",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1870",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:420-430",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2968-3195"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-118",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Profiles manager with scope and privacy/ZDR indicators",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:440-455"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. create/rename/delete/restore-probe."
+  },
+  {
+    "id": "v-quarry-119",
+    "category": "In-app browser shell (user-facing)",
+    "name": "DevTools panel (console/network/lifecycle)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1912-1940",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3454",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1446-1610"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-120",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Timeline / evidence / agent replay viewer",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:2090",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:2121",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserTimelineDetail.tsx"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Read-only replay of receipts."
+  },
+  {
+    "id": "v-quarry-121",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Manual screenshot and visual observation view",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Ta skjermbilde, Visuell observasjon."
+  },
+  {
+    "id": "v-quarry-122",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Browser embedded in chat live-run panel",
+    "status": "shipped",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:39-40",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:608"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-123",
+    "category": "In-app browser shell (user-facing)",
+    "name": "URL history / bookmarks",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx"
+    ],
+    "plannedIn": [],
+    "notes": "grep bookmark=0; Nettleserhistorikk is the action timeline, not visited-URL history."
+  },
+  {
+    "id": "v-quarry-124",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Downloads manager / file uploads",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1877-1882"
+    ],
+    "plannedIn": [
+      "docs/BROWSER_WORKSPACE_PLAN.md",
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "grep download/upload=0 in BrowserChrome; driver capability false."
+  },
+  {
+    "id": "v-quarry-125",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Extensions, password/autofill, reader mode, find-in-page, zoom, split view",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx"
+    ],
+    "plannedIn": [],
+    "notes": "grep reader/zoom/split/autofill/extension in BrowserChrome.tsx: 0 relevant hits."
+  },
+  {
+    "id": "v-quarry-126",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Annotate/comment on page, page recording",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx"
+    ],
+    "plannedIn": [],
+    "notes": "grep annotat/recording=0; comment hits are code comments."
+  },
+  {
+    "id": "v-quarry-127",
+    "category": "In-app browser shell (user-facing)",
+    "name": "Site permission prompts (geo/camera/notifications)",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs"
+    ],
+    "plannedIn": [],
+    "notes": "Searched chromiumoxide.rs for Browser.grantPermissions/permission handling: none."
+  },
+  {
+    "id": "v-quarry-128",
+    "category": "AI-browser control",
+    "name": "Observation protocol (AX snapshot, DOM summary, deltas, proof bundle, telemetry)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:19-97",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:347-460",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:346",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:952"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-129",
+    "category": "AI-browser control",
+    "name": "Element refs bound to CDP backend nodes; atomic verify-and-act",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1089-1200",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1232",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1019"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Stale refs fail with TARGET_REPAIR_REQUIRED."
+  },
+  {
+    "id": "v-quarry-130",
+    "category": "AI-browser control",
+    "name": "Semantic locators (role/text/label/placeholder/testId/nth)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:514-548",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:666-760"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Ambiguous matches fail closed."
+  },
+  {
+    "id": "v-quarry-131",
+    "category": "AI-browser control",
+    "name": "Cross-frame (OOPIF) explicit frame actions",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:658-816",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:418-431"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Frames disclosed origin-only."
+  },
+  {
+    "id": "v-quarry-132",
+    "category": "AI-browser control",
+    "name": "Coordinate actions (click_point, mouse_wheel) for vision/computer-use",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:671-710",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2841",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2951"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-133",
+    "category": "AI-browser control",
+    "name": "Raw JS evaluate and raw CSS actions",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:821-823",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:243-260"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Available on normal runs without per-action approval (risk)."
+  },
+  {
+    "id": "v-quarry-134",
+    "category": "AI-browser control",
+    "name": "BrowserBroker grant validation per action with broker-owned domain policy",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-339",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1377-1414",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2257-2266",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grant_validator.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:183-198"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Required in production."
+  },
+  {
+    "id": "v-quarry-135",
+    "category": "AI-browser control",
+    "name": "One-shot approval grants for sensitive actions (dialog/upload/download)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:135-312",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2276-2292"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Exact frame/dialog/artifact scope; replay rejected."
+  },
+  {
+    "id": "v-quarry-136",
+    "category": "AI-browser control",
+    "name": "Run-level domain allowlist enforcement pre/post action",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:442-444",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2294-2400",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:25-150"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-137",
+    "category": "AI-browser control",
+    "name": "Driver capability gating (fail-closed)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:269-290",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1131-1268"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-138",
+    "category": "AI-browser control",
+    "name": "JS dialog handling",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:822",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2732-2800",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:608-620"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Never auto-resolved."
+  },
+  {
+    "id": "v-quarry-139",
+    "category": "AI-browser control",
+    "name": "Artifact-only uploads/downloads",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2102",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2211",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1877-1882"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Implemented but capability false so actions are rejected."
+  },
+  {
+    "id": "v-quarry-140",
+    "category": "AI-browser control",
+    "name": "Human takeover / control-mode transfer",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1733-1785",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:86-90",
+      "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497-624"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Recorded server-side but /step does not block agent while human_takeover; receipts do not type initiator."
+  },
+  {
+    "id": "v-quarry-141",
+    "category": "AI-browser control",
+    "name": "Live frames (single, SSE, WS) and typed agent events SSE with replay",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2541",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2658",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2791",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2907"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. ?from_seq replay from durable history."
+  },
+  {
+    "id": "v-quarry-142",
+    "category": "AI-browser control",
+    "name": "Immutable step receipts, browser timeline, run checkpoints and resume",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:39-560",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1308-1361",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/migrations/0006_agent_run_checkpoints.sql"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md"
+    ],
+    "notes": "SRC. Non-ZDR only; durable with postgres-queue."
+  },
+  {
+    "id": "v-quarry-143",
+    "category": "AI-browser control",
+    "name": "Procedure compile + replay/quality/impact checks",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_procedure.rs:61-200",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2466-2538"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. No procedure store and no execute-procedure endpoint."
+  },
+  {
+    "id": "v-quarry-144",
+    "category": "AI-browser control",
+    "name": "Multi-tab per run and multi-run parallelism",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2447-2590",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3203-3452"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. window.open rewritten to same-tab nav (chromiumoxide.rs:969-1005)."
+  },
+  {
+    "id": "v-quarry-145",
+    "category": "AI-browser control",
+    "name": "ZDR browser runs (no durable receipts/profile/resume)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:527-534",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1347-1353",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1460-1466"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-146",
+    "category": "AI-browser control",
+    "name": "Ephemeral-evidence (lite) execution tier",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:388-411",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1143-1178"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "SRC. Lab flag QUARRY_LITE_EXPERIMENTAL; falls back to Chromium."
+  },
+  {
+    "id": "v-quarry-147",
+    "category": "AI-browser control",
+    "name": "Prompt-injection containment (labelling/detection)",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "Searched crates for injection/untrusted labelling: none in observation path; design in improvements doc section 20."
+  },
+  {
+    "id": "v-quarry-148",
+    "category": "AI-browser control",
+    "name": "Sensitive-data redaction and agent scratchpad memory",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_memory.rs:14",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_memory.rs:52"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/PARITY_IMPLEMENTATION_PLAN.md"
+    ],
+    "notes": "SRC. No caller in edge."
+  },
+  {
+    "id": "v-quarry-149",
+    "category": "AI-browser control",
+    "name": "Credential vault / secret references for agent login",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:640-827"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md"
+    ],
+    "notes": "Searched AgentAction and edge for secret/credential refs: none."
+  },
+  {
+    "id": "v-quarry-150",
+    "category": "AI-browser control",
+    "name": "Quarry-side planner/agent loop",
+    "status": "stub",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/planner.rs",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/mp_client.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Exists but unused by routes; planning is Model Plane (execution-core) by design."
+  },
+  {
+    "id": "v-quarry-151",
+    "category": "AI-browser control",
+    "name": "Challenge signals and visual evidence artifacts per observation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:158-230",
+      "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vision.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-152",
+    "category": "Integration-plane overlap",
+    "name": "First-party OAuth connector broker (connect/reconnect sessions, callback)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/api/server.go:256-305",
+      "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:97-300"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/integration-corev2/docs/COMPLETION_PHASES.md"
+    ],
+    "notes": "SRC. Providers incl. microsoft, google, slack, notion, github, shopify, stripe, okta, scim, meta family, linkedin, tiktok, snapchat, x, discord, shipping, openai-codex-subscription."
+  },
+  {
+    "id": "v-quarry-153",
+    "category": "Integration-plane overlap",
+    "name": "Encrypted token vault + internal short-lived token broker",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/crypto/vault.go:16-20",
+      "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1315"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. AES-GCM."
+  },
+  {
+    "id": "v-quarry-154",
+    "category": "Integration-plane overlap",
+    "name": "Named provider actions (whitelisted, ~142 ops) with write attestation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:164",
+      "apps/Ingestion Plane/integration-corev2/internal/attestation/verifier.go",
+      "apps/Ingestion Plane/integration-corev2/internal/api/server.go:539-573"
+    ],
+    "plannedIn": [
+      "docs/actions-surface-operations.md"
+    ],
+    "notes": "SRC. Raw provider proxy returns 410 (legacy_routes.go:69-74)."
+  },
+  {
+    "id": "v-quarry-155",
+    "category": "Integration-plane overlap",
+    "name": "Provider webhooks intake + Rust normalizer",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/api/server.go:933-1101",
+      "apps/Ingestion Plane/integration-corev2/services/webhook-normalizer-rs/src/main.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-156",
+    "category": "Integration-plane overlap",
+    "name": "Sync jobs with claim/progress/cancel/retry and SSE snapshots",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/api/server.go:589-930"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-157",
+    "category": "Integration-plane overlap",
+    "name": "Data sync into knowledge (Data Plane documents handoff, finspo SharePoint)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/handoff/dataplane.go:92-182",
+      "apps/Ingestion Plane/integration-corev2/cmd/finspo-worker/main.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-158",
+    "category": "Integration-plane overlap",
+    "name": "Per-connection ZDR assessment/acknowledgement",
+    "status": "partial",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/api/zdr_acknowledgement.go:1-60",
+      "apps/Ingestion Plane/integration-corev2/internal/zdr/contract.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Dark by default (ZDR_ACKNOWLEDGEMENT_ENABLED)."
+  },
+  {
+    "id": "v-quarry-159",
+    "category": "Integration-plane overlap",
+    "name": "SCIM provisioning and Codex-subscription inference",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1133-1208",
+      "apps/Ingestion Plane/integration-corev2/internal/api/codex_subscription.go:36-237"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-160",
+    "category": "Integration-plane overlap",
+    "name": "MCP/tool exposure of connectors or Quarry",
+    "status": "absent",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1-20"
+    ],
+    "plannedIn": [
+      "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md"
+    ],
+    "notes": "Searched IC and Quarry for MCP server: none (gateway only proxies Model Plane MCP-server registry)."
+  },
+  {
+    "id": "v-quarry-161",
+    "category": "Integration-plane overlap",
+    "name": "Connector-to-browser bridge (use connected accounts in browser runs)",
+    "status": "absent",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/egress/guard.go:23"
+    ],
+    "plannedIn": [],
+    "notes": "Searched IC for quarry references (only a comment) and Quarry for connector tokens: none."
+  },
+  {
+    "id": "v-quarry-162",
+    "category": "Integration-plane overlap",
+    "name": "Outbound SSRF/DNS-rebinding guard for provider HTTP",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/egress/guard.go:1-40"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-quarry-163",
+    "category": "Integration-plane overlap",
+    "name": "Integration metrics endpoint",
+    "status": "shipped",
+    "evidence": [
+      "apps/Ingestion Plane/integration-corev2/internal/api/server.go:178"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Internal auth only."
+  }
+]

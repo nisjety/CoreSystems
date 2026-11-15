@@ -1,0 +1,337 @@
+{
+ "verdict": "Mostly trustworthy, and complete enough to hand to the team once a handful of framing fixes are applied. Every number in the front matter, section 9 and Appendix A recomputes exactly from _context.json, the baselines and items.verified.json (227 baseline records and their per-category status splits, tiers 24/45/27 to 23/42/31, verdicts 9/78/9, 29 effort revisions, statuses 68/21/4/3, reference check 24 items with 2 confirmed, 22 partial and 17 prevalence fixes, 1,505 records, 446 clusters, 144 candidates). The Priority table, all 96 wave-table rows (tier, effort, wave, 'was' markers) and all 96 card headers agree with _titles.json; every item sits in exactly one wave; the quick-win list matches the flags; and the ten ADR item lists match _context.json. The brief's six points are answered: table stakes (section 2), best of breed (section 3), differentiators and their benefit (section 7), separated nice-to-haves (section 6), three tiers, and a read-only audit framing. No blockers. The real problems are coherence slips where framing text kept pre-verification wording that the cards already corrected: headline 6 overstates prevalence ('all five') and calls attachments absent next to a Partial status; open question 3 re-opens the approval-resume question that section 1.5 declares answered; the F-t1-003/F-t1-004 plane columns and the F-t1-001 dependency repeat placements or a new Control decision that verification rejected; and Teams string evidence is tagged [REA] although Appendix A.3 says the strings were tokenizer-extracted, which overstates REA's role. The rest are minor: wording, a broken Appendix B cross-reference, a double-counted table-stakes row, the stray Apify mention, and undefined abbreviations.",
+ "checked": [
+  "Front matter and Appendix A counts recomputed with node against _context.json, both baseline capability files and items.verified.json: 227 records, 12 categories with per-category status splits (102/51/63/7/4), tiers before and after, 5 tier changes, verdicts, effort revisions (29: 25 up, 4 down), verified statuses, reference-side 24/2/22/17, 1,505 records by source, 446 clusters, 144 candidates plus 1 dropped (11 count groups, all correct)",
+  "Section 1.4 Priority table: all 23 rows checked for title, status, effort and wave against _titles.json (all match; plane column checked against the cards, 2 mismatches)",
+  "Section 1.3 headlines: all 10 checked against card text and the verification exactGap and verdictReason (8 consistent, headline 6 inconsistent; headline 4 consistent but contradicted by 10.2 Q3)",
+  "Section 9 wave tables: all 96 rows checked by node for tier, 'was' tier, effort, 'was' effort and wave against _titles.json and the original estimates (0 mismatches); every item in exactly one wave; every Priority item present",
+  "Section 9.2 quick wins: 11 S/M items and 6 L items with the flag recomputed from _titles.json (match)",
+  "ADR topics: 10 ADRs in 1.5 and 9.3 compared with _context.json adrNeeded (match); wave-table ADR references compared with those lists (7 gaps)",
+  "All 96 card headers in sec-30/40/50 parsed and compared with _titles.json for status, effort, wave, title and tier file (match apart from two quote-style title differences)",
+  "Roadmap Plane column compared with card plane for all 96 items (about 22 differences, 2 material)",
+  "Section 2 common ground: all 72 rows counted by status (5/38/27/1/1 confirmed) and 16 rows spot-checked for Verevon status against the verified item status and for prevalence against the reference corrections",
+  "Section 3 best of breed: all 52 rows compared with bestSource in _titles.json and with the reference corrections (consistent; corrected attributions applied)",
+  "Section 7 differentials: all 37 bullets and their 62 item links checked to exist and match their topic (all valid)",
+  "Section 8 strengths: 15 strengths checked against _inputs.strengths.json, the baseline and the Priority card statuses (no strength contradicts a card)",
+  "Appendix A REA limits: 9 quantitative claims checked against teams/slack/grokbot inventory and deep-dive files (all supported); honesty about REA limits, web-delivered Slack and Teams UI and nothing launched checked",
+  "Cross-references to Appendices B, C and D and the section numbering checked (1 broken reference)",
+  "Brief coverage: 6 brief points mapped to sections; status and verification definitions and abbreviation coverage checked in the framing sections"
+ ],
+ "issues": [
+  {
+   "id": 1,
+   "severity": "major",
+   "file": "sec-10-front.md",
+   "where": "1.3 Headline findings, item 6",
+   "problem": "Headline 6 says 'All five references have them' for DMs, reactions, edit and delete, attachments and message search. Section 2 (corrected prevalence) gives DMs 4 of 5, edit and delete 4 of 5 and message search 4 of 5; only reactions and attachments are 5 of 5. The headline also calls attachments absent while the Priority table directly below (and card F-t1-013) shows F-t1-013 as Partial, with no explanation.",
+   "evidence": "sec-20-common.md 2.1 rows (DMs 4 of 5, Edit and delete 4 of 5, Emoji reactions 5 of 5, Attachments 5 of 5) and 2.4 (message search 4 of 5); _titles.json F-t1-013 status partial; items.verified.json F-t1-013 exactGap: the composer has no attach code and owner-plane plumbing exists only for connector imports.",
+   "patch": {
+    "find": "All five references have them (",
+    "replace": "Reactions and attachments are in 5 of 5 references, and DMs, edit and delete, and message search in 4 of 5; F-t1-013 is rated Partial only because connector imports already carry Space provenance, not because room attachments exist ("
+   }
+  },
+  {
+   "id": 2,
+   "severity": "major",
+   "file": "sec-70-roadmap.md",
+   "where": "10.2 Open questions, question 3",
+   "problem": "Question 3 still asks whether a granted approval resumes, while section 1.5 says this question is 'now answered by verification', headline 4 and the strengths section say it is settled, and card F-t1-010 records the answer. The document contradicts itself on whether this is open.",
+   "evidence": "sec-10-front.md 1.5 last paragraph and 1.3 headline 4; sec-60-diff.md section 8 'Durable approvals that really resume'; items.verified.json F-t1-010 exactGap: the execution-core approval_delivery_worker resumes execute_provider_action, book_shipment and tickets.create, shell/browser/MCP fail closed, and the model-gateway decide path returns a deliberate quarantine placeholder while the card says approving lets the run continue for every tool.",
+   "patch": {
+    "find": "3. Does a granted approval resume the paused run on the live-stream path today? The continuation dispatcher exists for three action kinds, but approval-gated resume is described as quarantined, so the behaviour must be traced end to end before",
+    "replace": "3. Approval resume is answered by verification: the execution-core worker resumes three idempotent action kinds and fails closed for shell, browser and MCP tools, while the model-gateway decide path still returns a deliberate quarantine placeholder and the room card says every tool continues. What remains open is how the card should state that difference before"
+   }
+  },
+  {
+   "id": 3,
+   "severity": "major",
+   "file": "sec-10-front.md",
+   "where": "1.4 Priority table, row F-t1-003",
+   "problem": "The Plane column for F-t1-003 omits the Model Plane. Verification found that Session Core is the only plane that sees a post or run change and must be the first event emitter; card F-t1-003 lists Model Plane (Session Core outbox events) first. The framing table repeats the pre-verification placement that verification rejected, and plane ownership is an architecture rule.",
+   "evidence": "items.verified.json F-t1-003 verdictReason ('puts the first event emitter in the Application Plane when Session Core is the only plane that sees a post or run state change'); sec-30-p1.md F-t1-003 header row; _titles.json plane is the stale pre-verification value.",
+   "patch": {
+    "find": "| Absent | XL | Application Plane; Frontend Plane; Control Plane | W1 |",
+    "replace": "| Absent | XL | Model Plane (Session Core outbox); Application Plane; Frontend Plane; Control Plane | W1 |"
+   }
+  },
+  {
+   "id": 4,
+   "severity": "major",
+   "file": "sec-70-roadmap.md",
+   "where": "9.1 Wave 1 table, row F-t1-003",
+   "problem": "The Plane column lists Application first and Model last, although the section says planes are listed 'in the order the verification named them' and verification (and card F-t1-003) put Session Core in the Model Plane first as the emitter.",
+   "evidence": "sec-70-roadmap.md section 9 intro sentence on plane order; items.verified.json F-t1-003 verdictReason; sec-30-p1.md F-t1-003 header row.",
+   "patch": {
+    "find": "| priority | XL | Application, Frontend, Control, Model |",
+    "replace": "| priority | XL | Model, Application, Frontend, Control |"
+   }
+  },
+  {
+   "id": 5,
+   "severity": "major",
+   "file": "sec-70-roadmap.md",
+   "where": "9.1 Wave 1 table, row F-t1-001 (Depends on)",
+   "problem": "F-t1-001 is shown as depending on 'a Control space:post or thread:append decision', implying new Control work. Verification and card F-t1-001 say the opposite: Control's thread:append decision is already member-capable (editor, manager, owner), so no new decision type is needed; the fix is the Session Core subject comparison plus a no-invoke route. Headline 1 and the ADR 1 recommendation say the same.",
+   "evidence": "items.verified.json F-t1-001 verification.verevon.reuse ('no new space:post decision type is required'); sec-30-p1.md F-t1-001 'Reuse thread:append rather than a new decision type'; sec-10-front.md headline 1; ADR 1 recommendation in 9.3.",
+   "patch": {
+    "find": "ADR 1 (message ownership); a Control space:post or thread:append decision;",
+    "replace": "ADR 1 (message ownership); the existing member-capable Control thread:append decision (no new decision type);"
+   }
+  },
+  {
+   "id": 6,
+   "severity": "major",
+   "file": "sec-80-appx-A.md",
+   "where": "A.3 How REA was used",
+   "problem": "Provenance inconsistency. A.3 states that the Teams locale strings were extracted with a purpose-built tokenizer and that REA did not do the string lookup [SRC], but the Teams product-surface records and the sections built from them tag that string evidence [REA] (114 of 167 product-surface records), and the front matter defines [REA] as 'observed through the REA tool'. A reader cannot tell that most Teams [REA] tags mean 'string found in an REA-parsed file', which overstates REA's role.",
+   "evidence": "teams.product-surface.features.json provenance counts (REA 114, DOC 28, SRC 23, INF 2); teams.product-surface.deep.md lines 13-14 (16,397 and 25,288 pairs parsed by the analyst, not REA); sec-80-appx-A.md A.3 first bullet; sec-10-front.md provenance definition; Teams claims tagged [REA] in sec-20 and sec-60.",
+   "patch": {
+    "find": "so REA contributed structure and parse validation, not the string lookup. [SRC]",
+    "replace": "so REA contributed structure and parse validation, not the string lookup. [SRC] The Teams cards and tables nevertheless tag these locale strings [REA]; for Teams, read that tag as a string located in files REA parsed, not as an REA trace."
+   }
+  },
+  {
+   "id": 7,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.4 Priority table, row F-t1-004",
+   "problem": "Plane column includes the Application Plane for F-t1-004, but verification said the item misplaced the live-state projection in the Application Plane (the data comes from Session Core) and card F-t1-004 lists only Model Plane and Frontend Plane.",
+   "evidence": "items.verified.json F-t1-004 verdictReason; sec-30-p1.md F-t1-004 header row 'Model Plane (run read decision branch, steer framing); Frontend Plane (...)'.",
+   "patch": {
+    "find": "| Partial | XL | Model Plane; Application Plane; Frontend Plane | W2 |",
+    "replace": "| Partial | XL | Model Plane; Frontend Plane | W2 |"
+   }
+  },
+  {
+   "id": 8,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "9.1 Wave 2 table, row F-t1-004",
+   "problem": "Same stale plane as the front matter: Application is listed for F-t1-004 although verification removed it and the card lists Model and Frontend only.",
+   "evidence": "items.verified.json F-t1-004 verdictReason; sec-30-p1.md F-t1-004 header row.",
+   "patch": {
+    "find": "| priority | XL | Model, Application, Frontend |",
+    "replace": "| priority | XL | Model, Frontend |"
+   }
+  },
+  {
+   "id": 9,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "9.3 ADR 1, Options",
+   "problem": "The first option still says to 'add a Control space:post or thread:append decision', which contradicts the ADR's own recommendation two sentences later and the verified finding that the member-capable thread:append decision already exists.",
+   "evidence": "items.verified.json F-t1-001 reuse (Control IssueThreadAppendDecision / ValidateForSharedThread already member-capable); sec-30-p1.md F-t1-001 approach.",
+   "patch": {
+    "find": "keep Session Core as the single transcript owner and add a Control space:post or thread:append decision with a turn_origin field",
+    "replace": "keep Session Core as the single transcript owner, reuse the existing member-capable Control thread:append decision and add a turn_origin field"
+   }
+  },
+  {
+   "id": 10,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.5 Decisions, item 1",
+   "problem": "The ADR 1 summary lists 'a Control space:post/thread:append decision' as something to decide, although verification found the member-capable thread:append decision already exists and only the Session Core subject check and a no-invoke route are missing.",
+   "evidence": "items.verified.json F-t1-001 reuse; sec-30-p1.md F-t1-001; headline 1 in the same file.",
+   "patch": {
+    "find": "Which plane is the source of truth for human posts, a Control space:post/thread:append decision, a turn_origin field, DM kinds",
+    "replace": "Which plane is the source of truth for human posts, reuse of the existing member-capable Control thread:append decision, a turn_origin field, DM kinds"
+   }
+  },
+  {
+   "id": 11,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "10.3 Evidence limits, Teams bullet",
+   "problem": "Says Teams strings and flags were 'observed with REA', contradicting A.3, which says they were extracted by a purpose-built tokenizer and REA only supplied structure and parse validation.",
+   "evidence": "sec-80-appx-A.md A.3 first bullet; teams.product-surface.deep.md lines 13-14; teams.shell-and-native.deep.md line 21 (flag names from webcfg_keys_prod.txt extracted by script).",
+   "patch": {
+    "find": "Teams evidence is mostly localized strings and feature flags observed with REA, plus Learn documentation;",
+    "replace": "Teams evidence is mostly localized strings and feature flags read from shipped files that REA parsed only partially (see Appendix A.3), plus Learn documentation;"
+   }
+  },
+  {
+   "id": 12,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "Section 9 intro",
+   "problem": "Says the table shows the revised value 'where an item's effort rose', but the tables also show effort reductions (F-t1-005 S was M, F-t1-021 M was L, F-t1-045 M was L, F-t1-074 S was M); 4 of the 29 revisions went down.",
+   "evidence": "items.verified.json: 29 effortRevised differences, 25 up (L->XL 12, M->L 10, S->M 2, M->XL 1) and 4 down (M->S 2, L->M 2); roadmap rows for F-t1-005, F-t1-021, F-t1-045, F-t1-074.",
+   "patch": {
+    "find": "Where an item's effort rose during verification, the table shows the revised value.",
+    "replace": "Where verification changed an item's effort (25 up, 4 down), the table shows the revised value with the original in brackets."
+   }
+  },
+  {
+   "id": 13,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "Section 9 intro (Depends on)",
+   "problem": "Broken cross-reference: 'full lists are in Appendix B', but Appendix B has no dependency column (ID, Tier, Title, Verevon today, Effort, Plane, Wave, Best reference). Dependencies appear only in the Recommended cards' 'Dependencies and risks' paragraphs and inline in some Priority cards.",
+   "evidence": "appx-B-index.md table header; 'Dependencies and risks' appears once per card in sec-40-*.md and nowhere in appx-B-index.md.",
+   "patch": {
+    "find": "full lists are in Appendix B.",
+    "replace": "fuller lists are in the item cards (the Recommended cards carry a Dependencies and risks paragraph); Appendix B does not list dependencies."
+   }
+  },
+  {
+   "id": 14,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "9.3 ADR 6",
+   "problem": "Says 'the lease is already required' without qualification; verification found the lease is mandatory only for Space-scoped code_interpreter, not for every Space agent.",
+   "evidence": "items.verified.json F-t1-021 exactGap ('a lease is mandatory only for Space-scoped code_interpreter ... not for every Space agent') and verdictReason.",
+   "patch": {
+    "find": "the lease is already required, and Quarry",
+    "replace": "the lease is already required for Space code_interpreter (not for every Space agent), and Quarry"
+   }
+  },
+  {
+   "id": 15,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "10.1 Risk 4",
+   "problem": "Hedged wording contradicts itself: the defect is 'confirmed by trace' but the read path 'may let' any member read all events. Verification confirmed that it does.",
+   "evidence": "items.verified.json F-t1-031 exactGap: 'The access concern is CONFIRMED by trace ... any org member can read all org events including other users via user_id'.",
+   "patch": {
+    "find": "the audit read path may let any member read all org events",
+    "replace": "the audit read path lets any org member read all org events"
+   }
+  },
+  {
+   "id": 16,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.2 Where Verevon stands today",
+   "problem": "Lists message search among Messaging core's absent records; in the baseline it is a Search and discovery record (v-space-backend-042, v-space-ui-039). The Messaging core absent records also include human-only posting, the headline gap, which is not named.",
+   "evidence": "v-space-backend.baseline.capabilities.json and v-space-ui.baseline.capabilities.json: Messaging core absent records include backend-002/ui-003 (human-only message), 013/007, 014/008, 015/009, 018/020; search records backend-042 and ui-039 are category Search & discovery.",
+   "patch": {
+    "find": "the absent records include direct messages, reactions, edit and delete, attachments and message search.",
+    "replace": "the absent records include human-only posts, direct messages, reactions, edit and delete, and attachments, and message search is absent under Search and discovery."
+   }
+  },
+  {
+   "id": 17,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "Section 2 intro",
+   "problem": "Says all 72 capabilities 'are shared by at least 3 of 5', but after the reference-side corrections at least one row falls below that line (privacy-respecting telemetry: 1 of 5, QM a counter-example) and others reach 3 only by counting partial evidence (audience-safe disclosure, stream watchdog). The definition of table stakes and the table disagree.",
+   "evidence": "sec-20-common.md 2.10 telemetry row and 2.7/2.9 rows; items.verified.json F-t1-005 reference corrections (consent-deferred client analytics 1 of 5); _inputs.table-stakes.json gives 4 of 5 before correction.",
+   "patch": {
+    "find": "72 capabilities are shared by at least 3 of 5.",
+    "replace": "72 capabilities were classed as shared by at least 3 of 5 before reference-side verification; after correction a few rows count partial evidence and one (privacy-respecting telemetry) falls to 1 of 5, kept here for traceability."
+   }
+  },
+  {
+   "id": 18,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "2.3 Calls and meetings, prose",
+   "problem": "Prose says 'the three chat incumbents' start calls from the room and names Slack, Grok Bot and Teams, while the table row (and F-t1-029) count Slack, Teams and Buzz. Grok Bot is not one of the three, and calling it a chat incumbent contradicts section 7.3.",
+   "evidence": "items.verified.json F-t1-029 prevalence ('Calls started from a room: 3 of 5 (Slack, Teams, Buzz)') and mechanism R-t1-03-05 (Buzz huddle as an ephemeral private child channel); Grok Bot supplies only the client call reducer.",
+   "patch": {
+    "find": "The three chat incumbents start a call from the room and keep it there; Slack documents the huddle as part of the channel, Grok Bot ships a client call state machine and Teams carries the deepest engine",
+    "replace": "The three references with room calls (Slack, Teams and Buzz) start a call from the room and keep it there; Slack documents the huddle as part of the channel, Buzz models it as a short-lived child channel and Teams carries the deepest engine, while Grok Bot contributes a client call state machine"
+   }
+  },
+  {
+   "id": 19,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "2.2 and 2.4 room directory rows",
+   "problem": "Room directory and self-join appears twice (2.2 'Room visibility ... directory, browse and self-join', 3 of 5 Buzz, Teams, QM; 2.4 'Room directory: browse and join', 3 of 5), both pointing to F-t1-048, so one capability is counted twice in the 72 and the two rows rest on different source sets (the input for the 2.4 row lists Buzz, Slack, Teams). Merge the rows or say why both are kept.",
+   "evidence": "_inputs.table-stakes.json C-t1-02-010 (buzz, teams, qm) and C-t1-04-012 (buzz, slack, teams), both mapped to F-t1-048 in doc/_cluster-to-item.json.",
+   "patch": null
+  },
+  {
+   "id": 20,
+   "severity": "minor",
+   "file": "sec-80-appx-A.md",
+   "where": "A.4 Public-docs-only sources",
+   "problem": "Mentions 'Web products and Apify', which appear nowhere else in this document and are not among its five sources, so a reader will not know what they refer to. It also omits that most Teams documentation claims rest on search snippets (only three Learn pages were fetched).",
+   "evidence": "Search of all doc sections: 'Apify' and 'web product' occur only here; A.1 lists five sources all analysed from installed apps or repos; teams.inventory.md line 492 (three Learn pages fetched, other public claims from search snippets or secondary sites).",
+   "patch": {
+    "find": "Web products and Apify are known only from public documentation. Several Slack facts rest on",
+    "replace": "None of the five sources is documentation-only, but several Slack facts, and most Teams documentation claims (only three Learn pages were fetched), rest on"
+   }
+  },
+  {
+   "id": 21,
+   "severity": "minor",
+   "file": "sec-80-appx-A.md",
+   "where": "A.2 step 2 (Deep dives)",
+   "problem": "Overclaims: says the generators 'resolved every pointer ... and refused to write a record whose pointer did not resolve'. The deep-dive notes show script checking for QM and documented pointer formats for Grok Bot and Slack, but no evidence of a uniform refuse-on-unresolved rule, and DOC records point to URLs.",
+   "evidence": "qm.product.deep.md line 7 (paths resolved and line ranges validated by script); grokbot.agent-product.deep.md line 11 and slack.shell-and-native.deep.md lines 35-37 (pointer formats); no refuse-on-unresolved statement found in the deep-dive files.",
+   "patch": {
+    "find": "The deep-dive generators resolved every pointer against the extracted copy and refused to write a record whose pointer did not resolve.",
+    "replace": "The deep dives document how each pointer resolves against the extracted copy or repository, and the QM records were checked by script; documentation pointers are URLs."
+   }
+  },
+  {
+   "id": 22,
+   "severity": "minor",
+   "file": "sec-80-appx-A.md",
+   "where": "A.1 table, Grok Bot row",
+   "problem": "Method column says only 'REA on app.asar and the extracted bundle', while A.3 says REA coverage was partial (call-stack and heap limits on the main files) and most Grok Bot evidence is [SRC] from direct reading. The table overstates REA's role at a glance.",
+   "evidence": "sec-80-appx-A.md A.3 Grok Bot bullet; grokbot.agent-product.deep.md line 210 (main-process findings rest on direct source reading); grokbot.inventory.md lines 11-14.",
+   "patch": {
+    "find": "| REA on app.asar and the extracted bundle | 318 |",
+    "replace": "| REA on app.asar (partial coverage) plus direct reading of the extracted bundle | 318 |"
+   }
+  },
+  {
+   "id": 23,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "How to read, Verevon today",
+   "problem": "Status vocabulary is incomplete and slightly wrong: 'Shipped' is said to be used only in strengths and common ground, but 1.2 and Appendix A use it for baseline counts; section 2 uses an 'Unknown' status (pluggable harnesses) that is never defined; and 'Every status was verified by reading the Verevon code' conflicts with section 2's 'one unverified' row.",
+   "evidence": "sec-10-front.md 1.2 (102 shipped); sec-20-common.md intro ('one unverified (pluggable harnesses)') and 2.7 row 'Unknown'.",
+   "patch": {
+    "find": "\"Shipped\" is used only in the strengths and common-ground sections and means present in source, not deployed.",
+    "replace": "\"Shipped\" (used in the baseline counts, the common-ground tables and the strengths) means present in source, not deployed; \"Unknown\" (one common-ground row) means the capability was not verified either way."
+   }
+  },
+  {
+   "id": 24,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "How to read (missing abbreviations)",
+   "problem": "Abbreviations and internal labels are used in the framing sections before or without definition: SSE, SSRF, AG-UI, MCP, SSO and SFU in 1.3-1.5 (some defined only later in section 2), and BFF, ASR, NATS, HITL, SIEM, TTL, Letta, Quarry, the adoption-plan section numbers (S2.7, S3.1, S3.4-S3.6, S4.5, S5.1) and UI-2c in sections 7-10. UI-2c is never explained and its source was not confirmed here, so it is left out of the patch.",
+   "evidence": "Term search over sec-10/20/60/70/80: first uses in sec-10 1.3-1.5 (AG-UI, MCP, SSE, SSRF, SSO, SFU), sec-60 section 8 (BFF), sec-70 ADR 7 (ASR), risk 1 (NATS), 10.3 (HITL), 7.2 (SIEM); F-t1-001 evidence cites apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md as the adoption plan; Quarry and Letta roles per the task context and F-t1-012/F-t1-021 verification.",
+   "patch": {
+    "find": "**Prevalence.** \"n of 5 references\" counts how many of the five sources show a capability.",
+    "replace": "**Prevalence.** \"n of 5 references\" counts how many of the five sources show a capability.\n\n**Abbreviations.** SSE = Server-Sent Events; SSRF = server-side request forgery; AG-UI = the agent-UI event stream protocol; MCP = Model Context Protocol; SSO = single sign-on; SCIM = System for Cross-domain Identity Management; SFU = selective forwarding unit (media server for calls); ASR = automatic speech recognition; BFF = backend-for-frontend (the Verevon Rust gateway); NATS = the message bus between planes; HITL = human in the loop; SIEM = security information and event management; TTL = time to live; DM = direct message. Quarry is Verevon's Ingestion Plane crawl and browser executor; Letta is the external agent-memory service that Session Core mirrors memory to. S2.7, S3.1, S3.4 to S3.6, S4.5 and S5.1 are section numbers of the Verevon QM adoption plan (apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md)."
+   }
+  },
+  {
+   "id": 25,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.6 What changed during verification",
+   "problem": "Does not say which 24 items the reference-side pass covered. They are exactly the 24 items that were Priority before verification (F-t1-001 to F-t1-024), so the prevalence and best-practice claims of all Recommended and Nice-to-have items were not independently re-checked; 10.3 implies this but a summary reader cannot tell.",
+   "evidence": "items.verified.json: verification.reference present for exactly F-t1-001..F-t1-024; appx-C-corrections.md title 'Reference-side verification log (Priority items)'.",
+   "patch": {
+    "find": "The reference-side pass re-examined 24 items,",
+    "replace": "The reference-side pass re-examined the 24 items that were Priority before verification (F-t1-001 to F-t1-024; Recommended and Nice-to-have reference claims were not re-checked),"
+   }
+  },
+  {
+   "id": 26,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "9.1 wave tables, Plane column (other rows)",
+   "problem": "Beyond F-t1-003 and F-t1-004, the Plane column differs from the card headers on about 20 rows, mostly by listing extra or missing planes: for example F-t1-027 (card: Model Plane; roadmap: Model, Control, Frontend), F-t1-025 and F-t1-028 (card: Model Plane only), F-t1-032 (card: Frontend only), F-t1-036 (card: Control, Model; roadmap adds Ingestion and Frontend), and F-t1-096 (card: 'Endpoint Plane, driven by Control grants', a plane that is not in the architecture; roadmap: Ingestion). The intro says the column follows the verification order. Align the column with the card headers, and fix the F-t1-096 card's plane name.",
+   "evidence": "Node comparison of the roadmap Plane column against the card header plane for all 96 items (card plane parsed from the sec-30/40/50 headers).",
+   "patch": null
+  },
+  {
+   "id": 27,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "9.1 wave tables, ADR references in Depends on",
+   "problem": "ADR references in the Depends on column do not match the ADR item lists in 9.3 and _context.json: F-t1-017 (ADR 1), F-t1-004 and F-t1-009 (ADR 2), F-t1-023 (ADR 4 and ADR 10), F-t1-067 (ADR 7) and F-t1-005 (ADR 8) omit their ADR, while F-t1-008 cites ADR 2 although it is not in that ADR's item list.",
+   "evidence": "_context.json adrNeeded item lists compared with each wave-table row's Depends on cell; the 9.3 ADR item lists themselves match _context.json exactly.",
+   "patch": null
+  }
+ ]
+}

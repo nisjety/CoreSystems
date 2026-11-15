@@ -1,0 +1,2290 @@
+[
+  {
+    "id": "slack-shell-and-native-001",
+    "category": "Client shell",
+    "name": "Boot stage: CLI flags and per-profile userData folders",
+    "what": "The app starts through a tiny boot script that parses command-line flags and picks an isolated user-data folder before the main bundle loads. Developers and QA can run separate profiles (dev environment, dev mode, integration test) side by side with the real install.",
+    "how": "boot.bundle.cjs parses flags with command-line-args style option lists (--startup, --logLevel, --resourcePath, --devEnv, --jsPath, --proxy-server, --troubleshoot, --userAgent, --bootClient, --fragments). It calls app.setPath(\"userData\") to Slack, SlackDevEnv, SlackDevMode, SlackIntegrationTest or SlackUserData (UNC-redirect case) and then requires main.bundle.cjs. Insecure Chromium flags (disable-web-security, allow-running-insecure-content) make the process exit.",
+    "evidence": [
+      "slack/dist/boot.bundle.cjs#c56909 CLI option table",
+      "slack/dist/boot.bundle.cjs#c59403 userData folder naming",
+      "slack/dist/boot.bundle.cjs#c54652 refuses insecure flags",
+      "slack/dist/boot.bundle.cjs#c55105 Windows toast COM launch argument stripped"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "A native or agent-host shell for Verevon should isolate dev/test profiles from the real profile from day one; today Verevon is a web SPA with no local profile.",
+    "notes": "Quality 4: simple, defensive (rejects insecure flags), but standard Electron practice. Offsets are JS char indexes (see deep.md)."
+  },
+  {
+    "id": "slack-shell-and-native-002",
+    "category": "Client shell",
+    "name": "Single-instance lock with protocol-activation sanity check and focus steal",
+    "what": "Launching Slack a second time (or clicking a slack:// link) hands the request to the running instance instead of starting another one, and the window comes to the foreground.",
+    "how": "Module 41235 requests the Electron single-instance lock when packaged and not a Squirrel event; if the lock fails the process quits. A guard aborts when a protocol activation arrives with unexpected extra arguments (slack: plus /p plus more than 3 args). When a protocol URL is present it runs rundll32 User32.dll,SetFocus to defeat Windows focus-stealing prevention. The Windows toast COM activator CLSID differs per distribution (Store, MSIX, Squirrel).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1436410 single-instance lock",
+      "slack/dist/main.bundle.cjs#c1436160 activation guard",
+      "slack/dist/main.bundle.cjs#c1436543 focus steal on protocol launch",
+      "slack/dist/main.bundle.cjs#c1436338 per-distribution toast CLSID"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "If Verevon ships a desktop wrapper, deep links into a Space must route to the existing window; copy the \"validate activation args before acting\" guard.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-003",
+    "category": "Client shell",
+    "name": "slack:// protocol registration across Win32, MSIX and macOS",
+    "what": "Slack registers itself as the handler for slack:// links so links in browsers, emails and other apps open the right workspace, channel or action.",
+    "how": "Non-MSIX: app.setAsDefaultProtocolClient(\"slack\") (a dev/chromedriver variant passes --test-type=webdriver). MSIX: AppxManifest declares uap3:Protocol Name=\"slack\" with Parameters \"/p \\\"%1\\\"\". macOS: app.on(\"open-url\"), which relaunches into a dev environment when the URL matches devEnv=(dev|staging|qa). A StartupTask \"SlackStartup\" and an app-execution alias are also declared.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1426177 protocol client registration",
+      "slack/dist/main.bundle.cjs#c1420766 open-url handler (macOS)",
+      "install:C:/Program Files/WindowsApps/com.tinyspeck.slackdesktop_4.52.178.0_x64__8yrtsj140pw4g/AppxManifest.xml (windows.protocol, windows.startupTask, windows.appExecutionAlias, comServer toast activation)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon needs a link grammar (verevon://space/<id>?thread=...) and the Space UI must actually consume thread deep links, which today are generated but ignored.",
+    "notes": "AppxManifest was read from the installed package (program metadata, read-only)."
+  },
+  {
+    "id": "slack-shell-and-native-004",
+    "category": "Client shell",
+    "name": "Deep-link grammar and parser (channel, open, app, setting, login-v2, magic-login, toolbelt-callback)",
+    "what": "One URL scheme drives many things: open a workspace or channel, run an app action, change a setting, sign in several workspaces at once, finish a magic-link login, or complete a developer OAuth.",
+    "how": "oe() parses slack://<cmd>?args into {args:{...searchParams, cmd:host}, pathname}. Dedicated matchers exist for slack://setting (JSON payload), slack://app (actions), slack://login-v2 (indexed token sets 0.host/0.tokens/0.dpop, 1.host ...), /magic-login/<TEAM>-token paths, slack://toolbelt-callback (OAuth code/state), slack://noop, devEnv=..., openDevToolsOnStart and feature_*=1 / pri=N webapp params. host params must pass a Slack-domain check or are dropped (\"received bad host param\").",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c963569 parser oe()",
+      "slack/dist/main.bundle.cjs#c1447652 indexed multi-workspace token sets",
+      "slack/dist/main.bundle.cjs#c1447971 host validation",
+      "slack/dist/main.bundle.cjs#c1447317 OAuth callback parser",
+      "slack/dist/main.bundle.cjs#c963208 settings deep link matcher"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Define an explicit, validated deep-link grammar for Verevon Spaces (space, thread, run, approval) and reject unknown hosts/params the way Slack does.",
+    "notes": "Scout listed only 5 links; login-v2, magic-login and setting payloads are additional."
+  },
+  {
+    "id": "slack-shell-and-native-005",
+    "category": "Client shell",
+    "name": "Deep links are resolved to the user's own workspace and forwarded to the web app",
+    "what": "A slack:// link that names a team is mapped to a workspace the signed-in user actually belongs to, then handed to the web app, which opens the right thing. Links arriving before the web app has loaded are held and delivered afterwards.",
+    "how": "Epics TRANSFORM_DEEP_LINKS (re-writes the team parameter through userWorkspaces membership) and FORWARD_DEEP_LINK_TO_WEBAPP (waits for WEBAPP_LOADED, 10 s timeout, then main->renderer IPC FORWARD_DEEP_LINK). The preload calls window.desktopDelegate.handleDeepLinkWithArgs, or window.desktopDelegates[teamId] for a specific workspace.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c944698 epic name",
+      "slack/dist/main.bundle.cjs#c1111766 team param re-write",
+      "slack/dist/main.bundle.cjs#c944638 forward epic",
+      "slack/dist/preload.bundle.js#c712003 preload delegate call"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Space links should be authorised against Control membership before navigation (never widen ACL); the \"resolve then forward, queue until ready\" pattern fits Verevon.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-006",
+    "category": "Client shell",
+    "name": "Settings can be changed by deep link, but only through a validated allowlist",
+    "what": "Support and docs can send a slack://setting link that flips selected desktop settings (for example release channel or hardware acceleration) without the user digging through menus.",
+    "how": "UPDATE_SETTINGS_VIA_DEEP_LINKS parses the JSON payload, picks only keys in the f7 allowlist (31 keys), validates with the Joi schema dl, and rejects clientEnvironment changes and unknown release channels. Related epics switch client feature mode via deep link, magic link or sign-out.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c944746 epic",
+      "slack/dist/main.bundle.cjs#c1112092 JSON parse with warn on failure",
+      "slack/dist/main.bundle.cjs#c1109282 Joi schema excerpt"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A \"support link\" to flip a Verevon workspace flag is useful but must go through the same allowlist + schema discipline, and never touch org-level policy.",
+    "notes": "Risk: any app that can launch slack:// can change those settings; the allowlist is what contains it."
+  },
+  {
+    "id": "slack-shell-and-native-007",
+    "category": "Client shell",
+    "name": "App-action deep links (reset window, quit, reveal logs, clear cache and restart)",
+    "what": "Links such as slack://app/?action=reset-window run local housekeeping actions. The Windows jump list uses the same link to offer \"Move Slack to current display\".",
+    "how": "tT.gM enum maps action names to dispatches (QUIT_APP, REVEAL_LOGS, RESET_WINDOW, CLEAR_CACHE_AND_RESTART). APP_ACTIONS_VIA_DEEP_LINKS epic is feature-gated (appActionsViaDeepLinks).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1112215 action switch",
+      "slack/dist/main.bundle.cjs#c1208833 jump list task argument",
+      "slack/dist/main.bundle.cjs#c945038 epic"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Low priority; useful only as a pattern for \"repair my client\" links in support flows.",
+    "notes": "Whether appActionsViaDeepLinks is enabled in production cannot be read offline."
+  },
+  {
+    "id": "slack-shell-and-native-008",
+    "category": "Client shell",
+    "name": "Windows jump list with recent workspaces and a display-recovery task",
+    "what": "Right-clicking the taskbar icon lists up to ten workspaces (opens straight into each) and a \"Move Slack to current display\" task.",
+    "how": "gf class builds app.setJumpList with a Workspaces custom category (slack://open?team=<id> tasks) and a Tasks category; refreshed when workspaces or locale change; honours removedItems.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1208064 workspace tasks",
+      "slack/dist/main.bundle.cjs#c1208636 task title (locale-driven)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quick-jump to a Space from the OS shell (jump list/dock menu) is a cheap, high-value native touch if Verevon wraps the web UI.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-009",
+    "category": "Client shell",
+    "name": "Tray icon with three states, tooltip counts and a launch-control menu",
+    "what": "A system-tray icon shows rest / unread / highlight states, a tooltip like \"You have 3 notifications\", and a right-click menu to pick a workspace, toggle Launch on Login, choose Show immediately vs Keep in background, check for updates, open Preferences or quit.",
+    "how": "gg tray handler derives icon + tooltip from aggregated unreads (getTrayStateFromUnreadsInfo: highlights>0 => \"highlight\" icon and number; unreads>0 => \"unread\" with optional bullet), uses slack-taskbar-{rest,unread,highlight}.ico (macOS template PNGs), ICU plural tooltips, and a menu built from the workspace list. Tray state also carries isRecording and launchEnforced.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1210110 icon/badge derivation",
+      "slack/dist/main.bundle.cjs#c1211178 tray context menu",
+      "slack/dist/resources/locales/en/desktop_browser_en_GB.json:6 tooltip string"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Aggregate \"needs-you\" count across Spaces and agents for tray/badge; Verevon has only per-room dots today.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-010",
+    "category": "Client shell",
+    "name": "Tray click is flag-gated: foreground the app, or summon the \"command center\"",
+    "what": "With the desktop_command_center flag on, a left-click on the tray raises the main window and opens a quick overlay in the web app (log text calls it \"Slackbot Mini\"); right-click shows the menu. With the flag off, a click simply foregrounds Slack.",
+    "how": "handleSlackbotMiniClick (200 ms throttled) calls ar() (forceAllowFocus native call, else setAlwaysOnTop trick on Win10 build >= 15000) and sends NOTIFY_GLOBAL_SHORTCUTS_TRIGGER with feature desktop_command_center to the MAIN window web contents. It does not open a separate native window.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1209347 tray click handler",
+      "slack/dist/main.bundle.cjs#c1209404 log text",
+      "slack/dist/main.bundle.cjs#c970862 focus-forcing helper",
+      "slack/dist/main.bundle.cjs#c795960 flag name"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "An always-available agent entry (tray + global hotkey opening an in-app overlay) maps directly to a Verevon \"ask my agent\" quick surface.",
+    "notes": "CORRECTS inventory: the scout described a separate Slackbot Mini window; code shows an overlay rendered by the web app inside the main window."
+  },
+  {
+    "id": "slack-shell-and-native-011",
+    "category": "Notifications & attention",
+    "name": "Taskbar overlay badge from 101 pre-rendered PNGs, counting highlights across all workspaces",
+    "what": "The Windows taskbar icon shows a red number overlay (1-99, then 99+) for notifications that need attention, summed over every signed-in workspace.",
+    "how": "SET_BADGE_EPIC recomputes iL(webapp.teams).unreadHighlights on redux changes and window foreground, then calls BrowserWindow.setOverlayIcon with a nativeImage created from base64 PNGs in resources/unreads-badge/unread-badge-resources.json (index 0-100); accessibility label \"You have unread messages\".",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1204713 overlay resource loader",
+      "slack/dist/main.bundle.cjs#c1205067 overlay call",
+      "slack/dist/resources/unreads-badge/unread-badge-resources.json (object, 101 base64 PNG values)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Ship one aggregate attention counter (mentions + approvals needing the human + agent questions) for the OS badge; pre-rendering avoids canvas work in the shell.",
+    "notes": "Counts highlights only; plain unreads change the tray icon but not the number."
+  },
+  {
+    "id": "slack-shell-and-native-012",
+    "category": "Notifications & attention",
+    "name": "Taskbar flash behaviour (idle vs always) with an explanatory balloon",
+    "what": "When a notification arrives the taskbar button can flash once after 10 idle seconds (default) or whenever active; if the user closes the window and the app keeps running, a tray balloon explains why Slack did not quit.",
+    "how": "Settings win32.windowFlashBehavior (\"idle\"|\"always\"), FLASH_WINDOW_ON_NOTIFICATION epic, showBalloon kinds window-flash and run-from-tray, with hasExplainedWindowFlash to show the balloon once.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c850811 setting",
+      "slack/dist/main.bundle.cjs#c945997 epic",
+      "slack/dist/resources/locales/en/desktop_browser_en_GB.json:18 balloon text",
+      "https://slack.com/help/articles/201355156-Configure-your-Slack-notifications (DOC: one flash after 10 idle seconds by default)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Explaining \"why the app is still running\" the first time is a good trust pattern for background agent hosts.",
+    "notes": "DOC cross-check agrees with the default."
+  },
+  {
+    "id": "slack-shell-and-native-013",
+    "category": "Client shell",
+    "name": "Native application menu with Alt-mnemonics that open sub-menus from the keyboard",
+    "what": "Menus (File, Edit, View, Go, Conversation, History, Window, Help, Developer) exist natively; on Windows with the custom title bar, Alt+F/E/V/G/C/H open the matching menu from the keyboard and workspaces are bound to Ctrl+1..9.",
+    "how": "fw class builds the template from ordered items (menu extension API adds items), shows it through POPUP_APP_MENU with invokedViaKeyboard; buildTeamMenuItem sets accelerator CmdOrCtrl+N for the first 9 workspaces. Menu usage is tracked by trackMenuEvent.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1088781 Alt+G handler",
+      "slack/dist/main.bundle.cjs#c1083933 Ctrl+1..9 workspace accelerators",
+      "slack/dist/resources/locales/en/desktop_menu_en_GB.json:39 menu locale keys (93 strings)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Keyboard parity (workspace/Space switching by number, F6 region cycling) is table stakes for power users; Verevon should specify it.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-014",
+    "category": "Client shell",
+    "name": "Custom window chrome rendered as a web component, themed by the selected workspace",
+    "what": "On Windows/macOS the title bar is not the OS one: it is a web-rendered strip whose colours come from the active workspace's sidebar theme, with window controls and an app-menu button.",
+    "how": "BrowserWindow frame:false with titleBarStyle hidden + titleBarOverlay (33 px, transparent). The preload injects an inlined \"windowchrome\" bundle through webFrame.executeJavaScript that defines <window-chrome> and <button is=\"window-chrome-app-menu\">; state (maximize, fullscreen, title, titleBar colours from team.theme.titlebarBackground/TextColor, default #232323) comes from a selector over the shell redux store.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1179068 window options",
+      "slack/dist/preload.bundle.js#c532134 custom element",
+      "slack/dist/preload.bundle.js#c706972 default title bar colours",
+      "slack/dist/preload.bundle.js#c761896 inline injection"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Workspace/org-themed shell chrome reinforces which tenant a user is acting in; consider a visible tenant colour band in the Verevon header.",
+    "notes": "Gated by isWin10 or the window-chrome debug feature on non-Win10."
+  },
+  {
+    "id": "slack-shell-and-native-015",
+    "category": "Client shell",
+    "name": "Window bounds persistence, display validation and display-scale healing",
+    "what": "The window reopens where it was, but is pulled back on-screen if a monitor disappeared; after docking/undocking, resume or unlock the DPI/scale is re-applied so the UI does not stay blurry or mis-sized.",
+    "how": "validateBoundsForDisplay clamps saved mainWindowSettings.bounds to a display work area (with 1.2x tolerance); HEAL_DISPLAY_SCALE epic debounces 15 s and re-applies scale on display, resume and unlock events for MAIN/WEBAPP windows; jump-list/menu task moves the window to the current display.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1182326 bounds clamp",
+      "slack/dist/main.bundle.cjs#c944100 epic",
+      "slack/dist/main.bundle.cjs#c1426581 display logging"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Only matters if Verevon ships a native shell; note the cost of multi-monitor and DPI bugs.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-016",
+    "category": "Client shell",
+    "name": "Main-process window drag loop for frameless windows",
+    "what": "Dragging the custom title bar moves the window smoothly even on high-DPI multi-monitor setups.",
+    "how": "START_WINDOW_DRAG / STOP_WINDOW_DRAG IPC: main records the cursor grab offset and runs an 8 ms setInterval that calls setBounds from screen.getCursorScreenPoint(), cleaning up on close.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1410032 drag implementation",
+      "slack/dist/main.bundle.cjs#c962175 IPC name"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "None for a web SPA; relevant only if a Tauri/Electron shell adopts frameless windows.",
+    "notes": "Workaround for -webkit-app-region limits; polling at 8 ms is CPU-visible."
+  },
+  {
+    "id": "slack-shell-and-native-017",
+    "category": "Client shell",
+    "name": "Allow-listed remote calls on BrowserWindow and window events from the web app",
+    "what": "The web UI can minimise, maximise, set always-on-top, resize, flash, show progress and listen to a few window events, but only through a fixed whitelist of methods.",
+    "how": "EXEC_BROWSERWINDOW_METHOD takes (windowId, method, ...args); methods must be in a ~90-name allowlist (yM) else \"cannot be called on a BrowserWindow\". REGISTER/UNREGISTER_EVENT_LISTENER permits only moved and will-move and auto-cleans on destroyed/render-process-gone/did-navigate. Preload exposes callBrowserWindowMethod and subscribeToFrameStateChanges.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1409190 allowlist enforcement",
+      "slack/dist/main.bundle.cjs#c1411201 event allowlist",
+      "slack/dist/preload.bundle.js#c703275 preload API"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A reusable \"capability allowlist\" idea: web code gets a named set of host operations, never raw handles. Mirrors Verevon's rule that the Model proposes, a trusted executor disposes.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-018",
+    "category": "Client shell",
+    "name": "Web-initiated native child windows with an option allowlist and a minimal preload",
+    "what": "Pop-outs (for example call windows) are real native windows opened by the web app, sized and positioned from options it supplies, but only recognised options are honoured and the child gets almost no native bridge.",
+    "how": "setWindowOpenHandler parses frameName options, keeps only keys in fT (width, height, x, y, frame, alwaysOnTop, titleBarStyle, vibrancy, ... 40 keys) plus titleBarOverlay/trafficLight shorthands, attaches parentId, forces the hardened webPreferences and child-preload-entry-point.bundle.js. The child preload only exposes slackPlatform.isWayland and zoom handling, and only when the opener is a trusted Slack origin.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1090847 window-open handler",
+      "slack/dist/main.bundle.cjs#c1089208 option allowlist",
+      "slack/dist/child-preload-entry-point.bundle.js#c15917 child preload exposes one flag"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Good template for letting an agent browser/computer panel open pop-out windows with capped options and no host bridge.",
+    "notes": "Quality 5: least-privilege applied consistently (options, preload, webPreferences)."
+  },
+  {
+    "id": "slack-shell-and-native-019",
+    "category": "Client shell",
+    "name": "Server-driven auto-update decision (\"should-i-update\") with hourly checks",
+    "what": "The desktop app asks a Slack endpoint whether it should update, sending platform, version, OS, channel and installer type. Checks run hourly and on demand from the menu; the menu item shows Checking / Downloading / An update is available / Restart to Apply Update.",
+    "how": "GET {base}/desktop/update/v2/should-i-update?platform&version&os_version&channel[&os_product&servicing_channel][&arch=arm64]&updater_variant=msix|squirrel[&is_user_initiated=1]. The JSON reply (update_available, version, url, why[]) drives the Squirrel or MSIX updater. AUTO_UPDATE_TIMER fires every 36e5 ms; MANUAL_UPDATE_CHECK is gated on the main window being ready. On endpoint failure the client reports update_available=false with the error in why[].",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1439962 update decision endpoint",
+      "slack/dist/main.bundle.cjs#c1440591 installer-type query value",
+      "slack/dist/main.bundle.cjs#c1326813 hourly timer scope",
+      "slack/dist/main.bundle.cjs#c1438676 menu label state machine"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Server-side rollout control (cohort, channel, OS) beats a static feed; a Verevon native shell should ask Control/Model plane \"should I update\" rather than polling a file.",
+    "notes": "Quality 5: decision logic lives on the server; client is thin, observable (desktop_updater_* traces) and failure-safe."
+  },
+  {
+    "id": "slack-shell-and-native-020",
+    "category": "Governance, security & compliance",
+    "name": "Signed update-URL override for testing (RSA-SHA256 plus freshness window)",
+    "what": "Engineers can point the updater at a test server by environment variable, but only with a valid signature that is fresh relative to process start.",
+    "how": "SLACK_UPDATE_URL is honoured only if SLACK_UPDATE_URL_SIGNATURE verifies (RSA-SHA256 over the URL and the SLACK_UPDATE_URL_SIGNATURE_TS timestamp against an embedded public key) and the timestamp is within 5 hours (18e6 ms) of the process creation time.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1439134 override env var",
+      "slack/dist/main.bundle.cjs#c1439309 signature verification"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Any Verevon override path (dev feed, staging model gateway) should require a signed, expiring token rather than a plain env var.",
+    "notes": "The public key is embedded in the bundle (public material, not reproduced here)."
+  },
+  {
+    "id": "slack-shell-and-native-021",
+    "category": "Client shell",
+    "name": "Platform-specific update engines: Squirrel with a RELEASES pre-check and MSIX re-registration",
+    "what": "Per-user installs update through Squirrel.Windows; Store/MSIX installs update by re-registering the package and restarting the app safely.",
+    "how": "WindowsSquirrelUpdater first fetches {updateUrl}/RELEASES, picks the highest valid semver and compares it to the running version before calling autoUpdater.setFeedURL/checkForUpdates. WindowsMsixUpdater.quitAndInstall calls native app.registerRestart (NoCrash|NoHang|NoReboot flags) and app.registerPackage(familyName,{forceShutdown:true}) from slack-desktop-utils, then app.quit(). Squirrel first-run and uninstall hooks are handled in a lazily loaded chunk (863.bundle.cjs).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1444718 RELEASES parse",
+      "slack/dist/main.bundle.cjs#c1443936 MSIX restart registration",
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/index.js:142 native wrapper restart-flag constants (registerRestart/registerPackage are native exports)",
+      "slack/dist/main.bundle.cjs#c1436732 Squirrel event chunk"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "If Verevon ships MSIX/Squirrel, copy the idea of querying native restart registration so Windows relaunches the app after an update.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-022",
+    "category": "Client shell",
+    "name": "Update success tracking via nextExpectedMinAppVersion and launch-failure attribution",
+    "what": "After an update is applied, the app remembers which version it expects to become; if the new build crashes at launch, that is reported as an update failure rather than a generic crash.",
+    "how": "Local setting nextExpectedMinAppVersion is read by the fatal-exception handler; on crash it emits desktop_updater_fail (update_fail_type app_launch_fail, expected min version) via both track() and trace(), clears the marker, flushes telemetry and offers Close/Restart/Restart & Report. An UPDATE_SUCCESS_TRACKING epic also exists (body not read).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c878180 persisted expectation key",
+      "slack/dist/main.bundle.cjs#c878992 failure type",
+      "slack/dist/main.bundle.cjs#c947245 epic"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Tie crash/regression telemetry to the release that was just rolled out; relevant for any Verevon agent-host auto-update.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-023",
+    "category": "Client shell",
+    "name": "Release channels (prod, beta, dogfood) switchable at runtime",
+    "what": "Users or admins can move a client to the beta channel (and Slack staff to dogfood); a banner confirms \"You've been added to the beta\" and the app immediately receives that channel's updates.",
+    "how": "Enum Xp = dogfood|beta|prod; user-selectable subset beta|prod; setting releaseChannelOverride (win32/darwin); a SWITCH_UPDATE_CHANNELS epic reacts to channel switches (body not read); the channel is a query parameter on the update endpoint and a tag in telemetry. Can be set by slack://setting deep link, by IT policy (ReleaseChannel) or through UPDATE_SETTINGS.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c788941 channel enum",
+      "slack/dist/main.bundle.cjs#c947190 epic",
+      "slack/dist/resources/locales/en/desktop_renderer_en_GB.json:96 renderer banner string"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Channels per org (stable/beta) managed by Control policy would let Verevon canary a shell or Space UI to staff first.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-024",
+    "category": "Client shell",
+    "name": "Launch-at-login that respects machine policy and the MSIX StartupTask",
+    "what": "\"Launch on login\" is a checkbox, but if IT enforces launch through the machine registry the user cannot turn it off, and Store builds use the Windows StartupTask API instead of registry Run keys.",
+    "how": "Module 6440 inspects login items for Slack.exe, the Squirrel stub and Update.exe in user vs machine scope, cleans duplicate user entries, treats machine scope as enforced (launchEnforced shown disabled in the tray menu); MSIX path uses systemPreferences.getStartupTaskState/enableStartupTask/disableStartupTask with EnabledByPolicy/DisabledByPolicy handling; hideOnStartup chooses Show immediately vs Keep in background.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1433827 policy enforcement",
+      "slack/dist/main.bundle.cjs#c1432637 MSIX StartupTask",
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/index.js:128 native enum"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Org-enforced settings should be visible as locked (not hidden) in Verevon's own settings UI.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-025",
+    "category": "Governance, security & compliance",
+    "name": "Four-layer managed configuration read from the registry, macOS managed prefs and /etc",
+    "what": "IT can lock or default desktop settings per machine: AutoUpdate, ReleaseChannel, ClientEnvironment, DefaultSignInTeam, DownloadPath, HardwareAcceleration, HideOnStartup, SignInMethod and WebSwitches. \"Policy\" values are locked; \"Defaults\" are starting values users may change.",
+    "how": "Windows: registry-js enumerates HKLM then HKCU under SOFTWARE\\Policies\\Slack (policy) and ...\\Slack\\Defaults (defaults), HKLM wins. macOS: cf-prefs isPreferenceForced/getPreferenceValue (policy) and a \"Defaults\" dictionary. Linux: JSON file /etc/slack-desktop.conf with root keys (policy) and \"defaults\". Each value is validated with the setting's Joi schema. The settings reducer merges slackDefaults < itDefaults < userChoices < itPolicy so policy always wins.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c837672 Linux policy file",
+      "slack/dist/main.bundle.cjs#c839017 Windows registry reader",
+      "slack/dist/main.bundle.cjs#c838184 macOS managed prefs",
+      "slack/dist/main.bundle.cjs#c1153890 4-layer settings state",
+      "https://slack.com/help/articles/11906214948755-Manage-desktop-app-configurations (DOC: same keys, paths and HKLM>HKCU precedence)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Mirror this: org policy from Control (locked) > org defaults > user choice > product defaults, with the UI told which keys are enforced (see _enforced).",
+    "notes": "Quality 5: three OS mechanisms behind one typed interface, schema-validated, documented publicly, cross-verified with DOC."
+  },
+  {
+    "id": "slack-shell-and-native-026",
+    "category": "Client shell",
+    "name": "Typed user-settings store with a built-in Settings Editor window",
+    "what": "Advanced desktop settings (notifications, zoom, theme, tray, spellcheck, scrollbars, flash behaviour) are stored in one validated object, and a hidden \"Settings Editor\" window shows every row with its effective value and which layer set it.",
+    "how": "Joi schema dl lists the user-changeable keys; settings reducer keeps four layers; SHOW_SETTINGS_EDITOR opens a component window (settings-editor.html + bundle, CSP + SRI) with a table of settings rows; deep link and web app can call UPDATE_SETTINGS with a layer argument.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c948081 epic",
+      "slack/dist/main.bundle.cjs#c1109553 schema excerpt",
+      "slack/dist/settings-editor.html and slack/dist/settings-editor.bundle.js (table#settings rows)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A \"why is this setting what it is\" inspector (default/org/user/policy) is a strong supportability feature for Verevon admins.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-027",
+    "category": "Governance, security & compliance",
+    "name": "Web UI is told which settings are IT-enforced",
+    "what": "The web app can grey out controls that IT has locked, because the shell exposes the list of enforced keys.",
+    "how": "The preload selector for settings returns {..., _enforced: Object.keys(settings.itPolicy)} through window.desktop.redux.getState(\"settings\"); only an allowlisted subset of settings, app state, environment and window frames is mirrored to the web app.",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c697994 settings selector",
+      "slack/dist/preload.bundle.js#c716895 bridge assignment"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Same contract Verevon needs between Control policy and the SPA: ship \"locked_by_policy\" with each effective value.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-028",
+    "category": "Client shell",
+    "name": "Local shortcuts: numpad zoom, F6/Tab region cycling forwarded as synthetic key events",
+    "what": "Keyboard users can cycle between app regions with F6 / Shift+F6 and tab order, and zoom with Ctrl +/- including the numpad.",
+    "how": "LOCAL_SHORTCUT epic hooks before-input-event for NumpadAdd/NumpadSubtract (preventDefault then ZOOM_IN/OUT); FOCUS_INPUT_EVENTS translates NEXT_SECTION/PREVIOUS_SECTION menu commands into webContents.sendInputEvent F6 (shift for previous) and Tab; preload intercepts Ctrl+= for zoom.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1322908 local shortcut epic",
+      "slack/dist/main.bundle.cjs#c948015 focus input epic",
+      "slack/dist/resources/locales/en/desktop_menu_en_GB.json:36 menu entry"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Region cycling (F6) is an accessibility baseline Verevon should specify for the cockpit tabs and the room pulse rail.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-029",
+    "category": "Client shell",
+    "name": "Zoom model: Ctrl +/-/0, clamped levels, pinch disabled",
+    "what": "Zoom steps are controlled by the app (not Chromium pinch) so layouts stay predictable, and the web app receives a --zoom-factor CSS variable.",
+    "how": "Switch disable-pinch plus webFrame.setVisualZoomLevelLimits(1,1) in the preload; zoomLevel reducer clamps -3..5 and maps to factors (1, 1.1, 1.25, 1.5, 1.75, 2 above 0; 0.9, 0.8, 0.7 below); preload sets document.body --zoom-factor on resize.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1429311 Chromium switch",
+      "slack/dist/preload.bundle.js#c710101 preload visual zoom lock",
+      "slack/dist/main.bundle.cjs#c1153968 reducer clamp"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Low relevance; note that CSS-driven density modes are an alternative to browser zoom.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-030",
+    "category": "Client shell",
+    "name": "Theme handling: user theme, system-theme sync, high contrast and reduced transparency",
+    "what": "The shell follows the OS dark/light and high-contrast settings if the user enables sync, and disables vibrancy/material effects when the OS asks for reduced transparency.",
+    "how": "Settings userTheme (default light), systemThemeSyncEnabled, shouldUseHighContrastColors (nativeTheme.shouldUseHighContrastColors observed), nativeTheme \"updated\" listener updating systemTransparency, background/vibrancy/backgroundMaterial computed per platform in lD().",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c850697 setting",
+      "slack/dist/main.bundle.cjs#c1426343 transparency listener",
+      "slack/dist/main.bundle.cjs#c948990 high contrast epic"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon already ships themes in the SPA; the OS-level hooks only matter for a native shell.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-031",
+    "category": "Client shell",
+    "name": "Localisation: 9 shell languages x 6 string namespaces with ICU plurals, 12 web locales",
+    "what": "Menus, dialogs and tray text are translated into German, English, Spanish, French, Italian, Japanese, Korean, Portuguese and Chinese; the web app has 12 locale variants (adds en-GB, es-LA, pt-BR, zh-TW) and the shell follows the locale the web app reports.",
+    "how": "resources/locales/<lang>/desktop_{browser,external,general,menu,messagebox,renderer}_en_GB.json (hash-keyed ICU messages, e.g. plural tooltips); LOAD_LOCALE and GET_LOCALE_RESOURCE IPC give the web app the same loader; APPLY_LOCALE_FROM_WEBAPP re-applies locale and dispatches settings; MSIX manifest declares 10 language resources; build uses @tinyspeck/i18n-translation-tools and a lint:locales script.",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c707422 web locale enum",
+      "slack/dist/main.bundle.cjs#c947779 locale follows web app",
+      "slack/dist/main.bundle.cjs#c957512 locale IPC",
+      "install:C:/Program Files/WindowsApps/com.tinyspeck.slackdesktop_4.52.178.0_x64__8yrtsj140pw4g/AppxManifest.xml (Resources: EN DE FR ES JA IT KO PT-BR ZH-CN ZH-TW)",
+      "slack/package.json:67 script"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon i18n is partial (activity grammar labels are hard-coded Norwegian); adopt message-id based ICU strings across the Space UI and any native shell.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-032",
+    "category": "Client shell",
+    "name": "Accessibility plumbing: OS screen-reader detection, high contrast, keyboard-opened menus",
+    "what": "The shell detects when assistive technology is on, tells the web app, and exposes menus to the keyboard.",
+    "how": "app accessibilitySupportEnabled is observed (ACCESSIBILITY_SUPPORT_CHANGED), forwarded to window.desktopDelegate.accessibilitySupportChanged, and reported as telemetry; NOTIFY_DELEGATE_ACCESSIBILITY epic; keyboard-invoked app menu (Alt+letter); high-contrast flag passed to the web app.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c943353 epic",
+      "slack/dist/preload.bundle.js#c579672 preload delegate call",
+      "slack/dist/main.bundle.cjs#c988091 telemetry trace"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Track screen-reader prevalence and test the Space cockpit tablist with it; Verevon already has roving arrow-key tabs.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-033",
+    "category": "Client shell",
+    "name": "Self-service support kit: net log, verbose logs, GPU page, tracing UI, cache reset, reset app data",
+    "what": "A built-in Developer/Troubleshooting menu lets support capture network logs, restart with verbose logging, open chrome://gpu, show the tracing UI, clear cache and exit, toggle hardware acceleration, copy the installation ID, open the crash-dump folder, or wipe all app data.",
+    "how": "Menu ids menuitem-net-log, menuitem-clear-cache, menuitem-copy-installation-id, menuitem-reset-app-data, ELECTRON_DEBUG_LOG; net-log window (net-log-window.html) driven by RESTART_WITH_NET_LOG/START_NET_LOG; OPEN_GPU_INFO loads chrome://gpu (blocked for MSIX); a --troubleshoot CLI flag exists (boot calls app.exit; the troubleshooter itself is not in this bundle); reset-app-data confirms with \"This will sign you out from all of your workspaces\".",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c787070 menu id",
+      "slack/dist/main.bundle.cjs#c957898 gpu page",
+      "slack/dist/resources/locales/en/desktop_menu_en_GB.json:280 menu strings",
+      "slack/dist/boot.bundle.cjs#c58571 CLI flag"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A \"Support bundle\" action (redacted logs + settings layers + feature flags) should exist for Verevon agent hosts and the SPA.",
+    "notes": "Quality 4 (high end): unusually complete self-service diagnostics, but mostly assembled from standard Chromium tools."
+  },
+  {
+    "id": "slack-shell-and-native-034",
+    "category": "Client shell",
+    "name": "Per-surface rotating logs, console capture with truncation, and log upload to support",
+    "what": "Each window type (main web app, service worker, notification window, pickers) logs its console to its own rotating file; support can upload a zip of logs and state from the app.",
+    "how": "l9() subscribes to webContents console-message and writes through a logger instance with an identifier per webContents type, maxFiles 10 when webapp-extended-logs is on, messages over 131072 chars truncated; service worker console is captured separately; uploadAppLogsArchive zips files and POSTs to the profiling.addLogging API with platform=ssb.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1031339 console truncation",
+      "slack/dist/main.bundle.cjs#c1392348 log upload API",
+      "slack/dist/main.bundle.cjs#c947876 service worker console capture"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Log capture per surface with redaction at export is the model for Verevon's agent-run diagnostics.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-035",
+    "category": "Client shell",
+    "name": "Crash and hang handling: fatal-exception dialog, unresponsive dialog, call-stack hashing",
+    "what": "If the main process throws, the app flushes telemetry and shows Close / Restart / Restart & Report issue; if the web UI hangs it offers Wait, Reload or Restart.",
+    "how": "rz crash handler (\"ABOUT TO QUIT DUE TO FATAL JAVASCRIPT EXCEPTION\") skips a short list of benign messages (net::err_, notification cache), flushes telemetry, saves reportIssueOnStartup, relaunches. webContentsTimeoutDialogEpic waits 5 s (15 s with extended_unresponsive_timeout flag), captures the renderer JS call stack, tags Sentry with an md5 of the top frames, and records whether the system just resumed from sleep.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c878583 fatal handler",
+      "slack/dist/main.bundle.cjs#c1025289 stack hashing",
+      "slack/dist/resources/locales/en/desktop_messagebox_en_GB.json:33 dialog text",
+      "slack/dist/main.bundle.cjs#c878464 report-on-restart flag"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Hashing hang stacks and tagging \"just resumed from sleep\" turns noisy hang reports into actionable buckets.",
+    "notes": "Quality 5: recovery plus attribution."
+  },
+  {
+    "id": "slack-shell-and-native-036",
+    "category": "Client shell",
+    "name": "Crash-integrity check: detect the app binary being replaced while running",
+    "what": "If the executable on disk changes (for example an update lands) and a child process then crashes, the crash is tagged as an integrity failure instead of a product bug and can trigger a clean restart.",
+    "how": "INTEGRITY_CHECK epic stores Slack.exe mtime at launch; on child-process-gone/render-process-gone (throttled 60 s) it compares the mtime again; mismatch emits desktop_integrity_check_failed, sets Sentry flag integrity.failed and, behind the crash_integrity_check flag, runs the fatal-restart path.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1174886 trace event",
+      "slack/dist/main.bundle.cjs#c1174834 mtime comparison",
+      "slack/dist/main.bundle.cjs#c795912 flag"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Pattern for self-updating hosts: do not let post-update crashes pollute reliability metrics.",
+    "notes": "CORRECTS inventory: this is a replaced-binary detector, not a tamper check."
+  },
+  {
+    "id": "slack-shell-and-native-037",
+    "category": "Client shell",
+    "name": "Distribution classification (Store, MSIX, MSI variants, DDL, MAS) and UA capability tokens",
+    "what": "The app knows how it was installed and tells the server in the user agent so the web app and update service can behave accordingly.",
+    "how": "u() returns WinStore, MSIX, MSQ (installInfo present), LMSI (machine-wide \"Slack Deployment\"), DDL (Update.exe present), MSI or MAS; the UA string appends WindowsStore/x, OS_Product, Servicing_Channel, the distribution token, WindowsOnArm/WoAEmu, \" Sonic\", \" GovEnvironment\" and Slack_SSB/<version>. Update endpoint and telemetry carry the same facts.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1448273 distribution function",
+      "slack/dist/main.bundle.cjs#c1457036 UA suffix",
+      "slack/dist/main.bundle.cjs#c1457623 UA capability token",
+      "https://slack.com/help/articles/212475728-Deploy-Slack-for-Windows (DOC: MSI/MSIX deployment, MSQ prefix means managed updates)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A host-capability UA/handshake lets the SPA adapt (for example hide update UI when the host manages updates).",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-038",
+    "category": "Client shell",
+    "name": "Dev/QA affordances shipped in production: feature fragments, devEnv, local assets, debug features",
+    "what": "Slack staff can point the shipped app at a local web build, a dev environment or toggle debugging aids (React DevTools, OPFS explorer, epic trace, extended web logs, window-chrome).",
+    "how": "--jsPath/js_path and slack://open?devEnv=... select web sources; TOGGLE_FEATURE_FRAGMENT only honours js_path when not packaged or the devtools flag allows it; USE_LOCAL_ASSETS epic; debugFeatures enum {react-devtools, opfs-explorer, epic-trace, window-chrome, webapp-extended-logs}; an isolated userData profile is used for dev environments; a local HTTP server on 127.0.0.1:<random> accepts magic_login_uri POSTs in dev.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1416006 js_path guard",
+      "slack/dist/main.bundle.cjs#c796442 debug features",
+      "slack/dist/main.bundle.cjs#c948163 local assets",
+      "slack/package.json:60 dev script"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Dev affordances must be gated by build and policy; Verevon should keep any \"run UI from local path\" off in production hosts.",
+    "notes": "The presence of OPFSExplorer is also evidence that the web client stores data in OPFS (see realtime records)."
+  },
+  {
+    "id": "slack-shell-and-native-039",
+    "category": "Client shell",
+    "name": "Packaging and release pipeline: Forge, Squirrel, MSIX, WiX MSI, notarisation, ASAR tooling",
+    "what": "One codebase ships as Squirrel installer, MSIX/Store package, machine-wide MSI, macOS DMG/ZIP (signed and notarised) and Linux packages.",
+    "how": "package.json devDependencies: @electron-forge/core 8.0.0-alpha.8 (maker-dmg/zip), electron-winstaller, electron-windows-msix, electron-wix-msi, @electron/osx-sign, @electron/notarize, @electron/asar, @electron/fuses, @electron/get, @aws-sdk/client-s3 (artefact upload), @octokit/rest, packagecloud CLI script, rspack + swc bundling, jest 30, oxlint, knip, dependency-cruiser; yarn 4 workspaces (spec/e2e, spec/old-joe, tools/triage-agent).",
+    "evidence": [
+      "slack/package.json:170 Squirrel packaging",
+      "slack/package.json:169 MSIX packaging",
+      "slack/package.json:171 MSI packaging",
+      "slack/package.json:120 macOS notarisation",
+      "slack/package.json:91 Linux repo publishing script"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "None directly; shows the breadth (5 install channels) a native Verevon shell would inherit.",
+    "notes": "Build-time only; nothing here runs in the shipped app."
+  },
+  {
+    "id": "slack-shell-and-native-040",
+    "category": "Client shell",
+    "name": "Multi-workspace switching inside one window (menu, Ctrl+1..9, tray, jump list, touch swipe)",
+    "what": "All signed-in workspaces live in one window; users switch with the sidebar rail, Ctrl/Cmd+1..9, next/previous commands, the tray menu, the jump list, or a three-finger swipe on touch screens (two-finger swipe goes back/forward).",
+    "how": "Shell keeps workspaces (id, name, domain, url, icon sizes, order, variant) and workspacesMeta.selectedWorkspaceId; WORKSPACE_SELECTION epic sends SELECT_NEXT/PREVIOUS/BY_ID to the web app, which implements focusNextWorkspace/focusPreviousWorkspace/setFocusedWorkspace on window.desktopDelegate; web app calls desktop.workspaces.sync/selectionChanged/storeUserWorkspaces to keep the shell in sync.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c958936 IPC",
+      "slack/dist/preload.bundle.js#c713020 delegate call",
+      "slack/dist/preload.bundle.js#c711278 three-finger swipe",
+      "slack/dist/main.bundle.cjs#c786645 menu id"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon org/Space switching should be addressable from OS chrome and keyboard, not only from the in-app sidebar.",
+    "notes": "Workspaces share one Chromium session (see session-model record)."
+  },
+  {
+    "id": "slack-shell-and-native-041",
+    "category": "Client shell",
+    "name": "window.desktop bridge: 30-odd namespaces exposed to the trusted web app, plus per-workspace delegates",
+    "what": "The remote web client gets a typed native API: windows, accelerators, accessibility, app, calls, clipboard, context menus, diagnostics, dock, downloads, local file search, menus, notices/notifications, recent files, OS search index, screen, spellcheck, stats, teams, workspaces, a read-only redux view and window chrome. The web client registers delegates that the shell calls back.",
+    "how": "preload.bundle.js builds one object and exposes it with contextBridge.exposeInMainWorld(\"desktop\") (also legacy alias window.winssb) together with a reduced \"process\" {versions, mas, sandboxed}. Trust check: only for https Slack origins on port 443, the app:// error/loading pages, or windows opened by those. Reverse direction: setGlobalDelegate / exposeWorkspaceDelegate(workspaceId, delegate).",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c716895 bridge object (alias winssb)",
+      "slack/dist/preload.bundle.js#c717071 per-workspace delegate registration",
+      "slack/dist/preload.bundle.js#c715302 namespace list excerpt",
+      "REA ev_82c8f3e18e130decdb4bb913a97a42003c015917feb99c8e1ac24f6d9a29eb37 (inspect_analysis_view summary: electron.context_bridge_apis=1, sender_validation_observations=4, literal_channels=0)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "This is the API shape Verevon would need between a Space UI and a host: small, namespaced, validated; define it before building a shell.",
+    "notes": "REA recorded context_bridge_apis=1 but could not resolve IPC names; the namespace list comes from reading the preload bundle."
+  },
+  {
+    "id": "slack-shell-and-native-042",
+    "category": "Client shell",
+    "name": "Remote-controlled Chromium feature overrides and command-line switches",
+    "what": "Slack can switch Chromium features on or off on user machines (to dodge platform bugs) without shipping a new build; a hard-coded list of risky features is always disabled.",
+    "how": "electronFeatureOverrides (stored in local-settings.json, delivered by the web app/server) contains filtered entries {filter, enable_blink_features, disable_blink_features, enable_chrome_features, disable_chrome_features, add_browser_command_line_args}; applied at startup via commandLine.appendSwitch. Always disabled: WebRtcHideLocalIpsWithMdns, HardwareMediaKeyHandling, RequestInitiatorSiteLockEnfocement, WinRetrieveSuggestionsOnlyOnDemand, CalculateNativeWinOcclusion, IntensiveWakeUpThrottling, AllowAggressiveThrottlingWithWebSocket, LogJsConsoleMessages, EnableWatermarkView; ExperimentalJSProfiler is enabled. GET_CHROMIUM_FEATURE_OVERRIDES reports applied vs pending.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1362024 remote override store",
+      "slack/dist/main.bundle.cjs#c1428173 always-disabled features",
+      "slack/dist/main.bundle.cjs#c956274 applied vs pending"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A remote kill-switch for engine-level behaviour is valuable for a fleet of agent hosts; it must be signed/audited because it widens the blast radius.",
+    "notes": "Disabling AllowAggressiveThrottlingWithWebSocket and IntensiveWakeUpThrottling shows Slack depends on timely WebSocket handling while backgrounded (INF)."
+  },
+  {
+    "id": "slack-shell-and-native-043",
+    "category": "Client shell",
+    "name": "Desktop feature flags: hourly poll plus flags pushed by the web app",
+    "what": "Shell behaviours (command center, focus sessions, native notifications, local file search, loading screen, DND check, COM activation, devtools menu) are toggled by server-side flags that the app refreshes hourly and the web app also pushes in.",
+    "how": "A loop in main calls v8() every 36e5 ms against the environment base URL (\"Error checking features\"); CHECK_DESKTOP_FEATURES epic applies the result to settings/slackDefaults and logs the enabled set; teams[].featureFlags arrive via REDUX_UPDATE_FROM_WEBAPP; tk.G(flag,state) reads them. Flag names: devtools, mas_native_platform_sign_in_by_default, force_native_notifications, focus_sessions, desktop_local_file_search, desktop_system_diagnostics, desktop_loading_screen, crash_integrity_check, desktop_command_center, extended_unresponsive_timeout, set_system_notification_playback, async_dnd_check, cookie_persistence_logging, windows_com_activation, tsauthSessionMenuItem.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c796238 flag enum",
+      "slack/dist/main.bundle.cjs#c1425178 hourly feature poll",
+      "slack/dist/main.bundle.cjs#c990898 apply epic"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Flag-gate shell capabilities per org via Control; log the effective set at boot (desktop_feature_flags_loaded) for support.",
+    "notes": "Flag defaults and rollout percentages cannot be read offline."
+  },
+  {
+    "id": "slack-shell-and-native-044",
+    "category": "Client shell",
+    "name": "GPU/hardware-acceleration fallbacks and safe-mode command-line switches",
+    "what": "If hardware acceleration misbehaves users or support can disable it (or enable low-end mode) with one restart; if GPU composition is unavailable the app also drops native notifications to the HTML fallback.",
+    "how": "useHwAcceleration setting and policy HardwareAcceleration; app.disableHardwareAcceleration at start; SET_COMMAND_LINE_SWITCHES allows only disable-gpu and enable-low-end-device-mode (persisted in local-settings.json appCommandLineSwitches); environment rule mn: isGpuCompositionAvailable=false => notificationMethod=null; disable-renderer-backgrounding is always set.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1430204 GPU switch",
+      "slack/dist/main.bundle.cjs#c1174114 GPU-composition rule",
+      "slack/dist/main.bundle.cjs#c1404707 safe-mode persistence"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Keep escape hatches small and allowlisted (two switches), exactly as Slack does.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-045",
+    "category": "Client shell",
+    "name": "Keyboard-layout awareness (WM_INPUTLANGCHANGE) and native-keymap",
+    "what": "The shell tracks the active keyboard layout so keyboard shortcuts and key-code based features (for example push-to-talk combos) map correctly on non-US layouts.",
+    "how": "SET_KEYBOARD_LAYOUT epic reads the layout via @tinyspeck/native-keymap and hooks window message 81 (WM_INPUTLANGCHANGE) on Windows, storing settings.keyboardLayout which is mirrored to the web app.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1320579 hook",
+      "slack/package.json:97 dependency"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "If Verevon adds global shortcuts, plan for layout-aware key codes from the start.",
+    "notes": "Purpose of layout mirroring for the web app is inferred from the ta settings mirror list (INF)."
+  },
+  {
+    "id": "slack-shell-and-native-046",
+    "category": "Realtime & sync architecture",
+    "name": "Shell state lives in a main-process Redux store, replicated to renderers over one IPC channel",
+    "what": "All desktop-level state (settings, windows, workspaces, downloads, notifications, update status) has a single owner in the main process; preloads hold read replicas and send actions back.",
+    "how": "Redux Toolkit store in main; renderers use a forward-to-main middleware that sends every non-local action on ipcRenderer channel \"redux-action\" (actions with meta.scope \"local\" and types matching /^@@/ or redux-form are not forwarded); main applies and rebroadcasts. A preload boots its replica synchronously via ipcRenderer.sendSync(GET_REDUX_STATE) (main answers with returnValue = full state), dropping the _persist key. Typed action creators carry meta.logPayload allowlists so logs never contain full payloads.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c222524 channel name",
+      "slack/dist/preload.bundle.js#c589587 sync hydration request",
+      "slack/dist/main.bundle.cjs#c1408455 sync reply",
+      "slack/dist/main.bundle.cjs#c797807 payload log allowlist pattern",
+      "REA ev_203fd8477a611ebc60bfe0cfc9cbe73086cc727560325ea5525c44d15e153e7f (analyze_javascript_application, directory, record-and-continue; this session) (REA could only see dynamic channel expressions: literal_channels=0)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "One authoritative host store + typed action contract is a clean way to keep a multi-window shell consistent; the logPayload allowlist idea suits ZDR-minded logging.",
+    "notes": "Quality 4. REA found 3 IPC operations but no literal channel; the channel name comes from direct reading."
+  },
+  {
+    "id": "slack-shell-and-native-047",
+    "category": "Realtime & sync architecture",
+    "name": "About 150 named redux-observable epics structure the whole shell",
+    "what": "Every shell behaviour (deep links, notifications, updates, downloads, idle, network, tray, menus, telemetry) is an independently named, independently loggable \"epic\" reacting to actions.",
+    "how": "Enum of epic names (INITIALIZE_APPLICATION ... MAIN_WINDOW_CREATED, about 150 entries, e.g. dispatchSleepAndWakeEventsEpic, reloadEmptyPagesEpic, flushPersistorOnStateChangeEpic) merged with combineEpics in two lists (app epics and webcontents epics); each epic is wrapped with error logging (logEpicException) and an optional \"epic-trace\" debug feature emits rxjs_epic_trace telemetry.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c947956 epic enum excerpt",
+      "slack/dist/main.bundle.cjs#c1354698 combine implementation",
+      "slack/dist/main.bundle.cjs#c854865 error wrapper",
+      "slack/dist/main.bundle.cjs#c1419787 epic trace telemetry"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Per-behaviour named reactors make long-lived host logic testable and traceable; relevant to Verevon agent-host orchestration (named, traced handlers).",
+    "notes": "Count from enum entries in the main bundle (INF-free count, about 153)."
+  },
+  {
+    "id": "slack-shell-and-native-048",
+    "category": "Realtime & sync architecture",
+    "name": "Persisted shell state: root-state.json via redux-persist, local-settings.json, instance/tray UUIDs",
+    "what": "Settings, workspaces and download history survive restarts; a separate small key-value file keeps low-level flags; each install has stable instance IDs for telemetry.",
+    "how": "redux-persist with a node-file storage at userData/storage/root-state.json, throttle 8 s, 5 s rehydrate timeout, versioned schema, per-slice whitelist transforms (field-level), writeFailHandler; flushPersistorOnStateChange debounces 5 s on workspace changes. local-settings.json (userData) is a synchronous JSON key-value store (atomic write) for flags such as appCommandLineSwitches, electronFeatureOverrides, nextExpectedMinAppVersion, clientEnvironment. Base64 UUID files provide instance and tray ids; the session id is instance id + timestamp.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c831643 persist key",
+      "slack/dist/main.bundle.cjs#c1382979 persist throttle",
+      "slack/dist/main.bundle.cjs#c842747 key-value store",
+      "slack/dist/main.bundle.cjs#c873104 instance id files"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Keep durable host state small, versioned, throttled and redactable; keep tokens out of it.",
+    "notes": "Secret-bearing stores (cookies, tokens) were not read."
+  },
+  {
+    "id": "slack-shell-and-native-049",
+    "category": "Realtime & sync architecture",
+    "name": "One shared Chromium session for all workspaces; isolated \"component\" partition for local UI",
+    "what": "Signing in to several workspaces does not create several isolated browser profiles: they share one cookie jar and storage, while Slack's own HTML windows (about, notifications, settings) run in a separate partition so they can never read workspace cookies.",
+    "how": "Session helper returns session.defaultSession (id PROD_DEFAULT_SESSION) for the web app, or persist:NORMAL/ALTERNATE(+Dev/DevEnv) partitions in dev; \"slack-component\" partition for app:// component windows; the permission and IPC gates treat the two sessions differently (component session only accepts app: origin).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1437152 session id",
+      "slack/dist/main.bundle.cjs#c1437603 component partition",
+      "slack/dist/main.bundle.cjs#c1002694 IPC gate keyed on session"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Shared-session multi-tenancy is cheap but means tenant isolation must be enforced server-side; Verevon's per-org Control decisions already assume that.",
+    "notes": "Cookie names d and lc appear in monitors; values were not read."
+  },
+  {
+    "id": "slack-shell-and-native-050",
+    "category": "Realtime & sync architecture",
+    "name": "Three-state connectivity model (online / slackDown / offline) plus network-quality hints",
+    "what": "The shell distinguishes \"no network\" from \"Slack is down\" and passes connection quality to the web app, which can degrade gracefully.",
+    "how": "Enum p = online|slackDown|offline set through SET_NETWORK_STATUS (NETWORK_STATUS epic); GET_NETWORK_INFO asks the renderer for navigator.connection.effectiveType/downlink and answers GET_NETWORK_INFO_RESPONSE (also added to telemetry spans as network_connection_type/downlink); REQUEST_EMULATION_THROTTLE (offline, latency, download/upload throughput, connectionType; CPU throttle rate) lets diagnostics emulate bad networks through the debugger.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c795520 connectivity enum",
+      "slack/dist/preload.bundle.js#c654932 renderer reply",
+      "slack/dist/main.bundle.cjs#c846139 emulation schema"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Surface \"service down\" vs \"you are offline\" separately in Verevon (today the room silently polls); it changes what the user should do.",
+    "notes": "How the web client sets slackDown (probably from its WebSocket state) is INF."
+  },
+  {
+    "id": "slack-shell-and-native-051",
+    "category": "Realtime & sync architecture",
+    "name": "Activity-driven \"tickle\" keeps the realtime connection warm while the user is active",
+    "what": "While the user is active and the screen is unlocked, the shell pings the web app every 10 seconds so it can verify or revive its message connection; after sleep/lock the web app is told immediately.",
+    "how": "SYSTEM_IDLE_STATUS epic: every 10 s, powerMonitor.getSystemIdleTime() <= 20 s means ACTIVE; when ACTIVE and not locked it dispatches TICKLE (FM) which sends TICKLE_MESSAGE_SERVER to every WEBAPP_LOADED webContents; the preload calls window.desktopDelegate.maybeTickleMS(). Idle/locked/awake states are part of the store mirrored to the web app (systemIdleStatus, systemLockedStatus, isMachineAwake).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1325974 idle poll",
+      "slack/dist/main.bundle.cjs#c781165 IPC",
+      "slack/dist/preload.bundle.js#c712771 preload call",
+      "slack/dist/preload.bundle.js#c581678 state mirrored to web app"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Realtime health nudges driven by OS activity are a cheap fix for stale rooms; Verevon's 6 s polling could at least refetch on activity/visibility/resume.",
+    "notes": "That \"message server\" means the WebSocket tier is INF; DOC confirms WebSockets over 443."
+  },
+  {
+    "id": "slack-shell-and-native-052",
+    "category": "Realtime & sync architecture",
+    "name": "Sleep/wake, lock and thermal throttling signals forwarded to the web app",
+    "what": "The web client learns when the machine sleeps or wakes (and when the CPU is throttled) so it can resync or lighten work; lock state is mirrored as state.",
+    "how": "powerMonitor suspend/resume update a suspend-status action; the DISPATCH_SLEEP_AND_WAKE epic then sends SLEEP_AND_WAKE (\"sleep\" or \"wake\") to every webContents and the preload dispatches a DOM Event of that name; powerMonitor \"speed-limit-change\" (throttled 5 s) sends SPEED_LIMIT_CHANGE (value bucketed by 10) to window.desktopDelegate.speedLimitChanged; lock state is tracked separately (systemLockedStatus); an auth-cookie monitor (flag cookie_persistence_logging) logs sleep duration to debug sign-outs after sleep.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c991064 thermal/CPU limit",
+      "slack/dist/preload.bundle.js#c712470 DOM event dispatch for SLEEP_AND_WAKE",
+      "slack/dist/main.bundle.cjs#c1407779 sleep-vs-auth-cookie debugging"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Agent-host clients should resync Space state on resume and expose an explicit \"resynced at\" marker.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-053",
+    "category": "Realtime & sync architecture",
+    "name": "Reload of blank pages with quadratic backoff, waiting for the network to return",
+    "what": "If the web app loads as an empty page, the shell retries with growing delays (1 s, 4 s, 9 s ... up to 10 tries) and, if offline, waits until connectivity returns instead of burning retries.",
+    "how": "RELOAD_EMPTY_PAGES epic counts per-webContents EMPTY_PAGE states; delay = 1000 * n^2 ms when networkStatus is ONLINE, else waits for SET_NETWORK_STATUS ONLINE; then sends RELOAD_DOCUMENT; gives up after 10. A separate load-timeout path shows \"Slack is having trouble loading\" with Wait / Reload / Restart.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1333779 retry cap",
+      "slack/dist/main.bundle.cjs#c1334017 offline wait",
+      "slack/dist/resources/locales/en/desktop_messagebox_en_GB.json:12 dialog text"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Same recipe works for the Space SPA shell (bounded retry, offline-aware); Verevon polling code has no stated backoff.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-054",
+    "category": "Realtime & sync architecture",
+    "name": "WebContents lifecycle state machine with session-expired and load-timeout states",
+    "what": "Each web view is tracked through unloaded, loaded, webapp-loaded, empty, failed, timed-out, crashed and session-expired, driving reloads, dialogs and sign-out handling.",
+    "how": "Enum oV = unloaded | loaded | page-fail-load | empty-page | webapp-loaded | page-closed | render-process-gone | webapp-session-expired | page-load-timed-out; typed contents types app | auth | posts | report_issue and cloud pickers box | dropbox | gdrive | onedrive; PAGE_LOADED vs WEBAPP_LOADED distinguishes DOM load from the app finishing boot (the preload reports it).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c968227 state enum",
+      "slack/dist/main.bundle.cjs#c968277 state enum",
+      "slack/dist/main.bundle.cjs#c967733 content types for pickers"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Make \"app ready\" a first-class state (not just DOM loaded) in any Verevon host; queue deep links and notifications until then.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-055",
+    "category": "Realtime & sync architecture",
+    "name": "Local data lifecycle: clear caches on sign-out, keep IndexedDB until the last workspace leaves, handle Electron version changes",
+    "what": "Signing out wipes caches and service workers, but the local database (IndexedDB) is only wiped when no workspace remains; upgrading or downgrading the Electron runtime keeps or restores cookies and clears code/service-worker caches that could be incompatible.",
+    "how": "SIGN_OUT_CLEANUP: session.clearData({dataTypes: backgroundFetch, cache, downloads, fileSystems, serviceWorkers, webSQL [+ indexedDB when workspaces is empty]}), removes non-Slack cookies, deletes per-domain dpop-keys files for domains no longer in use and the macOS auth cookie backup. On Electron major upgrade it copies Cookies to StaleCookies-<prev>; on downgrade restores them and deletes the Service Worker folder; any Electron version change deletes Code Cache.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1324353 per-domain key cleanup",
+      "slack/dist/main.bundle.cjs#c856201 cookie stash across runtime upgrades",
+      "slack/dist/main.bundle.cjs#c1422499 SW cache purge",
+      "slack/dist/main.bundle.cjs#c1422860 code cache clearing"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Explicit data-lifecycle rules per sign-out/upgrade are rare and valuable; Verevon's deletion saga (per-plane receipts) is the server-side analogue, so ensure any local cache is covered by it.",
+    "notes": "Quality 5: rollback-safe. Whether IndexedDB holds the message cache is INF (web client not available)."
+  },
+  {
+    "id": "slack-shell-and-native-056",
+    "category": "Realtime & sync architecture",
+    "name": "The web client uses a Service Worker and OPFS (evidence for an offline-capable local cache)",
+    "what": "Slack's web client appears to cache assets and data locally: the shell captures service-worker console output and ships an \"OPFS explorer\" debug tool.",
+    "how": "CAPTURE_SERVICE_WORKER_CONSOLE_OUTPUT logs session.serviceWorkers console messages (version boots) to webapp-service-worker-console; CLEAR_SERVICE_WORKER epic purges it when the client environment changes (GovSlack); debugFeatures contains opfs-explorer; preload sends RESTART_SELF to the service-worker manager if the preload runs twice in one session.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1030114 SW boot logging",
+      "slack/dist/main.bundle.cjs#c796442 OPFS debug feature",
+      "slack/dist/preload.bundle.js#c709812 preload re-run guard",
+      "slack/dist/main.bundle.cjs#c961594 SW manager IPC"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Offline-first for Spaces needs a local store plus a queued-send model; note Verevon's content-bound append decisions make offline queues hard.",
+    "notes": "INF: shell shows the plumbing, not what the SW/OPFS hold. Confidence medium."
+  },
+  {
+    "id": "slack-shell-and-native-057",
+    "category": "Realtime & sync architecture",
+    "name": "Telemetry pipeline: batched clog events, span-style traces and an IPC-validation beacon",
+    "what": "Usage events are buffered for ~70 seconds and sent in small batches; performance and health are sent as spans with hardware, memory and process counts; invalid IPC calls are beaconed separately.",
+    "how": "track(): ReplaySubject -> bufferTime(70 s) -> chunks whose encodeURIComponent(JSON) < 1500 chars -> POST {base}/clog/track/ (max 50 chunks per window, rest dropped with a warning). trace(): OpenTracing-like span {id, trace_id, name, start/duration micros, tags v_str/v_bool}, auto-tagged ssb_instance_id, platform, arch, dist, app_version, electron_version, os_version, virtualization, network, memory, CPU model/cores, machine model, uptime, JS heap and renderer/utility/GPU process counts, user_id/team_id. IPC schema failures POST to {base}/beacon/ssbipc (3 s timeout, serialised queue). Sentry + Electron crashReporter minidumps run in parallel; selected action payloads are redacted via logPayload.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c876541 event endpoint",
+      "slack/dist/main.bundle.cjs#c876922 batch cap",
+      "slack/dist/main.bundle.cjs#c873787 span dataset tag",
+      "slack/dist/main.bundle.cjs#c994130 IPC failure beacon",
+      "slack/dist/main.bundle.cjs#c875862 runtime metrics tags"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon must keep ZDR: batch locally, send counts not content, and make event allowlists explicit like logPayload.",
+    "notes": "Quality 4: efficient batching and rich context, but heavy device profiling (CPU model, machine model, virtualization)."
+  },
+  {
+    "id": "slack-shell-and-native-058",
+    "category": "Realtime & sync architecture",
+    "name": "Startup performance timeline and loading-screen telemetry",
+    "what": "Boot time is split into rehydrate, window created, DOM ready and web app loaded, and the web app reports how long the loading screen was visible.",
+    "how": "Phases REHYDRATE=0, MAIN_WINDOW_CREATED=1, WEB_CONTENTS_DOM_READY=2, WEBAPP_LOADED=3 recorded by RECORD_PERFORMANCE_TIMING; window.desktop.stats.timeToPageLoad and timeSpentInPreload expose them; LoadingScreenTelemetry IPC sends start/end/success; desktop_loading_screen flag controls a native loading screen.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1118814 phase enum",
+      "slack/dist/main.bundle.cjs#c1418028 trace event",
+      "slack/dist/preload.bundle.js#c699242 stats API"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Define \"time to first useful room\" as a measured Space SLO with these phases.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-059",
+    "category": "Realtime & sync architecture",
+    "name": "In-app diagnostics: Chromium trace sessions, perf metrics, DOM counters, network/CPU emulation",
+    "what": "Support can record a Chromium trace from the app and upload it, read performance metrics and DOM node counters, and emulate slow networks or CPUs.",
+    "how": "START_DIAGNOSTICS_TRACE takes {identifier, endpoint, token, mode record-until-full|record-continuously|record-as-much-as-possible|trace-to-console, categoryFilter, captureAllProcess, metadata}; window.desktop.stats exposes defaultTraceCategories, performance.enable/disable/getMetrics, getCPUUsage, getMemoryUsage, getAppMetricsV2, getDOMCounters; REQUEST_EMULATION_THROTTLE uses the debugger protocol (Emulation.setCPUThrottlingRate, Network.emulateNetworkConditions).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c848527 trace modes",
+      "slack/dist/preload.bundle.js#c699555 stats API",
+      "slack/dist/main.bundle.cjs#c794678 CDP throttle"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Server-initiated trace capture with an upload token is a strong model for debugging field issues in agent hosts (with consent).",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-060",
+    "category": "Realtime & sync architecture",
+    "name": "Web app pushes team-level state into the shell (unreads, theme, flags, recording)",
+    "what": "The web client tells the shell each workspace's unread counts, sidebar theme, feature flags, notification preferences, recording state and build version; the shell uses it for the tray, badge, menus and title bar.",
+    "how": "window.desktop.redux.dispatchUpdate -> REDUX_UPDATE_FROM_WEBAPP validated by schema k: teams[teamId]{theme{titlebarBackground,titlebarTextColor}, notificationPrefs{notificationSound,noTextInNotifications,muteSounds}, connectivityPrefs{ntlmCredentialDomains}, featureFlags{}, unreads{unreads,unreadHighlights,showBullet}, locale, isRecording, version, frontendBuildType, userId}.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c958396 IPC",
+      "slack/dist/main.bundle.cjs#c848187 schema excerpt",
+      "slack/dist/preload.bundle.js#c715851 preload API"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A narrow, schema-validated \"client status\" push (unread, theme, flags) is the right shape for a Verevon host to drive badge/tray without reading content.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-061",
+    "category": "Realtime & sync architecture",
+    "name": "No end-to-end encryption or client-side message store in the shell",
+    "what": "The desktop shell holds no message data and does no end-to-end encryption; message transport and storage are entirely the web client plus Slack servers.",
+    "how": "Search of main/preload bundles finds no E2EE primitives beyond safeStorage (used for developer tokens) and Chromium cookie encryption (fuse); chat data never appears in the shell redux schema (only counts, names, urls, themes).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c863671 only encryption use found",
+      "install:C:/Program Files/WindowsApps/com.tinyspeck.slackdesktop_4.52.178.0_x64__8yrtsj140pw4g/app/Slack.exe byte offset 199176568 (Electron fuse sentinel, wire version 1, 9 fuses = 010011001; Chrome/152.0.7977.130 Electron/44.4.5 string present)"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Slack-class products rely on server-side controls (EKM, retention); Verevon's ZDR and Control decisions are stronger authority primitives than Slack's shell offers.",
+    "notes": "Absence claim, medium confidence: grep-based; Slack Enterprise Key Management exists server-side (not verified here)."
+  },
+  {
+    "id": "slack-shell-and-native-062",
+    "category": "Realtime & sync architecture",
+    "name": "DOC: Slack realtime path (WebSockets over 443, Flannel edge cache, lazy loading)",
+    "what": "The client bootstraps from a snapshot then listens on a WebSocket; Flannel, an edge cache, answers lazy user/channel lookups and cuts boot payload and reconnect storms.",
+    "how": "WebSockets over port 443 to wss-primary / wss-backup / wss-mobile.slack.com (proxy exemption list); Flannel hosts are routed per team and region; engineering blog reports ~4M simultaneous connections, 600K client queries/s at peak, 7x smaller boot payload at 1.5K users and 44x at 32K users, 5x fewer presence events after pub/sub presence.",
+    "evidence": [
+      "https://slack.engineering/flannel-an-application-level-edge-cache-to-make-slack-scale/",
+      "https://slack.com/help/articles/360001603387-Manage-Slack-connection-issues"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Lazy-load members/channels behind an edge cache and use pub/sub presence; replace Verevon's full-thread-list-per-poll with incremental sync.",
+    "notes": "Numbers are from Slack's own engineering post as summarised by the fetch tool; dated but architecture-level."
+  },
+  {
+    "id": "slack-shell-and-native-063",
+    "category": "Realtime & sync architecture",
+    "name": "DOC: Socket Mode for apps (WebSocket envelopes with acknowledgements, up to 10 connections)",
+    "what": "Apps can receive events over a WebSocket instead of public HTTP: connect with an app-level token, ack each envelope, and reconnect on refresh warnings.",
+    "how": "apps.connections.open returns a short-lived WSS URL; hello message with connection lifetime; envelope_id must be acknowledged or Slack retries; up to 10 concurrent connections per app; refresh_requested / disconnect warnings; debug_reconnects=true for testing.",
+    "evidence": [
+      "https://docs.slack.dev/apis/events-api/using-socket-mode/"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "An agent/bot transport for Spaces (outbound WebSocket with envelope acks) avoids public webhooks for on-prem agents.",
+    "notes": "Platform feature, not shell; included because it is Slack's realtime contract for bots."
+  },
+  {
+    "id": "slack-shell-and-native-064",
+    "category": "Notifications & attention",
+    "name": "Notification pipeline: web app NOTIFY -> state gates -> redux action -> native toast or HTML window",
+    "what": "The web app asks the shell to show a notification; the shell checks the OS notification state, builds a normalised payload and delivers it natively or through its own fallback window.",
+    "how": "NOTIFY IPC (Joi schema C) -> check u5 (notification display allowed) and ah (DND/quiet hours) -> default id teamId_msg -> mj() builds payload (defaults: groupWindowsNotifications true, silent false, sound none, hasReply false, notifyPosition bottom_right on same_as_app display, max 3 on screen, 6 s timeout, 2 s after-hover timeout) -> NEW_NOTIFICATION epic -> native Windows toast (default) or HTML window. Telemetry events DESKTOP_NOTIFICATION_RECEIVED/CLICK/REPLY/ACTION.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1405862 IPC handler",
+      "slack/dist/main.bundle.cjs#c1153152 defaults",
+      "slack/dist/main.bundle.cjs#c864474 telemetry event use",
+      "slack/dist/main.bundle.cjs#c1195266 epic"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "common",
+    "verevonRelevance": "Define one normalised attention payload (who, where, thread, urgency, actions, trace id) that web, desktop and push channels share.",
+    "notes": "Quality 5: single normalised payload, gated, observable end to end."
+  },
+  {
+    "id": "slack-shell-and-native-065",
+    "category": "Notifications & attention",
+    "name": "Rich native Windows toasts: grouped headers, circular avatar, hero image, inline reply, action buttons",
+    "what": "Windows notifications are grouped under the workspace name (or channel name), show the sender avatar in a circle, an optional large image, an inline \"Reply\" text box and custom action buttons; clicking jumps to the exact message or thread.",
+    "how": "The shell generates ToastGeneric XML (header id/title/arguments, appLogoOverride hint-crop circle, hero image, audio, <input id=\"replyBox\"> + action with hint-inputId) and passes toastXml/id/groupId to Electron's Notification; COM activation (windows_com_activation flag, MSIX CLSID) returns JSON arguments (type notification|action|header) that are Joi-validated and routed; fallback activationType \"protocol\" uses slack:// launch URIs with &origin=notification.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1347247 toast template",
+      "slack/dist/main.bundle.cjs#c1345516 avatar crop",
+      "slack/dist/main.bundle.cjs#c1346682 inline reply",
+      "slack/dist/main.bundle.cjs#c795329 grouping option"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Reply-from-notification and per-thread deep links are what make attention flows productive; Verevon approvals (\"approve/deny\") would fit toast action buttons.",
+    "notes": "Quality 5: richest native notification implementation among what was inspected."
+  },
+  {
+    "id": "slack-shell-and-native-066",
+    "category": "Notifications & attention",
+    "name": "Reply to a message from the notification without opening the app",
+    "what": "Typing in the toast reply box sends a reply into the right channel/thread.",
+    "how": "Toast \"reply\" event carries userInputs.replyBox; handleForegroundActivation dispatches REPLY_TO_NOTIFICATION {channel, messageId, response, teamId, traceId, threadTimestamp} (logPayload keeps only the response field name) which the web app turns into a message; click dispatches CLICK_NOTIFICATION with the same ids. The notification payload schema also has a hasReply flag that enables the reply box.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1351433 reply branch",
+      "slack/dist/main.bundle.cjs#c783838 action",
+      "slack/dist/main.bundle.cjs#c846825 schema field"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quick-reply to an agent question from the OS notification is a direct fit for Verevon human-in-the-loop prompts.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-067",
+    "category": "Notifications & attention",
+    "name": "Notification failure counter and automatic failover to the in-app HTML notification window",
+    "what": "If native notifications keep failing, Slack falls back to its own HTML pop-ups and remembers the failover for a week.",
+    "how": "trackNotificationFailure counts consecutive failures (5 => telemetry desktop_persistence_notification_failure); settings notificationFailover (timestamp) and notificationFailoverEnabled; initialSettingsPayload resets an HTML method back to null when failover is stale; getNotificationWarnings reports FAILOVER_WITHIN_LAST_WEEK.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1350159 failure threshold",
+      "slack/dist/main.bundle.cjs#c1039893 warning code",
+      "slack/dist/main.bundle.cjs#c1046121 setting"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Any channel adapter (push, email, native) needs a health counter and a fallback ladder; log it for support.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-068",
+    "category": "Notifications & attention",
+    "name": "HTML notification window: own stacking, corner/display choice, click-through shape, strict CSP + SRI",
+    "what": "The fallback notification UI is a transparent, always-on-top, non-focusable window anchored to a screen corner on the same or primary display, stacking up to the configured count and auto-dismissing.",
+    "how": "Component window app://resources/notifications.html (partition slack-component, component preload, windowType notifications) with SET_NOTIFICATIONS_WINDOW_SHAPE for click-through; settings notifyPosition {corner top_left|top_right|bottom_left|bottom_right, display same_as_app|primary}, notificationMaxItems 1-50, notificationTimeout 250-60000 ms, notificationZoomLevel 0.5-5; page has CSP (script-src sha384 hash, frame-src none, img-src slack-edge/slack-imgs/app) and bundles DOMPurify with Trusted Types.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c959382 click-through shape IPC",
+      "slack/dist/notifications.html:1 local window CSP",
+      "slack/dist/main.bundle.cjs#c1109719 position schema"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "None for web; a native shell would need the same fallback ladder.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-069",
+    "category": "Notifications & attention",
+    "name": "Respecting OS attention state: Windows notifier state, Focus Assist, GPU composition, with isolation in utility processes",
+    "what": "Slack does not show or sound notifications when Windows has them off (for the app, the user, group policy or manifest), when Focus Assist/quiet hours is on (unless Slack is a priority app), or when the GPU compositor is unavailable.",
+    "how": "Native getNotifierState (slack-desktop-utils) and getFocusAssist/isPriority(AUMID) (windows-focus-assist) run in short-lived utilityProcess/worker entry points (call-get-windows-notifier-state-..., call-get-windows-focus-assist-...) so a hung COM call cannot block main; u3() applies different rules for \"notification display\" and \"sound playback\"; notificationPresentationCheck=false bypasses checks; desktop_notifier_state_* traces record failures.",
+    "evidence": [
+      "slack/dist/call-get-windows-focus-assist-entry-point.bundle.cjs#c255 focus assist helper",
+      "slack/dist/call-get-windows-notifier-state-entry-point.bundle.cjs#c317 notifier state helper",
+      "slack/dist/main.bundle.cjs#c1043669 suppression log",
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/index.js:118 native enum"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Honour OS Focus/DND for Verevon desktop alerts and isolate flaky native calls from the main loop.",
+    "notes": "Quality 5: process-isolated native probes with timeouts."
+  },
+  {
+    "id": "slack-shell-and-native-070",
+    "category": "Notifications & attention",
+    "name": "Notification health report (\"why am I not getting notifications\") with cached warnings",
+    "what": "The web app can ask the shell for a list of reasons notifications may not appear (quiet hours, disabled by policy, no GPU composition, zero timeout, unknown method, recent failover, failover disabled) to show a fix-it banner.",
+    "how": "getNotificationWarnings: cache TTL 30 s when warnings exist, 1 h when clean; codes include QUIET_HOURS, AC_* notifier states, GPU_COMPOSITION_UNAVAILABLE, ZERO_MAX, ZERO_TIMEOUT, UNKNOWN_METHOD, FAILOVER_WITHIN_LAST_WEEK, FAILOVER_DISABLED (+ mac NOT_DETERMINED); exposed as window.desktop.notice.getNotificationWarnings and included in exported diagnostics.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1045360 cache logic",
+      "slack/dist/preload.bundle.js#c696104 preload API"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A self-diagnosing attention channel (\"alerts blocked by Focus mode\") is a differentiator Verevon can copy cheaply.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-071",
+    "category": "Notifications & attention",
+    "name": "Sound system: 13 named sounds, web vs system playback, packaged sounds for MSIX, 9 call sounds",
+    "what": "Users choose among named notification sounds; playback can be done by the web app (\"web\") or by Windows (\"system\"); call events have their own sound pack.",
+    "how": "Enum of mp3 names (animal_stick, b2, been_tree, boop, complete_quest_requirement, confirm_delivery, flitterbug, here_you_go_lighter, hi_flowers_hit, hummus, item_pickup, knock_brush, save_and_checkout) shared between schemas; MSIX toasts reference ms-appx:///app/resources/<sound>, non-MSIX toasts are silent and the web app plays audio; SHOULD_PLAY_SOUND answers based on notifier state/Focus Assist; set_system_notification_playback flag sets playback to system once for MSIX; dist contains 9 calls_*_v2.mp3 files.",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c706119 sound enum",
+      "slack/dist/main.bundle.cjs#c1345284 packaged sound path",
+      "slack/dist/main.bundle.cjs#c990620 one-time system playback switch",
+      "slack/dist/calls_incoming_ring_v2.mp3 (and 8 other calls_*_v2.mp3)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Distinct, user-selectable attention sounds per event class (mention, approval, agent done) improve triage.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-072",
+    "category": "Notifications & attention",
+    "name": "Focus sessions / DND awareness polled while the app is open",
+    "what": "When the focus_sessions flag is on, Slack checks the OS focus/DND state on every window focus and every 5 seconds and exposes isInFocusSession to the web app.",
+    "how": "MONITOR_FOCUS_SESSION epic registers browser-window-focus plus a 5 s loop calling the async DND check (aX/am); state field app.isInFocusSession is mirrored to the preload; asyncDndCheck flag chooses the async implementation.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c795738 flag",
+      "slack/dist/main.bundle.cjs#c989208 check loop",
+      "slack/dist/preload.bundle.js#c696951 mirrored state"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "If an agent can interrupt, let it read the user's Focus state before pinging.",
+    "notes": "macOS DND helper in this build returns false unconditionally (stub); Windows path is real."
+  },
+  {
+    "id": "slack-shell-and-native-073",
+    "category": "Notifications & attention",
+    "name": "macOS notification authorisation re-request with throttling",
+    "what": "If macOS says notification permission was never determined, Slack re-requests it, at most 3 times per session and not more than once per 10 minutes.",
+    "how": "u4() with promptWhenNotDetermined calls systemPreferences.requestNotificationAuthorization from slack-desktop-utils with session_limit and interval guards and traces desktop_mac_notification_reauthorize.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1044740 re-request code",
+      "slack/dist/main.bundle.cjs#c1044340 throttle reason"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Prompt for permission in context, not on every launch.",
+    "notes": "macOS-only branch; not exercised on this Windows install."
+  },
+  {
+    "id": "slack-shell-and-native-074",
+    "category": "Notifications & attention",
+    "name": "Per-workspace notification preferences mirrored into the shell",
+    "what": "Each workspace's sound choice, \"no text in notifications\" privacy setting and mute-sounds flag are pushed from the web app so the native layer obeys them.",
+    "how": "Schema teams[].notificationPrefs {notificationSound, noTextInNotifications, muteSounds} in REDUX_UPDATE_FROM_WEBAPP; NOTIFY/Notification payloads carry sound, silent, urgency low|normal|critical.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c848107 pref name",
+      "slack/dist/main.bundle.cjs#c846762 payload urgency"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Carry a \"hide content in notifications\" flag per org/user (ZDR-friendly) from day one.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-075",
+    "category": "Notifications & attention",
+    "name": "DOC: Do Not Disturb, notification schedules, mobile push timing and admin default hours",
+    "what": "Users pause notifications for a period or on a schedule; mobile push waits until the user is inactive; admins can set default DND hours; colleagues can break through with a once-a-day urgent DM.",
+    "how": "Desktop: Pause notifications menu or /dnd; schedule every day/weekdays/custom; mobile push default 1 minute after locking the desktop or 10 minutes after cursor inactivity (configurable); default DND hours set by admins at workspace/Grid level; status \"Vacationing\" turns DND on.",
+    "evidence": [
+      "https://slack.com/help/articles/214908388-Pause-notifications-with-Do-Not-Disturb",
+      "https://slack.com/help/articles/214888418-Set-default-Do-Not-Disturb-hours"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Quiet hours/DND (planned S4.4 in Verevon) should include \"desktop active so skip mobile push\" timing and admin defaults.",
+    "notes": "Figures from help-center search summaries; older blog said 2 minutes; help center treated as current."
+  },
+  {
+    "id": "slack-shell-and-native-076",
+    "category": "Notifications & attention",
+    "name": "DOC: notification preferences (keywords, VIP, per-channel overrides, badges, Activity view)",
+    "what": "Granular controls: everything vs mentions/DMs, keyword alerts, VIP messages, per-conversation overrides, sounds, hiding previews, badge workspaces, taskbar flashing and an Activity view of mentions/reactions/thread replies.",
+    "how": "Configured in Preferences > Notifications; badges appear for DMs, keywords, mentions, app notifications, thread replies, Slack Connect invites, overdue reminders; Windows taskbar flash and notification-area behaviour are separate options.",
+    "evidence": [
+      "https://slack.com/help/articles/201355156-Configure-your-Slack-notifications"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Space needs mention routing and an Activity inbox; Verevon has no mention notifications and no cross-room unread counts.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-077",
+    "category": "Calls & meetings",
+    "name": "Global push-style hotkeys: toggle mute and command centre, registered on demand by the web app",
+    "what": "Ctrl/Cmd+Shift+Space mutes a huddle from any app and Ctrl/Cmd+Shift+K summons the command centre; the web app turns each global shortcut on or off per feature.",
+    "how": "sr map {toggle_mute: CommandOrControl+Shift+Space, desktop_command_center: CommandOrControl+Shift+K}; TOGGLE_GLOBAL_SHORTCUTS_HANDLER(feature, enabled) registers/unregisters with globalShortcut; on press the shell raises the main window if no window is focused (ar for command centre, at for others) and sends NOTIFY_GLOBAL_SHORTCUTS_TRIGGER(feature). The command-centre one is also gated by the desktop_command_center flag.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c994670 shortcut map",
+      "slack/dist/main.bundle.cjs#c1414793 registration",
+      "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts (DOC: Ctrl+Shift+Space toggles huddle mute; Ctrl+Shift+H start/join/leave huddle)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A global \"mute / ask my agent\" shortcut is cheap and loved by power users; keep it opt-in and feature-registered.",
+    "notes": "DOC page does not mention global shortcuts; this is shell-level only."
+  },
+  {
+    "id": "slack-shell-and-native-078",
+    "category": "Calls & meetings",
+    "name": "Low-level key combos with key-down/key-up events and double-tap modifiers (push-to-talk capable)",
+    "what": "The shell can listen to arbitrary key combinations (up to 8 keys) system-wide and report separate press and release, and to double-press of a modifier key (Cmd, Ctrl, Alt, Shift, Win).",
+    "how": "slack-desktop-utils accelerator.registerCombo(keys[], {onKeyDown,onKeyUp}) and registerDoublePressShortcut(modifier, cb, {threshold default 300 ms}) using a single native keyboard hook/event tap (macOS NSEvent monitors, Windows low-level hook); main exposes ACCELERATOR_* IPC with Joi schemas (keys: integers 0+, 1-8 items), disposes handles when the sender is destroyed or crashes; checkAccessibilityPermissions reports {granted, canPrompt} on macOS; native diagnostics include tapDisabledCount stats.",
+    "evidence": [
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/index.js:65 native wrapper docs",
+      "slack/dist/main.bundle.cjs#c954959 IPC",
+      "slack/dist/main.bundle.cjs#c995518 combo schema",
+      "REA ev_2a90444feeb793611259f458eb756194e4f6f2766a044417716bf34a9f2ec0e8 (inspect_pe_resources slackdesktoputils.node: PE32+ x64, one RT_MANIFEST)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Press-and-hold voice capture for a Verevon agent (push-to-talk) needs exactly this primitive; do it natively with strict schemas.",
+    "notes": "Push-to-talk use is INF from keydown/keyup design; native export names (getComboTapStats, tapDisabledByUserInputCount) read from the .node strings."
+  },
+  {
+    "id": "slack-shell-and-native-079",
+    "category": "Calls & meetings",
+    "name": "Native screen-share border overlay (WindowBorderPanel) that follows the shared window or screen",
+    "what": "While sharing, a coloured border is drawn around the shared window or screen so people know what is being broadcast.",
+    "how": "slack-desktop-utils exposes huddles.WindowBorderPanel (windowNumber, borderWidth, borderColor RGBA, timerIntervalMs, getWindowPositionAndDimensions with DIP conversion); main registers CALLS_SCREEN_SHARE_* IPC (create, show, hide, setWindowOrScreenId, setBorderWidth, setBorderColor, setTimerIntervalMs, getWindowPositionAndDimensions) with schemas; preload exposes window.desktop.callsScreenshare.",
+    "evidence": [
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/index.js:175 native class wrapper",
+      "slack/dist/main.bundle.cjs#c1412259 handler",
+      "slack/dist/main.bundle.cjs#c962417 IPC names"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "If Verevon exposes an agent browser/computer view, a persistent \"agent is acting here\" border is an excellent safety cue.",
+    "notes": "Naming shows huddles are the call product (namespace huddles)."
+  },
+  {
+    "id": "slack-shell-and-native-080",
+    "category": "Calls & meetings",
+    "name": "Screen/window picker thumbnails that exclude Slack's own windows",
+    "what": "The share dialog gets small previews of screens and windows, never including Slack's notification pop-ups or windows marked as excluded from sharing.",
+    "how": "GET_SCREEN_PREVIEW_THUMBNAILS clamps thumbnails to 480 px, calls desktopCapturer.getSources(types screen|window), filters sources whose mediaSourceId belongs to windows with excludeFromScreenShare or the notifications window; window state also reports isContentProtected.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1399610 thumbnail code",
+      "slack/dist/main.bundle.cjs#c1092898 exclusion filter",
+      "slack/dist/main.bundle.cjs#c849544 window state schema"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Protect sensitive Verevon surfaces (approval cards, secrets) with content protection during screen share.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-081",
+    "category": "Calls & meetings",
+    "name": "Media-permission probing in a utility process with timeout and cache",
+    "what": "Checking camera/microphone/screen permission cannot freeze the app: it runs in a child process with a 2-second timeout and caches the answer.",
+    "how": "getMediaAccessStatusViaChildProcess forks utilityProcess (serviceName slack-media-access-check) running systemPreferences.getMediaAccessStatus; timeout 2000 ms falls back to the main-process value; results cached 4 h (30 s for fallback answers) with forceRefresh; telemetry desktop_media_access_{cached,fresh,force_refresh}.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c972484 timeout",
+      "slack/dist/call-get-media-access-status-entry-point.bundle.cjs#c268 child entry point",
+      "slack/dist/main.bundle.cjs#c1398808 telemetry"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Same isolation pattern would protect a Verevon host from hangs in OS APIs.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-082",
+    "category": "Calls & meetings",
+    "name": "Audio device enumeration, device init checks and macOS voice-isolated capture",
+    "what": "Settings can list audio devices with details, test whether a device can be opened (Windows), read the microphone mode, and use system voice isolation on macOS; virtual cameras are stubbed to an empty list.",
+    "how": "IPC ENUMERATE_AUDIO_DEVICES, GET_AUDIO_DEVICE_DETAILS(index,direction), CAN_INIT_AUDIO_DEVICE(deviceName) -> systemPreferences.canInitAudioDeviceWin, GET_MICROPHONE_MODE; native audio.startVoiceIsolatedCapture with a GC finalizer safety net that stops the capture handle; GET_VIRTUAL_CAMERAS returns [].",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1396352 trace",
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/index.js:320 voice isolation wrapper",
+      "slack/dist/main.bundle.cjs#c1399863 virtual camera stub"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Relevant only if Verevon adds voice rooms; note the explicit device-open probe to catch exclusive-mode failures.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-083",
+    "category": "Calls & meetings",
+    "name": "Power-save blocker whose lifetime is tied to a MessagePort",
+    "what": "While a call or huddle is active the app keeps the machine awake, and the block is released automatically if the renderer drops the handle or crashes.",
+    "how": "Renderer posts POWER_SAVE_BLOCKER_START with a MessageChannel port; main validates type (prevent-app-suspension|prevent-display-sleep), starts powerSaveBlocker, replies with the id, and stops it when the port closes; POWER_SAVE_BLOCKER_IS_STARTED queries it.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1417039 type validation",
+      "slack/dist/preload.bundle.js#c699876 preload API with MessageChannel"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Tie any keep-awake for long agent runs to a handle that self-releases; avoids leaked sleep blocks.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-084",
+    "category": "Calls & meetings",
+    "name": "Call window teardown signals and a 9-sound call sound pack",
+    "what": "The shell can tell the web app to close the call window or that child windows are closing, and ships ring, join, leave and alert sounds.",
+    "how": "main->renderer IPC CLOSE_CALL and CLOSING_CHILD_WINDOWS mapped to desktopDelegate.closeCall / onClosingChildWindows; mp3 files calls_incoming_ring_v2, calls_outgoing_ring_v2, calls_alert_v2, calls_confirmation_v2, calls_pop_v2, calls_they_joined_call_v2, calls_they_left_call_v2, calls_you_joined_call_v2, calls_you_left_call_v2.",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c712390 delegate call",
+      "slack/dist/main.bundle.cjs#c961338 IPC",
+      "slack/dist/calls_they_joined_call_v2.mp3"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Audible join/leave cues matter for voice rooms; low priority.",
+    "notes": "Playback code is in the remote web client."
+  },
+  {
+    "id": "slack-shell-and-native-085",
+    "category": "Calls & meetings",
+    "name": "Stealth restart: the web app can veto a silent background restart while a huddle or upload is running",
+    "what": "The shell can ask the web app whether a restart (for example to apply an update) is safe; the app answers yes, or no with a reason: huddle, upload or guard.",
+    "how": "QUERY_STEALTH_RESTART_SAFE (main -> renderer, with requestId) and STEALTH_RESTART_SAFE_RESPONSE {requestId, safe, reason huddle|upload|guard}; window.desktopDelegate.queryStealthRestartSafe handles it. The STEALTH_RESTART epic body is empty in this build (feature stubbed).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c996181 response schema",
+      "slack/dist/preload.bundle.js#c713382 preload handler",
+      "slack/dist/main.bundle.cjs#c947295 epic name"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Agent runs and approvals in flight should veto updates/restarts the same way; expose a \"safe to restart\" contract.",
+    "notes": "Medium: protocol present, orchestration epic is empty in 4.52.178."
+  },
+  {
+    "id": "slack-shell-and-native-086",
+    "category": "Calls & meetings",
+    "name": "Recording indicator carried to the tray",
+    "what": "When any workspace reports an active recording, the tray state shows it.",
+    "how": "Team state field isRecording (web app -> shell schema); tray state computed by ix(teams) = some team isRecording === true and passed to the tray icon logic.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1210161 tray state",
+      "slack/dist/main.bundle.cjs#c848379 team schema"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Surface \"an agent/meeting is recording or acting\" in OS chrome for transparency.",
+    "notes": "Which feature sets isRecording (huddle recording, clips) is not determined."
+  },
+  {
+    "id": "slack-shell-and-native-087",
+    "category": "Calls & meetings",
+    "name": "DOC: huddle capabilities and limits (screen share, drawing, AI notes, captions, participants)",
+    "what": "Huddles run in any channel or DM on desktop, mobile and supported browsers; two people can share screens at once, desktop users can draw on shared screens, AI notes produce a canvas with transcript embedded, live captions are English only.",
+    "how": "Free plan 2 participants; paid up to 50 with 25 on video; AI notes are off by default, announced to all participants and cannot be used with externals/guests; transcripts are in the notes canvas and excluded from search; system audio sharing added June 2026.",
+    "evidence": [
+      "https://slack.com/help/articles/4402059015315-Use-huddles-in-Slack",
+      "https://slack.com/help/articles/31377193680019-Use-AI-to-take-huddle-notes-in-Slack"
+    ],
+    "provenance": "DOC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon has no calls; if added, copy \"everyone is notified when AI notes start\" and exclude externals by default.",
+    "notes": "Search-summary based; one fetch of the huddles help URL returned 404."
+  },
+  {
+    "id": "slack-shell-and-native-088",
+    "category": "Governance, security & compliance",
+    "name": "Hardened BrowserWindow factory with runtime enforcement",
+    "what": "Every Slack window is created with renderer sandboxing on and Node access off; developers cannot weaken it by accident, and any window that somehow lacks it is destroyed.",
+    "how": "Frozen webPreferences {nodeIntegration:false, nodeIntegrationInWorker:false, nodeIntegrationInSubFrames:false, contextIsolation:true, sandbox:true, webviewTag:false, autoplayPolicy:\"no-user-gesture-required\"} are merged last by o3(), which logs an error if the caller tried to override a key; app.enableSandbox() is called globally; a browser-window-created listener inspects getLastWebPreferences() and destroys windows with sandbox or contextIsolation false.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c969136 enforcing factory",
+      "slack/dist/main.bundle.cjs#c1423601 runtime guard",
+      "slack/dist/main.bundle.cjs#c1423427 global sandbox"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Make secure defaults non-overridable in the host factory and add a runtime assertion; the same applies to any Verevon agent-browser window.",
+    "notes": "Quality 5: defence in depth (factory + global + runtime check). REA saw 0 explicit_web_preferences (factory indirection), so this comes from reading."
+  },
+  {
+    "id": "slack-shell-and-native-089",
+    "category": "Governance, security & compliance",
+    "name": "IPC security gate: frame/process validation, origin allowlist per session, schema per channel, failure beacon",
+    "what": "Every message from a web page to the shell is checked for who sent it and what it contains; malformed or out-of-context calls are dropped and reported.",
+    "how": "ipcMain.handle/on wrappers sh/sm/sg: require senderFrame, processId and frameId, reject events whose frame/process changed after navigation (\"process transition\"/\"frame transition\"), accept only https Slack-domain origins (or the dev URL) for the main session and only app: origins for the component session; then validate each argument with a per-channel Joi schema (map su, 136 channel entries) padding missing required args; failures call trackValidationFailure {ipc_channel, ipc_sender, ipc_error} which POSTs to the /beacon/ssbipc endpoint.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1002300 sender gate",
+      "slack/dist/main.bundle.cjs#c1001548 schema validation",
+      "slack/dist/main.bundle.cjs#c994204 beacon on failure",
+      "REA ev_82c8f3e18e130decdb4bb913a97a42003c015917feb99c8e1ac24f6d9a29eb37 (inspect_analysis_view summary: electron.context_bridge_apis=1, sender_validation_observations=4, literal_channels=0)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Best template for Verevon gateway-to-host calls: origin + frame + schema + telemetry on every channel, deny by default.",
+    "notes": "Quality 5. REA counted 4 sender-validation observations and could not enumerate the channels; the 136-entry schema map was read directly."
+  },
+  {
+    "id": "slack-shell-and-native-090",
+    "category": "Governance, security & compliance",
+    "name": "Native bridge only for trusted origins; child windows get one flag; process object trimmed",
+    "what": "Pages outside Slack's own https domains (or windows opened by them) do not get window.desktop at all; even trusted pop-ups only get a tiny object.",
+    "how": "The preload checks the URL (https on port 443 and a Slack domain, or the app:// pages) before building the bridge, otherwise exposes only a stub {window}; window.process is reduced to versions, mas and sandboxed; the child preload exposes only slackPlatform.isWayland when the opener is trusted; a Sentry IPC bridge (__SENTRY_IPC__) is exposed in component windows.",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c711813 origin/port trust check",
+      "slack/dist/preload.bundle.js#c717255 reduced process object",
+      "slack/dist/child-preload-entry-point.bundle.js#c15917 child preload",
+      "REA ev_546b8e0f18081c29bee0272c77978cdf603b47562901ea61f62066d6c8565cb1 (trace_application_feature api exposeInMainWorld: no-match, partial graph)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Never expose host APIs to origins other than the product's own; Verevon's Space SPA should receive a minimal, versioned host object.",
+    "notes": "REA trace for exposeInMainWorld returned no-match on a partial graph; the exposure sites were found by grep."
+  },
+  {
+    "id": "slack-shell-and-native-091",
+    "category": "Governance, security & compliance",
+    "name": "Navigation, redirect and external-link policy with scheme allowlist and per-host consent",
+    "what": "Slack windows cannot be navigated to arbitrary sites; links to other sites open in the OS browser, and unusual protocols (ftp, sftp, ssh, smb) show a consent page with a remember option.",
+    "how": "will-navigate and will-redirect (main frame) allow only trusted hosts, otherwise preventDefault and load app://error (or destroy a child); slack: URLs from the page are routed into the deep-link handler; openExternal allows http/https/mailto/skype/spotify/live/callto/tel/im/sip/sips/slack and devtools schemes; others require a per-hostname allowance stored in settings (allowedHostnames); fallback opener spawns RunDll32 URL.dll,FileProtocolHandler with a scrubbed environment.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c970720 will-navigate guard",
+      "slack/dist/main.bundle.cjs#c970152 will-redirect guard",
+      "slack/dist/main.bundle.cjs#c790618 scheme allowlist",
+      "slack/dist/main.bundle.cjs#c1004347 fallback opener"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Agent browsing proposals executed by Quarry need the same allowlist + consent ladder; do not let model-proposed URLs navigate trusted windows.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-092",
+    "category": "Governance, security & compliance",
+    "name": "Permission request/check handlers: trusted-origin only, narrow exceptions",
+    "what": "Cameras, microphones, notifications and other web permissions are granted only to Slack's own origins; fullscreen and sanitized clipboard writes have narrow exceptions.",
+    "how": "setPermissionRequestHandler and setPermissionCheckHandler on the main and component sessions call y0(): allow when the requesting origin is a trusted Slack host (blob: unwrapped), fullscreen on any https, clipboard-read / fullscreen / clipboard-sanitized-write when the main frame is a recognised Slack window; app://resources/ gets clipboard-sanitized-write; all decisions are logged with origins redacted/normalised; setting isClipboardReadDisabled can switch clipboard read off.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1424312 handler log",
+      "slack/dist/main.bundle.cjs#c1418424 narrow grant",
+      "slack/dist/main.bundle.cjs#c1008829 setting"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Default-deny permissions with an origin allowlist; log decisions.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-093",
+    "category": "Governance, security & compliance",
+    "name": "Local app:// protocol with path-traversal guard; strict CSP and SRI on local windows",
+    "what": "Slack's own HTML windows load from a custom protocol that cannot read outside the app folder and run under a tight content-security policy.",
+    "how": "protocol.handle(\"app\") accepts only host \"resources\", rejects \"..\" and any path resolving outside __dirname, serves with net.fetch(file URL); app://error returns an empty body; registerSchemesAsPrivileged gives app standard+secure, plus a dev scheme with bypassCSP. Each component HTML has a CSP (default-src self + app + app.slack.com, script-src sha384 hash, object-src none, frame-src none, restricted img-src) and a matching SRI integrity attribute; notifications bundle includes DOMPurify/Trusted Types.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1362937 path guard",
+      "slack/dist/about-box.html:1 local window CSP",
+      "slack/dist/main.bundle.cjs#c1420468 privileged schemes"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Local UI surfaces in any host should ship with hash-pinned scripts and a path-safe custom protocol.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-094",
+    "category": "Governance, security & compliance",
+    "name": "Download safety: trusted-host gate, verified-download registry, dangerous-extension prompts",
+    "what": "Files only download from Slack file hosts; \"Open\" and \"Show in folder\" only act on files the app itself downloaded; risky types (.exe, .bat, .js, .msi ...) warn first, common documents open without warning.",
+    "how": "A hidden download BrowserWindow loads the URL and the session will-download event is matched by file id; the URL host must pass the trusted-host check; HYDRATE_VERIFIED_DOWNLOADS rebuilds a map id -> path from completed entries and TRIGGER_DOWNLOAD_SHELL_ACTION verifies the stored path equals the registry before shell.showItemInFolder/openPath; extension lists: dangerous (.bat .bin .cmd .command .com .exe .js .msi .pl .py .rb .sh .vb) vs known-safe (images, media, office, pdf, archives); file-handler-info finds the default app for the \"will open in {appName}\" dialog.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1140555 dangerous extension list",
+      "slack/dist/main.bundle.cjs#c950314 verified registry",
+      "slack/dist/resources/locales/en/desktop_messagebox_en_GB.json:72 warning copy"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Agent-produced files in Spaces need the same \"only open what the system wrote and registered\" rule and type-based warnings.",
+    "notes": "Quality 5: the renderer cannot ask the shell to open arbitrary paths."
+  },
+  {
+    "id": "slack-shell-and-native-095",
+    "category": "Governance, security & compliance",
+    "name": "Certificate errors are reported, never bypassed",
+    "what": "TLS errors are not click-through: the app records them for diagnostics and leaves Chromium's default rejection in place.",
+    "how": "certificate-error handler logs domain, issuer, subject, fingerprint and validity, emits desktop_certificate_error once per domain with a before/after/ok validity status, and does not call the callback with true.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1421235 handler",
+      "slack/dist/main.bundle.cjs#c1421479 telemetry"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Enterprise proxies break TLS; surfacing a diagnosable \"certificate problem\" panel beats silent failure.",
+    "notes": "Related user-facing copy: renderer locale \"Check your network settings or any security software\"."
+  },
+  {
+    "id": "slack-shell-and-native-096",
+    "category": "Governance, security & compliance",
+    "name": "Token-binding hints (DPoP) and per-domain key lifecycle",
+    "what": "Sign-in links can say that tokens require DPoP (proof-of-possession), and the shell keeps and deletes per-domain key files accordingly.",
+    "how": "Deep-link token sets carry <n>.dpop=1 -> requiresDpop on the sign-in request; userData/dpop-keys/<domain> files are removed when no remaining workspace uses that domain; key generation and proof signing were not located in this bundle (likely native or web side).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1005648 sign-in token option",
+      "slack/dist/main.bundle.cjs#c1324420 key cleanup",
+      "slack/dist/main.bundle.cjs#c1324486 cleanup error path"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Sender-constrained tokens for agents/hosts reduce replay risk for Control-issued decisions.",
+    "notes": "Medium: only the lifecycle edges were found."
+  },
+  {
+    "id": "slack-shell-and-native-097",
+    "category": "Governance, security & compliance",
+    "name": "Electron fuses and package capabilities in the shipped executable",
+    "what": "The installed Slack.exe has the dangerous Electron escape hatches turned off and integrity checks on.",
+    "how": "Fuse sentinel at byte offset 199176568 in Slack.exe: wire version 1, 9 fuses \"010011001\". With the @electron/fuses v2 ordering (INF) that reads: RunAsNode off, EnableCookieEncryption on, NODE_OPTIONS env var off, --inspect CLI args off, embedded ASAR integrity validation on, only-load-app-from-asar on, browser-process V8 snapshot off, file-protocol extra privileges off, WASM trap handlers on. MSIX capabilities: runFullTrust + internetClient. Runtime string: Chrome 152.0.7977.130, Electron 44.4.5.",
+    "evidence": [
+      "install:C:/Program Files/WindowsApps/com.tinyspeck.slackdesktop_4.52.178.0_x64__8yrtsj140pw4g/app/Slack.exe byte offset 199176568 (Electron fuse sentinel, wire version 1, 9 fuses = 010011001; Chrome/152.0.7977.130 Electron/44.4.5 string present)",
+      "slack/package.json:118 build dependency",
+      "install:C:/Program Files/WindowsApps/com.tinyspeck.slackdesktop_4.52.178.0_x64__8yrtsj140pw4g/AppxManifest.xml (Capabilities: runFullTrust, internetClient)"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Ship any Electron/Tauri host with fuses/hardening locked and verify them in CI.",
+    "notes": "Fuse positions follow the @electron/fuses enum order (confidence medium on the mapping; the raw bits are certain). Read from the installed binary, read-only."
+  },
+  {
+    "id": "slack-shell-and-native-098",
+    "category": "Governance, security & compliance",
+    "name": "Toast and link hardening: XML escaping, launch-URI guard, image-host allowlist, validated activation",
+    "what": "Notification content from other people cannot inject markup or malicious links into Windows toasts.",
+    "how": "vO() escapes & < > \" ' in every toast field; guardLaunchUri replaces any non-slack: launchUri with slack://noop; avatar/hero image URLs must belong to Slack image hosts else are dropped; images are downloaded to a temp cache named by md5(url); toast activation arguments are parsed as JSON and validated against alternatives (notification, action, header) before anything runs.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1343018 XML escape map",
+      "slack/dist/main.bundle.cjs#c1343211 launch URI guard",
+      "slack/dist/main.bundle.cjs#c1348892 image host allowlist"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Treat notification payloads from agents and other members as untrusted input: escape, allowlist hosts and links, validate activation.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-099",
+    "category": "Governance, security & compliance",
+    "name": "Log and state redaction at export and per-action payload allowlists",
+    "what": "When logs or state are exported for support, file names, workspace names, URLs and download paths are replaced with [REDACTED]; routine logging records only chosen fields.",
+    "how": "Regexes redact files-pri/files-tmb URL names, filename= and filename*= values; state-file export rewrites downloads.*.downloadPath, teams.*.team_name/team_url/name and workspaces.*.name/domain/url/icon; action creators use logPayload selectors (for example notifications log only content/title/body-length fields or nothing for credentials); basic-auth requests log uploadData as [REDACTED].",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1453183 URL name redaction",
+      "slack/dist/main.bundle.cjs#c1453496 state redaction map",
+      "slack/dist/main.bundle.cjs#c1207291 request body redaction"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Directly applicable to Verevon support bundles and ZDR: redact by schema path, not by regex alone.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-100",
+    "category": "Governance, security & compliance",
+    "name": "Proxy and site authentication dialog (NTLM/basic) with credentials kept out of logs",
+    "what": "When a proxy or site asks for credentials, Slack shows its own login window and supports NTLM domain lists pushed from the web app.",
+    "how": "SHOW_AUTH_DIALOG epic with basic-auth-view component window (modal child), SUBMIT_CREDENTIALS IPC (username/password logPayload redacted), connectivityPrefs.ntlmCredentialDomains, --proxy-server flag and desktop_proxy_info telemetry.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1206856 credential flow",
+      "slack/dist/main.bundle.cjs#c848187 NTLM prefs",
+      "slack/dist/basic-auth-view.html and slack/dist/basic-auth-view.bundle.js"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Corporate proxy support is a real adoption blocker for enterprise desktop clients.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-101",
+    "category": "Org & membership",
+    "name": "Three sign-in methods: browser, platform-native (system auth sheet) and native direct-SAML",
+    "what": "Slack can sign in through the default browser, through an OS authentication session (macOS), or by starting SAML directly inside the app; policy can pin a default workspace.",
+    "how": "Enum signInMethod = browser | platform-native | platform-native-direct-saml; boot URL carries aswebauth=1 for the native methods; sign-in URLs /ssb/signin, /ssb/signin_redirect, /ssb/add are intercepted and handled natively (START_NATIVE_AUTH epic using electron-native-auth); policy DefaultSignInTeam preselects an org; feature flag mas_native_platform_sign_in_by_default changes the default for Mac App Store builds.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c789203 method enum",
+      "slack/dist/main.bundle.cjs#c1092019 native intercept",
+      "slack/dist/main.bundle.cjs#c830126 policy setting"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Enterprise SSO for a desktop shell should avoid embedded login pages; mirror the browser/native/direct options per org policy.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-102",
+    "category": "Org & membership",
+    "name": "Magic-link login through a hidden window, with navigation limited to Slack hosts",
+    "what": "Clicking a magic sign-in link completes the login inside the app without the user doing more.",
+    "how": "The shell loads the magic-login URL in a hidden BrowserWindow sharing the main session (preload returns the page text as JSON {ok|error} over IPC), blocks will-navigate to non-Slack hosts, flushes cookies to disk and checks the d and lc auth cookies; token sets from login-v2 links are processed for several workspaces in parallel (forkJoin).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1006848 completion step",
+      "slack/dist/magic-login-preload-entry-point.bundle.js#c458 preload response IPC",
+      "slack/dist/main.bundle.cjs#c1006098 navigation limit"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Passwordless handoff from web to desktop is smooth UX; require the tokens to be single-use and bound (DPoP-style).",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-103",
+    "category": "Org & membership",
+    "name": "Enterprise-aware workspace model: org user team (E...) with member workspaces (T...), variants commercial/gov",
+    "what": "The shell knows that one user identity (an org-level team id starting with E) maps to several workspaces (ids starting with T), each with a name, domain, icon set, order and commercial/gov variant.",
+    "how": "STORE_USER_WORKSPACES {userTeamId, workspaceIds[]} fills userWorkspaces; SYNC_WORKSPACES supplies workspaces {id, name, domain, url, icon sizes 34-original, order, variant}; ids are validated with ^(E|T)[A-Z0-9]{8,50}$ patterns; deep-link team params resolve through userWorkspaces membership.",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c695659 id pattern",
+      "slack/dist/main.bundle.cjs#c846441 STORE_USER_WORKSPACES schema",
+      "slack/dist/main.bundle.cjs#c849851 variant enum"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Model org -> spaces membership in the host state exactly as Control returns it; never infer access from a link.",
+    "notes": "Interpretation of E/T as Enterprise/Team is INF from the regex and Slack conventions."
+  },
+  {
+    "id": "slack-shell-and-native-104",
+    "category": "Org & membership",
+    "name": "Commercial vs GovSlack/restricted/military client environments with domain families and mode-switching",
+    "what": "The same app can serve Slack commercial and government clouds; it switches modes when the user signs into or out of gov workspaces and tells the user.",
+    "how": "clientEnvironment 1000 (normal), 1001 (restricted, GovSlack), 1002 (military); domain families slack.com/.eu, slack-gov.com, slack.mil and -dev variants (app, files, imgs, msgs); SWITCH_CLIENT_FEATURE_MODE_VIA_SIGN_OUT/DEEP_LINK/MAGIC_LINK epics flip the mode, CLEAR_SERVICE_WORKER purges the old service worker, a native notification announces \"GovSlack was activated/deactivated\"; UA gets GovEnvironment; some features are replaced by gov-safe handlers (registry in the preload getAvailableFeatures).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c943528 announcement epic",
+      "slack/dist/main.bundle.cjs#c944964 mode switching",
+      "slack/dist/resources/locales/en/desktop_renderer_en_GB.json:56 renderer string",
+      "https://slack.com/help/articles/11906214948755-Manage-desktop-app-configurations (DOC: ClientEnvironment 1000 commercial / 1001 GovSlack)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Data-residency / sovereign modes need a client-level environment switch with cache purge, not just server routing.",
+    "notes": "Policy docs list 1000/1001; code also has 1002 (military)."
+  },
+  {
+    "id": "slack-shell-and-native-105",
+    "category": "Org & membership",
+    "name": "Sign-out, browser sign-out and \"Reset App Data\" flows",
+    "what": "Signing out of a workspace removes it and cleans local data; users can also sign out via the browser; Reset App Data signs out everywhere and returns the app to first-run.",
+    "how": "REMOVE_TEAMS IPC -> SIGN_OUT_BROWSER (opens /ssb/signout/<team> externally), SIGN_OUT_CLEANUP (clearData, cookie purge, dpop keys), CLOSE_WINDOWS_ON_SIGNOUT; menu item Reset App Data with confirm dialog \"This will sign you out from all of your workspaces\".",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1324773 browser sign-out URL",
+      "slack/dist/main.bundle.cjs#c946863 cleanup epic",
+      "slack/dist/resources/locales/en/desktop_messagebox_en_GB.json:57 confirmation text"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Space membership removal (member revocation) should trigger the equivalent local purge for any native cache.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-106",
+    "category": "Apps & extensibility",
+    "name": "Web-driven menu extension API with positioning and badges",
+    "what": "The web app can add its own items to native menus (global and per workspace), position them relative to existing groups and show badges (alerts, updates, new items).",
+    "how": "window.desktop.menus.extendMenu / extendWorkspaceMenu(workspaceId, items) -> EXTEND_MENU; items use Electron menu fields plus order, before/after/beforeGroupContaining/afterGroupContaining, accessibilityLabel, badge {content,count,type}; clicks come back as CUSTOM_MENU_ITEM_CLICKED -> desktopDelegate.customMenuItemClicked; feature_desktop_extend_app_menu flag.",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c695787 preload API",
+      "slack/dist/main.bundle.cjs#c845453 menu item schema",
+      "slack/dist/main.bundle.cjs#c780193 click-back IPC"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "A host-side extension point for plugin/agent-provided menu items (with badges) would let Verevon skills surface in OS chrome safely.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-107",
+    "category": "Apps & extensibility",
+    "name": "Chrome-style context-menu registration for the web app",
+    "what": "The web app can register context-menu items scoped by URL patterns and contexts, like a browser extension, and the shell shows them on right-click with spelling suggestions and link/image actions.",
+    "how": "contextMenus.create({id,title,contexts,documentUrlPatterns,targetUrlPatterns,parentId,type,...}) -> CREATE_CONTEXT_MENU (schema et mirrors chrome.contextMenus) and CONTEXT_MENU_CLICKED back; native menu built from params (linkURL, srcURL, selectionText, misspelledWord, dictionarySuggestions, mediaType, editFlags).",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c714365 preload API",
+      "slack/dist/main.bundle.cjs#c851439 schema",
+      "slack/dist/main.bundle.cjs#c852797 context params"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Context actions on messages/links (\"Ask agent about this\") are cheap extensibility wins.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-108",
+    "category": "Search & discovery",
+    "name": "OS search-index plumbing (Spotlight-style items) present but disabled in this Windows build",
+    "what": "The shell can add and remove items (messages, files) in the operating system's search index so they show up in system search, but on this Windows build availability reports false.",
+    "how": "IPC IS_SEARCH_INDEXING_AVAILABLE (hard-coded false here), ADD_TO_SEARCH_INDEX(items[{identifier, contentDescription, domainIdentifier, title, expirationDate, iconURL}]), REMOVE_FROM_SEARCH_INDEX, REMOVE_ALL_FROM_SEARCH_INDEX; items delegate to slack-desktop-utils search module when loaded (native addToIndex/removeFromIndex/removeAllFromIndex/isIndexingAvailable); schema mirrors CoreSpotlight attributes; window.desktop.search exposes it.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1416720 availability stub",
+      "slack/dist/main.bundle.cjs#c851121 index item schema",
+      "slack/dist/preload.bundle.js#c714853 preload API"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "OS-level indexing of Space titles/artifacts is a discovery differentiator but conflicts with ZDR; make it opt-in per org.",
+    "notes": "Native export names confirmed from the .node strings; macOS implementation is INF."
+  },
+  {
+    "id": "slack-shell-and-native-109",
+    "category": "Search & discovery",
+    "name": "Flag-gated local file search and Ctrl+F routed to in-app search",
+    "what": "A feature-flagged IPC lets the web app search recent local files; the Find command opens Slack's own search instead of a page-find bar.",
+    "how": "SEARCH_LOCAL_FILES(query, options) returns file metadata (name, extension, size, times, thumb) from a directory scan when desktop_local_file_search is on; editing command \"find\" sends START_SEARCH to the web app (desktopDelegate.startSearch).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c795772 flag",
+      "slack/dist/main.bundle.cjs#c1335764 find routed to in-app search",
+      "slack/dist/preload.bundle.js#c712240 delegate call"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Route Ctrl+F/Ctrl+K to Space search once Space search exists (today absent).",
+    "notes": "Scanned directory constant (yT) not resolved."
+  },
+  {
+    "id": "slack-shell-and-native-110",
+    "category": "UX patterns & layout",
+    "name": "DOC: desktop keyboard model (quick switcher, new message, jump to unread, Activity, All unreads)",
+    "what": "Navigation is keyboard-first: quick switcher, new message, search, jump to unread, previous/next unread, All unreads and Activity views have dedicated shortcuts.",
+    "how": "Windows: Ctrl+K/Ctrl+T (desktop only) switcher, Ctrl+N or Ctrl+Shift+K new message, Ctrl+G search, Ctrl+F search in conversation, Ctrl+J jump to latest unread, Alt+Shift+Up/Down previous/next unread, Ctrl+Shift+A All unreads, Ctrl+Shift+M Activity; no command palette listed.",
+    "evidence": [
+      "https://slack.com/help/articles/201374536-Slack-keyboard-shortcuts"
+    ],
+    "provenance": "DOC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Space needs Cmd/Ctrl+K switching and unread jumping; Verevon's Cmd/Ctrl+K currently opens web search only.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-111",
+    "category": "Messaging core",
+    "name": "Rich clipboard: write text/PNG, and multi-format set-and-paste with restore",
+    "what": "Copy actions write text or images to the system clipboard, and a \"set and paste\" operation can place several formats at once, paste, then restore the previous clipboard.",
+    "how": "WRITE_STRING_TO_CLIPBOARD (clipboard.writeText), WRITE_IMAGE_TO_CLIPBOARD (base64 -> nativeImage -> ClipboardItem image/png), SET_AND_PASTE_CLIPBOARD -> slack-desktop-utils clipboard.setAndPaste(formats{<=16 formats, each <=10 MB}, {restoreDelayMs <= 5000, maxSnapshotBytes}) serialised through a promise chain with default restore delay 450 ms (mac) / 150 ms; typed error codes unsupported/unavailable/invalid-payload/failed.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c960788 image clipboard",
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/index.js:273 restore delay constant",
+      "slack/dist/main.bundle.cjs#c851298 10 MB per format limit"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Copy-as-rich-text with source links from agent messages is a daily-use feature; serialise clipboard operations and restore state.",
+    "notes": "The purpose of setAndPaste (pasting into the focused app vs the composer) is not stated in the bundle (INF)."
+  },
+  {
+    "id": "slack-shell-and-native-112",
+    "category": "Messaging core",
+    "name": "Context menu for text, links, images and misspelled words",
+    "what": "Right-click offers Copy Link, Open Link, Copy Image, Copy Image URL, Copy Email Address, Search with Google, Paste and Match Style, Look Up (macOS), Add to Dictionary and spelling suggestions.",
+    "how": "contextMenuEpic builds an Electron menu from context-menu params; strings are localised; CONTEXT_MENU_CLICKED/CLOSE return to the web app for custom items.",
+    "evidence": [
+      "slack/dist/resources/locales/en/desktop_menu_en_GB.json:168 menu string",
+      "slack/dist/main.bundle.cjs#c944526 epic",
+      "slack/dist/main.bundle.cjs#c852780 params used"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Table stakes for any message surface in a native wrapper.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-113",
+    "category": "Messaging core",
+    "name": "Spell-check with 45+ downloadable dictionaries and per-session language selection",
+    "what": "Users pick one or more spell-check languages; dictionaries are fetched from Slack's CDN on demand and the web composer queries misspelling and suggestions through the shell.",
+    "how": "session.setSpellCheckerLanguages restricted to a known language map (about 45 locales with native names); dictionaries from spellcheck.slack-edge.com/dictionaries_v2/ (and .mil/.gov hosts) via DICTIONARY_EVENTS epic; window.desktop.spellCheckerV3 {getAvailableLanguages, getCurrentLanguages, setCurrentLanguages, isWordMisspelled, getWordSuggestions} using webFrame.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c791314 dictionary host",
+      "slack/dist/main.bundle.cjs#c959250 IPC",
+      "slack/dist/preload.bundle.js#c698461 webFrame spell API"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Multi-language spell-check matters for Norwegian/English mixed teams; Verevon composer has none documented.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-114",
+    "category": "Messaging core",
+    "name": "Recent files shelf: Windows Recent scan, native thumbnails and main-process upload with confirmation",
+    "what": "The composer can offer recently used local files (up to 10 within 7 days) with thumbnails; choosing one uploads it after a native \"You're about to share the file ... Proceed?\" confirmation, without the web page ever seeing the file path.",
+    "how": "RecentFiles service: scans app.getPath(\"recent\") .lnk targets, excludes app data/temp, filters excluded extensions, caches thumbnails via nativeImage.createThumbnailFromPath (clamped 64-2048 px; explicit requests validated to <=512), keeps id -> path only in main (renderer gets id, name, extension, size, timestamps, thumb); explicit requests are validated to at most 10 files used within 7 days (internal defaults 20 files / 14 days) and at most 10 are returned; UPLOAD_RECENT_FILE shows a message box then calls files.getUploadURL, uploads the file stream to the returned URL and calls files.completeUpload with channel, thread_ts and broadcast.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1356616 Windows Recent scan",
+      "slack/dist/main.bundle.cjs#c1357766 upload steps",
+      "slack/dist/main.bundle.cjs#c1359128 validation",
+      "slack/dist/preload.bundle.js#c714827 preload API"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 5,
+    "uniqueness": "unique",
+    "verevonRelevance": "Capability-by-id (renderer never gets paths) is the right pattern for agent file access in Spaces.",
+    "notes": "Quality 5: privacy-preserving by construction; upload token still comes from the web app."
+  },
+  {
+    "id": "slack-shell-and-native-115",
+    "category": "Agents in the room",
+    "name": "Command centre entry point reachable from tray and global hotkey (assistant surface)",
+    "what": "The tray click and Ctrl/Cmd+Shift+K both open the \"command center\" overlay in the web app; the log string calls it Slackbot Mini, suggesting it is Slack's assistant entry point.",
+    "how": "See tray and global-shortcut records: shell raises the window and sends NOTIFY_GLOBAL_SHORTCUTS_TRIGGER(desktop_command_center); the overlay itself is web-rendered and not in the bundle; slackb.* hosts appear among the trusted domain families (their purpose is not determined here).",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1209347 tray handler",
+      "slack/dist/main.bundle.cjs#c1209404 log text",
+      "slack/dist/main.bundle.cjs#c790810 slackb host family constant"
+    ],
+    "provenance": "INF",
+    "confidence": "low",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "An OS-level \"ask my agent\" overlay that does not require opening a room is a differentiator for personal agents.",
+    "notes": "Low confidence: only the naming links the overlay to the assistant."
+  },
+  {
+    "id": "slack-shell-and-native-116",
+    "category": "Agents in the room",
+    "name": "No agent runtime, sandbox, browser/PC control or approvals exist in the desktop shell",
+    "what": "The Slack desktop shell contains no agent harness: no sandbox, no tool-call cards, no scheduled work, no approvals; any agent features live in the remote web client or platform.",
+    "how": "Runtime dependencies are 8 native helpers (keymap, desktop-utils, cf-prefs, native-auth, file-handler-info, notification state, focus assist, registry); no utilityProcess for agents (only 3 state probes); webPreferences sandbox is renderer hardening.",
+    "evidence": [
+      "slack/package.json:100 runtime dependencies block",
+      "slack/package.json:104 runtime dependencies block",
+      "REA ev_82c8f3e18e130decdb4bb913a97a42003c015917feb99c8e1ac24f6d9a29eb37 (inspect_analysis_view summary: electron.context_bridge_apis=1, sender_validation_observations=4, literal_channels=0)"
+    ],
+    "provenance": "INF",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Slack's agent story is platform-side; Verevon's governed agent-in-room model is ahead on authority but behind on notification/shell polish.",
+    "notes": "Absence claim with medium confidence (shell only)."
+  },
+  {
+    "id": "slack-shell-and-native-117",
+    "category": "Collaborative artifacts",
+    "name": "Download manager: per-team records, progress, taskbar progress, folder chooser with fallbacks",
+    "what": "Downloads show progress, survive restarts, can be opened or revealed, and go to a user-chosen folder with automatic fallback to Desktop or TEMP.",
+    "how": "Epics INITIALIZE_DOWNLOADS_DIRECTORY, START_FILE_DOWNLOAD, UPDATE_DOWNLOAD, SET_DOWNLOAD_PROGRESS (taskbar progress), CANCEL_DOWNLOADS, OPEN_DOWNLOAD, CLEANUP_VERIFIED_DOWNLOADS; downloads state keyed teamId -> fileId (id, url, startTime, endTime, downloadState, downloadPath, progress, appVersion); SHOW_DOWNLOAD_FOLDER_CHOOSER with macOS security-scoped bookmarks; web app uses window.desktop.downloads.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1142063 start",
+      "slack/dist/main.bundle.cjs#c1141554 fallback folders",
+      "slack/dist/preload.bundle.js#c714767 preload API"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Artifacts produced by agents need a download center with provenance and open-safety (see download safety).",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-118",
+    "category": "Collaborative artifacts",
+    "name": "Cloud file pickers (Box, Dropbox, Google Drive, OneDrive) open as typed child windows with their own logs",
+    "what": "Attaching from cloud storage opens provider pickers in managed windows that the shell recognises and logs separately.",
+    "how": "URL patterns files/import/box|dropbox|gdrive|onedrive classify webContents into types box|dropbox|gdrive|onedrive; each gets a console log file (<type>-picker-console) and the standard hardening.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1338904 picker URL classification",
+      "slack/dist/main.bundle.cjs#c1031731 log naming"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Connector pickers for Spaces (SharePoint/OneDrive for Norwegian orgs) should reuse a controlled child-window model.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-119",
+    "category": "UX patterns & layout",
+    "name": "External-link interstitial for app protocols with \"Always open links to host\" memory",
+    "what": "Clicking a link that opens another app (for example ftp or smb) shows a plain explanation page with Open link and a checkbox to always allow that protocol for that host.",
+    "how": "SHOW_URL_SCHEME_MODAL epic and a renderer page using strings \"This link opens an app, not a website\" and \"Always open {protocol} links to {hostname}\"; WHITELIST_PROTOCOL reducer stores allowedHostnames per protocol or whitelisted schemes; ALLOWLIST_FILE_EXT stores always-open file extensions.",
+    "evidence": [
+      "slack/dist/resources/locales/en/desktop_renderer_en_GB.json:84 interstitial copy",
+      "slack/dist/preload.bundle.js#c578354 reducer action",
+      "slack/dist/main.bundle.cjs#c945262 epic"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Use the same consent pattern when an agent proposes opening non-web protocols.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-120",
+    "category": "UX patterns & layout",
+    "name": "Failure UX: loading screen, \"Slack cannot connect\" page with log download, crash/hang dialogs",
+    "what": "When the web app cannot load, users see a clear offline/blocked page with steps (check network and security software, restart to clear cache, download logs for support) instead of a blank window.",
+    "how": "app://error page and renderer strings (\"Slack cannot connect\", \"download your logs\", \"Other things to try\"), SET_PAGE_FAIL_LOAD IPC from critical-script load errors (data-critical attribute), desktop_loading_screen flag, Download/Stop logging buttons backed by the log pipeline.",
+    "evidence": [
+      "slack/dist/resources/locales/en/desktop_renderer_en_GB.json:87 renderer string",
+      "slack/dist/main.bundle.cjs#c791889 error page",
+      "slack/dist/preload.bundle.js#c710556 critical script failure hook (script data-critical attribute)"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "common",
+    "verevonRelevance": "Verevon should ship an explicit \"cannot reach Verevon\" state with a self-serve diagnostic export.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-121",
+    "category": "UX patterns & layout",
+    "name": "Default sidebar palette and workspace colour themes (aubergine) mirrored into the shell",
+    "what": "Each workspace has an 8-colour sidebar theme; the shell falls back to a default aubergine palette for the title bar and badges.",
+    "how": "Preload default theme {column_bg #4D394B, hover_item #3E313C, active_item #4C9689, active_presence #38978D, badge #EB4D5C, text #FFFFFF, titlebar #232323}; team schema theme {active_item, active_item_text, active_presence, badge, column_bg, hover_item, menu_bg, text_color}.",
+    "evidence": [
+      "slack/dist/preload.bundle.js#c706892 default palette",
+      "slack/dist/main.bundle.cjs#c849024 theme schema"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Per-org colour theming helps users keep tenants apart; Verevon already has themes, consider org accents.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-122",
+    "category": "Collaborative artifacts",
+    "name": "Docs/canvas-style \"posts\" windows tracked as workspace-scoped web contents",
+    "what": "Long-form documents open in their own window type; the shell works out which workspace a document window belongs to from its URL history so menus, badges and sign-out behave correctly.",
+    "how": "URL classification maps /docs paths to webContents type \"posts\" (other types: app, auth, report_issue); ASSOCIATE_WEB_CONTENTS_WITH_WORKSPACE inspects the navigation history for a workspace id and dispatches ASSOCIATE_WEB_CONTENTS {workspaceId, webContentsId}, stored in webContentsAssociations.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1338811 URL -> posts type",
+      "slack/dist/main.bundle.cjs#c967831 contents type enum",
+      "slack/dist/main.bundle.cjs#c949198 association epic"
+    ],
+    "provenance": "SRC",
+    "confidence": "medium",
+    "quality": 3,
+    "uniqueness": "uncommon",
+    "verevonRelevance": "Artifacts (docs, runs, boards) opened in separate windows must stay bound to the owning Space/org for access and sign-out purposes.",
+    "notes": "Whether \"posts\" are canvases or legacy Posts is INF; the /docs route suggests documents."
+  },
+  {
+    "id": "slack-shell-and-native-123",
+    "category": "Governance, security & compliance",
+    "name": "Internal developer sign-in (TSAuth/toolbelt OAuth) with an encrypted token file and gated menu item",
+    "what": "Slack staff can authenticate dev environments through an internal OAuth flow; the token blob is encrypted with the OS keystore and the menu entry only appears when flags and dev mode allow it.",
+    "how": "OAuth against toolbelt.tinyspeck.com with slack://toolbelt-callback; tokens persisted through safeStorage.encryptString in userData (file not read); TSAuth cookies (machine-cookie, slauth-session, tsa2) are set for internal domains from env credentials with 7-day expiry; \"Authenticate TSAuth session\" menu gated by tsauthSessionMenuItem flag and isDevToolsEnabled.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1425692 encrypted token load",
+      "slack/dist/main.bundle.cjs#c831841 OAuth callback",
+      "slack/dist/main.bundle.cjs#c1191085 TSAuth cookie capture"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "Staff/dev auth paths must be separable and removable from production builds; keep them behind compile-time flags.",
+    "notes": "Secret-bearing file toolbelt-tokens was skipped (name only)."
+  },
+  {
+    "id": "slack-shell-and-native-124",
+    "category": "Realtime & sync architecture",
+    "name": "Raised Chromium per-host connection limits for Slack domains",
+    "what": "The app lifts Chromium's per-host connection limit for Slack hosts so many parallel requests (messages, files, images) are not queued.",
+    "how": "app.commandLine.appendSwitch(\"ignore-connections-limit\", <comma list of Slack hosts>) with a wider list for dev/devEnv builds; combined with disable-renderer-backgrounding and the always-disabled throttling features.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c1429031 Chromium switch",
+      "slack/dist/main.bundle.cjs#c1429939 companion switch"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "unique",
+    "verevonRelevance": "Tuning transport limits is only possible in a host; for a web SPA, HTTP/2 multiplexing and incremental sync are the equivalents.",
+    "notes": "Host list constants (o.l$, o.T4, ...) not expanded."
+  },
+  {
+    "id": "slack-shell-and-native-125",
+    "category": "Client shell",
+    "name": "About, What's New, Release Notes and Notices windows",
+    "what": "Native windows show version information, release notes and open-source acknowledgements, and a \"What's New\" entry opens from the Help menu.",
+    "how": "Component windows about-box.html (CSP + SRI) with strings \"Notices and acknowledgements\"; SHOW_RELEASE_NOTES epic opens the web-hosted release notes; Help menu items What's New and Release Notes; build script collect-release-notes gathers notes at packaging time.",
+    "evidence": [
+      "slack/dist/main.bundle.cjs#c945178 epic",
+      "slack/dist/resources/locales/en/desktop_menu_en_GB.json:271 menu string",
+      "slack/dist/resources/locales/en/desktop_renderer_en_GB.json:12 renderer string",
+      "slack/package.json:62 build script"
+    ],
+    "provenance": "SRC",
+    "confidence": "high",
+    "quality": 3,
+    "uniqueness": "common",
+    "verevonRelevance": "Version/release-note surfacing keeps agent-host users informed about behaviour changes.",
+    "notes": ""
+  },
+  {
+    "id": "slack-shell-and-native-126",
+    "category": "Client shell",
+    "name": "Native addon layer: one in-house N-API module plus seven small OS helpers",
+    "what": "Everything the web runtime cannot do on Windows or macOS is done by eight native modules: input hooks, focus control, notification and Focus Assist state, registry/managed-policy access, default-app lookup, MSIX lifecycle, clipboard paste, screen-share border, voice isolation and OS search indexing.",
+    "how": "@tinyspeck/slack-desktop-utils 1.27.0 (PE32+ x64, N-API v8 prebuilt, Salesforce UNLICENSED) exposes namespaces accelerator, app (registerRestart, registerPackage, getPackageInfo, getActivationType), audio (startVoiceIsolatedCapture), clipboard (setAndPaste, readText), fs (isMountPoint), huddles (WindowBorderPanel), input (activateTouchpadHaptics), power (isSystemAutomaticallyResumed), search (index), systemPreferences (notifier state, StartupTask, canInitAudioDeviceWin, registry listeners, notification authorization) and window (forceAllowFocus); plus native-keymap, registry-js, windows-focus-assist, cf-prefs, macos-notification-state, electron-native-auth and file-handler-info. All eight .node files in this Windows package are PE images (the macOS-named ones are Windows builds of the same packages). Heavy or hang-prone probes run in utilityProcess/worker entry points.",
+    "evidence": [
+      "REA ev_2a90444feeb793611259f458eb756194e4f6f2766a044417716bf34a9f2ec0e8 (inspect_pe_resources slackdesktoputils.node: PE32+ x64, one RT_MANIFEST)",
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/index.js:175 JS wrapper namespaces",
+      "slack/dist/main.bundle.cjs#c1025461 power namespace use",
+      "slack/package.json:98 runtime dependencies",
+      "slack/node_modules/@tinyspeck/slack-desktop-utils/lib/binding/napi-v8/slackdesktoputils.node (export names read from binary strings: getComboTapStats, getModelName, getNotifierState, updateMsix, requestNotificationAuthorization ...)"
+    ],
+    "provenance": "REA",
+    "confidence": "high",
+    "quality": 4,
+    "uniqueness": "unique",
+    "verevonRelevance": "A narrow in-house native layer behind validated IPC is the safest way to give Verevon hosts OS powers (hotkeys, focus, hardware model) without exposing them to web code.",
+    "notes": "Provenance REA for the PE identity/manifest (inspect_pe_resources) combined with SRC reading of the JS wrapper and binary strings; no native decompilation was performed. package.json says the module targets Electron 42.2.0 headers while the app runs Electron 44.4.5 (N-API v8 keeps the ABI stable)."
+  }
+]

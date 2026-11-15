@@ -1,0 +1,198 @@
+{
+  "verdict": "Trustworthy and complete enough to hand to the team after a short patch pass. Every sampled Priority card carries the reference-side corrections faithfully: refuted mechanisms are removed or relabelled (Buzz 15 render classes, QM character offsets, the disabled Grok Bot rate limiter, Teams keywords not counted as triggers, the Grok Bot sandbox enforcement mechanism marked unknown, Buzz roster validation done on the client), corrected prevalence counts are used, and the Verevon-side text follows verification.verevon closely, including approachAdjustment and the architecture constraints. Examples: thread:append reused instead of a new space:post decision; Session Core, not the Application Plane, as the first event emitter; a notification-core consumer instead of a wider gateway allowlist; Quarry as the SSRF boundary. Every cited code location I opened in CoresSystem at afb83928 supports its sentence, and specific reference figures I traced back (500 ms debounce, 4096-character rule cap, 2.2 s headline rotation, 4 s SSE open timeout, 9-participant DM cap, 5 MB broker cap) exist in the inputs or the reference source. The four Recommended-to-Nice-to-have demotions and the F-t1-005 demotion read consistently. The problems found are local. One Priority sentence says search is permission-aware in 4 of 5 references, although per-hit re-authorization is verified only in Buzz. One Priority card says the agent self-API is low cost although verification raised its effort. Three cards give three different lists of gateway search routes. There are a few wrong or overclaiming provenance tags, two 'ships' and 'every' overstatements, one citation that points at the wrong code, and stale plane text in Appendix B. None of these changes a tier or a recommendation.",
+  "checked": [
+    "All 5 tier-changed items (F-t1-005, 029, 066, 068, 069): card text compared with verification.verevon (exactGap, constraints, approachAdjustment, effortNote) and with each demotion reason",
+    "All 22 items with reference verdict 'partial' (F-t1-001 to F-t1-024 except the reference-confirmed F-t1-016 and F-t1-019; F-t1-005 among them is now Recommended), plus F-t1-016 and F-t1-019 read in full: each card compared with reference.corrections, caveats and the corrected prevalence, and with verification.verevon for gap, reuse, constraints and approach",
+    "Code spot-checks at commit afb83928 for Priority cards, about 20 locations: SpaceRoomComposer streamChat (001), session-core AppendMessage authorize_thread_owner and the thread-audience UPDATE, auth.rs ZDR refusal (001, 005, 018), SpacePage 6 s poll (003), orchestration_grpc stream_run_events authorize_run_owner (004), spaces.rs mentioned_agent_not_bound (002), composer person ids user:<subject_id> (007 quick win), approvals.rs quarantine placeholder (010), SpaceTabId six tabs (014, 015), gateway create route personal/room only (016), search.rs route list (018), MODEL_EXECUTABLE_ACTION_IDS 8 entries (019), browser_run empty space_id (020), MpNetworkPolicy::Disabled (021), spaceMembers role editor (022), create-resource-compat shim comment (024)",
+    "8 random Recommended cards (F-t1-025, 030, 033, 038, 044, 051, 057, 061) and 5 random Nice-to-have entries (F-t1-071, 076, 080, 087, 094) against verification.verevon, with code checks for 057 (server.go authz grant routes behind requireVerifiedAuthzDelegation), 061 (Meeting Scribe template), 033 (/health route), 076 (orpc-router lines) and 094 (audit-core payload_hash)",
+    "Specific reference figures traced to the features, clusters and items.verified evidence or the reference source: Buzz 500 ms unsubscribe debounce, 4096-character rule cap, 2.2 s rotation, resume triggers at least 5 s apart, 9-participant DM cap and auto-approving harness; QM SSE_OPEN_TIMEOUT_MS 4000 (C:/dev/qm/plugins/web-ui/src/core-bridge.ts:35), 30 s silence timeout, 403/409 browser completions, 5 MB broker cap, 7-day secret drop and audience-floor.ts; Grok Bot 30 s restore watchdog",
+    "Provenance tags on sampled cards (SRC/REA backed by app or source records, DOC for documentation-only claims), including the Slack shell record provenance in slack.shell-and-native.features.json",
+    "Cross-references: every [F-...](#F-...) link in sec-40-r1..r4 and sec-50-n (72 links) checked against _titles.json, plus the links and plain-text dependency ids in all three Priority files; no broken anchors, one label/topic mismatch",
+    "Contradiction scan across cards and against sec-70-roadmap section 9.2 and appx-B-index for quick-win claims, F-t1-005 status, search routes and plane ownership"
+  ],
+  "issues": [
+    {
+      "id": 1,
+      "severity": "major",
+      "file": "sec-30-p3.md",
+      "where": "F-t1-018, Why it matters",
+      "problem": "The card says permission-aware search is table stakes in 4 of 5 references. The 4 of 5 count is for full-text search. The reference correction says per-hit re-authorization is verified only in Buzz, Teams' Substrate permission model cannot be observed and must not be cited for it, and QM's re-authorization was not verified. The card's own caveat later says the same, so the sentence overstates the corrected prevalence and contradicts its own card.",
+      "evidence": "items.verified.json F-t1-018 verification.reference.corrections and caveats ('Per-hit re-authorization is SRC-verified only in buzz'; 'Teams must not be cited for per-hit re-authorization'); referenceBestPractice.prevalence '[R-t1-04-01] 4 of 5 sources' is the full-text-search count.",
+      "patch": {
+        "find": "Permission-aware search is table stakes in 4 of 5 references",
+        "replace": "Full-text search is table stakes in 4 of 5 references (per-hit re-authorization is verified only in Buzz)"
+      }
+    },
+    {
+      "id": 2,
+      "severity": "major",
+      "file": "sec-30-p3.md",
+      "where": "F-t1-019, Why it matters",
+      "problem": "'so the cost is low' contradicts verification. Verification raised the effort from M to L because each action needs an owner endpoint, a Control decision target, a pinned schema and an execution-core adapter, and the single-action pipeline must first be generalized. The card header itself shows L.",
+      "evidence": "items.verified.json F-t1-019 verification.verevon.effortRevised 'L' and effortNote 'Raised from M. Each action needs an owner endpoint, a Control decision target, a pinned schema and an execution-core adapter, and the single-action machinery must first be generalized.'",
+      "patch": {
+        "find": "so the cost is low;",
+        "replace": "but verification raised the effort from M to L because that one-action pipeline must first be generalized;"
+      }
+    },
+    {
+      "id": 3,
+      "severity": "minor",
+      "file": "sec-30-p3.md",
+      "where": "F-t1-019, Quick win paragraph (vs sec-70-roadmap.md section 9.2)",
+      "problem": "The F-t1-019 card keeps a 'Quick win' paragraph, while sec-70-roadmap.md section 9.2 lists F-t1-019 with F-t1-047, 056 and 057 under 'verification says these are not quick wins'. The two sections contradict each other. The verification data for F-t1-019 does not use the words 'quick win' at all, but it does say the first phase is same-plane tools needing no cross-plane grant. Also, 'reuses the tickets.create machinery' is loose, because reuse names that pipeline as a template only. One section should be changed. The simplest fix is to reword the roadmap parenthesis so it covers only 047, 056 and 057 (whose cards and verification say not a quick win), and to say in the card that the first phase uses tickets.create as a template.",
+      "evidence": "sec-70-roadmap.md:156; sec-30-p3.md F-t1-019 '**Quick win.**'; items.verified.json F-t1-019 verification.verevon.reuse ('tickets.create pipeline ... as the template for each admitted action'; 'Model-Plane-owned operations ... as same-plane tools that need no cross-plane grant').",
+      "patch": null
+    },
+    {
+      "id": 4,
+      "severity": "minor",
+      "file": "sec-30-p3.md",
+      "where": "F-t1-018, Verevon today",
+      "problem": "The card says the gateway search router serves 'web, images, videos and answer only'. The router also serves similar, suggest and suggestions. The 'only' list is wrong and contradicts F-t1-069 in sec-50-n.md, which lists web, similar, suggest, images, videos and answer.",
+      "evidence": "Opened C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:38-46. Routes: /search/web, /similar, /suggest, /images, /videos, /suggestions, /answer/stream. verification.verevon.exactGap for F-t1-018 lists 'web, similar, suggest, images, videos, suggestions and answer'.",
+      "patch": {
+        "find": "serves web, images, videos and answer only",
+        "replace": "serves web, similar, suggest, images, videos, suggestions and answer only"
+      }
+    },
+    {
+      "id": 5,
+      "severity": "minor",
+      "file": "sec-40-r2.md",
+      "where": "F-t1-038, Verevon today and approach",
+      "problem": "The card says the gateway search routes are 'web, image and video only', which is wrong. It also contradicts F-t1-018 and F-t1-069, which each give a different list. The point the sentence needs to make is that no route searches Space messages.",
+      "evidence": "search.rs:38-46 in CoresSystem (seven routes: web, similar, suggest, images, videos, suggestions, answer/stream); sec-50-n.md F-t1-069 lists 'web, similar, suggest, images, videos and answer'.",
+      "patch": {
+        "find": "the gateway search routes are web, image and video only (search.rs:39-45)",
+        "replace": "the gateway search routes cover only web, similar, suggest, images, videos, suggestions and answer, none over Space messages (search.rs:39-45)"
+      }
+    },
+    {
+      "id": 6,
+      "severity": "minor",
+      "file": "sec-30-p3.md",
+      "where": "F-t1-018, What the references do",
+      "problem": "The card counts full-text search as 4 of 5 including Slack and tags the sentence [SRC]. The reference correction says Slack has no member record for this and rests on product knowledge. The card should say so, so the Slack share of the count is not read as source-verified.",
+      "evidence": "items.verified.json F-t1-018 verification.reference.corrections: 'qm is confirmed by its own tsvector search over session entries. Slack has no member record and rests on product knowledge.'",
+      "patch": {
+        "find": "qm has its own tsvector over session entries [SRC].",
+        "replace": "qm has its own tsvector over session entries [SRC]; Slack's place in the count rests on product knowledge, not a record [INF]."
+      }
+    },
+    {
+      "id": 7,
+      "severity": "minor",
+      "file": "sec-30-p2.md",
+      "where": "F-t1-017, What the references do",
+      "problem": "Wrong provenance tag. The card tags Slack's rich clipboard and native context menu record [DOC], but those records come from the shipped desktop shell code and are SRC.",
+      "evidence": "slack.shell-and-native.features.json records slack-shell-and-native-111 'Rich clipboard' and slack-shell-and-native-112 'Context menu for text, links, images and misspelled words', both provenance SRC.",
+      "patch": {
+        "find": "Slack's record covers rich clipboard and the native context menu only [DOC]",
+        "replace": "Slack's record covers rich clipboard and the native context menu only [SRC]"
+      }
+    },
+    {
+      "id": 8,
+      "severity": "minor",
+      "file": "sec-30-p2.md",
+      "where": "F-t1-014, Verevon today",
+      "problem": "The card states as [SRC] that the Model Plane already persists a Space turn's artifacts. Verification's approachAdjustment says Space-bound persistence is inferred from the shared chat invoke path [INF] and should be confirmed with one live Space turn, and the card's own How-to paragraph says the same. The tag overclaims, and the card's two paragraphs disagree on provenance.",
+      "evidence": "items.verified.json F-t1-014 verification.verevon.approachAdjustment: 'Space-bound persistence is inferred from the shared chat invoke path (INF), so confirm with one live Space turn before committing.'",
+      "patch": {
+        "find": "returns that metadata on each turn (http_routes.rs:7726-7754, spaces.rs:2616-2730) [SRC].",
+        "replace": "returns that metadata on each turn (http_routes.rs:7726-7754, spaces.rs:2616-2730) [SRC]; that Space-bound turns take this persistence path is inferred from the shared invoke path [INF]."
+      }
+    },
+    {
+      "id": 9,
+      "severity": "minor",
+      "file": "sec-30-p3.md",
+      "where": "F-t1-022, Why it matters",
+      "problem": "'Every chat product closes these gaps' is an unsupported universal claim. The corrected data supports graded roles in 5 of 5 and rename, topic and archive in at least 3 of 5. QM has no lifecycle evidence.",
+      "evidence": "items.verified.json F-t1-022 verification.reference.corrections item 5 (lifecycle 'at least 3 of 5') and prevalence '[R-t1-02-01] 5 of 5 sources have graded roles'.",
+      "patch": {
+        "find": "Every chat product closes these gaps.",
+        "replace": "Graded roles are in all five references, and rename, topic and archive are in at least three."
+      }
+    },
+    {
+      "id": 10,
+      "severity": "minor",
+      "file": "sec-40-r3.md",
+      "where": "F-t1-051, Reference practice",
+      "problem": "The card says retention 'ships' in 3 of 5 references including Buzz. The prevalence data marks Buzz's retention as documentation only ('buzz doc'), and Slack's mechanism is also tagged DOC.",
+      "evidence": "items.verified.json F-t1-051 referenceBestPractice.prevalence: 'Retention: 3 of 5 (slack, teams, buzz doc)'.",
+      "patch": {
+        "find": "Retention ships in 3 of 5 references (Slack, Teams, Buzz)",
+        "replace": "Retention appears in 3 of 5 references (Slack, Teams, and Buzz in its docs)"
+      }
+    },
+    {
+      "id": 11,
+      "severity": "minor",
+      "file": "sec-40-r1.md",
+      "where": "F-t1-025, Verevon today and approach",
+      "problem": "The card keeps the original framing that StartManagedRunRequest carries no space_id or audience. It omits the verification correction that child runs are not Space-less in effect, because they are registered on the parent's thread_id. A reader would conclude that delegated children escape the room's thread.",
+      "evidence": "items.verified.json F-t1-025 verification.verevon.approachAdjustment: 'children are not Space-less in effect because they are registered on the parent's thread_id even though the proto has no space field'.",
+      "patch": {
+        "find": "StartManagedRunRequest carries no space_id or audience (apps/Model Plane/proto/model_plane/v1/sessions.proto:493-509)",
+        "replace": "StartManagedRunRequest carries no space_id or audience (apps/Model Plane/proto/model_plane/v1/sessions.proto:493-509), although child runs are registered on the parent's thread_id, so they are not Space-less in effect"
+      }
+    },
+    {
+      "id": 12,
+      "severity": "minor",
+      "file": "sec-50-n.md",
+      "where": "F-t1-068",
+      "problem": "'Cheap once an SFU exists' sits in an entry whose verified effort is XL. Verification's approachAdjustment asks to 'drop the claim that it is cheap'. Its effortNote supports only 'M for the incremental share track after a call stack exists'.",
+      "evidence": "items.verified.json F-t1-068 verification.verevon.approachAdjustment and effortNote.",
+      "patch": {
+        "find": "Cheap once an SFU exists, but hard-dependent on",
+        "replace": "About M as an increment once a call stack exists, but hard-dependent on"
+      }
+    },
+    {
+      "id": 13,
+      "severity": "minor",
+      "file": "sec-50-n.md",
+      "where": "F-t1-076",
+      "problem": "The only citation is apps/Control Plane/auth-core/src/auth/orpc-router.ts:2717-2790, offered for 'keys are already minted, listed and revoked end to end and the registry builds a deterministic JSON-Schema catalog'. Those lines are the API-key validate RPC (verifyApiKey). They show neither minting, listing and revoking nor the action catalog, which verification places in gateway settings/api_keys.rs and catalog-manifest.ts.",
+      "evidence": "Opened orpc-router.ts:2717-2790 (ValidateAPIKeySchema, verifyApiKey, apiKeyScopesFrom). Confirmed that apps/Frontend Plane/verevonv3/apps/gateway/src/domains/settings/api_keys.rs (list and create API-key handlers) and src/shared/actions/catalog-manifest.ts exist. items.verified.json F-t1-076 exactGap names these files.",
+      "patch": {
+        "find": "(apps/Control Plane/auth-core/src/auth/orpc-router.ts:2717-2790)",
+        "replace": "(gateway apps/Frontend Plane/verevonv3/apps/gateway/src/domains/settings/api_keys.rs, the auth-core validate RPC at apps/Control Plane/auth-core/src/auth/orpc-router.ts:2717-2790, and src/shared/actions/catalog-manifest.ts)"
+      }
+    },
+    {
+      "id": 14,
+      "severity": "minor",
+      "file": "sec-30-p1.md",
+      "where": "F-t1-007, How to build (Dependencies line)",
+      "problem": "The dependency label 'F-t1-018 (thread references)' does not match the target's topic. F-t1-018 is permission-checked message search. Entry references and permalinks are F-t1-039. The item data does name F-t1-018 (R-t1-04-01, search) as the source for # thread references, so the label should say search.",
+      "evidence": "_titles.json F-t1-018 'Permission-checked message search...' and F-t1-039 'Entry references and permalinks...'. items.verified.json F-t1-007 dependencies: 'F-t1-018 (R-t1-04-01) for thread references'.",
+      "patch": {
+        "find": "F-t1-018 (thread references)",
+        "replace": "F-t1-018 (message search behind # thread references)"
+      }
+    },
+    {
+      "id": 15,
+      "severity": "minor",
+      "file": "appx-B-index.md",
+      "where": "rows F-t1-001, F-t1-003, F-t1-004 (Plane column)",
+      "problem": "Appendix B still shows the pre-verification plane text, which contradicts the corrected card headers. For F-t1-001 it shows a 'space:post/thread:append decision', although verification says reuse thread:append and add no space:post type. For F-t1-003 it makes the 'Application Plane (event projection, NATS fan-out)' the first owner, although verification says Session Core's outbox is the first emitter. For F-t1-004 it lists an 'Application Plane (live-state projection)' that verification dropped. The card headers in sec-30-p1.md are correct. The index should copy their plane text.",
+      "evidence": "appx-B-index.md rows for F-t1-001, 003 and 004 compared with sec-30-p1.md card headers and with items.verified.json verification.verevon.approachAdjustment for those three items.",
+      "patch": null
+    },
+    {
+      "id": 16,
+      "severity": "minor",
+      "file": "sec-50-n.md",
+      "where": "F-t1-029, F-t1-066, F-t1-068, F-t1-069",
+      "problem": "The F-t1-005 card marks its demotion ('moved down from Priority by verification'), but the four entries demoted from Recommended to Nice to have carry no such marker in sec-50-n.md. A reader of section 6 cannot see that these were Recommended before verification. Add '· moved down from Recommended by verification' to each entry's parenthetical header, as Appendix B does with 'was X'.",
+      "evidence": "items.verified.json originalTier 'recommended' and finalTier 'nice-to-have' for F-t1-029, 066, 068 and 069. sec-40-r4.md F-t1-005 header shows the demotion note.",
+      "patch": null
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+[
+ {
+  "finalId": "F-t3-018",
+  "verdict": "partial",
+  "checked": [
+   "extract/claude/.vite/build/index.chunk-D7ye_MQA.js: ScheduledTasksManager.shouldAutoApprovePermission (refuses Artifact-family, no-suggestion, directory-mount, browser/computer sentinel, plugin-shim, save_skill/memory and scheduled-task tools) - SRC confirmed",
+   "extract/claude/.vite/build/index.chunk-BeqXJNqE.js: caller audits permission_auto_approved with scheduled_task_id; sandbox-routed runs deny stored approvals",
+   "extract/claude/.vite/build/index.chunk-EzXl5k4A.js: scheduledTaskApprovalLifetimeDays admin setting (int 0..3650)",
+   "claude-extensibility-and-safety-038 record notes (DOC: unset = never expire; folder/browser/built-in/account-wide grants never expire)",
+   "C:/dev/hermes-agent/hermes_cli/config_defaults.py:1655-1680 (approvals.mode default smart; cron_mode/single_query_mode/unattended_mode default deny for DANGEROUS COMMANDS)",
+   "C:/dev/hermes-agent/agent/turn_finalizer.py:776-790 (cron sets skip_background_review)",
+   "C:/dev/hermes-agent/cron/ listing: executions.py, occurrences.py, incidents.py, quota_hold.py, scheduler_delivery*.py present",
+   "records hermes-learning-and-memory-084/088/099, hermes-architecture-and-surfaces-118, manus-product-ux-049, codexagent-agent-runtime-and-models-024/085, deepseek-harness-architecture-026, deepseek-transparency-and-customization-114, antigravity-agent-ux-and-gemini-043, antigravity-architecture-042, cursor-harness-architecture-033, cursor-ai-features-135, claude-product-ux-081, claude-extensibility-and-safety-003"
+  ],
+  "corrections": "(1) Claude's stored shape is approvedPermissions[{toolName, ruleContent?, approvedAt}], not {tool, rule, expiresAt}: expiry is computed at check time from an admin-managed lifetime (mcpScheduledTaskApprovalLifetimeDays). When the setting is unset, approvals never expire, so expiry is an enterprise/managed-config control, not a default. (2) Hermes' 'deny by default' covers only the dangerous-command approval gate in cron, -q and unattended modes; other tools in cron jobs run auto-approved (record 099 says so). The 'narrowed toolset' applies to the webhook surface (web_search, web_extract, vision_analyze, clarify) and to optional per-job enabled_toolsets, not to cron by default. (3) The document's Schedule{... autonomy_cap, run_target, expiry} is a Verevon synthesis: autonomy_cap has no direct reference counterpart. Manus has run_mode (ask/full auto) and expire_config, and Hermes has per-job toolsets. (4) Prevalence 10/12 is broadly right but counts the same vendor twice (manus + web-manus, claude + web-claudeai). DeepSeek's feature is follow-up reminders that are off by default in Desktop, and Antigravity's Windows schedules run only while the app or daemon is alive. Origin attribution '4 of 12' also double-counts Manus.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Claude approval expiry is admin/managed-config only (unset = never expires); HIPAA-ready restriction handling is enterprise",
+   "Hermes deny-default is limited to dangerous commands; cron tools otherwise auto-approved",
+   "Codex and Cursor cloud schedulers are server-side; only client strings and descriptors were seen (SRC client-only)",
+   "DeepSeek scheduling off by default in Desktop",
+   "Off-surface approval (Allow dropped from notifications for risky tools) is Claude desktop only (SRC, 1 of 12)"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-015",
+  "verdict": "partial",
+  "checked": [
+   "extract/claude/.vite/build/index.chunk-EzXl5k4A.js: notificationLevels{permission,idle,question} schema, notificationSound system|none, dockBounceEnabled - SRC confirmed",
+   "scratchpad/tmp/ag2/protos/devtools__jetski__boq__api__proto__api.proto.txt:107-156 (ApiService.RegisterWebPush {subscription_id, fcm_token, user_agent})",
+   "scratchpad/tmp/ag (Antigravity UI bundle): appVariant tree Web/Desktop/RemoteControl/Pwa and a Pwa detection branch",
+   "scratchpad/tmp/t3code/recovered/server/src/ws.ts:823-850,1322-1390 (subscribeShell, coalesceShellLiveStream, synchronized marker, afterSequence replay) - SRC confirmed",
+   "scratchpad/tmp/t3code/recovered/client/src/components/Sidebar.tsx (snooze/Woke logic, about 200 snooze references); client-runtime/src/state/threadSettled.ts",
+   "records claude-product-ux-054/129, antigravity-agent-ux-and-gemini-114, antigravity-architecture-009, t3code-ui-and-multimodel-020, t3code-architecture-092; clusters C-t3-12-001/006/007/008/018, C-t3-13-010/022/033"
+  ],
+  "corrections": "(1) The closed attention set {needs_approval, needs_input, finished, failed} is a Verevon synthesis. Claude's notification kinds are permission, idle and question, with no 'failed' kind, and Antigravity distinguishes only action-required from done. Present the set as a design choice, not as a reference practice. (2) Antigravity web push is evidenced only by an RPC in the cloud API proto (RegisterWebPush with an FCM token). It is FCM-based, not VAPID, and the 'remote sessions' framing is inference from its neighbours in the proto (instances, mesh sessions). (3) Antigravity PWA support is an app-variant enum plus a detection branch. Whether it is publicly shipped or installable was not observed. (4) Mobile parity and push for claude.ai and ChatGPT are DOC-only. (5) The prevalence counts include same-vendor pairs (manus + web-manus, claude + web-claudeai) in the multi-platform and Recents clusters, so the '6 of 12' table-stakes counts are about one vendor too high.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Claude sidebar sections, group-by and auto-archive are partly evidenced via agent-callable sidebar tool names and i18n strings (SRC strings, behaviour not run)",
+   "Antigravity web push: proto-only RPC; PWA: variant enum only",
+   "Antigravity favicon badge is wired only for the internal app type (per record notes)",
+   "claude.ai and ChatGPT mobile and push are DOC-only"
+  ],
+  "confidence": "medium"
+ },
+ {
+  "finalId": "F-t3-009",
+  "verdict": "partial",
+  "checked": [
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/cursor/resources/app/extensions/cursor-agent-exec/dist/main.js: system-prompt text 'Docker container inside of a Firecracker VM', proto enum anyrun.v1.FirecrackerVersion (V1_12_1, V1_16_1), shared tmux session prompt text",
+   "REA analyze_javascript_application(directory=cursor-agent-exec, summary) -> ev_4f135b06...; REA trace_application_feature(seed string 'Firecracker') -> no-match (the graph does not index prompt literals; grep confirmed instead)",
+   "extract/claude/.vite/build/index.chunk-EzXl5k4A.js: heartbeat (__heartbeat__ ping, 'Guest disconnected', lam_vm_heartbeat_failure with consecutive_failures), vpn_routing_conflict error_type - SRC confirmed",
+   "C:/dev/hermes-agent/tools/environments/ (local, docker, singularity, ssh, modal, managed_modal, daytona, vercel_sandbox)",
+   "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:1358-1365 (SandboxBackend trait deferred)",
+   "records cursor-harness-architecture-083, claude-runtime-architecture-042/063, manus-computer-control-architecture-001/002, hermes-architecture-and-surfaces-075, web-claudeai-web-product-119, web-perplexity-web-product-071"
+  ],
+  "corrections": "(1) Claude desktop's VM state machine and 30 s heartbeat govern a LOCAL VM on the user's PC (download, Hyper-V/HCS boot, host share, VPN routing). They are a transferable liveness pattern, not a hosted per-thread microVM. The heartbeat is also flag-gated, with a fallback monitor otherwise. (2) The Cursor 'code-verified mechanism' is overstated. The evidence is agent system-prompt text plus a client proto enum naming Firecracker versions, and the VM orchestration itself is server-side and not inspectable. Call it SRC (client strings/proto), not a verified implementation. (3) 'Firecracker, Kata or gVisor' and the warm-pool, vsock-guest-agent and proxy credential injection details are Verevon design. Only Firecracker appears in the references (Perplexity DOC, Cursor strings). Perplexity's per-task microVM and claude.ai's per-conversation VM with snapshot and 30-day expiry are DOC-only. (4) Prevalence double-counts vendors (manus + web-manus and web-claudeai in both C-06-001 and C-13-036) and the two clusters overlap. The distinct vendors with a hosted per-task computer are roughly Cursor, Manus, Anthropic (claude.ai), Perplexity and OpenAI (ChatGPT): 5 vendors, not 5 + 3. (5) Hermes' 'seven backends' are terminal/exec backends behind a spawn-per-call shell contract, not VM lifecycles. (6) The Manus executor protocol is SRC from binary strings and protobuf names (HOST_KIND_OPERATOR / SANDBOX_RUNTIME), and its direction (cloud = client) is inferred from the message names.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Perplexity SPACE, claude.ai VM lifecycle and Manus sleep/wake/recycle are DOC-only",
+   "Cursor microVM: prompt text + proto enum, server-side not inspectable",
+   "Claude heartbeat is flag-gated and applies to a local Cowork VM",
+   "Manus executor protocol direction inferred from message names"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-007",
+  "verdict": "partial",
+  "checked": [
+   "extract/manus/frontend/out/_next/static/chunks/*.js: KnowledgeEventStatus.PENDING/ACCEPTED/REJECTED, updateKnowledgeEventStatus({eventUid, status, sessionUid, scene}), 'Suggested knowledge' string - SRC confirmed",
+   "C:/dev/hermes-agent/agent/background_review.py:169-173 (_REVIEW_MAX_ITERATIONS = 16; default 'auto' routing runs the fork on the MAIN model for warm prompt cache; a different aux model is optional), :375/440/511 (three prompts), :1079-1119 (dispatch-side tool whitelist incl. read_file/search_files)",
+   "C:/dev/hermes-agent/agent/turn_finalizer.py:776-790 (spawn only if final_response, not interrupted, not skip_background_review)",
+   "C:/dev/hermes-agent/tools/memory_tool.py:171-212 (_background_delete_gate stages replace/remove from unattended review)",
+   "C:/dev/hermes-agent/hermes_cli/config_defaults.py:1318,1482 (write_approval default False)",
+   "C:/dev/hermes-agent/tools/skill_ledger.py:1-40,310-313 (actor in {curator, agent, user}; before/after manifests; 5 MB cap; 'telemetry, not a gate')",
+   "records manus-product-ux-097, web-manus-web-product-068, hermes-learning-and-memory-009/049/057/066/067/098/102, claude-product-ux-072, cursor-ai-features-068"
+  ],
+  "corrections": "(1) Hermes does NOT run the review on a cheap model by default. The default 'auto' routing forks on the main model to reuse the warm prompt cache, and routing to a different (cheaper) model is optional config. (2) The Hermes trigger is cadence-based (every 10 user turns for memory, 10 tool iterations for skills) and is skipped for cron via skip_background_review. 'Unattended' is not itself a spawn condition. (3) The Hermes ledger covers SKILL mutations only, not memory (memory edits and deletes are exposed via the journey view). Its actor is a coarse enum {curator, agent, user}, not a user identity, and it has no run_id. The mechanism's {actor, entity, before_hash, after_hash, run_id} row is a Verevon extension. (4) Hermes' skill write-approval gate is opt-in (skills.write_approval default False). Only unattended replace/remove of memory is fail-closed by default. (5) The 'seeded eval proves the loop' is not reference-derived: no reference evaluates learning outcomes (the Hermes record flags this as a weakness). (6) Claude's inclusion in the proposal cluster rests on lazy module names (tool_cell_skill_proposal/suggestion) and analytics events. That is a skill-authoring proposal UI, not evidence of an approval-gated learning loop. Cursor's Bugbot learned rules are PR-review specific.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "Manus web self-updating Projects is DOC-only (blog)",
+   "Hermes write-approval staging is opt-in",
+   "Claude skill proposal is inferred from module/analytics names",
+   "Learning ledger and rollback is Hermes-only (1 of 12), local single-user scope",
+   "Outcome evaluation of learning is absent from all references"
+  ],
+  "confidence": "high"
+ },
+ {
+  "finalId": "F-t3-004",
+  "verdict": "partial",
+  "checked": [
+   "extract/claude/.vite/build/index.chunk-DBiWryPP.js (pretty: scratchpad/tmp/claude-ext/pretty/cDBiW.js:27-156): 'audit-chain-genesis', createHmac sha256 chain, .audit-key via safeStorage (unsigned with warning if unavailable), verify -> {valid, entries, brokenAt}, audit.jsonl - SRC confirmed",
+   "C:/Users/ImaFernandesDaCosta/AppData/Local/Programs/cursor/resources/app/out/main.js: sand_action_audit_logs {client:true, default:false}; workbench.desktop.main.js: team admin setting sand_action_audit_settings",
+   "https://support.claude.com/en/articles/9970975-access-audit-logs (Enterprise only; 180 days; actor/IP/device; content excluded; no agent-action events listed; no tamper-evidence or SIEM)",
+   "https://www.perplexity.ai/help-center/en/articles/11652747-audit-logs (real-time webhook, Splunk HEC and Slack formatting; 50+ seats or Enterprise Max; comet_agent_action and computer_agent_action events; no query API; no tamper-evidence)",
+   "https://help.openai.com/en/articles/9261474-... (HTTP 403, could not re-verify 'immutable' or per-category keys)",
+   "records claude-extensibility-and-safety-094, web-claudeai-web-product-090/091, web-manus-web-product-076, cursor-ai-features-095, deepseek-transparency-and-customization-049, web-chatgpt-web-product-127, web-perplexity-web-product-098/102"
+  ],
+  "corrections": "(1) Claude's HMAC-chained audit.jsonl is a LOCAL per-session Cowork log in the desktop app. Its key sits beside the log under the same OS user, so it detects naive or partial edits, not a same-user attacker, and it falls back to unsigned entries when safeStorage is unavailable. It is not a server-side compliance store and must not be presented as the 'tamper-evident compliance' reference. No reference was verified to hash-chain a hosted audit store. (2) No inspected source combines hash-chaining with a compliance query API and SIEM export. That combination is a Verevon synthesis. (3) Claude.ai enterprise audit logs list no agent/AI-action events, so the cluster text 'AI actions incl. browser actions' comes from Manus' Browser Operator doc, not from Claude. (4) Prevalence: DeepSeek is counted in C-11-047 although it is a counter-example (approval events without actor identity), and Perplexity record 102 (Comet browser telemetry) is not an AI-action audit log. Cursor's action audit log is a team-admin setting with client flag default off, plus telemetry. The real count is closer to 5 vendors (Anthropic, OpenAI, Perplexity, Manus, Cursor-flagged), and the two clusters should be merged rather than reported separately as 3/12 and 4/12. (5) The ChatGPT 'immutable Compliance Logs Platform' and its per-category admin keys could not be re-verified (403), so keep them as DOC, unverified.",
+  "prevalenceCorrect": false,
+  "caveats": [
+   "All hosted audit/compliance features are enterprise-only (Claude Enterprise; ChatGPT Enterprise/Edu; Perplexity 50+ seats or Enterprise Max; Manus compliance API gated by customer success)",
+   "ChatGPT logs exclude agent-mode internal actions (per record notes)",
+   "Cursor action audit logs flag-gated (client default off)",
+   "Claude HMAC chain is local and same-user-forgeable; the unsigned fallback exists",
+   "ChatGPT claims DOC-only and not re-verified (HTTP 403)"
+  ],
+  "confidence": "high"
+ }
+]

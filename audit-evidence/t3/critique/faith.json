@@ -1,0 +1,141 @@
+{
+ "verdict": "Mostly trustworthy, and close to ready for the team. The Priority cards follow verification.verevon closely: every sampled card uses the corrected exactGap, constraints and approachAdjustment (for example, the resolver location in F-t3-001, the Temporal host decision in F-t3-002, the Do-first MCP scope in F-t3-003, the Z-60/Z-40 reorder in F-t3-005 and the Control-owned contract in F-t3-018). Every Priority card whose reference check came back partial has dropped the refuted reference claim and uses the corrected prevalence. Of the roughly 45 code citations I opened at commit afb83928, all but one support the sentence that cites them. The document should not ship until three factual errors are fixed. First, F-t3-045 says MCP tools are already callable through mcp_call; the code refutes this, and so do the F-t3-003 and F-t3-070 cards. Second, F-t3-022 says the SPA shows cache read tokens per turn, but the Usage frame carries no cache fields, which F-t3-028 itself notes. Third, F-t3-006 points its 'always' rules at F-t3-066 (UI quality gates) instead of the F-t3-032 policy registry. The remaining problems are minor: two wrong denominators (5 of 11, 1 of 11), one citation pointing at the wrong file, one 'every reference' overstatement, a Priority dependency on the demoted F-t3-016 that contradicts the demotion reason, an M4 plan omission, REA tags on SRC records, and named-agent counts that differ between two cards. With the nine proposed patches applied, the cards meet the brief: shared gaps, best source per capability, differentiators, a separate nice-to-have tier and a three-tier sort, all written as an audit that changes nothing.",
+ "checked": [
+  "Tier-change sample: F-t3-016 (Priority to Recommended); card in sec-40-r4.md compared with verdict, effortNote, corrections and its dependants (F-t3-002, F-t3-011, F-t3-012, F-t3-015, F-t3-064)",
+  "All 20 Priority cards with reference verdict 'partial' (F-t3-001 to F-t3-018, F-t3-020, F-t3-021, F-t3-023), plus the 'confirmed' F-t3-019 and F-t3-022: each card compared with reference.corrections, caveats and prevalence, and with verification.verevon exactGap, constraints and approachAdjustment",
+  "Code at commit afb83928: about 45 cited locations opened for the Priority cards, at least two per card, for example agent.rs:926,1185-1226,4466-4474; grpc.rs:706-713; approvals.rs:255-275; permission/mod.rs:72-100; capability_policy.rs:836-838; store.go:300; settings.rs:150; trigger.go:40-44; browser.rs:1235; grant.go:62-69; ledger.md:1358-1375; integration_tools.rs:102,111; history.rs:21; zdr_posture.rs:247-260; chat-client.ts:1144; consumer.go:81-100; ChatArtifactPanel.tsx:440-456; execution-core grpc.rs:498-530; interactive_run.go:243; 0039 migration; handlers.go:1410-1421; sessions.proto:901-918; model-gateway grpc.rs:148-160; prompt_context.rs:25; sse.rs:1491,1655,1855; workplane_apis.go:856-871; FleetRunConsole.tsx:28",
+  "9 Recommended cards against verification.verevon: F-t3-024, F-t3-028, F-t3-033, F-t3-041, F-t3-045, F-t3-047, F-t3-053, F-t3-060, F-t3-065, plus provenance tags in F-t3-066 and F-t3-068",
+  "5 Nice-to-have entries: F-t3-070, F-t3-075, F-t3-083, F-t3-089, F-t3-092",
+  "All 138 [F-...](#F-...) cross-references in the eight section files checked against _titles.json and item dependency lists; 1 broken",
+  "Cross-card contradiction scan (MCP callability, cache-token display, F-t3-016 dependency, named-agent prevalence) and an overstatement scan ('every', 'all references')",
+  "Code check of the MCP and cache-token claims: tool_loop.rs:3686-3697 refuses mcp_catalog and mcp_call, execution-core has no mcp_call handler, and sse_events.rs:268-286 Usage has no cache fields while cache tokens go only to the NATS usage envelope (sse.rs:4120-4135)"
+ ],
+ "issues": [
+  {
+   "id": 1,
+   "severity": "major",
+   "file": "sec-30-p1.md",
+   "where": "F-t3-006, How to build it",
+   "problem": "Broken cross-reference: 'always' rules are said to land in the policy registry of F-t3-066, but F-t3-066 is 'UI quality gates: remove Norwegian-only controls and enforce i18n and design tokens in CI'. The policy registry is F-t3-032 ('Org agent policy registry'). The item's own approach text says 'always becomes a rule in the F-t3-032 policy registry'; its dependency list carries F-t3-066 by mistake.",
+   "evidence": "_titles.json (F-t3-066 and F-t3-032 titles); items.verified.json F-t3-006 approach text names F-t3-032, while its dependencies list F-t3-066",
+   "patch": {
+    "find": "\"always\" rules land in the policy registry of [F-t3-066](#F-t3-066)",
+    "replace": "\"always\" rules land in the policy registry of [F-t3-032](#F-t3-032)"
+   }
+  },
+  {
+   "id": 2,
+   "severity": "major",
+   "file": "sec-40-r2.md",
+   "where": "F-t3-045, Verevon today and approach",
+   "problem": "The card says MCP tools are already callable through mcp_call. The code refutes this, and the claim contradicts the F-t3-003 card ('The model cannot call any MCP tool today') and the F-t3-070 entry ('tool_loop.rs refuses every mcp__ call'). It was copied from the F-t3-045 approachAdjustment, which conflicts with the F-t3-003 and F-t3-070 verifications.",
+   "evidence": "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3686-3697 returns errors for mcp__*, mcp_catalog and mcp_call ('requires governed agentic execution and approval'); execution-core has no mcp_call handler (grep); capability_policy.rs:836-838 returns None for dynamic MCP names; verification F-t3-070 exactGap says 'tool_loop.rs returns an error for both names and every mcp__ call, execution-core has no mcp_call handler'",
+   "patch": {
+    "find": "MCP tools are already callable through mcp_call; [F-t3-003](#F-t3-003) supplies side-effect classes and the signed gate.",
+    "replace": "MCP tools are not callable today: the inline loop refuses mcp_catalog and mcp_call (tool_loop.rs:3686-3697) and trusted_capability_id returns None for mcp__ names; [F-t3-003](#F-t3-003) makes them callable through the signed gate with side-effect classes."
+   }
+  },
+  {
+   "id": 3,
+   "severity": "major",
+   "file": "sec-30-p3.md",
+   "where": "F-t3-022, Verevon today",
+   "problem": "The card says 'the SPA shows read tokens per turn'. The SPA has a Prompt cache metric, but the server's Usage frame carries no cache_read or cache_write fields, so the metric reads zero. Cache tokens reach only the NATS usage envelope and cost-core. This contradicts the F-t3-028 card, which says correctly that Usage has no cache fields and the metric appears to stay at zero. The F-t3-022 verification repeated the error, but the F-t3-028 verification and the code agree with each other.",
+   "evidence": "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:268-286 (Usage: input_tokens, output_tokens, cost_usd, cost_basis, latency_ms, confidence, served_by, retention_class); sse.rs:4120-4135 passes cache_read_tokens only into usage_envelope for NATS; ChatPanels.tsx:929-936 reads cacheReadTokens ?? 0; verification F-t3-028 exactGap",
+   "patch": {
+    "find": "the SPA shows read tokens per turn (ChatPanels.tsx:926-940)",
+    "replace": "the SPA has a per-turn Prompt cache metric (ChatPanels.tsx:926-940) that reads zero because the Usage frame carries no cache fields (sse_events.rs:268-286; see [F-t3-028](#F-t3-028))"
+   }
+  },
+  {
+   "id": 4,
+   "severity": "minor",
+   "file": "sec-30-p1.md",
+   "where": "F-t3-002, How to build it",
+   "problem": "The Priority card says flatly that it depends on F-t3-016. The F-t3-016 card in sec-40-r4.md says that item is 'scale-readiness hardening rather than a precondition for durable runs', and that is the reason verification demoted it. The same unqualified dependency appears in F-t3-011, F-t3-012 and F-t3-015. The roadmap (sec-70 item 10) acknowledges the tension, but the cards contradict each other.",
+   "evidence": "verification F-t3-016 verdictReason: 'not a precondition for durable runs because approvals already persist in session-core'; F-t3-016 card text in sec-40-r4.md:113; F-t3-002 dependencies list",
+   "patch": {
+    "find": "Depends on [F-t3-016](#F-t3-016). Keep the core slice",
+    "replace": "Lists [F-t3-016](#F-t3-016) as a dependency, although verification demoted it because approvals already persist in session-core and it is not a precondition for durable runs. Keep the core slice"
+   }
+  },
+  {
+   "id": 5,
+   "severity": "minor",
+   "file": "sec-30-p2.md",
+   "where": "F-t3-010, What the references do",
+   "problem": "Wrong denominator. The corrected count is 5 of 11 sources, after dropping Antigravity from 6 of 11; the card says 5 of 12.",
+   "evidence": "items.verified.json F-t3-010 prevalence 'R-t3-03-04: 6 of 11 sources'; refcheck correction 1: 'Drop Antigravity ... which gives 5 of 11'",
+   "patch": {
+    "find": "Connected apps appear in 5 of 12 references",
+    "replace": "Connected apps appear in 5 of 11 references"
+   }
+  },
+  {
+   "id": 6,
+   "severity": "minor",
+   "file": "sec-50-n.md",
+   "where": "F-t3-092",
+   "problem": "Wrong denominator: the data gives Model Council as 1 of 11 sources, not 1 of 12.",
+   "evidence": "items.verified.json F-t3-092 referenceBestPractice.prevalence '1 of 11 sources; unique (DOC only)'",
+   "patch": {
+    "find": "Perplexity Model Council, 1 of 12 references",
+    "replace": "Perplexity Model Council, 1 of 11 references"
+   }
+  },
+  {
+   "id": 7,
+   "severity": "minor",
+   "file": "sec-30-p1.md",
+   "where": "F-t3-007, Verevon today",
+   "problem": "Citation points at the wrong file. The claim that SessionRef drops user_id is true, but the cited go/pkg/envelope/envelope.go:30-67 is the Envelope struct, which does carry UserID. SessionRef is defined in capability-core sessionreview/trigger.go:40-44 with only OrgID, RunID and ThreadID.",
+   "evidence": "Opened apps/Model Plane/go/pkg/envelope/envelope.go:30-41 (UserID field present) and apps/Model Plane/go/services/capability-core/internal/sessionreview/trigger.go:40-44 (SessionRef without user id); trigger.go:40-70 is in the item's verification evidence",
+   "patch": {
+    "find": "SessionRef drops user_id (go/pkg/envelope/envelope.go:30-67)",
+    "replace": "SessionRef drops the envelope's user_id (go/services/capability-core/internal/sessionreview/trigger.go:40-44; the envelope carries it at go/pkg/envelope/envelope.go:30-41)"
+   }
+  },
+  {
+   "id": 8,
+   "severity": "minor",
+   "file": "sec-30-p2.md",
+   "where": "F-t3-009, Why it matters",
+   "problem": "Overstatement. 'Every \"do the work\" reference gives each task its own computer' is not supported. The corrected prevalence is five distinct vendors with a hosted per-task computer, and the card's own reference paragraph says so. Hermes runs spawn-per-call backends, not VMs.",
+   "evidence": "refcheck F-t3-009 corrections 4 and 5 (five vendors: Cursor, Manus, Anthropic, Perplexity, OpenAI; Hermes is spawn-per-call)",
+   "patch": {
+    "find": "Every \"do the work\" reference gives each task its own computer.",
+    "replace": "Five reference vendors (Cursor, Manus, Anthropic, Perplexity, OpenAI) give each task its own hosted computer."
+   }
+  },
+  {
+   "id": 9,
+   "severity": "minor",
+   "file": "sec-50-n.md",
+   "where": "F-t3-089",
+   "problem": "The entry omits that outward MCP and the WebMCP bridge are already planned as M4. Verification says the item is 'absent and already planned as M4', and alreadyPlanned.is is true, so without this the reader is told the work is unplanned.",
+   "evidence": "items.verified.json F-t3-089 alreadyPlanned.where; opened C:/dev/CoresSystem/Verevon-ai-first-plan.md:44 (M4 outward parity: MCP server and WebMCP) and :120-123",
+   "patch": {
+    "find": "Verevon only consumes MCP servers",
+    "replace": "Outward MCP and a WebMCP bridge are already planned as M4 (Verevon-ai-first-plan.md:44,114-123, repo root), but today Verevon only consumes MCP servers"
+   }
+  },
+  {
+   "id": 10,
+   "severity": "minor",
+   "file": "sec-40-r4.md",
+   "where": "F-t3-065, F-t3-066, F-t3-068, F-t3-016",
+   "problem": "Four Claude desktop claims are tagged [REA]. The underlying records are tagged SRC (bundle reading, not REA tool analysis), and these items' provenanceMix shows REA 0. The evidence is still shipped-app evidence, so no claim is unsupported, but the tag should be [SRC] for consistency with the provenance rules.",
+   "evidence": "claude.*.features.json records claude-product-ux-107 and claude-runtime-architecture-072 have provenance SRC; items.verified.json provenanceMix REA:0 for F-t3-065, F-t3-066 and F-t3-068",
+   "patch": null
+  },
+  {
+   "id": 11,
+   "severity": "minor",
+   "file": "sec-40-r4.md",
+   "where": "F-t3-060, Reference practice",
+   "problem": "Prevalence of persistent named agents differs between cards: F-t3-060 says 4 of 12, while F-t3-019 (sec-30-p3.md) says 5 of 12. Both figures come from different clusters (F-t3-060 prevalence vs R-t3-04-06). One figure, or a note on why they differ, should be used.",
+   "evidence": "items.verified.json F-t3-060 prevalence 'Named persistent agents: 4 of 12'; F-t3-019 prevalence 'R-t3-04-06: persistent named agents 5 of 12'",
+   "patch": null
+  }
+ ]
+}

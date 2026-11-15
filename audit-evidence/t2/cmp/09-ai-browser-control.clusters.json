@@ -1,0 +1,2972 @@
+{
+ "category": "AI-browser control",
+ "excluded": [
+  {
+   "id": "aside-browser-product-092",
+   "reason": "Upstream Chromium (Google Gemini auto-browse) UI strings present in Aside's Chromium base; not an Aside-built capability, evidence of upstream pattern only (pattern covered by takeover cluster C19)"
+  },
+  {
+   "id": "codexbrowser-in-app-browser-078",
+   "reason": "Desktop-local named-pipe framing between Node REPL and Electron host; transport trivia with no product relevance for a networked, server-side Quarry"
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t2-09-001",
+   "name": "Authenticated agent-to-browser control channel (agent loop outside the browser, routed command bridge)",
+   "description": "The agent loop runs outside the browser process and drives it over an authenticated, routed channel: page-level control over a token-gated CDP endpoint, browser-level commands over a separate bridge, with per-turn proof that browser use is enabled.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-001",
+    "aside-agent-control-architecture-005",
+    "aside-agent-control-architecture-006",
+    "aside-agent-control-architecture-007",
+    "aside-browser-product-046",
+    "aside-browser-product-047",
+    "aside-browser-product-050",
+    "aside-browser-product-051",
+    "aside-browser-product-087",
+    "codexbrowser-automation-and-safety-028"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-005",
+     "aside-browser-product-050",
+     "aside-agent-control-architecture-007",
+     "aside-browser-product-047"
+    ],
+    "why": "q5 SRC: the CDP server refuses unauthenticated clients and issues short-lived tokens only after a signed installation challenge; the bridge is routed per (account, profile, mode), cancellable and detects stale connections. Codex CA028 (signed per-turn verification) is the complementary idea."
+   },
+   "mechanism": "(1) Browser DevTools server accepts only a bearer token; client GETs /json/challenge, signs it with an installation key, POSTs to /json/auth/session for a short-lived token. (2) Browser-level commands use a WebSocket bridge: register{connectionId, route{accountId,profileId,mode}} then runCommand{id,command,params}/cancelCommand; stale or replaced connections are rejected. (3) Non-standard methods (Aside.*) go through the same send() and are routed to the bridge. Verevon analogue: model-gateway/execution-core sends typed actions to quarry-edge with a BrowserBroker grant (x-browser-authorization) that Quarry validates per action.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-134",
+     "v-browser-app-083",
+     "v-browser-app-082",
+     "v-browser-app-078",
+     "v-browser-app-079"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-339",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1377-1414",
+     "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1263",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:138-202"
+    ],
+    "gap": "The topology is right (Model proposes, Quarry executes, broker grant validated per action in quarry-edge) but it is not wired end to end: BrowserBroker keeps grants in memory and has no production AcquireGrant caller; the Verevon gateway sends grant_id 'session:{id}' without x-browser-authorization, and the AI-step route lacks x-inference-authorization, so AI-step/AI-loop likely return 401/403 (baseline SRC+INF high).",
+    "strengths": "Server-side, plane-separated authority is stronger than a local daemon: grants are org/owner scoped, TTL-bound and checked by the executor, not the model."
+   },
+   "benefit": "Unblocks every AI-browser feature: without issued grants and correct gateway headers, users cannot run any agent step in the in-app browser. Keeps the authority model intact (broker issues, Quarry enforces).",
+   "approach": "Model Plane: give BrowserBroker a durable store (Postgres) and an AcquireGrant path called by model-gateway when a run starts (scoped to org, owner, session, domain set, TTL). Frontend gateway: forward x-inference-authorization and a real broker grant instead of 'session:{id}'. Add an end-to-end contract test gateway -> model-gateway -> execution-core -> quarry-edge.",
+   "effort": "M",
+   "dependencies": [
+    "BrowserBroker persistence",
+    "gateway auth header plumbing",
+    "Control Plane identity for org/owner scope"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Grant scope too broad would widen ACLs; keep grants per run and per domain set, never per user globally. ZDR runs must not persist grants beyond the run.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Blocking: shipped pieces in Quarry and execution-core are unreachable from the product until grants are issued and headers forwarded.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 10,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-002",
+   "name": "Purpose-built browser-level command catalogue with audited tab/window/bookmark management",
+   "description": "A small, schema-validated command set for browser state CDP cannot reach (tab groups, notifications, downloads, bookmarks), with read-only passthrough by default and an audit trail of model-initiated changes.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-008",
+    "aside-browser-product-048",
+    "aside-browser-product-049",
+    "codexbrowser-automation-and-safety-049",
+    "codexbrowser-in-app-browser-106"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-106",
+     "codexbrowser-automation-and-safety-049"
+    ],
+    "why": "q5/q4 SRC: Chrome-API-shaped management capability that logs every model-initiated change with the pre-change state, behind a guarded capability."
+   },
+   "mechanism": "Expose a typed allowlist (list/open/close/group tabs, bookmarks CRUD, history queries) instead of raw chrome.*; mutating calls require a capability flag and write an audit row {before, after, turnId}.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-144",
+     "v-quarry-142"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2447-2590",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:39-560"
+    ],
+    "gap": "Quarry offers multi-tab per run and immutable step receipts, but there is no user-browser state (bookmarks, history, tab groups) to manage because Quarry sessions are server-side.",
+    "strengths": "Step receipts already give an audit trail of every agent action."
+   },
+   "benefit": "Low: Verevon's browser is server-hosted, so user bookmark/tab-group management has little value.",
+   "approach": "No new build. If user-facing tab organisation in the Verevon browser chrome is wanted later, model it as Application Plane workspace state, not as a Quarry capability.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Adding mutable user-state APIs to the agent widens blast radius without clear benefit.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Designed for a user's desktop browser; does not fit server-side Quarry sessions.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-003",
+   "name": "Code-mode browser control: model writes a script against a typed browser runtime (single REPL tool)",
+   "description": "Instead of one tool call per action, the model writes JavaScript in a persistent sandboxed REPL with a Playwright-like API, batching several actions and reads per turn; programmatic reads can stay out of the model context. Firecrawl's variant (FA099) runs caller-written code against a live session.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser",
+     "firecrawl"
+    ],
+    "n": 3,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-018",
+    "aside-agent-control-architecture-019",
+    "aside-agent-control-architecture-084",
+    "aside-browser-product-052",
+    "codexbrowser-in-app-browser-075",
+    "codexbrowser-automation-and-safety-077",
+    "codexbrowser-automation-and-safety-054",
+    "firecrawl-api-surface-099"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-018",
+     "aside-agent-control-architecture-019",
+     "aside-browser-product-052"
+    ],
+    "why": "q4 SRC: one persistent QuickJS scope per session with a deliberately small surface (page, tabs, snapshot, annotatedScreenshot, fetch) plus runtime lints; Codex CA077/CA054 add the model-visible vs programmatic observation split."
+   },
+   "mechanism": "Embed a WASM JS engine (QuickJS) with memory/stack limits and an interrupt deadline; keep one top-level scope per session; inject host functions (page.goto, locator.click, snapshot()) that marshal to typed commands; return only values the script emits (write/emit) to the model while get() results stay in-script. In Verevon the host functions would be thin clients for quarry-edge /step so each call is still grant-checked by Quarry.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-browser-app-082"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4202",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3479"
+    ],
+    "gap": "Verevon exposes browser.observe / browser.act as one typed action per model call; no batching, no programmatic post-processing of page data before it reaches the model.",
+    "strengths": ""
+   },
+   "benefit": "Fewer model round-trips and tokens for multi-step tasks (fill a form, paginate, extract a table), lower latency and cost; matches how both reference agents operate. Preserves 'Model proposes, Quarry executes' if each host call is a Quarry step.",
+   "approach": "Model Plane sandboxes: run model-written scripts in a QuickJS/V8 isolate inside execution-core with only typed Quarry bindings (observe, act, locator, extract); no network, fs or raw CDP. Every binding call goes to quarry-edge with the run's grant, so Quarry still validates and receipts each action.",
+   "effort": "L",
+   "dependencies": [
+    "C01 grant wiring",
+    "C04 sandbox hardening",
+    "Quarry typed action contracts (shipped)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Larger attack surface (model-written code); approvals must happen per Quarry step, not per script, because one script can contain many actions.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Material efficiency win, not a blocker; build after C01/C51 are live.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-004",
+   "name": "Sandbox hardening for model-written browser code and approval inputs",
+   "description": "Model code cannot reach raw CDP or browser handles, cannot import modules, runs under deadlines, and approval-gate inputs are frozen plain data so getters/proxies cannot change what was approved.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-083",
+    "codexbrowser-automation-and-safety-078",
+    "codexbrowser-automation-and-safety-089"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-089",
+     "codexbrowser-automation-and-safety-078"
+    ],
+    "why": "q5 SRC: approval inputs are checked to be plain data properties and copied into a frozen object before approval, closing a TOCTOU gap specific to code-mode; Aside AA083 adds non-marshalable host handles."
+   },
+   "mechanism": "Host handles are opaque (not structurally clonable); module import/require rejected; per-call deadline interrupt; before any approval, deep-copy arguments verifying own data properties only, freeze, and execute exactly the frozen copy.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Only relevant if Verevon adopts code-mode (C03). Current typed JSON actions are already plain data.",
+    "strengths": "Typed JSON actions over HTTP are inherently immune to getter/proxy tricks."
+   },
+   "benefit": "Required safety envelope for C03.",
+   "approach": "Implement together with C03 in the Model Plane sandbox: opaque handles, no imports, deadline, freeze-and-copy of every argument that reaches an approval or Quarry call.",
+   "effort": "M",
+   "dependencies": [
+    "C03"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Shipping C03 without this would create approval bypasses.",
+   "tier": "recommended",
+   "significance": 2,
+   "rationale": "Only together with C03; no standalone value.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-005",
+   "name": "Typed backend-agnostic command protocol with per-backend capability discovery",
+   "description": "All browser operations are typed commands shared across backends; the runtime tells the model which members each backend supports and discovers optional capabilities at runtime.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-076",
+    "codexbrowser-in-app-browser-077"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-076",
+     "codexbrowser-in-app-browser-077"
+    ],
+    "why": "q5 SRC: about 85 zod-typed command types shared by in-app, extension, CDP, MCP Apps and cloud backends, with an unsupportedByDefaultIn matrix."
+   },
+   "mechanism": "One schema per command (type, payload schema); backends declare a support matrix; a capability discovery call returns supported members; unsupported calls fail with a typed 'capability unavailable' error.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-137",
+     "v-browser-app-082",
+     "v-quarry-128"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:19-97",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:269-290",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1131-1268"
+    ],
+    "gap": "Capability matrix is enforced fail-closed in Quarry; check that execution-core surfaces driver capabilities to the model (see C06).",
+    "strengths": "Typed Rust AgentAction contracts plus fail-closed driver capability gating are on par with Codex."
+   },
+   "benefit": "",
+   "approach": "Keep; expose the capability set to the planner prompt (C06).",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is equal: typed contracts and fail-closed capability gating are shipped.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-006",
+   "name": "Capability- and environment-conditional tool docs and policy delivered as data",
+   "description": "The documentation and tools the model receives depend on backend capabilities, session kind (main, subagent, headless, incognito) and environment; risky APIs require the model to have read the policy doc first; the server can push updated policy text per request; model-specific prompt overrides.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-029",
+    "codexbrowser-automation-and-safety-030",
+    "codexbrowser-automation-and-safety-031",
+    "codexbrowser-automation-and-safety-076",
+    "codexbrowser-automation-and-safety-141",
+    "aside-browser-product-088",
+    "aside-agent-control-architecture-068"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-029",
+     "codexbrowser-automation-and-safety-030",
+     "codexbrowser-automation-and-safety-141"
+    ],
+    "why": "q5/q4 SRC: docs filtered by advertised capability, doc-read enforcement before raw CDP/WebMCP, and server-pushed confirmation policy overriding packaged text without a release."
+   },
+   "mechanism": "Build the tool description from a docs index filtered by {backend, capabilities, environment}; track which doc ids were emitted in this context and reject calls to gated APIs until the gate doc was emitted; allow request metadata to replace policy text; re-emit docs after context summarisation. Aside AB088 varies the tool set by session kind.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:53"
+    ],
+    "gap": "Unknown: check whether execution-core's browser tool schema/prompt is generated from Quarry driver capabilities and run kind (ZDR, headless, approval-less), and whether policy text is versioned server-side.",
+    "strengths": ""
+   },
+   "benefit": "Prevents the model from attempting unsupported or forbidden actions (fewer failed steps), lets Verevon change browser policy centrally in the Model Plane without frontend releases, and supports ZDR/headless variants cleanly.",
+   "approach": "Model Plane: generate browser tool descriptions from the Quarry capability response plus run attributes; store policy text as versioned config; add 'must have read X' gating for escape hatches (C32).",
+   "effort": "M",
+   "dependencies": [
+    "C05 capability exposure"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Doc drift between policy text and enforcement; enforcement must stay in Quarry/broker, docs are guidance only.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap reliability and governance win once the loop is live.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-007",
+   "name": "Browsing operating procedure in the system prompt (snapshot-first, verify, efficiency limits)",
+   "description": "Concrete rules for web work: read via snapshot, escalate to screenshots only when needed, treat actions as unconfirmed until a fresh observation shows the effect, bounded exploration (one direct URL attempt, one search), and environment stance.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-038",
+    "codexbrowser-automation-and-safety-070",
+    "codexbrowser-automation-and-safety-131"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-038"
+    ],
+    "why": "q4 SRC: complete procedure including verification and recovery; Codex CA070 (DOC) adds efficiency caps."
+   },
+   "mechanism": "Prompt sections: observe -> act -> re-observe to confirm; escalation ladder (AX -> locator -> screenshot -> coordinates); stop rules (no URL-guessing loops, trust one authoritative on-page signal); periodic progress updates and final proof.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-browser-app-080"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:53",
+     "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:135"
+    ],
+    "gap": "Unknown: inspect the llm_planner.rs prompt for verification and efficiency rules; the LLM planner is also disabled by default (QUARRY_BROWSER_AGENT_LLM unset).",
+    "strengths": ""
+   },
+   "benefit": "Directly improves task success and cost of the browser agent at near-zero engineering cost.",
+   "approach": "Model Plane: add a versioned browsing procedure prompt to the planner (observe-act-verify, escalation ladder, stop rules); evaluate with Quarry step receipts.",
+   "effort": "S",
+   "dependencies": [
+    "C51 planner enabled"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Over-long prompts; keep rules short and test-driven.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "High leverage, small effort.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-008",
+   "name": "Surface selection: connector or search before browser, single gated control channel",
+   "description": "For semantic tasks the agent must prefer a purpose-built connector/API or web search; the browser is used on explicit intent or as fallback, only through the gated runtime (no side doors such as shell Playwright); an explicitly named browser is a hard constraint.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-071",
+    "codexbrowser-automation-and-safety-098",
+    "codexbrowser-automation-and-safety-123",
+    "codexbrowser-automation-and-safety-124",
+    "codexbrowser-in-app-browser-112"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-071",
+     "codexbrowser-automation-and-safety-123"
+    ],
+    "why": "q5/q4 DOC: crisp routing rule (connector first, browser on explicit intent or fallback) plus a no-side-door rule."
+   },
+   "mechanism": "Planner routing step: if a linked resource has a connector capability, call it; for public lookups use search; open the browser only on explicit intent or connector failure. All browser control goes through one gated API; other automation tools are hidden from browsing agents.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-087"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:137",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:113"
+    ],
+    "gap": "Single channel is shipped (UI browser actions are not model-executable; the model uses execution-core tools only). Connector-first routing between Integration Plane provider actions, Quarry search and the browser is unverified: check execution-core tool routing.",
+    "strengths": "UI/model action separation is already enforced by an allowlist."
+   },
+   "benefit": "Verevon owns an Integration Plane (integration-corev2) with provider actions; routing to it before browser automation is cheaper, more reliable and respects provider OAuth scopes instead of driving UIs.",
+   "approach": "Model Plane: add a routing policy in planner/tool selection (connector -> Quarry search/scrape -> browser), recorded in run receipts; keep browser tools unavailable to agents that have a matching connector unless the user asked for the browser.",
+   "effort": "S",
+   "dependencies": [
+    "Integration Plane capability discovery"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Over-eager routing can ignore the user's explicit wish to use the browser; honour explicit intent.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Fits Verevon's plane design and reduces risky browsing.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 4,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-009",
+   "name": "Accessibility-tree observation with stable element refs and diffs",
+   "description": "The primary page observation is a compact accessibility-style tree with short element refs (frame-aware), and after each action the model receives a diff instead of a full tree. Firecrawl's interact agent (FA098/FE098, clustered in C51) uses the same @eN-ref pattern.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser",
+     "firecrawl"
+    ],
+    "n": 3,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-020",
+    "aside-browser-product-054",
+    "codexbrowser-automation-and-safety-053",
+    "codexbrowser-in-app-browser-080",
+    "codexbrowser-automation-and-safety-073"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-054",
+     "aside-agent-control-architecture-020"
+    ],
+    "why": "q5 SRC: refs per element with iframe prefixes (f1e3), shadow DOM traversal, W3C accessible names, scoping and text diffs; Codex CA053/CI080 is equivalent with index targets and revision-keyed diffs."
+   },
+   "mechanism": "Inject a script into a CDP isolated world per frame; walk light/shadow DOM and aria-owns; compute role and accessible name; assign refs stored in a per-snapshot WeakMap/symbol; render a compact indented text; keep the previous text per tab and return removed/added/changed lines after actions.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-128",
+     "v-quarry-129",
+     "v-quarry-131",
+     "v-browser-app-082"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:19-97",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:346",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1089-1200"
+    ],
+    "gap": "None material. Verify that deltas are returned to the model by default after each act (baseline says deltas exist in the observation protocol).",
+    "strengths": "Quarry binds refs to CDP backend node ids from the native AX tree (stronger than injected-script refs) and discloses frames origin-only."
+   },
+   "benefit": "",
+   "approach": "Keep; consider Aside-style scoped snapshots (subtree by ref) to cut tokens.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 4,
+   "rationale": "Verevon is equal or ahead on the core observation primitive.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-010",
+   "name": "Stale-target protection and ref re-resolution",
+   "description": "Element refs are valid only for the observation that produced them; actions on stale refs fail loudly (Codex) or the runtime re-finds the same logical control by role, name and ordinal before failing (Aside); coordinate input is refused if the window changed since the screenshot.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-021",
+    "codexbrowser-automation-and-safety-055",
+    "codexbrowser-automation-and-safety-086"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-055",
+     "codexbrowser-automation-and-safety-086"
+    ],
+    "why": "q5 SRC: captures keyed by documentKey (main frame + loader id) and AX revision; straddling captures are discarded. Aside AA021 (q4) adds automatic re-resolution."
+   },
+   "mechanism": "Key each observation by (frameId, loaderId, axRevision); store per ref a signature {role, name, tag, inputType, ariaLabel, placeholder, nth}; on act: if the node is gone, optionally re-resolve by signature uniquely, else return a typed STALE error telling the model to re-observe.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-129"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1128-1167",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1232-1300"
+    ],
+    "gap": "Fail-closed is shipped (TARGET_REPAIR_REQUIRED). Missing only the optional Aside-style unique re-resolution by signature, which would save a re-observe round-trip.",
+    "strengths": "Fail-closed stale detection with frame-execution-context checks matches Codex."
+   },
+   "benefit": "",
+   "approach": "Optional: add signature-based unique re-resolution in quarry-runtime before returning TARGET_REPAIR_REQUIRED.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Re-resolution must refuse ambiguous matches.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Equal to Codex; re-resolution is a minor optimisation.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-011",
+   "name": "Actionability checks, hit-target verification and trusted input events",
+   "description": "Before clicking or typing, wait for attached/visible/enabled/stable, scroll into view, verify that the click point actually hits the target (through shadow roots and cross-process iframes) and report 'covered by X'; deliver real CDP input (isTrusted) with modifiers and platform-aware keyboard synthesis.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-022",
+    "aside-agent-control-architecture-023",
+    "codexbrowser-automation-and-safety-056",
+    "codexbrowser-in-app-browser-115"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-056",
+     "codexbrowser-in-app-browser-115"
+    ],
+    "why": "q5 SRC: hit-testing across nested and cross-process iframes returning hittable|covered(hitTag)|unpositioned, plus realistic key synthesis bound to an input target token. Aside AA022 (q4) has a clear waitForReady(attached|visible|enabled|stable) with 32 ms stability sampling."
+   },
+   "mechanism": "For a target: DOM.scrollIntoViewIfNeeded; poll getContentQuads until stable over two frames; compute centre point; DOM.getNodeForLocation (per frame hop with coordinate transforms) and check that the hit node is the target or its descendant; else error 'covered by <tag>'; then Input.dispatchMouseEvent moved/pressed/released and Input.dispatchKeyEvent with modifiers.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-129",
+     "v-quarry-132"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1232-1300",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2841-2880"
+    ],
+    "gap": "Quarry's ref-targeted act (execute_native_target_action) resolves the backend node, checks isConnected and then calls element.click() via Runtime.callFunctionOn: a synthetic, non-trusted click with no visibility, stability, scroll or covered-element check (SRC, read in this audit). Only coordinate click_point uses trusted Input.dispatchMouseEvent. Sites that ignore untrusted events or have overlays will silently mis-act.",
+    "strengths": "Atomic verify-and-act on backend node ids and frame contexts."
+   },
+   "benefit": "Higher action success and fewer silent no-op clicks; honest errors ('covered by cookie banner') let the model recover. Users notice flaky agents immediately.",
+   "approach": "Ingestion Plane (quarry-browser): implement actionability (attached, visible, enabled, stable), scroll into view, hit-test via DOM.getNodeForLocation including OOPIF hops, then trusted CDP input; keep element.click() only as an explicit fallback. Return typed errors (covered, not_visible, disabled).",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Trusted input on cross-origin iframes needs coordinate transforms; regression risk in existing flows, so ship behind a driver capability first.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Core reliability gap in the executor every AI action passes through.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-012",
+   "name": "Rich input action set and isolated agent clipboard",
+   "description": "AX-index actions include held clicks, drag, typed paste in text/markdown/html, key presses with modifiers, select text, set value and secondary actions (expand/collapse); the agent has its own virtual clipboard so it never touches the user's clipboard.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-081",
+    "codexbrowser-in-app-browser-100"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-100",
+     "codexbrowser-in-app-browser-081"
+    ],
+    "why": "q5 SRC: page-side bridge replaces navigator.clipboard with a virtual implementation, cleaned at turn end; action set is DOC-backed (q4)."
+   },
+   "mechanism": "Runtime binding installs a per-page clipboard shim (ClipboardItem blobs, base64 transport) used by paste actions; actions are an enum over AX indices with options {clickCount, duration, modifiers, button}.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-quarry-130"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:666-760"
+    ],
+    "gap": "Unknown: check AgentAction variants in contracts.rs for press_key with modifiers, drag, select_text, secondary actions and rich paste; no clipboard support found by grep in Quarry crates.",
+    "strengths": ""
+   },
+   "benefit": "Moderate: rich-editor and spreadsheet tasks need paste/select/keyboard shortcuts; server-side Quarry has no user clipboard to protect, so the isolation aspect matters less.",
+   "approach": "Ingestion Plane: extend AgentAction with paste{format}, press_key{modifiers}, drag, select_text, perform_secondary_action; per-session virtual clipboard in the page.",
+   "effort": "M",
+   "dependencies": [
+    "C11 trusted input"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Low.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful for rich editors; not core.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-013",
+   "name": "Post-action settle logic and ambient page-event notes",
+   "description": "After an action the runtime waits just long enough (DOM quiet window, same-site request tracking, SPA navigation dwell) instead of fixed sleeps, and surfaces background events (navigated, dialog, popup, download, new tab) to the model as short system lines or a cursor-based event buffer.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-024",
+    "aside-agent-control-architecture-042",
+    "aside-agent-control-architecture-085",
+    "codexbrowser-automation-and-safety-020"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-024",
+     "aside-agent-control-architecture-085"
+    ],
+    "why": "q4 SRC: concrete constants (350 ms quiet window with <=1% mutation ratio sampled twice, 1.2 s request tracking budget, 300 ms post-settle) and queued ambient notes flushed into the next tool result; Codex CA020 adds a cursor-based CDP event buffer purged on origin change."
+   },
+   "mechanism": "After act: wait for DOMContentLoaded (<=2 s), then sample MutationObserver counts every 100 ms until a 350 ms window has <=1% mutation ratio twice; track same-site in-flight requests up to 1.2 s; extra dwell on SPA URL changes. Queue framenavigated/dialog/popup/download events and append them to the next observation.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-141",
+     "v-quarry-128"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2800",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:445",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2791"
+    ],
+    "gap": "Quarry has explicit wait_for actions and fixed waits plus a typed agent-event SSE for the UI, but no adaptive post-action settle was found (grep), and page events are not shown to have been injected into the model's next observation (check observation deltas).",
+    "strengths": "Typed event stream with durable replay already exists for the UI."
+   },
+   "benefit": "Fewer stale observations and wasted steps; lower latency than fixed sleeps.",
+   "approach": "Ingestion Plane: add an adaptive settle stage after every act in quarry-browser (mutation quiet window plus request tracking) and attach a bounded 'events since last observation' list to the observation contract; Model Plane renders it into the tool result.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Long-polling pages (websockets, analytics beacons) need same-site filtering and caps.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Reliability and speed gain at moderate cost.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-014",
+   "name": "Multi-path input with visual fallback: AX -> DOM node -> coordinates, with set-of-marks screenshots",
+   "description": "When refs cannot reach the target (canvas, maps, sliders), the agent can request a screenshot with numbered boxes on interactive elements, act on visible-DOM node ids, or use coordinate actions; guidance restricts coordinates to pixel-only UIs.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-025",
+    "aside-agent-control-architecture-026",
+    "aside-browser-product-055",
+    "codexbrowser-in-app-browser-082",
+    "codexbrowser-automation-and-safety-060"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-055",
+     "aside-agent-control-architecture-025",
+     "aside-agent-control-architecture-026"
+    ],
+    "why": "q4/q3 SRC: annotatedScreenshot draws ref labels so the model can pick by number, and the cua skill is explicitly gated to pixel-only cases; Codex CI082/CA060 offer the same three paths (DOC/SRC)."
+   },
+   "mechanism": "Take Page.captureScreenshot, overlay boxes for each interactive ref (from the AX snapshot's box model) with the ref label, return PNG plus legend; coordinate actions via Input.dispatchMouseEvent; prompt rule: return to snapshots after a visual action.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-132",
+     "v-quarry-151"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:671-710",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2841",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/artifact.rs:13"
+    ],
+    "gap": "Coordinate actions and visual evidence are shipped. ArtifactKind::ScreenshotAnnotated exists in quarry-core but no producer was found (only parsing in artifact_store.rs:23), so set-of-marks screenshots appear absent (SRC grep, INF). No visible-DOM node-id path.",
+    "strengths": "Coordinate actions use trusted CDP input."
+   },
+   "benefit": "Lets vision-capable models act reliably on canvas-heavy apps without guessing pixels.",
+   "approach": "Ingestion Plane: render set-of-marks overlays server-side from the AX snapshot boxes (no page injection), store as ScreenshotAnnotated artifact (skipped or ephemeral under ZDR), expose 'act by mark number' mapped back to the ref.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Screenshots under ZDR must stay ephemeral; marks must map to refs from the same observation revision.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small build on existing artifact type; improves vision fallback.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-015",
+   "name": "Playwright-compatible semantic locators across frames with failure diagnostics",
+   "description": "getByRole/Text/Label/Placeholder/TestId, frameLocator, filter/nth chains and waits; cross-origin iframes visible; failed actions return match counts and sample matches.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-browser-product-053",
+    "codexbrowser-automation-and-safety-052",
+    "codexbrowser-in-app-browser-083",
+    "codexbrowser-in-app-browser-084"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-083",
+     "codexbrowser-in-app-browser-084"
+    ],
+    "why": "q5 SRC: full locator algebra plus rich failure diagnostics (counts, samples, ranked selector candidates via elementInfo(x,y))."
+   },
+   "mechanism": "Locator = chain of (selector engine, filter, nth); resolve against AX/DOM per frame; strict mode fails on ambiguity with a diagnostic listing the first N candidates with role/name.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-130",
+     "v-quarry-131"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:514-548",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:666-760",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:658-816"
+    ],
+    "gap": "Check whether ambiguous/no-match errors include candidate samples like Codex.",
+    "strengths": "Semantic locators with fail-closed ambiguity and explicit OOPIF frame actions are shipped."
+   },
+   "benefit": "",
+   "approach": "Keep; add candidate samples to ambiguity errors if missing.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Equal.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-016",
+   "name": "JavaScript dialog handling as controllable objects",
+   "description": "alert/confirm/prompt/beforeunload are exposed to the agent as objects it can accept or dismiss instead of hanging the page. Aside auto-accepts dialogs (AA023, clustered in C11) and reports them as ambient notes.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-059",
+    "codexbrowser-in-app-browser-108"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-059",
+     "codexbrowser-in-app-browser-108"
+    ],
+    "why": "q4 SRC: dialogs appear as AX nodes with accept/dismiss/prompt controls; screenshots are declined with guidance while a dialog is open."
+   },
+   "mechanism": "Listen to Page.javascriptDialogOpening; expose a pending-dialog node in the observation; Page.handleJavaScriptDialog on explicit agent action.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-138",
+     "v-quarry-135"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:822",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2732-2800",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:608-620"
+    ],
+    "gap": "None.",
+    "strengths": "Never auto-resolved and requires a one-shot approval grant scoped to the exact dialog: stricter than Aside's auto-accept."
+   },
+   "benefit": "",
+   "approach": "Keep.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Verevon is ahead of Aside and equal to Codex.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-017",
+   "name": "Agent tab ownership and turn-scoped tab lifecycle",
+   "description": "Tabs the agent opens are owned and cleaned up (idle auto-close, turn end) unless marked as a deliverable or handoff; user tabs attached by the agent are borrowed and never closed; agent tabs are grouped and sessions are pinned to profile/window/anchor tab.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-030",
+    "aside-agent-control-architecture-031",
+    "aside-agent-control-architecture-032",
+    "aside-browser-product-063",
+    "codexbrowser-in-app-browser-088"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-088"
+    ],
+    "why": "q5 SRC: temporary vs persistent tabs, markTab({status: handoff|deliverable}), cleanup on turn end restoring clipboards and detaching debuggers. Aside AA030/AA031 (q4) add owned/borrowed rows and an 'Agent Tabs' group with orphan reconciliation."
+   },
+   "mechanism": "session_tabs(sessionId, targetId, ownership owned|borrowed, source, mark) ; on turn/run end: close owned unmarked tabs, release borrowed ones, keep deliverable/handoff tabs; idle sweeper closes after N minutes; reconcile orphans on restart.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-144",
+     "v-browser-app-088"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2447-2590",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:969-1005"
+    ],
+    "gap": "Quarry supports multiple tabs per run, but runs use their own lease, window.open is rewritten to same-tab navigation, and there is no deliverable/handoff marking so the user cannot be left on the result tab.",
+    "strengths": "Server-side lease isolation per run."
+   },
+   "benefit": "Lets an agent hand the finished page to the user in the Verevon browser (the result stays open as a deliverable).",
+   "approach": "Ingestion Plane: add tab ownership and mark{deliverable|handoff} to the Quarry session model; Frontend shows marked tabs after the run.",
+   "effort": "M",
+   "dependencies": [
+    "C18 co-browsing"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Tab leaks without idle sweep.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Valuable mostly as part of co-browsing (C18).",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-018",
+   "name": "Co-browsing: agent claims the tab the user is looking at (fail-closed tab claiming)",
+   "description": "The agent can list the user's open tabs and claim one for control (without moving it), or act on a tab mentioned in the prompt; claiming requires an exact match of tab id, title and URL, else the agent reports it unavailable. Aside attaches user tabs as 'borrowed' (AA030, C17).",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-089",
+    "codexbrowser-automation-and-safety-047"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-089",
+     "codexbrowser-automation-and-safety-047"
+    ],
+    "why": "q4 SRC/DOC: claimTab returns a controllable tab, unmarked claimed tabs are released at turn end, and mention resolution fails closed on any mismatch."
+   },
+   "mechanism": "User tab list from the browser surface -> mention token {browserId, tabId, title, url}; claim validates all three against live state, takes a control lease on that tab, and releases (not closes) it at end of turn.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-browser-app-088"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:674"
+    ],
+    "gap": "The AI run acquires its own Quarry lease; continuity with the user's tab is only via profile_id/start_url. The agent cannot act on the exact page state (form progress, scroll, logged-in session) the user is looking at.",
+    "strengths": ""
+   },
+   "benefit": "This is the product vision ('a built-in browser that users and AI both use'): the user browses, asks the AI to continue on this page, and watches it work. Users notice its absence immediately.",
+   "approach": "Ingestion Plane: let a Quarry session have one control lease holder at a time (user|agent) with a lease-transfer API; Model Plane: browser_run accepts an existing session/tab id plus a grant scoped to that session; Frontend: 'Ask AI on this tab' passes the mention token. Combine with C19 takeover and C20 presentation.",
+   "effort": "L",
+   "dependencies": [
+    "C01",
+    "C19 takeover blocking",
+    "C20 presentation"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Lease races between user input and agent steps; must not widen the user's ACL (the agent inherits only the session's grant); ZDR sessions must stay non-persistent.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Central to Verevon's in-app browser vision; absent today.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-019",
+   "name": "User takeover, manual handoff and interruption",
+   "description": "The user can take over the controlled tab at any time (Take over button, stop/interrupt), the agent stops cleanly and is told the user took over; the agent can request a manual handoff for CAPTCHA/MFA and the tab stays alive for the next turn.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-browser-product-062",
+    "aside-agent-control-architecture-061",
+    "codexbrowser-automation-and-safety-045",
+    "codexbrowser-automation-and-safety-046",
+    "codexbrowser-in-app-browser-090"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-045",
+     "codexbrowser-automation-and-safety-046",
+     "codexbrowser-in-app-browser-090"
+    ],
+    "why": "q4 SRC: typed user_took_over status, interrupt hooks that stop automation, and a requestManualHandoff command that keeps the cloud tab alive. Aside AB062 (q4) contributes the 'Aside is controlling this tab / Take over' strip; Aside AA061 (INF) notes its daemon does not detect user input."
+   },
+   "mechanism": "Session control_mode {agent|human}; UI 'Take over' flips it and cancels in-flight agent steps; every agent /step checks control_mode and returns USER_TOOK_OVER; agent-initiated handoff sets control_mode=human with a reason and resumes on user 'Give back'.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-140"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1733-1785",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:86-90",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497-624"
+    ],
+    "gap": "Control-mode transfer is recorded server-side, but /step does not block the agent while human_takeover is active, and step receipts do not record the initiator (user vs agent).",
+    "strengths": "Server-side control-mode record and UI controls exist."
+   },
+   "benefit": "Safety and trust: the user can always grab control and the agent provably stops; needed for co-browsing and for CAPTCHA/MFA handoffs (Quarry never bypasses challenges).",
+   "approach": "Ingestion Plane: enforce control_mode in quarry-edge /step (reject agent steps with typed USER_TOOK_OVER while human), add initiator to receipts, add agent 'request_handoff' action with reason; Model Plane: map USER_TOOK_OVER to a suspended run.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Race between in-flight step and takeover; use a monotonic control epoch on every step.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Small, high-trust fix; prerequisite for co-browsing.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t2-09-020",
+   "name": "Agent activity presentation: animated cursor, active-tab state, visibility and viewport control",
+   "description": "The app animates an agent cursor to each target before the click lands, marks the tab as agent-active, protects it from suspension, and lets the agent work in the background or explicitly show the browser/set the viewport. Aside has no page-level cursor (AA062).",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-085",
+    "codexbrowser-in-app-browser-086",
+    "codexbrowser-in-app-browser-087",
+    "aside-agent-control-architecture-062"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-085",
+     "codexbrowser-in-app-browser-086",
+     "codexbrowser-in-app-browser-087"
+    ],
+    "why": "q5 SRC: every pointer command first moves a host-drawn cursor and waits for arrival acknowledgement (moveSequence) before the click."
+   },
+   "mechanism": "Before each pointer action, executor emits {moveSequence, x, y} to the UI; UI animates a cursor overlay and acks; executor proceeds after ack or timeout. Active state toggles a tab badge and keeps the capture surface alive.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-browser-app-089"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1824"
+    ],
+    "gap": "Only an AI rationale bubble and step badges; no cursor or element highlight overlay in BrowserChrome.",
+    "strengths": "Live frames (SSE/WS) and typed step events already stream to the UI (v-quarry-141), so the data path exists."
+   },
+   "benefit": "Users can follow and trust what the AI is doing in the shared browser; strongly visible polish for co-browsing.",
+   "approach": "Ingestion Plane: include target box/point in step 'started' events; Frontend Plane: render an animated cursor and target highlight over the live frame (Solid overlay, reduced-motion aware). No ack needed server-side; keep it presentation-only.",
+   "effort": "M",
+   "dependencies": [
+    "C18"
+   ],
+   "planeOwner": "Frontend Plane",
+   "risks": "Overlay mis-alignment with scaled live frames; ZDR: coordinates are not sensitive.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "High user visibility, moderate effort; follows co-browsing.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-021",
+   "name": "Run control protocol: steer, queue follow-ups, interrupt, replayable event stream",
+   "description": "Clients drive a run over a versioned protocol with idempotent command ids and sequence-numbered events; users can steer a running turn, queue follow-ups or interrupt, and reconnecting clients resume from a sequence number.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-agent-control-architecture-036",
+    "aside-browser-product-073"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-036",
+     "aside-browser-product-073"
+    ],
+    "why": "q5 SRC: WS envelopes {op: command|ack|event|error, protocolVersion}, commands prompt/continue/steer{interrupt, expectedTurnId}/queue/abort, afterSeq resume."
+   },
+   "mechanism": "Command {id (idempotency), type, expectedTurnId}; server acks then emits events with monotonically increasing seq persisted per run; steer injects a user message at the next step boundary (optionally interrupting the in-flight step); queue appends to the run's inbox.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-141",
+     "v-browser-app-079"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2658",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2791",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:296",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1263"
+    ],
+    "gap": "Quarry has typed event SSE with ?from_seq replay and the gateway exposes pause/resume/stop, but the AI-loop wiring is likely broken (401/403) and no mid-run steering or queued follow-up for browser runs was found.",
+    "strengths": "Durable, replayable typed event stream already exists in Quarry."
+   },
+   "benefit": "Users can redirect a browser agent without restarting it ('no, the second result'), a daily-use expectation.",
+   "approach": "Model Plane: add steer/queue commands to browser_run (execution-core picks them up at step boundaries) with idempotency keys; reuse Quarry seq replay for the UI.",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "C51"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Steering mid-action must not bypass pending approvals.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Noticeable UX gain once the loop runs.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-022",
+   "name": "Crash-safe runs: recovery, persistent suspensions and rerun-safe tool classification",
+   "description": "If the agent host restarts, interrupted runs resume, runs waiting on a human stay suspended and continue when the decision arrives, and only tools marked rerun-safe are re-executed automatically.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-agent-control-architecture-037",
+    "aside-browser-product-089"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-037",
+     "aside-browser-product-089"
+    ],
+    "why": "q5 SRC: recoverInterruptedRuns per account, persisted suspensions, and an explicit CRASH_RERUN_SAFE_TOOLS allowlist with an 'unsettled tool result' message for others."
+   },
+   "mechanism": "Persist run/turn/tool-call state; on boot, resume runs in 'running' state; for an in-flight tool call, re-run only if in the rerun-safe set, else return an 'unsettled' result telling the model the outcome is unknown and to re-observe.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-142"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:39-560",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1308-1361",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/migrations/0006_agent_run_checkpoints.sql"
+    ],
+    "gap": "Check that resume treats an in-flight non-idempotent action (submit, click) as 'unsettled' rather than replaying it. ZDR runs have no resume by design.",
+    "strengths": "Immutable step receipts, checkpoints and resume with Postgres queue."
+   },
+   "benefit": "",
+   "approach": "Keep; add an explicit rerun-safe classification per AgentAction if missing.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon is equal or ahead (durable receipts).",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-023",
+   "name": "Durable human-in-the-loop approvals with fail-closed semantics",
+   "description": "When an action needs a human, the run suspends with a persisted request that survives restarts and can be answered from any client; if approval cannot be obtained (no channel, timeout, cancelled) the action is blocked; headless runs auto-deny every 'ask'; paid tool calls can require approval up to a call budget.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser",
+     "firecrawl"
+    ],
+    "n": 3,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-050",
+    "aside-agent-control-architecture-051",
+    "codexbrowser-automation-and-safety-012",
+    "codexbrowser-automation-and-safety-122",
+    "codexbrowser-in-app-browser-092",
+    "firecrawl-api-surface-101"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-050",
+     "codexbrowser-automation-and-safety-012"
+    ],
+    "why": "q5 SRC: Aside persists suspensions that resume the exact tool call after a restart; Codex makes 'no explicit decision' fail closed and tells the model so. Firecrawl FA101 shows the API form (requireApproval with maxCalls)."
+   },
+   "mechanism": "suspend(kind, toolCallId, request) writes {kind, request, createdAt} and status 'suspended'; any client resolves it; resolution resumes the identical frozen tool call. Missing elicitation channel, cancel or timeout => typed approval_unavailable/failed_closed, never implicit allow; headless sessions map ask->deny.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-browser-app-081",
+     "v-quarry-135"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:809",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:135-312",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:322"
+    ],
+    "gap": "Check headless/scheduled runs map 'ask' to deny rather than hanging.",
+    "strengths": "Risk-classified approvals reuse generic orchestration approvals and fail closed; Quarry one-shot grants are scoped to exact frame/dialog/artifact and reject replay."
+   },
+   "benefit": "",
+   "approach": "Keep.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 4,
+   "rationale": "Equal to the references.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-024",
+   "name": "Risk-tier confirmation taxonomy and final-confirm mode with typed review artifacts",
+   "description": "Browser actions are classified (hand-off required, always confirm, pre-approvable, no confirmation); an optional 'ask first' mode makes the agent pause before sending, posting, paying, deleting or final submissions and show a typed draft preview.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-034",
+    "codexbrowser-in-app-browser-105",
+    "aside-agent-control-architecture-052",
+    "aside-browser-product-058"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-058",
+     "aside-agent-control-architecture-052"
+    ],
+    "why": "q5 SRC: request_action_confirmation must be the only tool call in the turn and carries a typed draft artifact (email, message, calendar event) for review; Codex CA034/CI105 provide the clearest taxonomy (DOC)."
+   },
+   "mechanism": "Classifier maps (action, target, page context) to tier; tier>=confirm suspends with {title, message, artifact{type, fields}}; UI renders the draft; approval resumes exactly that action.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-browser-app-081"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:809"
+    ],
+    "gap": "Risk classes (login, checkout, posting_form, destructive, cross-domain, persistent cookie) are shipped; typed draft previews and a per-session 'ask first' switch are unverified.",
+    "strengths": "Fail-closed, code-enforced classification (not prompt-only like part of Codex's DOC taxonomy)."
+   },
+   "benefit": "",
+   "approach": "Keep; optionally add typed draft previews to approval cards.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 4,
+   "rationale": "Verevon's code-enforced risk gates are on par.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-025",
+   "name": "Automated safety reviewer model ('guardian') for approvals and sensitive actions",
+   "description": "An independent reviewer model can approve or deny first-time origin access, every page-defined (WebMCP) tool call, credential prompts and sensitive submissions, using a bounded transcript slice and its own page capture; evidence shown to it is fenced as untrusted; approvals are cached briefly per thread and origin.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-008",
+    "codexbrowser-automation-and-safety-009",
+    "codexbrowser-automation-and-safety-010",
+    "codexbrowser-automation-and-safety-011",
+    "codexbrowser-automation-and-safety-108",
+    "codexbrowser-automation-and-safety-135",
+    "codexbrowser-in-app-browser-104"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-008",
+     "codexbrowser-automation-and-safety-011",
+     "codexbrowser-automation-and-safety-108"
+    ],
+    "why": "q5 SRC: guardian v2 cache keyed {threadId, origin} with 5-minute expiry, strict auto-review for credential prompts with a rubric comparing top-level origin and credential recipient, and explicit evidence fencing."
+   },
+   "mechanism": "Approval request -> reviewer sub-agent with {action, origin, sanitized URL, bounded transcript, reviewer-only page capture}; reviewer returns allow|deny|escalate; deny and escalate fail closed or go to the user; cache allow for (thread, origin) with short TTL; never treat missing evidence as permission.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/go/services/capability-core/internal/llmreviewer/reviewer.go"
+    ],
+    "gap": "No safety reviewer for browser approvals was found (grep for auto_review/guardian: none). capability-core's llmreviewer is a skill-learning reviewer, not a safety gate. All 'ask' decisions go to the user.",
+    "strengths": ""
+   },
+   "benefit": "Cuts approval fatigue for low-risk first-visit domains while keeping a fail-closed second opinion; useful for unattended (scheduled) runs where no human is present.",
+   "approach": "Model Plane: optional reviewer step inside the approval pipeline (separate model call with a fixed rubric, no tools), allowed only for tiers marked pre-approvable; never for hand-off or always-confirm tiers; log reviewer decisions in receipts.",
+   "effort": "L",
+   "dependencies": [
+    "C28 per-origin consent",
+    "C24 taxonomy"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Reviewer can itself be prompt-injected; must see fenced evidence only and never be the sole gate for irreversible actions. Cost per approval.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful later; human approvals are sufficient for the first release.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-026",
+   "name": "Session permission modes and rule engine with browser action classes",
+   "description": "Every session runs in read-only, guard (default) or full-access mode; ordered rules decide allow/ask/deny for tools (name/glob + argument matchers), browser actions classed as read/modify/download with URL globs, and network access; policy is implemented as hooks wrapping every tool; unattended runs can be stricter. Aside also lets the agent rewrite its own permissions (AA070, an anti-pattern).",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-034",
+    "aside-agent-control-architecture-049",
+    "aside-agent-control-architecture-069",
+    "aside-agent-control-architecture-070",
+    "aside-browser-product-056",
+    "aside-browser-product-057",
+    "codexbrowser-automation-and-safety-013"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-056",
+     "aside-browser-product-057"
+    ],
+    "why": "q5/q4 SRC: zod-typed modes and ordered rules, with every Page method declaring its action class and calling ensureAccess(action, url)."
+   },
+   "mechanism": "Each executor method declares class read|modify|download; a central check evaluates rules in order deny > ask > allow > default for (mode, class, url glob, tool args); read-only mode denies modify/download outright.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-083",
+     "v-quarry-134",
+     "v-browser-app-081"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2257-2266"
+    ],
+    "gap": "Broker grants carry domain allowlist, TTL and org/owner scope, and risk gates exist, but there is no explicit read-only/guard/full-access run mode and no per-action-class rules (e.g. 'read-only research run cannot type or submit'). Check whether grants can restrict action kinds.",
+    "strengths": "Permissions live in a separate broker the model cannot write to (avoids Aside's AA070 self-modification risk)."
+   },
+   "benefit": "Lets users and orgs launch 'read-only research' browser runs safely and scheduled runs with stricter policy; clean mapping onto broker grants.",
+   "approach": "Model Plane (BrowserBroker): add mode and allowed action classes to the grant; Quarry classifies each AgentAction as read/modify/download/sensitive and rejects classes not in the grant.",
+   "effort": "M",
+   "dependencies": [
+    "C01"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Never let the agent change its own mode; mode changes are user/Control Plane actions.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Natural extension of the grant model; enables safe read-only agents.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 7,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-027",
+   "name": "Single policy choke point with typed, non-retryable denials and anti-circumvention guidance",
+   "description": "Every command touching a page is vetted against the tab's current URL before it runs; refusals carry a machine-readable reason, the deciding source (user, enterprise, reviewer, site status) and a retryable flag, and tell the model not to reach the same outcome through workarounds.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-001",
+    "codexbrowser-automation-and-safety-002",
+    "codexbrowser-automation-and-safety-003",
+    "codexbrowser-in-app-browser-091"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-001",
+     "codexbrowser-automation-and-safety-002",
+     "codexbrowser-automation-and-safety-003"
+    ],
+    "why": "q5 SRC: runCommand -> ensureCommandAllowed for all non-exempt commands; 16-reason denial catalogue with decisionSource and retryable."
+   },
+   "mechanism": "Wrap the executor dispatch in one function: classify command (none|targetUrl|currentTab), evaluate policy, on deny return {code, decisionSource, retryable, message + fixed anti-circumvention sentence}.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-134",
+     "v-quarry-136"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1377-1414",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2294-2400"
+    ],
+    "gap": "quarry-edge already validates the grant and domain per action (a choke point), but denials are generic QuarryError codes without decisionSource/retryable or anti-circumvention text, so the planner cannot tell 'retry later' from 'never'.",
+    "strengths": "Per-action grant validation in the executor."
+   },
+   "benefit": "Fewer wasted retries and less model 'creativity' around denials; better audit.",
+   "approach": "Ingestion Plane: add {decision_source, retryable} to QuarryError for policy denials; Model Plane: render a standard anti-circumvention line in tool results.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Low.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small change with clear agent-behaviour benefit.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-028",
+   "name": "Per-origin consent with scoped persistence and deny-first resolution",
+   "description": "First access to a new origin asks the user; the answer can be remembered for the turn, the conversation or globally (unless org policy forbids persistence); saved and enterprise denials always beat approvals, resolved from the narrowest scope up. Consent is per action class (browse, upload, download, raw CDP, site tools).",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-004",
+    "codexbrowser-automation-and-safety-005",
+    "codexbrowser-automation-and-safety-025",
+    "codexbrowser-in-app-browser-093"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-004",
+     "codexbrowser-automation-and-safety-005",
+     "codexbrowser-in-app-browser-093"
+    ],
+    "why": "q5 SRC: explicit resolution order (conversation deny, global deny, enterprise deny, turn cache, reviewer cache, saved approvals) and per-class consent."
+   },
+   "mechanism": "On navigation to origin O for class K: check denies (conversation, global, org) -> approvals (turn, conversation, global) -> prompt user with scope choices; store decision in a scoped table; org flag can forbid global persistence.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-084",
+     "v-quarry-136",
+     "v-browser-app-083"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2296",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1397",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:190"
+    ],
+    "gap": "Verevon enforces a fixed run-level domain allowlist from the grant (exact host or subdomain, pre/post action). There is no interactive 'allow this new origin?' prompt mid-run, no scoped persistence, and no per-class origin consent; an agent that needs a new domain fails instead of asking.",
+    "strengths": "Fixed allowlists are strict and fail closed."
+   },
+   "benefit": "Makes open-ended browsing tasks possible without pre-declaring every domain, while keeping explicit user consent and owner-plane authority (new domain = new child grant).",
+   "approach": "Model Plane: on Quarry 'domain not in grant' denial, raise a consent approval; on approval BrowserBroker issues a child grant adding the origin for the chosen scope (run, conversation, user default), stored in the broker; deny wins; org policy (C29) caps it.",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "C29"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Consent fatigue; persistence must be per user/org and never widen Space ACLs.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Needed for useful general browsing, builds on existing grants.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-029",
+   "name": "Org/enterprise origin policy with wildcard pattern language and deny-wins merge",
+   "description": "Admins set per-origin policy for access, uploads, downloads, raw CDP, auto-review and persistent approvals; a precise pattern language ('*.x' subdomains only, '**.x' apex plus subdomains); denial from either admin or user config wins. Firecrawl constrains agent runs to supplied URLs with threat-protection checks; Aside ships no allow/deny list by default (AA071, INF).",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser",
+     "firecrawl"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-006",
+    "codexbrowser-automation-and-safety-007",
+    "firecrawl-api-surface-102",
+    "aside-agent-control-architecture-071"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-006",
+     "codexbrowser-automation-and-safety-007"
+    ],
+    "why": "q5/q4 SRC: field-level deny-wins merge across admin and user config; IPv6 and trailing-dot normalisation in patterns."
+   },
+   "mechanism": "Policy = {defaultOriginPolicy, origins[pattern] -> {access, uploads, downloads, rawCdp, autoReview, persist}}; normalise host (lowercase, strip trailing dot, IPv6 brackets); match exact > '*.' > '**.'; merge admin and user per field with deny precedence.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-084",
+     "v-quarry-136",
+     "v-browser-app-083"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2296",
+     "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62"
+    ],
+    "gap": "Domain allowlist supports exact host or subdomain; no org-admin per-origin policy (block lists, per-class rules) was identified in the baseline. Check Control Plane for an org browser policy object.",
+    "strengths": "Broker policy is authoritative when grants are required."
+   },
+   "benefit": "Enterprise customers expect admin block/allow lists (no banking, no personal mail) applied to all agents.",
+   "approach": "Control Plane owns the org policy object; BrowserBroker reads it when issuing grants and intersects it with user consent (deny wins); Quarry enforces only what is in the grant (no cross-plane DB access).",
+   "effort": "M",
+   "dependencies": [
+    "C28"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Policy drift between Control and Model Plane caches; version the policy in the grant.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Enterprise requirement; reuses existing grant flow.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t2-09-030",
+   "name": "Navigation guard: scheme allowlist and request-level interception of redirects, subframes and popups",
+   "description": "While the agent controls a tab only http(s) and about:blank are allowed; disallowed navigations, including page-initiated redirects, subframes and window.open, are cancelled at request level; main-document responses can be paused for vetting; certificate-error interstitials require hand-off.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-015",
+    "codexbrowser-automation-and-safety-016",
+    "codexbrowser-automation-and-safety-017",
+    "codexbrowser-automation-and-safety-130",
+    "codexbrowser-in-app-browser-095"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-016",
+     "codexbrowser-automation-and-safety-017"
+    ],
+    "why": "q5/q4 SRC: shell-level restriction covers redirects, subframes and popups; fail-closed interceptors."
+   },
+   "mechanism": "Enable request interception for all requests; on each paused request evaluate scheme + origin policy; fail the request on deny and emit a navigationBlocked event; missing policy = deny all.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-136",
+     "v-browser-app-084"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:112-117",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:700-760",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:969-1005"
+    ],
+    "gap": "Certificate-interstitial handling not verified.",
+    "strengths": "Quarry installs a fail-closed CDP Fetch guard before navigation that covers redirects, frames, XHR and subresources with deny-all default, and allows only http/https (SRC, read in this audit): equal to Codex."
+   },
+   "benefit": "",
+   "approach": "Keep; add explicit cert-error detection that maps to a hand-off.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 4,
+   "rationale": "Verevon equals Codex here.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-031",
+   "name": "Site reputation gate before navigation",
+   "description": "Before visiting a site the runtime asks a reputation service whether browsing agents are permitted there; blocked sites are refused without prompting; results cached; fail-open only on transport errors (Codex).",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-014",
+    "codexbrowser-in-app-browser-094"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-014",
+     "codexbrowser-in-app-browser-094"
+    ],
+    "why": "q4 SRC: server-side site_status endpoint keyed by origin+path with conversation/turn ids, cached per origin."
+   },
+   "mechanism": "Before navigate: lookup(origin, path) in a reputation cache; on miss call the reputation service; deny if blocked category (malware, phishing, disallowed agent use).",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/go/services/capability-core/internal/models/capability.go:92"
+    ],
+    "gap": "Only a capability flag 'cap.self_owned.quarry_url_reputation_feeds' exists in capability-core; no reputation lookup was found in Quarry crates (SRC grep).",
+    "strengths": ""
+   },
+   "benefit": "Protects agents and users from phishing/malware pages and prompt-injection farms; supports enterprise compliance.",
+   "approach": "Ingestion Plane: add a reputation check in the egress policy (feeds such as Safe Browsing-style lists cached locally) evaluated alongside the domain grant; deny with decision_source=site_status.",
+   "effort": "M",
+   "dependencies": [
+    "C27 typed denials"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Privacy: do not send full URLs of ZDR sessions to third-party services; prefer local hashed-prefix lists.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Domain grants already limit exposure; reputation is defence in depth.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-032",
+   "name": "Escape-hatch gating: raw CDP and JavaScript evaluation",
+   "description": "Raw DevTools access is off by default, needs per-origin high-risk consent plus enterprise permission and is filtered to an allowlist of CDP domains with a method denylist and URL-explicit parameters; page JavaScript may only be evaluated read-only in an isolated world that hides credential fields.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-018",
+    "codexbrowser-automation-and-safety-019",
+    "codexbrowser-in-app-browser-079",
+    "codexbrowser-in-app-browser-096",
+    "codexbrowser-in-app-browser-114"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-018",
+     "codexbrowser-in-app-browser-114",
+     "codexbrowser-automation-and-safety-019"
+    ],
+    "why": "q5 SRC: three gates plus a 22-domain allowlist, URL-authorising cookie/request params, and a read-only evaluate wrapper that cannot mutate the DOM."
+   },
+   "mechanism": "Evaluate in Page.createIsolatedWorld with a frozen read-only proxy of document (no setters, no event dispatch), JSON-serializable args only, credential inputs masked; raw CDP only when the grant has rawCdp=true and method in allowlist.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-133",
+     "v-browser-app-086"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:821-823",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:243-260",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3751"
+    ],
+    "gap": "The Verevon UI facade blocks raw script, but Quarry's AgentAction::Evaluate and raw CSS actions are available on normal agent runs without per-action approval (baseline flags it as a risk). A model-proposed Evaluate can mutate the page or read sensitive fields outside the risk gates.",
+    "strengths": "UI facade already refuses raw script."
+   },
+   "benefit": "Closes a bypass of the risk-classified approval model: any risky action could be expressed as Evaluate.",
+   "approach": "Ingestion Plane: make Evaluate read-only by default (isolated world, no mutation, credential masking) and require an explicit grant capability plus one-shot approval for mutating script; Model Plane: hide Evaluate from the planner unless the grant allows it.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Some extraction flows may rely on mutating evaluate; audit callers first.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Security gap in an executor that otherwise fails closed; small fix.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-033",
+   "name": "Gated uploads and downloads with one-time grants",
+   "description": "Uploads only through the file-chooser event with per-origin approval; downloads only when initiated by an approved agent flow, with one-time grants tied to tab, session and exact URL (blob URLs bound to page origin), and unsolicited downloads cancelled; downloaded files are handed to the agent's workspace.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-021",
+    "codexbrowser-automation-and-safety-022",
+    "codexbrowser-automation-and-safety-023",
+    "codexbrowser-in-app-browser-098",
+    "codexbrowser-in-app-browser-099",
+    "aside-agent-control-architecture-081"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-022",
+     "codexbrowser-in-app-browser-098",
+     "codexbrowser-in-app-browser-099"
+    ],
+    "why": "q5/q4 SRC: grant {grantedAtMs, sessionId, url} consumed in the will-download handler, URL-chain matched, expiring. Aside AA081 shows the handoff of the downloaded path into the sandbox."
+   },
+   "mechanism": "allowDownload(url) stores a one-time grant; the download handler consumes a matching grant (url or redirect chain, same tab/session, not expired) else cancels; uploads: wait for Page.fileChooserOpened (intercepted), check approval, DOM.setFileInputFiles with artifact paths.",
+   "verevon": {
+    "status": "stub",
+    "baselineIds": [
+     "v-quarry-139",
+     "v-quarry-135"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2102",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2211",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1877-1882",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2276-2292"
+    ],
+    "gap": "Quarry implements artifact-only upload/download and one-shot grants, but the driver capability is false so these actions are rejected.",
+    "strengths": "One-shot grants scoped to exact artifact already exist."
+   },
+   "benefit": "Agents that research or file paperwork need PDFs/CSVs and form uploads; files land as Verevon artifacts/documents (Data Plane) rather than on a desktop.",
+   "approach": "Ingestion Plane: enable the capability, store downloads as Quarry artifacts with checksum and MIME sniffing, hand off to Data Plane via its API (no cross-plane DB); uploads only from artifacts the run's owner can read.",
+   "effort": "M",
+   "dependencies": [
+    "Data Plane document ingest API",
+    "C01"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Malware in downloads (scan), ACL widening on uploads (check owner-plane ACL), ZDR artifacts must be ephemeral.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Mostly built; flipping it on needs safety review.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 6,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-034",
+   "name": "Secure credential handoff: the model never sees secrets",
+   "description": "For sign-in the agent submits only selectors and labels; the host shows a secure form or saved-login picker, fills the fields itself in an isolated world and returns only a status; after delivery the agent is blocked from observing that document until a new one loads; OTP, QR and number-matching flows; Aside offers opaque vault references and fill-by-ref.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-036",
+    "codexbrowser-automation-and-safety-037",
+    "codexbrowser-automation-and-safety-038",
+    "codexbrowser-automation-and-safety-039",
+    "codexbrowser-automation-and-safety-040",
+    "codexbrowser-automation-and-safety-041",
+    "codexbrowser-in-app-browser-101",
+    "codexbrowser-in-app-browser-102",
+    "codexbrowser-in-app-browser-103",
+    "aside-browser-product-061"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-036",
+     "codexbrowser-automation-and-safety-038",
+     "codexbrowser-automation-and-safety-039",
+     "codexbrowser-in-app-browser-103"
+    ],
+    "why": "q5 SRC: request validation against the live page, native isolated-world delivery, an observation-gate state machine that blocks AX/DOM/screenshot reads after delivery, and machine-readable recovery steps. Aside AB061 (q5) adds password-reference fill without a UI form."
+   },
+   "mechanism": "Agent: browserAuth.request({origin, fields[{label, selector, autocomplete}], submit}). Runtime validates origin and selector uniqueness/visibility; UI renders a secure form (or vault picker); values go executor -> CDP isolated world -> input.value + input events; agent receives {status}. Mark document as credential-delivered; deny observations of that loader id until navigation; errors include next-step codes.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-quarry-149",
+     "v-quarry-148"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:640-827",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_memory.rs:14"
+    ],
+    "gap": "No secret references in AgentAction or quarry-edge; sensitive-data redaction is a stub without callers. Today a login would require the model to type secrets (or the user to take over).",
+    "strengths": ""
+   },
+   "benefit": "Logged-in sites are where agents create most value; doing it without exposing secrets to the model, logs or receipts is a hard requirement for ZDR and enterprise trust.",
+   "approach": "Control Plane: secret store with opaque references scoped to user/org; Frontend: secure credential form outside the live frame; Ingestion Plane: fill_secret{ref, selector} action executed in an isolated world, observation gate on that document, redaction of receipts/frames; Model Plane: only sees ref ids and status.",
+   "effort": "L",
+   "dependencies": [
+    "Control Plane secret store",
+    "C19 takeover",
+    "C11 trusted input"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Live frames/screenshots can leak typed secrets: blank or blur credential fields in frames and block observations until navigation; never log values.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Blocks the main agent use cases on authenticated sites; references converge on the same design.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 9,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-035",
+   "name": "Payment and spending consent policy",
+   "description": "Users configure whether the agent may pay (ask, auto-approve under a USD limit, never), which cards, per-card notes and daily/monthly limits; Aside's enforcement path was not observed (AA058).",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-browser-product-059",
+    "aside-agent-control-architecture-058"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-059"
+    ],
+    "why": "q5 SRC: settings schema with thresholds, cards and spending limits."
+   },
+   "mechanism": "Settings {paymentUse.enabled, beforePaying ask|auto-under|never, autoApproveUnderUsd, cards[], spendingLimits}; checkout actions are classified and gated against limits.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-browser-app-081"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1"
+    ],
+    "gap": "Checkout is a risk class that always requires approval; there is no card or spending policy.",
+    "strengths": "Checkout always needs explicit approval (safer default)."
+   },
+   "benefit": "Low for now; autonomous payment is high-risk and not core to Verevon's workspace vision.",
+   "approach": "Do not build now; keep checkout as always-confirm. Revisit with Control Plane billing/policy if customers ask.",
+   "effort": "L",
+   "dependencies": [
+    "C34"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Financial loss and fraud liability.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Out of scope and risky; existing always-confirm gate is the right default.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-036",
+   "name": "Prompt-injection guard for web content",
+   "description": "Tool/page output is wrapped in explicit untrusted-data boundaries with fake boundaries and role tags neutralised (Aside, tiered by model capability); Codex states the policy that web content never grants permission; Firecrawl offers an opt-in classifier check on scraped content that aborts with a typed error.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser",
+     "firecrawl"
+    ],
+    "n": 3,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-053",
+    "aside-browser-product-060",
+    "codexbrowser-automation-and-safety-033",
+    "firecrawl-api-surface-100",
+    "firecrawl-engine-and-infra-097"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-060",
+     "aside-agent-control-architecture-053"
+    ],
+    "why": "q4 SRC: concrete neutralisation of role tags (including spaced spellings) and fake boundaries plus envelopes; Firecrawl FE097 (q4) adds chunked classifier screening (32k chunks, 2k overlap) for API users."
+   },
+   "mechanism": "Before returning page text to the model: neutralise strings resembling role tags/boundaries, wrap in BEGIN/END UNTRUSTED markers with a fixed warning; optionally classify chunks with a small model and block or flag.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-085",
+     "v-quarry-147"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/provenance.rs:1",
+     "apps/Model Plane/rust/services/execution-core/src/provenance.rs:61",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs"
+    ],
+    "gap": "Model Plane screens ExternalWeb/BrowserScraped/ThirdPartyMcp results unconditionally (shipped). Quarry itself has no injection labelling/detection in the observation path, so direct Quarry API consumers (scrape/extract) get no guard like Firecrawl's checkPromptInjection.",
+    "strengths": "Unconditional provenance-based screening in execution-core."
+   },
+   "benefit": "Consistent protection for every consumer of Quarry content, not only the Model Plane agent path.",
+   "approach": "Ingestion Plane: add an opt-in prompt-injection flag on scrape/extract that labels suspicious spans and can fail with a typed error; keep the Model Plane screening authoritative for agents.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "False positives; classifier cost; fail-open billing semantics need a decision.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Agent path is already guarded; this is for API consumers.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-037",
+   "name": "Site-specific playbooks and per-site instructions",
+   "description": "Built-in playbooks for popular apps (canonical URLs, scoped selectors, rules) injected by URL or keyword; server-supplied per-site guidance in page observations that grants no extra permission.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "common"
+   },
+   "members": [
+    "aside-browser-product-066",
+    "codexbrowser-automation-and-safety-032"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-066"
+    ],
+    "why": "q4 SRC: sixteen playbooks as SKILL.md files with autoInject {keywords, url} frontmatter."
+   },
+   "mechanism": "Skill registry keyed by URL pattern/keywords; on navigation or task match, inject the playbook text into the next observation header; mark it as guidance only.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Unknown: check whether Model Plane skills (capability-core learning/skills) can be bound to URL patterns for browser runs.",
+    "strengths": ""
+   },
+   "benefit": "Higher success on common SaaS UIs; Verevon's skill-learning pipeline could generate them from successful runs (procedure compile, C42).",
+   "approach": "Model Plane: URL-pattern-bound skills injected into browser observations; seed with a few top sites; learn more from receipts.",
+   "effort": "M",
+   "dependencies": [
+    "C51",
+    "C42"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Stale selectors; playbooks must never grant permissions.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Incremental quality gain after the loop works.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-038",
+   "name": "Session-cookie API calls and site API globals instead of UI driving",
+   "description": "The agent issues fetches that reuse the page's cookies and user agent, and calls site APIs (LinkedIn, Gmail, Docs, Notion, X, YouTube transcripts) directly with the browser session.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-agent-control-architecture-041",
+    "aside-browser-product-067"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-067",
+     "aside-agent-control-architecture-041"
+    ],
+    "why": "q3 SRC: cookie-carrying Node fetch behind a network permission hook plus per-site API clients."
+   },
+   "mechanism": "Network.getCookies(url) from the active tab -> set Cookie and User-Agent headers -> fetch, gated by a network permission rule.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Unknown (no baseline record). Verevon's Integration Plane provider actions cover the 'API instead of UI' need with proper OAuth scopes.",
+    "strengths": "Integration Plane connectors are the sanctioned path."
+   },
+   "benefit": "Low: replaying browser cookies against private APIs bypasses provider consent and ToS and is fragile.",
+   "approach": "Do not build; route to Integration Plane connectors (C08).",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "ToS violations, session theft blast radius, ACL widening.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Conflicts with Verevon's authority model; connectors are the right tool.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-039",
+   "name": "Subagents with isolated browser state and read-only side chats",
+   "description": "The main agent spawns bounded background subagents with their own tabs and REPL, no access to the parent's tabs, and some read-only profiles; users can open a side chat that reads but does not drive the main task.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-agent-control-architecture-033",
+    "aside-browser-product-065"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-033",
+     "aside-browser-product-065"
+    ],
+    "why": "q4 SRC: up to 8 subagents with profiles (context_explorer read-only, code_explorer) and prompt-cache fork."
+   },
+   "mechanism": "subagent.spawn(profile, task) -> new session with its own browser binding and tool set filtered by profile; parent waits via subagent_wait; results returned as text.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-144"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2447-2590",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3203-3452"
+    ],
+    "gap": "Quarry supports parallel runs; whether execution-core can fan out browser subagents with separate grants is unverified.",
+    "strengths": "Multi-run parallelism in Quarry."
+   },
+   "benefit": "Parallel research across sites; fits Model Plane agents.",
+   "approach": "Model Plane: allow a run to spawn child browser runs with child grants (narrower domains, read-only class) and aggregate results.",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "C26"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cost explosion; cap concurrency per org.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful for research tasks, not core.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-040",
+   "name": "Remote and external drivers of the browser runtime",
+   "description": "A user's desktop browser can be driven and approved from another device via an outbound relay; external agents (coding agents) can drive the same browser tools through a CLI with an ephemeral session; cloud agents can use the local browser only with a signed access attestation.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "common"
+   },
+   "members": [
+    "aside-agent-control-architecture-014",
+    "aside-agent-control-architecture-015",
+    "aside-browser-product-072",
+    "codexbrowser-in-app-browser-109"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-014",
+     "aside-browser-product-072"
+    ],
+    "why": "q4 SRC: outbound-only relay with an allow-listed set of remote operations; Codex CI109 adds signed browser-access attestation for cloud agents."
+   },
+   "mechanism": "Host enrolls with a relay and keeps an outbound WebSocket; remote clients can only call an allowlisted set of session operations; external CLI gets its own incognito-style session under the same permission engine.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-134",
+     "v-browser-app-083"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-339"
+    ],
+    "gap": "Quarry is a server-side service, so any authorised device can drive sessions; exposing Quarry browser control to external agents (e.g. via MCP) with broker grants is not evidenced.",
+    "strengths": "Cloud-native: no relay needed and cookies never live on a single desktop."
+   },
+   "benefit": "Lets external coding/automation agents use Verevon's governed browser.",
+   "approach": "Model Plane: expose browser.observe/act as an MCP tool behind the same broker grants and approvals.",
+   "effort": "M",
+   "dependencies": [
+    "C01"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "External clients must not obtain grants outside the user's ACL.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Architecture already covers the remote case; MCP exposure is optional.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-041",
+   "name": "Visual proof and recording of agent work",
+   "description": "Tasks end with visual proof (fresh locator screenshot), optional screenshot on every snapshot, screen recording of the agent tab as video, and attaching window screenshots plus accessibility text to chat.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "aside-agent-control-architecture-028",
+    "aside-agent-control-architecture-039",
+    "codexbrowser-in-app-browser-116"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-039",
+     "aside-agent-control-architecture-028"
+    ],
+    "why": "q3 SRC: mandatory final proof screenshot and screencast-to-ffmpeg video artifacts."
+   },
+   "mechanism": "Page.startScreencast frames piped to an encoder with timestamps; final proof = element screenshot of the confirming element.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-128",
+     "v-quarry-142",
+     "v-quarry-151",
+     "v-quarry-141"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:347-460",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:39-560",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vision.rs",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2541"
+    ],
+    "gap": "No video recording artifact; immutable receipts and proof bundles cover evidence.",
+    "strengths": "Proof bundle, immutable step receipts, browser timeline and live frames exceed both references' evidence model."
+   },
+   "benefit": "",
+   "approach": "Keep; optional video export from live frames for non-ZDR runs.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon ahead on auditable evidence.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-042",
+   "name": "Task record and replay of browser procedures",
+   "description": "Codex has feature flags for record-and-replay but no browser replay mechanism was observed (INF, low confidence). (Supported only by DOC/INF records.)",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-113"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-113"
+    ],
+    "why": "Only reference; INF q2, gated and not observed in the browser path."
+   },
+   "mechanism": "Not established in references. Verevon: compile a successful run's receipts into a parameterised procedure and replay-check it.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-143",
+     "v-browser-app-090"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_procedure.rs:61-200",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2466-2538",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:188"
+    ],
+    "gap": "Quarry compiles procedures and runs replay/quality/impact checks, but has no procedure store or execute endpoint and Verevon does not call them.",
+    "strengths": "Verevon is ahead of all references here (procedure compile and replay checks exist in code)."
+   },
+   "benefit": "",
+   "approach": "Keep and finish: procedure store plus execute endpoint, then wire to the UI ('save as routine').",
+   "effort": "M",
+   "dependencies": [
+    "C51"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 3,
+   "rationale": "Verevon ahead; reference support is INF only.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t2-09-043",
+   "name": "WebMCP site tools: page-defined agent tools",
+   "description": "Pages that register tools through Chromium's document.modelContext are discovered per tab/frame and offered to the agent as callable tools instead of clicking, with per-site settings and strict review of each call.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-043",
+    "codexbrowser-in-app-browser-097"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-097",
+     "codexbrowser-automation-and-safety-043"
+    ],
+    "why": "q5 SRC: CDP WebMCP.enable on every frame target, toolsAdded/Removed events, handles bound to registration ids."
+   },
+   "mechanism": "Enable the WebMCP CDP domain per frame; maintain a per-tab tool registry; expose tools as 'webmcp:<host>:<tool>' with schemas; each invocation requires per-site permission and review.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No modelContext/WebMCP handling found in Quarry crates (SRC grep).",
+    "strengths": ""
+   },
+   "benefit": "Emerging standard: when sites adopt it, agents get reliable typed actions instead of UI driving.",
+   "approach": "Ingestion Plane: discover WebMCP tools in observations; Model Plane proposes calls; Quarry executes with one-shot approval per call (sensitive class).",
+   "effort": "M",
+   "dependencies": [
+    "C26 action classes"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Page-defined tools are untrusted input; descriptions must be fenced.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Low adoption today; track the standard.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-044",
+   "name": "Bot-detection and CAPTCHA reporting with strict no-bypass scope",
+   "description": "The agent reports why a site blocked it (captcha failed, access denied, challenge loop) as telemetry recording only the hostname, and never bypasses challenges.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-107"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-107"
+    ],
+    "why": "q4 SRC: typed report reasons with careful exclusions (bare 403, admin blocks)."
+   },
+   "mechanism": "Classify challenge signals in observation; emit typed telemetry; hand off to the user.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-151"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:158-230"
+    ],
+    "gap": "Ensure challenge signals map to a user hand-off (C19).",
+    "strengths": "Challenge signals are part of every observation."
+   },
+   "benefit": "",
+   "approach": "Keep.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Equal.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-045",
+   "name": "Web notifications and push as agent triggers",
+   "description": "The agent silently grants a site an 'Allow for AI' notification permission and wakes a routine when the site pushes a notification.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-agent-control-architecture-047",
+    "aside-browser-product-069"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-069"
+    ],
+    "why": "q4 SRC: permission grant plus routine trigger."
+   },
+   "mechanism": "Grant notifications for origin; route push events to a routine scheduler.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Unknown (no baseline); Verevon has Application Plane notifications but no web-push-triggered browser routines evidenced.",
+    "strengths": ""
+   },
+   "benefit": "Low: server-side sessions are not long-lived user browsers; triggers belong in the Integration Plane (webhooks).",
+   "approach": "Do not build; use Integration Plane webhooks/polling for triggers.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Silent permission grants conflict with explicit consent.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Does not fit server-side browser sessions.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-046",
+   "name": "Background task UX and proactive suggestions",
+   "description": "Agents run in the background with a task list, attention/completion notifications and sounds; a proactive mode searches user context with minimal questions; suggested tasks from draft routines appear in onboarding.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-browser-product-064",
+    "aside-browser-product-074",
+    "aside-browser-product-101"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-browser-product-074"
+    ],
+    "why": "q3 SRC: needs-attention and completion notifications, approvals reachable from notifications."
+   },
+   "mechanism": "Run state changes (needs_approval, completed, failed) publish notifications; UI task list subscribes.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Unknown: check Application Plane notifications for browser-run events (needs approval, completed).",
+    "strengths": ""
+   },
+   "benefit": "Users can leave a browser run in the background and return when approval is needed.",
+   "approach": "Application Plane: subscribe to Quarry/Model run events and emit notifications; skip proactive history mining.",
+   "effort": "S",
+   "dependencies": [
+    "C21"
+   ],
+   "planeOwner": "Application Plane",
+   "risks": "Notification noise.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Cheap once run events flow.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-047",
+   "name": "Gated access to the user's browsing context (history, session stores)",
+   "description": "History can be read only after approval with bounded queries; browser discovery must never inspect cookies, local storage, profiles or passwords.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-024",
+    "codexbrowser-automation-and-safety-125"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-024"
+    ],
+    "why": "q4 SRC: approval, small query budget, date bounds, policy kill switch."
+   },
+   "mechanism": "history.search({query, from, to}) behind an approval and a per-turn budget.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable to server-side Quarry sessions (no user history). Principle applies to persistent profiles: agents must not read profile cookie stores directly.",
+    "strengths": ""
+   },
+   "benefit": "Low.",
+   "approach": "No build; keep persistent profiles opaque to the model.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "No user browsing history in Verevon's model.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-048",
+   "name": "Desktop computer use over native apps and windows",
+   "description": "A unified API to observe and act on native applications and windows (UI Automation, SendInput, occluded-window capture), via a native helper with turn scoping and request budgets; Aside's Windows helper captures context only.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "common"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-074",
+    "codexbrowser-automation-and-safety-079",
+    "codexbrowser-automation-and-safety-080",
+    "codexbrowser-automation-and-safety-088",
+    "codexbrowser-in-app-browser-111",
+    "aside-browser-product-082"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-074",
+     "codexbrowser-automation-and-safety-080"
+    ],
+    "why": "q4 SRC: same observe/act surface for apps and browsers, native helper with budgets and respawn."
+   },
+   "mechanism": "Native helper process over NDJSON; window objects from enumeration only; AX state + screenshot; input via SendInput after activation.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Verevon has no desktop agent; Model Plane sandboxes are server-side.",
+    "strengths": ""
+   },
+   "benefit": "None for a web/cloud product.",
+   "approach": "Do not build.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "Large security surface on user machines.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Out of scope for Verevon's web-first architecture.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-049",
+   "name": "Desktop computer-use safety controls (per-app approval, forbidden classes, managed policy, kill switch)",
+   "description": "Per-app approval negotiated by the helper, refusal of password managers/security software/terminals, enterprise app policy bound to signed package identity, URL policy when the target window is a browser, and a physical Escape-key kill switch per turn.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-035",
+    "codexbrowser-automation-and-safety-081",
+    "codexbrowser-automation-and-safety-082",
+    "codexbrowser-automation-and-safety-083",
+    "codexbrowser-automation-and-safety-084",
+    "codexbrowser-automation-and-safety-085"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-082",
+     "codexbrowser-automation-and-safety-081"
+    ],
+    "why": "q5 SRC: physical kill switch with a per-turn interrupt marker; per-app approvals."
+   },
+   "mechanism": "Helper exits on Escape and writes a marker; later calls in that turn are refused.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not applicable (no desktop agent). The per-turn kill-switch idea maps to C19 (enforced takeover epoch).",
+    "strengths": ""
+   },
+   "benefit": "None directly.",
+   "approach": "Do not build; reuse the kill-switch concept in C19.",
+   "effort": "L",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Tied to desktop computer use.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 5,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-050",
+   "name": "Agent control of embedded MCP App widgets",
+   "description": "The agent can inspect and operate MCP App UIs shown in side-panel tabs but cannot create or navigate tabs.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 3,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-110"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-110"
+    ],
+    "why": "Only reference (q4 SRC)."
+   },
+   "mechanism": "A backend that maps tab commands to the MCP App iframe with navigation disabled.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Unknown whether Verevon renders MCP Apps at all.",
+    "strengths": ""
+   },
+   "benefit": "Low.",
+   "approach": "Revisit only if Verevon adopts MCP Apps.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "No MCP Apps surface in Verevon evidenced.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-09-051",
+   "name": "Prompt-driven multi-step browser agent run (planner loop)",
+   "description": "A model-driven loop observes the page (AX refs), chooses an action, executes and re-observes until done, exposed as a hosted 'interact with this page by prompt' API (Firecrawl) or as the browser agent harness (Aside v1 harness).",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "firecrawl"
+    ],
+    "n": 2,
+    "of": 3,
+    "cls": "common"
+   },
+   "members": [
+    "aside-agent-control-architecture-035",
+    "firecrawl-api-surface-098",
+    "firecrawl-engine-and-infra-098"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-098",
+     "firecrawl-api-surface-098"
+    ],
+    "why": "q4 SRC: concise hosted design: initial interactive snapshot (capped 40k chars), a single tool issuing agent-browser commands with @eN refs, guardrails and step caps inside the sandbox. Aside AA035 shows harness versioning."
+   },
+   "mechanism": "Loop: snapshot -i (interactive refs, capped) + URL -> LLM with one tool (browser command) -> execute -> new snapshot diff -> stop on done/step cap/budget; guardrails reject commands outside the allowed set.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-078",
+     "v-browser-app-079",
+     "v-browser-app-080",
+     "v-quarry-150"
+    ],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:53",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:621",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1056",
+     "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:296"
+    ],
+    "gap": "Durable loop with pause/resume/stop and an LLM planner exist in execution-core, but the LLM planner is gated by QUARRY_BROWSER_AGENT_LLM (not set in compose), so the default loop is deterministic observe; gateway calls likely fail auth (see C01); Quarry's own planner is an unused stub by design.",
+    "strengths": "Planning correctly lives in the Model Plane; Quarry only executes."
+   },
+   "benefit": "This is the AI-browser feature users see; without an enabled planner the in-app browser has no real agent.",
+   "approach": "Model Plane: enable the LLM planner by default behind org policy, add step/budget caps and the procedure prompt (C07), integrate risk gates and ZDR checks already present; Frontend: one entry point 'Do this in the browser'.",
+   "effort": "M",
+   "dependencies": [
+    "C01",
+    "C07",
+    "C11"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Cost and runaway loops: enforce step/time/token budgets per run.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Core product vision; most code exists but is disabled or unreachable.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  }
+ ]
+}

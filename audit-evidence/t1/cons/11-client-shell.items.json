@@ -1,0 +1,663 @@
+{
+  "category": "Client shell",
+  "items": [
+    {
+      "id": "R-t1-11-01",
+      "title": "Installable PWA: manifest, versioned service worker, install prompt, tab-title and app badge",
+      "summary": "Add a web app manifest (standalone display, icons from public/verevon-mark.svg, start_url into Spaces, protocol_handlers and share_target entries that point at the entity router), a minimal service worker (build-id-keyed app-shell precache, reconnecting fallback page, push and notificationclick handlers) and an install affordance. Drive document.title and navigator.setAppBadge from the unread counts the navbar already computes. This is the cheap first step toward Teams/Slack-style presence; the native tray and a desktop shell wait for R-t1-11-09.",
+      "whyItMatters": "Agents that finish or need approval while the tab is closed currently cannot reach the user at all, and a background tab shows a static title. An installed, badged app with push turns \"agents work like colleagues\" into something users notice, at a fraction of the cost of a native shell.",
+      "referenceBestPractice": {
+        "bestSource": "qm (installable single web build with phone mode) for the PWA surface; slack for the aggregated unread state behind tray and badge",
+        "others": [
+          "buzz (native mobile apps, badges, running agents in tray)",
+          "teams (presence-aware tray icon, jump list)",
+          "grokbot (monotonic unread projection feeding the badge)"
+        ],
+        "prevalence": "Installable PWA 2 of 5 sources (qm, buzz) = differentiator; unread badge/tray state 3 of 5 (buzz, slack, teams) = common. Presence outside the open tab is treated as table stakes by every native client.",
+        "mechanism": "One web build with a shared breakpoint constant for CSS and JS and a visualViewport listener to keep the composer above the keyboard (qm); web manifest plus service worker for app shell and Web Push; Badging API fed by an aggregated unread count; Slack derives a three-state icon (rest/unread/highlight) plus a count tooltip from the same aggregate."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/index.html:1-15",
+          "apps/Frontend Plane/verevonv3/index.html:10",
+          "apps/Frontend Plane/verevonv3/nginx.conf:69",
+          "apps/Frontend Plane/verevonv3/nginx.conf:102-105",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:280-290",
+          "apps/Frontend Plane/verevonv3/src/styles/global.css:44084-44110",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:101",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:192"
+        ],
+        "gap": "Responsive workroom layout and dark theme ship, but index.html links no manifest, the title is the static string \"verevonv3\", and a source grep (src, public, vite.config.ts) finds no service worker, Push API or setAppBadge use outside the demo guard. Unread counts exist only as navbar badges polled on a timer. Cannot be installed and cannot notify when the tab is closed (SRC; also stated in the dated parity audit, DOC)."
+      },
+      "approach": "Frontend Plane (verevonv3): add public/manifest.webmanifest plus icons and link it in index.html; hand-rolled or vite-plugin-pwa service worker that precaches the shell keyed by the build id from R-t1-11-04 and never caches /api, Space transcripts or media (ZDR); serve the worker script and index.html with no-cache (nginx.conf:102-105 gives every .js file a one-year immutable header, so sw.js needs its own location, and the CSP comment at nginx.conf:69 assumes no workers, so check worker-src/manifest-src); push handler and Open/Reply actions exactly as specified in R-t1-05-05 (subscription storage and fan-out stay in Application Plane notification-core, payload carries ids only); title \"(n) Verevon\" and setAppBadge from the same unread map as R-t1-05-08, skipping muted rooms; manifest protocol_handlers (web+verevon) and share_target route through the resolver from R-t1-11-03 and the share target from R-t1-06-12. Native tray with a running-agent list is deferred to R-t1-11-09.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-11-04 (service-worker cache invalidation)",
+        "R-t1-05-05 (Web Push, content-free wake)",
+        "R-t1-05-08 (unread map, title and badge store)",
+        "R-t1-11-03 (route resolver for protocol and share handlers)"
+      ],
+      "planeOwner": "Frontend Plane (push subscription storage and fan-out: Application Plane)",
+      "risks": "Stale service-worker caches pin users to an old bundle (pair with R-t1-11-04), and the current nginx rules would cache sw.js for a year unless exempted; iOS web push works only for installed PWAs; payloads and cached responses must never carry message text from ZDR Spaces; badge counts must respect per-Space mute.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 10,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-11-035",
+        "C-t1-11-011"
+      ]
+    },
+    {
+      "id": "R-t1-11-02",
+      "title": "Root error boundaries, lazy-chunk recovery and a boot watchdog",
+      "summary": "Wrap the app in a root error boundary and add per-region boundaries (navbar, Space cockpit, side panels, run console) that show a classified failure card (render error, stale-deploy chunk failure, session expired, gateway unreachable) with Reload, Retry region and an ids-only report action. Listen for the Vite chunk-preload failure event and reload once with a loop guard. Add a boot watchdog that records the last stage reached (session, navbar, Space projection, SSE attach) and emits a stuck-at-stage event to gateway observability.",
+      "whyItMatters": "A Space is left open all day while agents work in the background. Today one uncaught render exception or one 404 on a lazy route chunk after a deploy can blank the whole SPA with no explanation, which undermines trust in unattended agent work.",
+      "referenceBestPractice": {
+        "bestSource": "teams (diagnosis-specific error curtain with Restart / Repair / Open on web)",
+        "others": [
+          "slack (fatal-exception and unresponsive-window dialogs with telemetry flush)",
+          "grokbot (single restore lifecycle with a 30 s stuck detector that reports the stage reached)"
+        ],
+        "prevalence": "3 of 5 sources (slack, teams, grokbot) = common; every native reference invests heavily here.",
+        "mechanism": "Root boundary catches render and chunk-load failures and shows a curtain with a classified cause and actions; watchdog timers on boot stages emit \"stuck at stage X\" telemetry; hang detection offers wait or reload; safe-mode switches."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts:5",
+          "apps/Frontend Plane/verevonv3/src/index.tsx:1-22",
+          "apps/Frontend Plane/verevonv3/src/app/App.tsx:8-37",
+          "apps/Frontend Plane/verevonv3/nginx.conf:102-110",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:546-550"
+        ],
+        "gap": "The createResource shim comment states the app has zero Suspense/ErrorBoundary usage, and src/index.tsx renders <App/> directly. A grep over src (excluding demo) for ErrorBoundary, Errored, Loading, unhandledrejection and vite:preloadError finds only that comment. About 30 routes are lazy() imports, and nginx answers a missing hashed .js file with 404 (try_files $uri =404), so a stale chunk after deploy has no recovery path. Only per-feature typed error states exist (for example budget_exceeded in the Space composer)."
+      },
+      "approach": "Frontend Plane: use the boundary primitive of the Solid version in use (the shim comment names Errored/Loading for Solid 2) at the root and around each shell region; failure card component with i18n copy keyed by error code (reuse shared/i18n/errors.ts) and a request id; window listener for the Vite preload-error event that reloads once (sessionStorage guard) and otherwise shows the card; boot-stage recorder posting to the existing gateway observability route (apps/gateway/src/domains/monitoring.rs). Report action uses the ids-only flow in R-t1-11-08.",
+      "effort": "S",
+      "dependencies": [
+        "R-t1-11-04 (build id makes \"stale deploy\" distinguishable from a real bug)",
+        "R-t1-11-08 (report action; can ship later)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Boundaries that swallow errors silently; always report with a request id. Auto-reload must not lose an unsent composer draft (see R-t1-01-08).",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 9,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-11-024"
+      ]
+    },
+    {
+      "id": "R-t1-11-03",
+      "title": "Message, run and thread permalinks through one entity router shared with notifications",
+      "summary": "Define one route table of (entity, action) pairs (space, thread/entry, run, task, agent) and one resolver in the SPA, add /spaces/:spaceId/m/:entryId and /spaces/:spaceId/runs/:runId, and have notification clicks, push actions, agent-posted links and the protocol/share handlers all call it. The resolver asks the gateway whether the viewer may open the target (fail closed with an explanation) and message links load the transcript window around the target and highlight it.",
+      "whyItMatters": "Citing an exact message, decision or run (\"see this run\") is how Slack and Teams users coordinate, and agents need to post links humans can open in place. Today a Space link reaches only the Space and a tab; the exact entry cannot be shared.",
+      "referenceBestPractice": {
+        "bestSource": "teams (toast clicks, deep links and lifecycle events normalised into one (entity, action) command) with qm (?seq= pages older history until the target message is loaded and highlights it)",
+        "others": [
+          "slack (maps the team in a link to a workspace the user belongs to; holds links until the web app is ready)",
+          "grokbot"
+        ],
+        "prevalence": "4 of 5 sources (slack, grokbot, qm, teams) = table-stakes.",
+        "mechanism": "Route table of entity types x actions; resolver checks membership before navigating and fails closed; message links load the transcript window around the target id then scroll and highlight; notifications reuse the exact same command object."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/app/App.tsx:181-182",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:114-164",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-deep-link.ts:7-31",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:1823",
+          "apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts:15-25"
+        ],
+        "gap": "Space plus tab is linkable (/spaces/:spaceId with hash tabs, replaceState on tab change). Chat has a validated /chat?thread_id= deep link that resolves through the owner-bound transcript route (fail-closed parser; a good pattern to copy). No message/entry permalink, agent-run link inside a Space or shared command router exists (grep for permalink, messageId=, ?message= finds nothing); notifications carry a free-form href string rather than a typed route."
+      },
+      "approach": "Frontend Plane: a typed route builder/reader module (modelled on chat-thread-deep-link.ts) used by the Solid router, notifications, push and agent-posted links; add the two Space routes in App.tsx. Server side comes from R-t1-01-11 (stable (space_ref, thread_id, seq) reference resolved under the viewer audience revision) and an Application Plane read-around-entry call; the resolver never widens an owner-plane ACL, and unfurls expose no titles before the ACL check. Notification payloads should carry entity refs, not hrefs.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-01-11 (server-side entry reference and audience-checked resolution)",
+        "Application Plane read-around-entry API",
+        "Notification payloads carrying entity refs (R-t1-05-05)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Links must not leak titles or previews to non-members; ZDR Spaces must not keep resolvable entry ids beyond retention; never execute actions from a link without user confirmation.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-11-005"
+      ]
+    },
+    {
+      "id": "R-t1-11-04",
+      "title": "Client build identity and version gating: stale-tab reload banner and contract-mismatch guard",
+      "summary": "Expose a build id to the SPA (Vite define plus a no-store /version.json) and a minimum-client and contract version from the gateway (a header or client-config endpoint with min_version and optional per-feature minimums). The SPA compares on visibility change and SSE reconnect and shows a non-blocking \"new version, reload\" banner; it forces a reload only on a contract mismatch and only after the composer draft is persisted.",
+      "whyItMatters": "A realtime workroom is open for days. A tab that keeps the old bundle against a newer gateway or Space event contract breaks in subtle ways, and the service worker in R-t1-11-01 needs the same identity to invalidate its cache.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (per-feature minimum client versions with a machine-readable update-required hint)",
+        "others": [
+          "teams (staged nag-then-block staleness policy, DOC only)"
+        ],
+        "prevalence": "2 of 5 sources (grokbot, teams) = differentiator.",
+        "mechanism": "Remote config {min_version, feature_min_versions, max_age_days}; API responses carry a CLIENT_UPDATE_REQUIRED hint when a stale client calls a gated feature; the UI turns the hint into a banner or forced reload."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/index.html:1-15",
+          "apps/Frontend Plane/verevonv3/src/shared/api/sse.ts:25-47",
+          "apps/Frontend Plane/verevonv3/vite.config.ts:20",
+          "apps/Frontend Plane/verevonv3/nginx.conf:102-105",
+          "apps/Frontend Plane/verevonv3/nginx.conf:131-133"
+        ],
+        "gap": "No build id or version is exposed to the client (comparator grep for buildId, __APP_VERSION__, version.json found nothing; my grep of import.meta.env use shows only demo, captcha and gateway-url toggles). A tab open across a deploy keeps the old bundle, lazy chunks can 404, and there is no \"reload\" prompt. The SSE reader already supports Last-Event-ID resume, which is a natural hook for the version check."
+      },
+      "approach": "Frontend Plane: Vite build id injected at build, emitted as /version.json (Cache-Control: no-store; add an explicit nginx location, because json files currently fall through to the SPA fallback at nginx.conf:131-133 with no cache header, and give index.html no-cache too); gateway adds an X-Verevon-Client-Min header (or /api/v1/client-config) next to the existing envelope; SPA store compares on visibilitychange and SSE reconnect, shows the banner, and hard-reloads on a contract-version mismatch after the draft store flushes. An optional \"What is new\" entry can render once per build id from the deploy pipeline (low value, one-day follow-on).",
+      "effort": "S",
+      "dependencies": [
+        "Persistent composer drafts (R-t1-01-08) before any forced reload"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Forced reloads during typing lose drafts; version skew between the gateway and Space event schemas must be a deliberate contract version, not the build hash.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 1,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-11-008"
+      ]
+    },
+    {
+      "id": "R-t1-11-05",
+      "title": "Shared command registry and shortcut layer: Space switching, shortcut sheet, palette on typed actions",
+      "summary": "Create one command registry {id, title, hotkey, when, run} that wraps the existing typed ActionDescriptor registry plus navigation commands, with a single capture-phase key handler, Ctrl/Cmd+1-9 Space switching, a \"?\" shortcut sheet and later user-assignable bindings. The palette overlay itself is specified in R-t1-04-04; this item supplies the registry and hotkey layer it renders.",
+      "whyItMatters": "Chat power users expect a quick switcher and discoverable shortcuts, and a palette that lists the same typed actions agents can call (with risk and approval badges) gives humans and agents one action vocabulary inside a Space, which no reference offers.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (every shell action is a registered command with id and hotkey, consumed by one hotkey layer and a mod+K palette)",
+        "others": [
+          "teams (user-assignable shortcuts, slash menu as palette)",
+          "qm (hold Cmd to reveal 1-9 session shortcuts)",
+          "buzz"
+        ],
+        "prevalence": "4 of 5 sources (buzz, grokbot, teams, qm) = table-stakes; palette itself in 2 of 5.",
+        "mechanism": "Command registry {id, label, hotkey, when, run}; one keydown handler resolves hotkeys (capture phase for globals); a palette fuzzy-searches commands and entities (Spaces, people, agents); custom bindings stored per user."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:122-132",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:170-179",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:338-367",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:11",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/types.ts:15-25"
+        ],
+        "gap": "Basic keys exist (roving tablist focus, picker arrows, Enter to send), and Cmd/Ctrl+K plus \"/\" open web search with Escape closing overlays. There is no Space quick switcher, no command registry or palette, no shortcut help sheet and no custom bindings."
+      },
+      "approach": "Frontend Plane: a registry module that adapts shared/actions descriptors (id, label, risk, requiresApproval, zod schemas) and navigation commands; replace the ad-hoc keydown handlers in CoreNavbar.tsx and the Space cockpit with the one layer; execution of any action goes through the existing ActionCommand preview/approval path so authority stays in the owning plane (approval-required actions never run straight from the palette). Move web search into the palette as a provider (coordinate with R-t1-04-04) and share Ctrl/Cmd+1-9 org switching with R-t1-02-12.",
+      "effort": "M",
+      "dependencies": [
+        "Action registry (shared/actions)",
+        "Space list API",
+        "R-t1-04-04 (palette overlay)",
+        "R-t1-02-12 (org switcher shortcuts)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Rebinding Cmd/Ctrl+K changes an existing habit (web search); browser-reserved shortcuts collide; model-ineligible and human-only actions must stay filtered.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-11-016"
+      ]
+    },
+    {
+      "id": "R-t1-11-06",
+      "title": "Locale correctness, server-held user preferences and high-contrast/branding support",
+      "summary": "Phase A (S): make Space activity grammar labels and date formatting follow the active locale instead of hard-coded Norwegian and nb-NO, pass the viewer locale to the Model Plane, and add forced-colors and prefers-contrast rules for status marks and focus rings. Phase B (M): move locale (and agent-relevant preferences such as time zone) out of localStorage into a layered, versioned user/org preference document served with effective-value and source, and add org branding (accent, mark) and a density token. Move to ICU catalogs only when a third locale is planned.",
+      "whyItMatters": "English users of a Space currently see Norwegian run statuses and dates, a visible defect. Agents acting for a user need language and time zone server-side, not in one browser; enterprise buyers need high contrast and per-org branding in shared Spaces.",
+      "referenceBestPractice": {
+        "bestSource": "teams (63 locales with regional fallback map, app locale independent of the OS locale) for localization; slack (validated layered settings object with effective-value view) for preferences",
+        "others": [
+          "grokbot (RTL, endonyms, zod-versioned settings that refuse bad files)",
+          "qm (palette import with contrast checks, density tiers)",
+          "buzz (theme-derived UI)"
+        ],
+        "prevalence": "Localization 3 of 5 (common); theming and high contrast 4 of 5 (table-stakes); preference store 3 of 5 (common).",
+        "mechanism": "Message catalogs keyed by id with ICU plurals and a fallback chain; dir=rtl; Intl dates in the user locale. Preference schema with version and migrations; layers default < org policy < user < device; read API returns value plus source. Theme tokens as CSS variables with system, light, dark and contrast modes; org branding from config."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1-20",
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/index.tsx:48",
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/index.tsx:82",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:122-137",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-thread-presentation.ts:71-93",
+          "apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts:114",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx:51-55",
+          "apps/Frontend Plane/verevonv3/src/styles/global.css:44084-44110"
+        ],
+        "gap": "Two locales via inline tr(no, en) pairs. RUN_STATUS labels in activity-grammar.ts are hard-coded Norwegian and formatWhen/formatWhenWithTime force nb-NO. Locale is stored in localStorage (verevon.locale) while theme is saved server-side through /api/v1/navbar/theme, so preferences are split. global.css has 14 prefers-reduced-motion rules but no forced-colors or prefers-contrast handling (SRC grep). No org branding or density setting. The unified settings store was not examined (confidence low on that part)."
+      },
+      "approach": "Frontend Plane: route RUN_STATUS and date formatters through i18n.tr and localeIntl(); add forced-colors and prefers-contrast blocks for status marks and focus rings; include the viewer locale in Model Plane run requests so activity lines match. Control Plane (user-core / org-core): a versioned preference document with layered resolution exposed through the navbar/bootstrap payload (migrating the localStorage locale on first load); org branding fields (accent, mark) with contrast enforced at save time. Model Plane reads time zone and language for scheduled agent work.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane user profile and org settings",
+        "R-t1-05-04 (notification preferences can join the same document)"
+      ],
+      "planeOwner": "Frontend Plane (preference document and branding: Control Plane)",
+      "risks": "Agent-generated text stays in the model language unless the viewer locale is passed; brand colours with poor contrast; migration of existing localStorage values; a third locale needs catalog extraction first.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 16,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-11-021",
+        "C-t1-11-020",
+        "C-t1-11-019"
+      ]
+    },
+    {
+      "id": "R-t1-11-07",
+      "title": "Org-scoped feature flags, preview rings and agent-capability kill switches in the Control Plane",
+      "summary": "Create a typed, audited flag and ring registry per org (and optionally per user) in the Control Plane, returned through the navbar/bootstrap payload with fallback values and validators, and read by the Model Plane for agent capabilities. Add a user-facing \"Labs\" opt-in for preview features and an admin kill switch for individual agent capabilities. Flags are rollout controls only, never an authorization input.",
+      "whyItMatters": "New agent capabilities in a shared Space need staged rollout and a fast off-switch; today only plan entitlements exist, so there is no way to ring-fence a risky capability to one org or pull it back.",
+      "referenceBestPractice": {
+        "bestSource": "teams (layered providers resolved by ring, tenant and account with a local override and editor page, plus Labs/Insider/Public preview programmes)",
+        "others": [
+          "grokbot (typed dynamic configs with fallback values and validators)",
+          "slack",
+          "buzz"
+        ],
+        "prevalence": "4 of 5 sources (buzz, grokbot, slack, teams) = table-stakes.",
+        "mechanism": "Config service returns typed values per (org, ring, user); client caches with fallbacks and validators; preview programme is a per-org or per-user ring with feature descriptions shown in a Labs panel."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Control Plane/billing-core/internal/billing/service.go:166",
+          "apps/Control Plane/billing-core/internal/billing/service.go:823",
+          "apps/Control Plane/org-core/README.md:8",
+          "apps/Frontend Plane/verevonv3/src/features/billing/lib/api.ts:9"
+        ],
+        "gap": "Only plan entitlement booleans exist (FeatureFlags map[string]bool in billing-core, entitlements described in the org-core README) and the client reads them from the billing payload. No remote-config or ring service, no preview programme and no per-org staged rollout or kill switch for Space/agent features was found; Model Plane-side agent toggles were not checked."
+      },
+      "approach": "Control Plane org-core (with audit-core events for every change): flag registry with type, default, validator, ring and per-org overrides; gateway returns resolved values in the navbar payload; Model Plane reads the same flags for agent capability gating; Labs panel in settings. Keep authorization in ACLs and approvals, and make flag evaluation fail to the safe default.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane org settings",
+        "audit-core events"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Flag debt; flags misused as authorization; a client-side flag is a UX hint, not an enforcement point.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-11-010"
+      ]
+    },
+    {
+      "id": "R-t1-11-08",
+      "title": "Ids-only \"report this\" flow and hardened error-code registry",
+      "summary": "Add a Report dialog in the Space, the run console and the error card that sends only ids (Space, run, thread, request ids, build id, error code, client error class) and an optional free-text note to a Support Plane ticket through the gateway, with no message bodies or screenshots by default. Extend the error catalogue with domain and retryable fields and add a gateway test that every emitted error code has a catalogue entry.",
+      "whyItMatters": "Agent-heavy collaboration produces hard-to-reproduce problems. Ids-only reports let support reconstruct a run without private content and fit Zero-Data-Retention; retryable flags let the UI and agents decide between retry and ask-the-user.",
+      "referenceBestPractice": {
+        "bestSource": "slack (self-service diagnostics kit, rotating logs with zipped upload, installation id) and teams (report-a-problem with screenshots and chunked upload); grokbot for the coded error registry",
+        "others": [
+          "grokbot (108 coded errors grouped by domain with retryable flags and the raising location)"
+        ],
+        "prevalence": "Report/diagnostics 2 of 5 (differentiator); coded registry 1 of 5 (unique).",
+        "mechanism": "One action bundles recent request and trace ids, state and error code into a support upload; registry {code: {name, domain, retryable, summary, payload}} that UI, telemetry and retry logic all key on."
+      },
+      "verevonToday": {
+        "status": "unknown",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/envelope.rs:11-45",
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts:1-30",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs"
+        ],
+        "gap": "The gateway returns {code, message} on every error and the client maps roughly 100 codes to Norwegian and English copy plus a ZDR refusal catalogue; errors.ts itself says it is not a claim that every gateway code is covered. There is no retryable flag, domain grouping or coverage test. No user-facing report-a-problem flow was found by name (the grep hits are report-artifact listings); request-id handling exists in several gateway domains. Whether Support Plane exposes an intake endpoint for such tickets was not checked."
+      },
+      "approach": "Frontend Plane: report dialog component reused by the error card (R-t1-11-02), Space and run console, posting through a new gateway route to Support Plane; extend ERROR_COPY entries with domain and retryable and surface \"retry\" only when retryable. Gateway: a test that enumerates envelope error call sites against the catalogue and exposes the request id header consistently. Default to ids only; any content upload requires explicit consent and is refused for ZDR Spaces.",
+      "effort": "M",
+      "dependencies": [
+        "Request id propagation in the gateway",
+        "Support Plane ticket intake endpoint",
+        "R-t1-11-02 (error card hosts the action)"
+      ],
+      "planeOwner": "Support Plane (client dialog and error catalogue: Frontend Plane)",
+      "risks": "Uploading content from ZDR Spaces (default to ids only); catalogue drift without the coverage test.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-11-027",
+        "C-t1-11-025"
+      ]
+    },
+    {
+      "id": "R-t1-11-09",
+      "title": "Tauri desktop shell around the gateway origin: narrow bridge, system-browser sign-in, protocol links, signed updater",
+      "summary": "After the PWA, build a Tauri 2 shell that loads the existing gateway origin with a locked CSP and no local tokens, exposes a versioned, schema-validated bridge of at most about 15 capability commands (notify, badge, open-external, deep-link, window state, updater status), and signs users in through the system browser with a single-use PKCE handoff that mints the same HttpOnly BFF session in an isolated webview profile. Register a native verevon:// protocol with single-instance forwarding and a cold-start queue feeding the R-t1-11-03 router, and ship signed MSIX/MSI/DMG installers with a gateway-served updater manifest that installs only when no agent run is streaming and no draft is unsent.",
+      "whyItMatters": "All five references ship a native shell, and it is the only route to tray presence, OS protocol links from mail and Office, and global hotkeys. Verevon can capture most value with the PWA first, but enterprise rollout (IT-managed installers, \"chat with\" links) eventually needs this.",
+      "referenceBestPractice": {
+        "bestSource": "teams (thin native shell around a web UI with a versioned RPC over capability modules); buzz (Tauri 2, Rust-owned state) is the closest stack fit",
+        "others": [
+          "slack (one URL grammar on every OS, should-i-update server decision, Joi-validated bridge channels)",
+          "qm (PKCE desktop handoff, locked-down minimal Electron shell)",
+          "grokbot (never install while an agent is working)"
+        ],
+        "prevalence": "Shell 5 of 5, protocol handler 5 of 5, bridge 4 of 5, updater 4 of 5, signed packaging 4 of 5 = table-stakes; system-browser sign-in 3 of 5 = common.",
+        "mechanism": "Shell loads the remote web app in a system WebView; renderer sandboxed with a narrow typed bridge (single envelope, per-capability schemas, sender-origin check, validation-failure telemetry); native side owns badge, notifications, deep links, updates. Tauri 2 plugins: single-instance, deep-link, window-state, updater, notification. PKCE: app creates verifier and state, opens /auth/desktop?challenge, the portal returns a sealed two-minute code through the protocol link, the app redeems it with the verifier for a session cookie. Updater: idle, checking, staging, ready; apply on idle; block while runs or uploads are active; candidate-commit CI with signed canary then promote."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/index.html:1-15",
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/COPILOT_APP_PARITY_2026-09-28.md:192",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:735",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:150-151"
+        ],
+        "gap": "Web SPA only: no Electron, Tauri or MSIX package, no tray, native notifications, protocol handler, bridge, updater or desktop sign-in (SRC plus a dated internal audit, DOC, which calls Windows presence greenfield). Only HTTPS routes exist; the BFF cookie session is the right target for the handoff."
+      },
+      "approach": "Frontend Plane: new desktop workspace in verevonv3 (Tauri 2, Rust to match the gateway stack) with a capability ACL file and a shared TS/Rust bridge schema in packages/; native protocol and single-instance handling that parse into the same route table as R-t1-11-03 with an allowlist of commands. Control Plane identity plus the gateway: /auth/desktop PKCE endpoint minting a sealed single-use short-TTL code bound to challenge, state and audience. Gateway: updater manifest per org and channel (stable/beta) with rollback and update-required hints from R-t1-11-04. CI: Tauri bundler for MSIX/MSI and DMG using a candidate-commit release pattern and held signing certificates. No local agent runtime and no offline message store: agent execution stays server-side under \"Model proposes, Quarry executes\", which keeps audit and ZDR intact.",
+      "effort": "XL",
+      "dependencies": [
+        "R-t1-11-01 (PWA first)",
+        "R-t1-11-03 (route table)",
+        "R-t1-11-04 (version gating, update-required hints)",
+        "Control Plane desktop sign-in endpoint",
+        "Release pipeline with signing certificates"
+      ],
+      "planeOwner": "Frontend Plane (sign-in handoff: Control Plane)",
+      "risks": "Code-signing and notarisation custody and cost; a second client to test; bridge sprawl enlarges the attack surface (Slack has 122 channels, Teams about 545 methods), so keep it minimal; link parsing is an injection surface; a broken update channel strands users, so rollback is mandatory; no local caching of Space content that would break ZDR.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 3,
+        "SRC": 47,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-11-001",
+        "C-t1-11-002",
+        "C-t1-11-004",
+        "C-t1-11-007",
+        "C-t1-11-009",
+        "C-t1-11-032"
+      ]
+    },
+    {
+      "id": "R-t1-11-10",
+      "title": "Shell-only conveniences: quick composer, global hotkey and push-to-talk, window state, close guard",
+      "summary": "Once the Tauri shell exists, add an always-on-top mini composer window that posts to the same gateway run endpoint as the Space composer (landing in the user's personal Space so it stays auditable), a validated global shortcut with key-up events for push-to-talk to the voice feature, and window-state memory. Ship the web-first part now: a beforeunload guard when the Space composer holds unsent text or a run is awaiting approval.",
+      "whyItMatters": "A personal agent one keystroke away is the Grok Bot half of the Space vision, and push-to-talk suits the existing voice feature. These need OS-level hooks a browser tab cannot provide.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (transparent always-on-top mini composer that sends to the selected Bot, switchable from a menu)",
+        "others": [
+          "slack (flag-gated tray-click overlay; validated global-shortcut API with key-down/key-up; bounds clamped to a live display)",
+          "teams (close prompts for unsent messages and calls)",
+          "buzz (push-to-talk binding, INF)"
+        ],
+        "prevalence": "Window management 3 of 5 (common); quick composer 2 of 5 (differentiator); global shortcuts 1 of 5 (unique).",
+        "mechanism": "Frameless transparent window loading a minimal composer route with its own capability set and a typed call that submits a prompt to the selected agent; native global-shortcut registration with validation and key-up events; persisted bounds per window type validated against live displays; close policy with prompt cases."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/index.html:1-15"
+        ],
+        "gap": "No native shell, so no window management, global shortcuts or quick composer; a web equivalent of the close prompt (beforeunload on unsent composer text or a running agent) was not found."
+      },
+      "approach": "Frontend Plane inside the R-t1-11-09 workspace: secondary window plus tauri-plugin-global-shortcut and tauri-plugin-window-state; the mini composer route posts through the existing run endpoint with org and ZDR context carried; push-to-talk reuses src/features/voice. Web-first guard is a small beforeunload handler on the Space composer. Overlaps in-tab push-to-talk keys in R-t1-03-11.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-11-09 (desktop shell)",
+        "R-t1-03-11 (in-tab voice keys)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Prompts typed outside a Space must still carry ZDR and org context; shortcut collisions with other apps; over-eager beforeunload prompts annoy users.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 11,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-11-018",
+        "C-t1-11-017",
+        "C-t1-11-013"
+      ]
+    },
+    {
+      "id": "R-t1-11-11",
+      "title": "Multi-window coordination: pop-out run console, cross-org unread counts, idle presence signal",
+      "summary": "Open the agent run console and a Space thread as compact pop-out routes (?popout=1) via window.open, coordinate tabs and windows with one SharedWorker or BroadcastChannel leader that owns the SSE connection and the presence heartbeat, derive an active/away signal from visibility plus input idle time (Idle Detection API where permitted), and add a per-org unread-count endpoint so the org switcher can show badges without switching.",
+      "whyItMatters": "Watching an agent work in a side window while chatting in the Space is a natural cooperation pattern, and guests from partner companies need to see activity in both orgs. Routing approvals to a present human needs a trustworthy presence signal. Several windows must not multiply SSE connections.",
+      "referenceBestPractice": {
+        "bestSource": "teams (window manager with tagged windows, per-type placement, pop-out chats and calls; multi-tenant isolated instances with shared notifications)",
+        "others": [
+          "slack (rail with Ctrl/Cmd+1..9 switching and tray badge; safe child-window option allowlist)",
+          "buzz (community rail)"
+        ],
+        "prevalence": "Pop-out 2 of 5 (differentiator); multi-workspace unread 3 of 5 (common); OS idle/lock signals 1 of 5 (unique).",
+        "mechanism": "Window tags opened through a bridge with allowlisted options, each loading the same SPA route in a compact layout with shared state via the server stream; an aggregator streams unread per account; native idle/lock events forwarded as host events (web substitute: visibility plus idle timers)."
+      },
+      "verevonToday": {
+        "status": "unknown",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:695-729",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreShell.tsx:60-81",
+          "apps/Frontend Plane/verevonv3/src/app/App.tsx:16",
+          "apps/Frontend Plane/verevonv3/src/shared/api/sse.ts:25-47"
+        ],
+        "gap": "Org switching is one active org at a time (server-side switchOrganization) with no cross-org unread and no keyboard switching. Document visibility only slows navbar polling; no idle-based presence or online/offline banner was verified. The run console exists as a lazy route, but no pop-out or compact route was found (window.open is used only for search results and OAuth popups, per the comparator); whether it can render standalone was not checked."
+      },
+      "approach": "Frontend Plane: compact route variants for AgentRunConsole and the Space thread plus a SharedWorker/BroadcastChannel multiplexer in front of shared/api/sse.ts and the presence heartbeat. Application Plane: presence heartbeat consumer (see R-t1-01-09; personal data, org-scoped and optional) and a per-org unread projection returning counts only, each computed under that org's own ACL (see R-t1-02-12 for the switcher UI). Shell adds placement memory later via R-t1-11-10.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-11-03 (routes)",
+        "R-t1-01-09 (presence model)",
+        "R-t1-02-12 (org switcher badges)",
+        "Control Plane membership list"
+      ],
+      "planeOwner": "Frontend Plane (unread and presence projections: Application Plane)",
+      "risks": "Multiple SSE connections per user raise gateway load without the multiplexer; the org switcher must never leak another org's Space names into the current org context; presence is personal data and must be optional.",
+      "tier": "nice-to-have",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 10,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-11-014",
+        "C-t1-11-031",
+        "C-t1-11-036"
+      ]
+    },
+    {
+      "id": "R-t1-11-12",
+      "title": "Realtime and media operability checks: stream-stall self-test, space-open perf marks, media cache policy",
+      "summary": "Add a gateway diagnostics stream that emits timed heartbeats so the client can detect SSE buffering (proxies, TLS inspection) and show IT guidance, report web-vitals (INP, LCP) and a custom space_open scenario mark to gateway observability, and verify the gateway media route supports Range, ETag and private cache-control with no-store for ZDR Spaces.",
+      "whyItMatters": "Enterprise customers behind buffering proxies otherwise see agent runs \"hang\"; a self-test turns a support ticket into a checklist. Space open time and composer latency are what users feel, and the same-origin BFF should already make media safe if cache headers are right.",
+      "referenceBestPractice": {
+        "bestSource": "grokbot (in-app Network Debugger with IT guidance for SSE and HTTP/2) for network diagnostics; teams (shared scenario marks and INP-style telemetry) for performance; buzz (media grants with range requests) for media",
+        "others": [
+          "slack",
+          "buzz (Playwright suite and E2E bridge that mocks transport)"
+        ],
+        "prevalence": "Network diagnostics 2 of 5, startup performance 2 of 5, authenticated media 2 of 5 = differentiators.",
+        "mechanism": "Connectivity probe classes (DNS, TLS, proxy, stream stall) with remediation text; scenarioStart/Mark/Stop emitting success, failure or abandoned; media URLs carry short-lived authorization and forward Range headers with a content-keyed cache."
+      },
+      "verevonToday": {
+        "status": "unknown",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/api/sse.ts:25-47",
+          "apps/Frontend Plane/verevonv3/nginx.conf:84",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs",
+          "apps/Frontend Plane/verevonv3/playwright.config.ts",
+          "apps/Frontend Plane/verevonv3/playwright.real-authority.config.ts"
+        ],
+        "gap": "The SSE reader supports Last-Event-ID resume but a grep of sse.ts finds no heartbeat, stall or timeout detection and no connectivity self-test. The Verevon-owned nginx tier is already stream-friendly (proxy_buffering off, 3600 s read timeout on /api/), so the risk sits in customer-side proxies and TLS inspection. Performance telemetry, route-level chunking intent and the media route (Range support, cache headers, ZDR no-store) were not assessed. Playwright configs including a real-authority one exist; a scripted SSE fixture for Space events was not found."
+      },
+      "approach": "Frontend Plane: /diagnostics/stream endpoint in the gateway plus a stall detector in sse.ts and a settings-page self-test with an allowlist document; web-vitals and space_open marks posted to the monitoring domain; audit the gateway media route for cookie auth, Range, ETag, private cache-control and no-store for ZDR; optional scripted SSE fixture so Playwright can assert agent-activity rendering deterministically.",
+      "effort": "M",
+      "dependencies": [
+        "R-t1-11-01 (service-worker shell cache, if perf marks compare cached and cold opens)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Stale service-worker caches skew perf data; caching private media on shared machines; mock fixtures drifting from real contracts.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 10,
+        "DOC": 0,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-11-028",
+        "C-t1-11-030",
+        "C-t1-11-034"
+      ]
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t1-11-029",
+      "reason": "Developer-facing test tooling; Verevon already has Playwright plus a real-authority config. A scripted SSE fixture is mentioned as an optional sub-task of R-t1-11-12 rather than an item."
+    },
+    {
+      "cluster": "C-t1-11-041",
+      "reason": "About / What's New is low-value polish (1 of 5 sources, significance 1); it is a one-day follow-on once R-t1-11-04 exposes a build id, noted in that item's summary."
+    }
+  ],
+  "strengthsToKeep": [
+    "Same-origin Rust BFF: the browser holds no upstream credential and every error returns a {code, message} envelope (apps/Frontend Plane/verevonv3/apps/gateway/src/envelope.rs:11-45, apps/gateway/src/domains/spaces.rs:735, require_session route layer). Equal to qm and safer than shells that keep tokens locally; any desktop shell must reuse it.",
+    "Space accessibility is at or above buzz and qm: roving-focus tablist with arrow keys (src/features/spaces/components/SpaceCockpit.tsx:170-179), non-colour status marks and aria-live activity rows (per Space UI baseline v-space-ui-104/108), and 14 prefers-reduced-motion rules in src/styles/global.css (SRC).",
+    "Bilingual Norwegian/English UI with a code-keyed error catalogue and a ZDR refusal catalogue (src/shared/i18n/errors.ts:1-30, src/shared/i18n/locales.ts:1-20, src/shared/api/zdr-refusals.ts); buzz and qm are English only. The gap is limited to the hard-coded Norwegian in activity grammar (see R-t1-11-06).",
+    "Theme preference is saved server-side and follows the user across devices (src/shared/api/navbar-client.ts:114, src/features/core/components/CoreShell.tsx:51-55).",
+    "Fail-closed deep-link parser that never grants access by itself and resolves through the owner-bound BFF route (src/features/chat/lib/chat-thread-deep-link.ts:1-31); the pattern to copy for R-t1-11-03.",
+    "Typed ActionDescriptor registry (id, label, risk, requiresApproval, zod schemas) shared by human clicks and model-initiated actions (src/shared/actions/types.ts:15-25): a ready base for a command palette that no reference has.",
+    "Org switching is a server-side active-org change, so ACLs are never mixed in the client (src/features/core/components/CoreNavbar.tsx:695-729).",
+    "Real-authority Playwright config that tests against real planes, not only mocks (playwright.real-authority.config.ts).",
+    "Agent browsers and sandboxes run server-side in the Model Plane and Quarry, so there are no per-OS agent runtime gaps like the Windows limits of the local runtimes in grokbot and buzz (INF, from the architecture rules in CLAUDE.md)."
+  ]
+}

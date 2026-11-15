@@ -1,0 +1,856 @@
+{
+  "category": "Chat experience",
+  "items": [
+    {
+      "id": "R-t3-01-01",
+      "title": "Make Spaces the chat project: instructions, knowledge, members and a retrieval indicator in Ask and Do",
+      "summary": "Replace the browser-only localStorage project organiser with Space-backed projects. A Space already carries governed instructions, Data Plane v2 knowledge and members, so add a project picker and folder view to the chat sidebar, apply Space instructions and retrieval scope in Do runs as well as Ask, and show a knowledge-mode indicator (in context versus retrieval). Also confirm and expose the multi-author Space room threads that session-core already stores.",
+      "whyItMatters": "Projects are how every comparable product organises ongoing work (7 of 12 sources) and, for Verevon, they are the container that carries org governance: who sees what and which knowledge a run may retrieve. Today chat projects do not survive a browser change and Do runs ignore Space-authored instructions, so the vision of project-scoped agents is visibly missing.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (SRC) plus Claude desktop (SRC) and claude.ai (DOC)",
+        "others": [
+          "claude.ai (DOC)",
+          "ChatGPT web (DOC)",
+          "Perplexity web (DOC)",
+          "Manus web (DOC)",
+          "DeepSeek harness"
+        ],
+        "prevalence": "7 of 12 sources; table-stakes",
+        "mechanism": "A project entity holds versioned, restorable instructions, files and links, default connectors and skills, members with read/write/full roles and a visibility policy (Manus ProjectService, 37 RPCs). Threads carry project_id and inherit that configuration. Knowledge stays in context while it fits and switches to a retrieval tool when it outgrows the window, with a visible indicator (Claude, claude.ai). Real-time multi-user use (C-031) is DOC-only: Manus lets up to 49 collaborators instruct one task, Perplexity uses head-checked optimistic concurrency."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/actions/chat-organization.ts:3-27",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:5-45",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:55-96",
+          "apps/Model Plane/rust/services/session-core/migrations/0023_thread_space_context.sql",
+          "apps/Model Plane/rust/services/session-core/migrations/0035_message_author_attribution.sql",
+          "apps/Model Plane/proto/model_plane/v1/sessions.proto:255-260"
+        ],
+        "gap": "Chat projects are a client-only organiser (max 100) with no instructions, files, memory or sharing. The server container is Spaces, whose instructions are layered into Ask turns but not Do runs, and chat shows no knowledge-mode indicator. session-core already persists space_id, audience refs and a per-message author_subject_id (SRC, migrations 0023/0035), which suggests multi-author Space room threads exist at the data layer, but whether the Application Plane or SPA exposes them as a shared agent thread was not verified."
+      },
+      "approach": "Do not invent a new container. Application Plane keeps Space membership and projections; Data Plane v2 keeps knowledge and the retrieval scope; Model Plane reads Space instructions and scope for both Ask and Do (close the known Do-run instruction-layering gap). SPA: migrate the local organiser into server-synced Space folders (plan I21), add a project picker to the chat sidebar and composer, and render a knowledge-mode badge from the existing retrieval_notice event. First step for the collaboration facet: read the Space room implementation and the author_subject_id read path and write down which actor's delegated token runs a collaborator-triggered agent turn.",
+      "effort": "L",
+      "dependencies": [
+        "Spaces API and membership projections (Application Plane)",
+        "Do-run instruction layering (known gap)",
+        "Data Plane v2 retrieval scope per Space",
+        "Owner ruling on project precedence (OD19)"
+      ],
+      "planeOwner": "Application Plane (membership, projections) with Model Plane (instruction and scope layering) and Data Plane v2 (knowledge)",
+      "risks": "Space access must never widen an owner-plane ACL. Per-member overrides complicate audit. Authority confusion when a collaborator instructs the agent (whose delegated token runs). ChatGPT retired group chats in July 2026 (DOC), a warning that multi-user chat is hard to make useful, so keep collaboration a later phase.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 10,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I21 'server-synced project folders with folder instructions' is deferred to Wave 6 pending an owner precedence ruling (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:273; OD19)"
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-01-029",
+        "C-t3-01-031"
+      ]
+    },
+    {
+      "id": "R-t3-01-02",
+      "title": "Server-owned message tree: persisted regenerate/edit versions, regenerate with model or effort override, and durable fork with lineage",
+      "summary": "Move conversation structure into session-core: messages get a parent pointer, a sibling ordinal and an active-leaf pointer per thread. Regenerate and edit create siblings (shown as 1/N on any turn), regenerate accepts a model, mode and effort override, and ForkThread creates a new thread that records its parent, fork point and an inherited-prefix marker. The SPA stops minting local branch threads and keeps no version state of its own.",
+      "whyItMatters": "Branching (8 of 12 sources) and edit/regenerate versions are table-stakes, and Verevon's current behaviour is visibly broken: regenerate versions vanish on reload, editing a non-final turn discards later turns, and a branch is not durable until it sends. A model-switch regenerate also fits the Budget/Balance/Genius routing modes. Rewind, side chat and sharing all need this tree, so it unblocks four later items.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (SRC) for fork, lineage and message actions; Perplexity and ChatGPT (DOC) for regenerate with model or effort",
+        "others": [
+          "DeepSeek harness (SRC, inherited-prefix marker)",
+          "Antigravity",
+          "Manus",
+          "claude.ai (DOC)",
+          "ChatGPT (DOC)",
+          "Perplexity (DOC)",
+          "Cursor"
+        ],
+        "prevalence": "8 of 12 sources (fork) and 4 of 12 (message actions); table-stakes",
+        "mechanism": "Each assistant turn stores model, mode and effort. Regenerate creates a sibling under the same parent user message (a tree) and the UI shows 1/N; edit creates a sibling user message. Fork creates a new session whose header stores parent_session_id, fork_point_message_id and an inherited-prefix marker; history to the fork point is referenced or copied once, artifacts are snapshotted per branch, and the UI shows a 'Forked from' lineage."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3499-3531",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions.ts:44-137",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3752-3786",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:226-281",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6735-6757",
+          "apps/Model Plane/proto/model_plane/v1/gateway.proto:250",
+          "apps/Model Plane/rust/services/session-core/migrations/0001_init.sql:14-24"
+        ],
+        "gap": "Edit-and-resubmit ships and effectful turns are immutable, but regenerate keeps 1/N versions for the final exchange only and loses them on reload; regenerate and edit reach the server only as client-declared flags (regenerated, edited_resubmit); no regenerate-with-another-model menu was found; branch is a client-minted thread with a browser-local snapshot. The messages table is linear (a sequence identity, no parent column, SRC 0001_init.sql), sessions.proto has no branch fields, and gateway.proto reserves parent_message_id (field 21) without use."
+      },
+      "approach": "session-core migration: parent_message_id, sibling_ordinal and a per-thread active_leaf_id on messages; a SupersedeMessage/ForkThread RPC pair that writes lineage (parent_thread_id, fork_point_message_id, inherited-prefix marker). model-gateway: regenerate and edit routes create siblings, accept model, mode and effort overrides, and assemble context along the active leaf only; reuse the reserved parent_message_id field. SPA: 1/N switcher on every turn, a 'Forked from' header, and delete the chat-versions.ts local state. Reuse the effect-class rule so a turn with external effects cannot be forked past its effect boundary, carry recipient_audience_hash into forks of Space threads (the proto comment already anticipates fork and share), and refuse forking a ZDR thread into a durable one.",
+      "effort": "M",
+      "dependencies": [
+        "session-core migration and proto change (buf generate)",
+        "model-gateway context assembly follows active leaf",
+        "owner decisions on branch semantics (OD19)"
+      ],
+      "planeOwner": "Model Plane (session-core is the single writer), SPA changes in Frontend Plane",
+      "risks": "Context assembly must follow the active leaf or a sibling's tokens leak into the next turn. Idempotency keys are needed per sibling. Copying memory and artifacts across branches, and ZDR threads forking into durable ones, are data-governance risks.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 7,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Yes: plan I8 server-owned branch (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:220), I9 supersede primitive (:221), I10 persist versions across reload (:251); the parity backlog calls the server-authoritative session the prerequisite (apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md:31)"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-008",
+        "C-t3-01-009"
+      ]
+    },
+    {
+      "id": "R-t3-01-03",
+      "title": "History at scale: server full-text search, recall_conversations tool, cursor paging and thread organisation (archive, unread, star)",
+      "summary": "Add owner-scoped Postgres full-text search over messages and titles in session-core, a /v1/threads/search route, and cursor paging for the thread list so the 80-thread cap stops hiding history. Give the model a read-only recall_conversations builtin that returns verbatim snippets with thread ids as untrusted data. Expose the archive and bulk routes that model-gateway already has, and add unread and star fields beside pinned_at and archived_at.",
+      "whyItMatters": "Search and organisation are table-stakes (7 and 9 of 12 sources). Today search is a client-side substring filter over at most 80 loaded threads, so anything older is unfindable, and recall of past work is the base of Hermes-style learning and of 'continue where I left off'.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (SRC) for search; T3 Code (SRC) and Claude desktop (SRC) for thread organisation",
+        "others": [
+          "Antigravity",
+          "Manus",
+          "T3 Code",
+          "claude.ai (DOC)",
+          "ChatGPT (DOC)",
+          "Perplexity (DOC)",
+          "DeepSeek harness"
+        ],
+        "prevalence": "7 of 12 sources (search) and 9 of 12 (organisation); table-stakes",
+        "mechanism": "A worker-backed index over transcripts per owner (limit 50, up to 200 sessions, archived optional) behind a palette with snippets and jump-to-message, plus an agent tool search_past_conversations(query, scope) whose snippets are treated as untrusted data and rendered as a visible tool call. Organisation is thread metadata on the server (pinned, starred, archived_at, snoozed_until, last_visited_at, section) with a row menu, multi-select bulk actions and paged history."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:21",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:351",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:49-56",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:397",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:147-152",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:8080-8138",
+          "apps/Model Plane/rust/services/session-core/migrations/0021_thread_presentation.sql"
+        ],
+        "gap": "Only a client substring filter over a BFF list capped by MAX_THREADS = 80 (SRC history.rs:21,351) with no paging. No full-text index exists among session-core migrations 0001-0045 (a grep for tsvector found none), there is no recall_conversations tool, and no command palette. Rename, pin, hard delete and clear ship; archive and bulk archive exist in model-gateway but are not exposed through the BFF; unread, star, snooze and sections are absent."
+      },
+      "approach": "session-core: migration adding a tsvector column and GIN index on messages and presentation_title (owner-scoped, excluded for ZDR threads, honouring hard erase), a SearchThreads RPC, and starred, last_visited_at and snoozed_until columns next to pinned_at and archived_at (0021). model-gateway: /v1/threads/search, cursor-paged /v1/threads, and a read-only recall_conversations builtin in the inline-allowed tool set. BFF: replace MAX_THREADS with a cursor, expose archive and bulk routes. SPA: command palette (Ctrl/Cmd+K already opens global search), unread dots, star, multi-select.",
+      "effort": "M",
+      "dependencies": [
+        "session-core migration",
+        "BFF cursor contract",
+        "tool registry entry for recall_conversations"
+      ],
+      "planeOwner": "Model Plane (session-core and model-gateway), Frontend Plane for palette and sidebar",
+      "risks": "The index must honour hard deletion and ZDR (no indexing of ZDR content). Snippets returned to the model are untrusted data and could carry prompt injection. Cross-thread recall must be owner-scoped, never widened by Space membership.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 11,
+        "DOC": 9,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I12 full-text search plus recall_conversations (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:222); thread-list paging, unread and star were not found in the plan"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-028",
+        "C-t3-01-027"
+      ]
+    },
+    {
+      "id": "R-t3-01-04",
+      "title": "Server-side artifact versions with user editing, restore and human/agent turn-taking",
+      "summary": "Give Model Plane a session-scoped artifact store with revision ids and an editor kind (agent, owner), and add an editor to the Output panel (Markdown and code first) that saves with an expected revision. Users can browse and restore versions, and editing is locked while a run targets the same artifact. A 'Save to knowledge' action promotes a version into a Data Plane v2 document instead of duplicating storage.",
+      "whyItMatters": "claude.ai, ChatGPT canvas, Perplexity and Manus all let users edit outputs. Without it every small fix costs a model turn on the very reports and documents Verevon produces, and version history is client-side so it disappears on reload.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (SRC) for versions, restore and editor attribution; claude.ai (DOC) for typed artifacts",
+        "others": [
+          "claude.ai (DOC)",
+          "Perplexity (DOC)",
+          "ChatGPT canvas (DOC)"
+        ],
+        "prevalence": "4 of 12 sources; common",
+        "mechanism": "A server-side file/artifact store keeps a version list with restore and editor attribution (AI, owner, collaborator). Edits require the current binding id and revision (optimistic concurrency). While a run targets the same artifact the editor is read-only ('editing available when ready'), unsaved edits must be saved before asking the agent, and lineage records the origin task and the latest editing task."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:88-600",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:202-343",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:54-79",
+          "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-40",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4361-4383"
+        ],
+        "gap": "The Output panel (document, code, sandboxed HTML, image, PDF, files) with a version stepper and diff ships, but users cannot edit, restore a version or edit a selection, version history is held client-side, and there is no editor attribution or conflict guard."
+      },
+      "approach": "session-core owns an artifact table (artifact_id, revision, editor_kind, content ref, source run) with expected-revision writes; model-gateway artifact events reference revision ids; the SPA editor (Markdown and code first) saves with the expected revision and shows a read-only banner while the run is active. Promotion to a document goes through Data Plane v2 import, never a second store. Under ZDR no durable versions are written (memory-only session artifacts).",
+      "effort": "L",
+      "dependencies": [
+        "session-core artifact version table",
+        "Data Plane v2 document import",
+        "message tree (R-t3-01-02) for rewind later"
+      ],
+      "planeOwner": "Model Plane (version store), Frontend Plane (editor), Data Plane v2 (promotion)",
+      "risks": "Concurrency with running agents; the boundary between session artifacts and Data Plane documents must stay explicit; ZDR forbids durable version storage.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 3,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I17 canvas phase 1 (highlight-to-edit, restore this version) (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:253); the server-side version store itself is not named in the plan"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-017"
+      ]
+    },
+    {
+      "id": "R-t3-01-05",
+      "title": "Structured ask_user tool: pause the run with typed questions and resume on the answer",
+      "summary": "Add ask_user as a non-effectful builtin in both loops. In Do runs it reuses the durable awaiting-approval pause and emits a new user_question ChatEvent; in Ask mode it ends the turn with a question card. The card supports single-select, multi-select, free text, optional ranking and skip, the answer posts through the existing resume route and is echoed as Q/A text, and run watchers notify the user when they are away.",
+      "whyItMatters": "Agents that guess instead of asking waste runs and money. A structured question is the cheapest guardrail, it fits the 'Verevon needs you' framing in the Work panel, and it is present in the four most agentic references.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (SRC) plus Antigravity (SRC)",
+        "others": [
+          "claude.ai (DOC)",
+          "Perplexity (DOC)"
+        ],
+        "prevalence": "4 of 12 sources; common",
+        "mechanism": "A builtin ask_user tool with schema {questions:[{question, options[], multi_select, allow_write_in, rank}]} suspends the run and emits a typed event. The UI renders a sheet or composer-inline card, the answer is posted back and echoed as Q/A text, skipped and cancelled states are explicit, and a notification fires when the user is away. MCP servers use the same surface for elicitation."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:2217-2542",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1940",
+          "apps/Model Plane/docs/PLAN.md:134"
+        ],
+        "gap": "Plan-proposal and tool-approval cards exist with durable approvals and resume routes, but there is no ask_user or clarifying-question tool (a grep of model-gateway and execution-core sources found none; PLAN.md:134 records that Model Plane exposes no AskUserQuestion equivalent) and no clickable option widget. MCP elicitation is moot while MCP execution is blocked."
+      },
+      "approach": "Define ask_user in the shared tool registry as non-effectful; in execution-core reuse the awaiting_approval durable pause with a new pending-question record; add a user_question variant to the ChatEvent taxonomy (producer and SPA case together, the CI gate enforces both); the SPA renders the card in the composer area; answers return through the existing resume route; notification-core fires through run watchers. Budget the tool (at most N per run) and let plans carry open questions instead of repeated asks.",
+      "effort": "M",
+      "dependencies": [
+        "ChatEvent taxonomy CI gate",
+        "run watchers / notification-core",
+        "existing approval resume route"
+      ],
+      "planeOwner": "Model Plane (tool, pause state, event), Frontend Plane (card)",
+      "risks": "Models over-ask, so budget the tool. The pause must stay durable across restarts. A skipped question must resume safely rather than strand the run.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-013"
+      ]
+    },
+    {
+      "id": "R-t3-01-06",
+      "title": "Streaming render performance: block-level memoisation, virtualised timeline and paged transcript reads",
+      "summary": "Split streamed Markdown into blocks and re-parse only the trailing one or two, virtualise the message list with a live-follow rule (follow the stream only within about 40 px of the bottom, otherwise show a scroll-to-end pill), and load transcripts tail-first with a paged message endpoint (before_seq, limit).",
+      "whyItMatters": "Long research and Do runs are where Verevon competes with Manus and Claude. Re-parsing the whole message on every token remounts blocks and breaks reading, selection and copy during streaming, and whole-thread reloads limit how long an agent transcript can get.",
+      "referenceBestPractice": {
+        "bestSource": "T3 Code (SRC) for the virtualised timeline; DeepSeek harness (DOC) for freezing completed blocks",
+        "others": [
+          "Claude desktop (SRC)",
+          "ChatGPT web (DOC)"
+        ],
+        "prevalence": "4 of 12 sources; common",
+        "mechanism": "Memoise all but the trailing one or two blocks, keep an open code fence's parse node and resume the highlighter grammar state line by line, skip colouring very long lines. A virtualised list with variable row heights follows the stream only while the reader is within about 40 px of the bottom, suspends end-pinning for two frames on disclosure toggles and anchors a just-sent message near the top. Data loads tail-first and pages backwards; the server exposes paged message reads."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:21",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs:335-385",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx:15-20",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-code-highlight.ts:1"
+        ],
+        "gap": "No list virtualisation in chat (a grep for 'virtual' in features/chat matches only chat-code-highlight.ts, apparently incidental); the whole message is re-parsed on every streamed token so blocks remount; the thread list is capped at 80 with no paging and message reload is whole-thread. Mermaid and KaTeX already defer until fences close."
+      },
+      "approach": "SolidJS: a block-level memoised renderer keyed by block index (freeze completed blocks) plus a virtualiser such as @tanstack/solid-virtual with the live-follow rule. session-core and model-gateway: a paged message endpoint (before_seq, limit); the cursor contract is shared with the thread-list paging in R-t3-01-03. Verify with a streamed-token benchmark and with find-in-page and screen-reader checks.",
+      "effort": "M",
+      "dependencies": [
+        "chat-node registry",
+        "paged message reads in session-core"
+      ],
+      "planeOwner": "Frontend Plane (renderer, virtualiser), Model Plane (paged reads)",
+      "risks": "Virtualising variable-height rich content (Mermaid, charts, iframes) causes scroll jumps; find-in-page, selection and accessibility need care.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I5 block-level streaming render and frame-batched deltas (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:217); virtualisation and paged reads are not in the plan"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-005"
+      ]
+    },
+    {
+      "id": "R-t3-01-07",
+      "title": "Durable multi-replica run controls: shared stream, cancel and queue registries plus a visible, editable message queue",
+      "summary": "Back the stream buffer, cancel registry and queued-input registry with Redis/Dragonfly and NATS so a model-gateway restart or replica move does not lose an in-flight turn or a queued message. On top of that, add queue routes (list, reorder, cancel, promote), a queue dock above the composer, and a split send button (interrupt and send, steer at the next safe boundary, or queue) with a remembered preference, plus client TTFT/TTLT on the existing turn_timing event.",
+      "whyItMatters": "Long Do and research turns must survive deploys and replica moves, and users notice a lost answer immediately. The model-classified redirect-versus-follow-up semantics already ship, but without a visible queue users cannot see, reorder or recover what they typed while the agent ran.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (SRC) for stream recovery and the queue; Manus (SRC) for the split send button",
+        "others": [
+          "Antigravity",
+          "claude.ai (DOC)",
+          "ChatGPT (DOC)",
+          "Manus web (DOC)"
+        ],
+        "prevalence": "1 of 12 (resilient streaming, unique) and 5 of 12 (queue and steer, common)",
+        "mechanism": "On stream loss the client resumes first, then polls the message at a slow rate until a terminal state, measuring opened_stream_lost, recovery_started, recovery_completed and perceived TTFT/TTLT. The queue is a server-side list per session with ids and operations cancel, reorder, promote (send now) and return-to-editor, with a dock above the composer shared with the plan card; the send control offers interrupt-and-send, steer or queue and persists the choice."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:1-24",
+          "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:9-13",
+          "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:1-13",
+          "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:1-20",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:134-167",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3582-3640",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:3277-3419"
+        ],
+        "gap": "The mechanism exists (monotonic frame ids, Last-Event-ID replay, a 10-minute buffer, durable-outcome reconciliation with backoff, mid-run input delivered at the tool-round boundary with pending, delivered and refused states) but stream_buffer only uses Redis when REDIS_URL is set (SRC, stream_buffer.rs:9-13; the comparator records it as not set, DOC), so a gateway restart loses an in-flight turn, and the cancel and queued-input registries are single-replica memory. There is no visible editable queue, no reorder, remove, send-now or return-to-editor, and no explicit interrupt-versus-queue choice."
+      },
+      "approach": "Ops: set REDIS_URL on model-gateway (Dragonfly). Code: move cancel_registry and queued_input to Redis or NATS as their module docs already propose; add list, reorder, cancel and promote routes on queued_input; SPA queue dock and split send button; add TTFT and TTLT to turn_timing. Under ZDR keep the stream buffer memory-only or disabled, because buffered frames contain content. Promote-to-interrupt only at safe boundaries (never mid-effect).",
+      "effort": "M",
+      "dependencies": [
+        "Dragonfly/Redis in the deploy",
+        "NATS subject for cancel and queue fan-out",
+        "ChatEvent taxonomy (additive queue events)"
+      ],
+      "planeOwner": "Model Plane (registries, routes), Frontend Plane (queue dock, send button)",
+      "risks": "Buffered frames hold content, so ZDR must stay memory-only. Promote-to-interrupt must respect effectful steps. Multi-replica ordering of queue operations needs idempotent ids.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I3 redeploy-safe turns with REDIS_URL on model-gateway (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:134) and I4 settle orphaned streams (:250); the visible queue UX is not in the plan"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-002",
+        "C-t3-01-007"
+      ]
+    },
+    {
+      "id": "R-t3-01-08",
+      "title": "Transcript readability for long agent runs: view modes, settled-turn folding and a docked plan strip with end-of-turn recap",
+      "summary": "Add a per-user transcript view preference (normal, thinking, verbose), fold settled turns behind a 'Worked for Xm' row that keeps the first and final assistant messages, show tool rows as soon as the tool name streams, and dock a compact 'Step N/M' plan strip above the composer. Optionally add an end-of-turn recap card whose buttons come from an allowlist of app actions. All of it is derived from plan, todo and tool events Verevon already emits.",
+      "whyItMatters": "Do-run transcripts get long once tools and MCP run. Folding and view modes keep them readable without hiding transparency (the Work panel stays the full record), and a docked progress strip tells users where the agent is without opening the Work panel.",
+      "referenceBestPractice": {
+        "bestSource": "T3 Code (SRC) for settled-turn folding; Claude desktop (SRC) for view modes, plan pin and recap; Manus (SRC) for the docked Step N/M planner",
+        "others": [
+          "DeepSeek harness (SRC, early tool rows from partial JSON)",
+          "Antigravity (SRC, thinking duration and render hints)",
+          "Codex (SRC, commentary versus final channel)",
+          "claude.ai (DOC)",
+          "ChatGPT (DOC)"
+        ],
+        "prevalence": "4 of 12 (view modes, common); 3 of 12 each for folding and the plan dock (differentiators)",
+        "mechanism": "Folding: derive one fold row per settled turn that keeps the first and terminal assistant messages, measure duration from the triggering user message, never fold a running turn, keep expanded ids in UI state. Tool lifecycle preparing, started, result is grouped by call id and partial JSON arguments are indexed by top-level key so a row can show a path or size live; an optional server render_info lets generic or MCP tools render without bespoke components. View modes: normal hides thinking, thinking shows collapsible thought with elapsed time, verbose shows every step. Plan dock: update_plan items with one in_progress plus an optional wrap_up recap with allowlisted actions."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/registry.ts:41",
+          "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts:81",
+          "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/tool-presentation.ts:38-159",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1008-1160",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:97-330",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1603"
+        ],
+        "gap": "reasoning_delta renders as a collapsible ReasoningTrace and the Work panel shows raw events, plans and todos, and tool cards carry intent, hit count, truncation and diff. Missing: a transcript view-mode switch, a thinking recap per tool group, settled-turn folding, a 'preparing' stage from streaming arguments, server-supplied render hints, a compact docked Step N/M strip above the chat composer, and an end-of-turn recap card."
+      },
+      "approach": "SPA chat-node layer: add fold derivation (never persisted, like tool presentation), a view-mode preference in user settings applied in the node registry, and a docked progress strip built from the existing plan and todo events (orchestration todos stay the single source of truth). Model Plane, additive and optional: render_info on the tool_call ChatEvent and a wrap_up event with an action allowlist (new thread, schedule, export). Any one-line thinking recap is a cheap-tier summary call, non-ZDR only and opt-in.",
+      "effort": "S",
+      "dependencies": [
+        "chat-node registry",
+        "render performance work (R-t3-01-06) for stable anchoring"
+      ],
+      "planeOwner": "Frontend Plane (presentation), Model Plane (optional render_info and wrap_up events)",
+      "risks": "Folding must never hide approvals, questions or effect receipts. Recaps cost a model call and must not run for ZDR turns. The strip duplicates the Work panel unless it reads the same data.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 8,
+        "DOC": 3,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I15 covers visible reasoning on the Terra route (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:224); view modes, folding and the dock are not in the plan"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-003",
+        "C-t3-01-006",
+        "C-t3-01-014"
+      ]
+    },
+    {
+      "id": "R-t3-01-09",
+      "title": "Rewind with undo preview, read-only side chat and spin-off tasks, built on the message tree",
+      "summary": "Once the server message tree exists, add three tree operations. Rewind moves the active leaf to before an earlier message and restores the artifact version pointer, with a preview and an undo of the rewind. Side chat is an ephemeral child thread seeded with a read-only snapshot of the parent's context, with inline read-only tools only, usable while the run continues. Spin-off lets the assistant propose a draft thread chip with a seeded prompt that the user must accept.",
+      "whyItMatters": "Rewind is a differentiator for safe experimentation in Do mode, side chat (6 of 12 sources) lets users ask 'why did it do X?' mid-run without redirecting the run, which serves the transparency goal, and spin-off keeps threads focused. All three are cheap once forks exist.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (SRC) for rewind and spin-off; Claude desktop plus Codex (SRC) for side chat, with Codex's ephemeral read-only fork as the safest model",
+        "others": [
+          "Antigravity (SRC, rewind preview)",
+          "Cursor",
+          "Perplexity (DOC)",
+          "DeepSeek harness (DOC proposal)",
+          "claude.ai (DOC)"
+        ],
+        "prevalence": "6 of 12 (side chat, common), 2 of 12 each (rewind, spin-off; differentiators)",
+        "mechanism": "Rewind: a checkpoint per user turn (conversation cursor plus artifact version ids); rewinding moves the cursor, restores versions and keeps the rewound tail recoverable until a new message is sent; a preview lists the per-artifact diffs that would be undone and warns about external effects. Side chat: an ephemeral child session seeded with a read-only snapshot of parent context, no effectful tools and no user prompts, not appended to the main transcript, stoppable independently, discarded or merged back as one message. Spin-off: a plan scope value or spawn_task tool creates a backlog chip with a self-contained prompt."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/rust/services/session-core/src/grpc.rs:4774",
+          "apps/Model Plane/rust/services/session-core/src/compaction.rs:1-8",
+          "apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs:1-40"
+        ],
+        "gap": "Run checkpoints exist (SaveCheckpoint, auto-checkpoint compaction) but there is no user-facing rewind or restore. A grep for side chat in the chat feature found no hits, so there is no side-chat surface or ephemeral fork primitive. There is no user-facing spin-off or backlog; the nearest thing is wide-research fan-out inside Do runs."
+      },
+      "approach": "Rewind: move the active leaf of the R-t3-01-02 tree plus an artifact version pointer; scope per OD19 is conversation and artifact versions only, and effectful turns are marked non-rewindable with an explicit preview. Side chat: a model-gateway ephemeral invocation using the parent thread's assembled context snapshot (GetContextAssembly exists), the inline_tool_allowed read-only tool gate, no persistence under ZDR and an origin=side tag otherwise; SPA resizable side pane. Spin-off last: a spawn_task builtin that creates a draft thread in session-core.",
+      "effort": "L",
+      "dependencies": [
+        "server message tree (R-t3-01-02)",
+        "artifact versions (R-t3-01-04)",
+        "GetContextAssembly snapshot API"
+      ],
+      "planeOwner": "Model Plane (tree operations, ephemeral invocation), Frontend Plane (side pane, rewind preview)",
+      "risks": "Users may assume rewind reverts external effects (emails, tickets), so the preview must be explicit. A second context costs tokens and must carry the parent's ACL and ZDR posture. Spin-off must never auto-start effectful work.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 4,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I11 checkpoint and rewind with non-rewindable marking (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:252, owner decision OD19); side chat and spin-off are not in the plan"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-010",
+        "C-t3-01-011",
+        "C-t3-01-012"
+      ]
+    },
+    {
+      "id": "R-t3-01-10",
+      "title": "Composer: atomic typed context tokens, per-thread drafts, large attachments through Data Plane, and thread references",
+      "summary": "Turn the composer into a rich editor where references (Data Plane document, past thread, Space, skill) become atomic typed tokens serialised as content parts {type, id}, resolved by model-gateway with the caller's delegated token. Persist drafts per thread (prompt, attachments, tokens) under the existing ZDR purge rules, route large files through Data Plane v2 import instead of inlining them (today 1 MB per file), and let the agent browse referenced threads lazily through read-only outline, search and read tools.",
+      "whyItMatters": "Typed references make context explicit and auditable, which suits Verevon's authority model better than free text. Losing a long prompt on reload is a top frustration, and 1 MB per file is far below every reference for document-heavy business users.",
+      "referenceBestPractice": {
+        "bestSource": "T3 Code (SRC) for atomic Lexical chips and drafts; Antigravity (SRC) for typed scope items and server slash commands; Manus (SRC/DOC) for task references browsed lazily; Claude desktop and ChatGPT (DOC) for large-paste handling",
+        "others": [
+          "DeepSeek harness",
+          "Claude desktop",
+          "Manus",
+          "Perplexity (DOC)",
+          "ChatGPT (DOC)",
+          "Cursor"
+        ],
+        "prevalence": "6 of 12 (typed composer, table-stakes), 4 of 12 (attachments), 2 of 12 each (drafts, thread references)",
+        "mechanism": "A rich-text editor with decorator nodes per token type; triggers for @, / and $ detected at the cursor; offsets map between collapsed (one char per chip) and expanded forms; the send payload is a list of text and typed scope items; slash commands come from a server endpoint. Drafts persist per thread in versioned localStorage (debounced writes, flush on unload, byte budgets). Long pastes over a threshold become attachments and uploads are validated by type and size (Manus 300 MB). Thread references carry up to 20 task ids whose access is checked lazily at read time, and the agent gets outline, search and read-part tools instead of injected content."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3876",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3944",
+          "apps/Frontend Plane/verevonv3/src/shared/api/chat-actions-client.ts:20-61",
+          "apps/Frontend Plane/verevonv3/src/shared/session/home-draft-storage.ts",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:102",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts:18-35",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs:14-40"
+        ],
+        "gap": "Slash commands (/file, /image, /search, /research, /schedule plus server skills, capabilities and connectors) and an entity overlay ship, but @-mentions are deliberately not handled in the global composer (Space rooms own governed agent mentions), tokens are not atomic typed items in the payload, and user slash templates are absent. The Home draft persists per user and org and is purged under ZDR, but no per-thread chat draft store was found (inference from grep, medium confidence). Attachments cap at 1,000,000 bytes per file, 60,000 characters per file and 120,000 per turn (SRC prepare-chat-attachments.ts:18-35); long paste becomes an attachment at 4,000 characters; there is no image annotation and files are not staged into the code sandbox. No thread references or recall tool exist."
+      },
+      "approach": "SPA: Solid rich-text composer with typed tokens serialised as content parts {type: doc_ref|thread_ref|space_ref, id}; use a different trigger or scoped menu than the Space-agent @ the owner reserved. model-gateway resolves refs with the caller's delegated token (owner-plane ACL check at read time, never widened by Space access) and exposes read-only thread outline, search and read tools that reuse the recall index from R-t3-01-03. Generalise home-draft-storage to a per-thread key with the same ZDR purge and size clamps. Large files go through Data Plane v2 chunked import and retrieval; stage attachments into sandbox workspaces for code_interpreter; raise limits per plan.",
+      "effort": "L",
+      "dependencies": [
+        "history search and recall (R-t3-01-03)",
+        "Data Plane v2 imports",
+        "sandbox staging (plan H6)",
+        "owner ruling on who may author slash templates (OD19)"
+      ],
+      "planeOwner": "Frontend Plane (editor, drafts), Model Plane (ref resolution, thread tools, attachment routing), Data Plane v2 (large files)",
+      "risks": "The owner's decision to keep @ for Space agents must be respected. Cross-thread references leak across ZDR boundaries unless ZDR threads are refused. Large files must not persist under ZDR. Referenced thread content is untrusted data.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 5,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I13 user-authored slash templates (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:223) and H6 staging attached documents into the sandbox (Wave 4); typed tokens, per-thread drafts, thread references and large-file routing are not in the plan"
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-01-022",
+        "C-t3-01-023",
+        "C-t3-01-024",
+        "C-t3-01-039"
+      ]
+    },
+    {
+      "id": "R-t3-01-11",
+      "title": "Interactive outputs: inline generative UI widgets, selection-to-agent comments and narrow result cells",
+      "summary": "Let the model emit a widget artifact (small HTML or SVG) that renders inline in the transcript in the existing sandbox with host theme tokens injected, a small widget-state store and a prompt-back bridge whose follow-ups the user must confirm. Reuse the same typed-context path for selection actions: selecting transcript text or an artifact region produces a typed context item (quote, element, region comment) that travels to the agent as a tagged text block any provider can read. Add only the dedicated result cells Verevon tools actually return (comparison table, KPI card).",
+      "whyItMatters": "Interactive answers (calculators, comparisons, small dashboards) are a visible trend across ChatGPT, Claude, Codex and Cursor (6 of 12) and suit Verevon's analytics and business use. Point-and-edit lets users fix reports precisely without re-describing them. Verevon already has the sandbox half (sandboxed HTML viewer, native charts).",
+      "referenceBestPractice": {
+        "bestSource": "Antigravity (SRC), Codex (DOC) and Claude desktop (SRC) for widgets; Manus (SRC) and T3 Code (SRC) for point-and-edit",
+        "others": [
+          "Cursor (React canvases)",
+          "DeepSeek harness (static versus scripted preview)",
+          "Perplexity (DOC)",
+          "claude.ai (DOC)",
+          "ChatGPT (DOC)"
+        ],
+        "prevalence": "6 of 12 for widgets and for point-and-edit (common); 4 of 12 for result cells; 2 of 12 for selection actions",
+        "mechanism": "Widgets: a show_widget tool returns an HTML fragment rendered in a sandboxed iframe (scripts allowed, no same-origin) under a strict CSP, with semantic CSS variables for light and dark, a postMessage bridge with getState/setState (small JSON snapshot persisted with the message, up to 16 KiB in Codex), sendFollowUp(prompt) gated by a confirmation dialog, and readContext. Point-and-edit: each selection becomes a typed context item serialised as a tagged block (for example element_context with url, selector and an html preview capped near 4,000 characters; review_comment with id, author, text), shown as chips in the composer and cards in the sent message. Selection popover: reply stages a quote token, explain sends a templated prompt."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx:1-15",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:164",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:502-519",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:356-538",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4361-4383",
+          "apps/Model Plane/rust/services/model-gateway/src/format_guidance.rs:146"
+        ],
+        "gap": "Sandboxed HTML (allow-scripts without same-origin) renders only in the Output panel, not inline; there is no host-theme token injection, widget state or prompt-back bridge, and native charts cover only chart fences. No maps, weather, product or entity cells exist. There is no selection popover (grep for getSelection in the chat feature found none) and no selection-scoped edit or comment-to-agent on artifacts or previews."
+      },
+      "approach": "model-gateway: a widget artifact kind emitted via the artifact ChatEvent. SPA: inline sandboxed iframe with CSP and theme tokens, a postMessage bridge with user confirmation for follow-ups, widget state stored with the message in session-core (refused under ZDR). Then a typed context item type for selections, accepted by model-gateway as content parts and rendered as tagged blocks for any provider (the same payload as composer tokens in R-t3-01-10). Add result cells only through the typed chat-node registry for result types Verevon tools return; prefer generic widgets to bespoke cells.",
+      "effort": "L",
+      "dependencies": [
+        "artifact store (R-t3-01-04)",
+        "composer typed tokens (R-t3-01-10)",
+        "chat-node registry"
+      ],
+      "planeOwner": "Frontend Plane (widget frame, bridge, selection UI), Model Plane (widget artifact kind, context parts)",
+      "risks": "Model-written code can attempt XSS or exfiltration: no network by default, no same-origin, strict CSP, user-confirmed follow-ups. Element HTML selected from a page is untrusted data and a prompt-injection vector. Many bespoke cells are a maintenance burden.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 11,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I17 highlight-to-edit (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:253, scope per OD19); inline widgets and result cells are not in the plan"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-019",
+        "C-t3-01-020",
+        "C-t3-01-018",
+        "C-t3-01-016"
+      ]
+    },
+    {
+      "id": "R-t3-01-12",
+      "title": "Sharing, replay, export and import: governed snapshot links, org-only default, and conversation export and import",
+      "summary": "Add a session-core snapshot entity (owner, visibility org or named people, created_from_message) whose grants are checked through Control Plane and audited, with public links only behind admin policy and refused for ZDR threads and threads that used private connectors unless redacted. Viewers read it read-only and a follow-up creates a fork under the viewer; a replay view is built from the durable run event log. In parallel add an owner-only audited whole-conversation export and an importer that maps ChatGPT and Claude export JSON into origin=import threads.",
+      "whyItMatters": "Teams share answers and agent runs constantly and org-only sharing is expected in B2B (8 of 12 sources). A replay of an agent run is also a strong trust and transparency artefact. Importing history lowers switching cost, and reports must leave Verevon as Office files and PDFs.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (SRC) for visibility, roles, replay and admin policy; claude.ai and Perplexity (DOC) for snapshot hygiene and fork-on-follow-up; Manus (SRC) and Claude desktop (SRC) for conversion and import",
+        "others": [
+          "Antigravity",
+          "Cursor",
+          "Claude desktop",
+          "ChatGPT (DOC)",
+          "claude.ai (DOC)",
+          "Perplexity (DOC)",
+          "Manus web (DOC)"
+        ],
+        "prevalence": "8 of 12 for sharing (table-stakes); 6 of 12 for export and import (common)",
+        "mechanism": "Share is an immutable snapshot of the thread up to a message (artifacts included, raw tool and connector payloads and files excluded unless in-org) with a visibility enum and an audit entry. Viewers load read-only, a follow-up forks under the viewer, replay plays recorded steps with a countdown and skip-to-result, and admin policy can disable public or replay sharing (strictest wins). Export uses server-side conversion jobs with PENDING, CONVERTING, SUCCESS and FAILED states, session export as a zip (rate-limited, policy-gated), and importers that enumerate sources and can remove an import run."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/index.ts:1-60",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/docx.ts",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/xlsx.ts",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:621-624",
+          "apps/Model Plane/proto/model_plane/v1/sessions.proto:255-260",
+          "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md:176-181"
+        ],
+        "gap": "No chat share link exists (status absent; deferred pending the owner's share-model ruling). Export is partly shipped: answers export to Word, Excel and PowerPoint and print-to-PDF in the browser with pure in-browser OOXML builders (no network, good for ZDR), but without images, charts or math, PDF goes through the print dialog, there is no whole-conversation or account export endpoint, and no importer from ChatGPT or Claude exports."
+      },
+      "approach": "session-core: a snapshot entity with a visibility enum and Control Plane grant and audit checks; the viewer follow-up reuses ForkThread from R-t3-01-02. sessions.proto already stores recipient_audience_revision and hash so share, replay and fork can detect a participant-set change. Replay is built from the durable run event log. Client builders stay and gain chart and image embedding (plan H3/H4); add a session-core export (owner-only, audited) and an importer that marks imported turns untrusted. Refuse sharing and import for ZDR threads, and honour admin policy.",
+      "effort": "L",
+      "dependencies": [
+        "server message tree and fork (R-t3-01-02)",
+        "Control Plane grants and audit",
+        "owner share-model ruling (OD19)",
+        "session-core bulk write path"
+      ],
+      "planeOwner": "Model Plane (snapshots, export, import), Control Plane (grants, audit, admin policy)",
+      "risks": "Leakage of connector content, ZDR and residency violations, and legal retention of public snapshots. Imported content may carry prompt injections.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 13,
+        "DOC": 8,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I19 read-only share link (deferred to Wave 6, owner-gated, apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:271) and I20 copy a chat into a Space (:272); H3 direct PDF and H4 native charts in Office exports (Wave 4); backlog item #22 governed share and replay (apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md:176); import and whole-conversation export are not planned"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-030",
+        "C-t3-01-032"
+      ]
+    },
+    {
+      "id": "R-t3-01-13",
+      "title": "Claim-level citations: bind chips by citation number, per-claim support view, source labels and document chips",
+      "summary": "Finish the citation chain Verevon already started: bind citation chips by number from model-gateway instead of a client regex over [n], expose the server claim anchors as a per-claim support view using the existing verification event, add source-authority labels from Quarry or Data Plane metadata, and render doc_ref links in answers as chips that open the Data Plane document at the passage.",
+      "whyItMatters": "Verifiable answers are a core trust promise for business research, and Verevon is close: it already has claim anchors, a verification event and the 'read and used' versus 'not read' separation that Claude and ChatGPT lack. Per-claim checking is a Perplexity-style differentiator.",
+      "referenceBestPractice": {
+        "bestSource": "Perplexity (DOC) for per-claim Check Sources; T3 Code (SRC) for file chips that open at a line",
+        "others": [
+          "Claude desktop (SRC, per-domain fetch consent)",
+          "DeepSeek harness"
+        ],
+        "prevalence": "2 of 12 for claim verification and 2 of 12 for file chips; differentiators",
+        "mechanism": "Per-citation passage snippets stored with the answer; a post-hoc verification pass over (claim, cited passage) pairs returns per-claim support ratings; domain labels (government, academic, trusted) are shown with an icon; fetch consent per domain with allow-once or always. File chips come from a remark plugin that detects path-like links and opens an in-app panel at a line anchor."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:90-138",
+          "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:953-969",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:356-538",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:163-209",
+          "apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs:1"
+        ],
+        "gap": "Citations with source groups, origin and server claim anchors plus a sources panel ship, but chips are placed by a client regex over [n], there is no per-claim support check UI, no source-authority labels, no passage-level follow-up, no per-domain fetch consent, and references in answer text are not turned into document or source chips."
+      },
+      "approach": "model-gateway: emit stable citation numbers and doc_ref anchors; SPA: bind chips by number, add a per-claim support popover over the existing verification ChatEvent, and doc_ref chips that open the document viewer at the anchor. Source labels come from Quarry or Data Plane metadata. The optional verification pass costs a model call, so make it user-initiated and never claim certainty it lacks.",
+      "effort": "M",
+      "dependencies": [
+        "Quarry source metadata",
+        "verification ChatEvent",
+        "citation_anchors in model-gateway"
+      ],
+      "planeOwner": "Model Plane (anchors, verification), Frontend Plane (chips and popover)",
+      "risks": "The verification pass costs a model call and can be wrong; present ratings as evidence, not proof. Chips must not link to documents the viewer cannot access.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 6,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Partly: plan I6 citation chips bind by number with one numbering across producers (apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:218); claim-level view, authority labels and document chips are not in the plan"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-036",
+        "C-t3-01-037"
+      ]
+    },
+    {
+      "id": "R-t3-01-14",
+      "title": "Library of generated and uploaded files across chats, with org publishing built on Data Plane documents",
+      "summary": "Register generated files and promoted artifacts (non-ZDR) as Data Plane v2 documents with origin_thread metadata, and build the library as a filtered document view with search, type grouping and favourites instead of a new store. 'Publish' is then 'save the artifact as a document and share it through the existing resource_grants and Application Plane collaboration', not a parallel publishing platform.",
+      "whyItMatters": "Users want to find 'that report Verevon made last week' without hunting threads, and agentic products that produce deliverables converge on a library. Reusing Data Plane documents avoids duplicate storage and keeps sharing under existing grants.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (SRC) for the library; Claude desktop (SRC) for private-by-default published artifacts with roles",
+        "others": [
+          "ChatGPT (DOC)",
+          "Manus web (DOC)",
+          "Perplexity (DOC)"
+        ],
+        "prevalence": "3 of 12 for the library (differentiator) and 3 of 12 for publishing (differentiator)",
+        "mechanism": "A server file index keyed by owner with type, stage (process versus product), origin session, versions and share state; a library page with filters and batch download; storage quotas and recently-deleted restore (ChatGPT, DOC). Publishing: an artifact store with versions and an ACL (org, people, groups, email, public link; view, comment, edit), comments anchored to spots and @assistant comments routed to a watching session."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatUtilityPage.tsx:23-70",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs"
+        ],
+        "gap": "No cross-chat file library: artifacts and generated files live per thread (partly client-side), and the Findings and Reports pages read the local transcript cache only. No artifact publishing, comments or runtime exist; the only sharing is document sharing through resource_grants in shares.rs, not chat artifacts."
+      },
+      "approach": "After R-t3-01-04, add a 'Save as document' action that creates a Data Plane v2 document with origin_thread metadata and reuses shares.rs and Control Plane grants for visibility. The library page is a filtered document view in the SPA. Comments and @assistant routing, if wanted, go through Application Plane collaboration rather than a new runtime. No durable library under ZDR.",
+      "effort": "M",
+      "dependencies": [
+        "server-side artifacts (R-t3-01-04)",
+        "Data Plane v2 documents",
+        "Control Plane grants"
+      ],
+      "planeOwner": "Data Plane v2 (documents), Frontend Plane (library view), Control Plane (grants)",
+      "risks": "Duplicated storage between session artifacts and documents; retention policy; public links conflict with ZDR and org data policies, so do not offer them by default.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 4,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-01-033",
+        "C-t3-01-021"
+      ]
+    },
+    {
+      "id": "R-t3-01-15",
+      "title": "Reader polish: conversation TOC and chapters, appearance and accessibility settings, reasoning translation",
+      "summary": "Three small SPA items. A floating table of contents built from user messages and headings (a model-marked chapter event later). CSS-variable appearance settings for chat font, density and an optional dyslexia-friendly font, plus collapsing long user prompts. An opt-in, cost-isolated on-demand translation of model reasoning into the user's language, stored with the session and never fed back to the model, alongside fixing Norwegian-only chat strings.",
+      "whyItMatters": "These help long research threads, a broad business audience (accessibility) and Norwegian users reading English reasoning from frontier models. Value is modest, so sequence them after the priority items.",
+      "referenceBestPractice": {
+        "bestSource": "Claude desktop (SRC) for chapters, TOC and appearance settings; T3 Code (SRC) for collapsing long prompts; DeepSeek harness (SRC) for reasoning translation",
+        "others": [
+          "ChatGPT web (DOC, TOC from headings)",
+          "Manus web (DOC, output locale)"
+        ],
+        "prevalence": "2 of 12 sources each; differentiators",
+        "mechanism": "A mark_chapter tool inserts a titled divider and the UI builds a floating TOC from chapters (or from headings once a conversation exceeds roughly five responses). Appearance preferences are exposed as root data attributes and CSS variables; long user messages clamp to about 8 lines or 600 characters with a toggle. Translation records are bound to the session and a reasoning block id, produced by a cost-isolated call, original text retained, and never added to model input."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatAppearancePreview.tsx:15",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2266",
+          "apps/Frontend Plane/verevonv3/src/shared/i18n/locales.ts:1"
+        ],
+        "gap": "No chapters or TOC (grep found none). Theme switching ships, but ChatAppearancePreview is a development-only comparison, so there are no user font, density or dyslexia-font settings, and long-prompt collapsing was not verified. The UI is Norwegian and English with some Norwegian-only chat strings, and there is no reasoning translation or explicit output-locale setting."
+      },
+      "approach": "SPA only for the first two: a TOC from user messages and headings (anchoring depends on R-t3-01-06) and CSS-variable appearance settings in user preferences. Fix i18n leaks first; reasoning translation later as an opt-in cheap-tier call through model-gateway, non-ZDR only, stored as a session-bound record.",
+      "effort": "S",
+      "dependencies": [
+        "render performance and anchoring (R-t3-01-06)",
+        "i18n cleanup"
+      ],
+      "planeOwner": "Frontend Plane, with an optional Model Plane translation call",
+      "risks": "Low. Translation costs a model call and must not enter model context; never translate ZDR turns through a retained path.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-01-015",
+        "C-t3-01-038",
+        "C-t3-01-043"
+      ]
+    }
+  ],
+  "dropped": [],
+  "strengthsToKeep": [
+    "Typed ChatEvent taxonomy (23 variants, feature-family gated) with a CI producer/consumer coverage gate and a byte-verbatim, allowlist-free BFF relay: a new capability is a new ChatEvent plus an SPA case, and errors never masquerade as done (model-gateway/src/sse_events.rs:462-484; apps/Frontend Plane/verevonv3/apps/gateway/tests/sse_relay_no_allowlist.rs; src/shared/api/chat-client.ts:1488-1760). Keep additive.",
+    "Own Markdown parser with KaTeX, Mermaid in strict security mode that renders only after the fence closes, and native accessible SVG charts from chart fences and table-to-chart with SVG export, ahead of most references (apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts:588-652; ChatMessages.tsx:1086-1600; ChatChart.tsx:15-20).",
+    "Mid-run steering semantics: the model classifies redirect versus follow-up, input is delivered at the tool-round boundary with pending, delivered and refused states, stopped is a distinct terminal state with continue-after-stop, and a turn that had effects cannot be edited in place ('Run as a new turn') (apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:1-20; apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:3499-3531, 3582-3640). More principled than the references.",
+    "Context management ahead of all references: compaction with protected pinned messages that survive compaction, reattach_context, and an itemised context inspector (apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:153-159, 6751, 7919; apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-pinned-messages.ts:33-43). One gap: pins are stored per browser, not per user.",
+    "Sources panel separates 'read and used' from 'not read' sources and adds a grounding overview (facts, graph nodes, community summaries); server claim anchors exist (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:356-538; chat-types.ts:163-209; apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs:1). Ahead of Claude and ChatGPT.",
+    "Editable plan proposal card with authority rungs and a written justification, plus the Work / Output / Sources / Trace canvas with memory_recall events and the Agent Run Console; more transparent than any reference (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1008-1160; ChatMessages.tsx:2217-2542; src/features/agents/components/AgentRunConsole.tsx:97-330).",
+    "Explicit Ask/Do authority switch with a plan gate instead of silent escalation, safer and more transparent than the references (apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1085, 1110-1121; apps/Model Plane/rust/services/model-gateway/src/sse.rs:9527). Keep explicit; at most add an escalation suggestion chip.",
+    "ZDR-aware local state: Home drafts, caches and pending launches are retention-gated and purged under Zero-Data-Retention, ahead of the references (apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-retention.ts:102; src/shared/session/home-draft-storage.ts).",
+    "Stream resume design: monotonic frame ids, Last-Event-ID replay, buffers keyed by verified org, user and request, durable-outcome reconciliation with backoff and typed failure presentation, with a Redis backend already coded and selected by REDIS_URL (apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:1-24; apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:134-167). Only deployment backing is missing.",
+    "Recomputed, never-persisted tool presentation with an exhaustive chat-node registry that fails the build when a node kind has no renderer, plus typed tool cards with intent, hit count, truncation flag and diff (apps/Frontend Plane/verevonv3/src/shared/chat-nodes/registry.ts:41; derive.ts:81; tool-presentation.ts:38-159).",
+    "Governed slash catalogue fetched from server endpoints (skills, capabilities, connectors), each degrading to empty, plus date autocomplete, a work-period picker and a connector attach picker with provenance (apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3876, 3944; src/shared/api/chat-actions-client.ts:20-61).",
+    "Sandboxed HTML artifact viewer (allow-scripts without same-origin) with typed viewers and a diff against the previous revision, and pure in-browser OOXML export builders with no network, which suits privacy and ZDR (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:88-600, 502-519; src/features/chat/lib/chat-export/index.ts:1-60)."
+  ]
+}

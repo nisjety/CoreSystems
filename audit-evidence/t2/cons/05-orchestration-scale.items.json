@@ -1,0 +1,618 @@
+{
+  "category": "Orchestration & scale",
+  "items": [
+    {
+      "id": "R-t2-05-01",
+      "title": "Wire crawl scoping, robots and typed denial reasons into the live crawl path",
+      "summary": "Route every discovered link through a scope filter before it reaches the frontier: default to same host plus the seed's directory prefix, with includePaths/excludePaths, allowSubdomains, allowExternal, crawlEntireDomain, maxDiscoveryDepth and robots enforcement. Reuse the existing Rust CrawlFrontier/CrawlDenialReason code, add the options to CrawlRequest, the gateway normalize_crawl_body and the crawl composer, and return denial counts with fix-it text in job events and status so the Model can self-correct.",
+      "whyItMatters": "Today a crawl seeded on a page with external links can walk off-site until max_pages, wasting budget, hitting third-party hosts (egress-governance conflict) and polluting the Data Plane with unrelated documents. Typed, plain-language denials also fit the rule that the Model proposes and Quarry executes or rejects: a rejected proposal tells the agent exactly which option to change.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (native Rust filter_links with typed denial map and remediation messages)",
+        "others": [
+          "Apify enqueueLinks (strategy, globs, transformRequest hook)"
+        ],
+        "prevalence": "2 of 4 sources (both crawl platforms; Codex and Aside have no crawler); table-stakes",
+        "mechanism": "filter_links(candidates, opts) returns (allowed, denials{url: reason}). Checks in order: parse, protocol, fragment-only, depth > maxDiscoveryDepth, scope (directory prefix of seed unless crawlEntireDomain/allowBackwardLinks), domain/subdomain/external, include then exclude patterns on path or full URL, file extension, social-media, robots. Patterns are validated with ReDoS caps (<=1000 patterns, <=2000 chars each, 100k total). Each denial reason maps to a message that names the matched pattern or depth and the option to set (for example allowSubdomains). Apify adds a transformRequest hook so callers can drop or retag requests."
+      },
+      "verevonToday": {
+        "status": "stub",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs:54-380",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:474-486",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:570-585",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:386",
+          "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:36-38"
+        ],
+        "gap": "CrawlFrontier (scope, include/exclude, depth, typed CrawlDenialReason) is only referenced from quarry-runtime/lib.rs and its own tests; grep finds no caller in quarry-edge or the Go orchestrator. Both the in-workflow BFS and the durable-frontier loop enqueue every non-empty link returned by the page with only a depth and exact-string visited check. The gateway forwards only url, max_pages (capped at 5000) and ingest. Robots is not enforced on crawl. Repo docs (PROGRESS.md, gap-quarry.md) describe CrawlFrontier as complete, which is stale relative to the code."
+      },
+      "approach": "Ingestion Plane (quarry-runtime, quarry-core, orchestrator, edge) with a thin Frontend change. Keep frontier mutation in Rust as ROADMAP Phase 5 states: add a filter_links entry point in quarry-runtime that takes (candidates, CrawlScopeConfig, RobotsCache) and returns allowed links plus a denial map; call it from the Go crawl activity before FrontierEnqueue (both the in-workflow slice and the durable frontier). Extend CrawlRequest/CrawlJobInput with includePaths, excludePaths, allowSubdomains, allowExternal, crawlEntireDomain, maxDiscoveryDepth; apply the same SSRF/egress guard the gateway already uses (normalize_public_http_url). Emit a crawl.links_denied event with per-reason counts and a remediation string, and include them in crawl status. Gateway: extend normalize_crawl_body and the crawl composer with scope fields. Ship explicit defaults (same host, directory prefix) and a flag for legacy behaviour.",
+      "effort": "M",
+      "dependencies": [
+        "R-t2-05-07 shares the scope filter for sitemap seeding",
+        "Go-to-Rust call path for filtering (edge endpoint or activity helper)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Changing the default scope alters existing crawl results; make defaults explicit and document the legacy opt-out. Over-tight directory-prefix scope can miss sibling sections users expect, so denial summaries must be visible in the UI.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md Phase 5 (sitemap, robots, include/exclude, typed denial reasons) and docs/PLAN.md; Rust types exist but are not wired into the crawl path"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-007"
+      ]
+    },
+    {
+      "id": "R-t2-05-02",
+      "title": "Make scrape, crawl and batch schedules actually execute (Temporal schedules)",
+      "summary": "Map crawl, scrape and batch schedule target kinds to Temporal ScheduleSpec instead of skipping them, wire a Temporal client into quarry-control so trigger and backfill stop returning 501, add a timezone field and record skipped reasons as job events. Until this ships, stop the gateway UI offering actions the backend cannot perform.",
+      "whyItMatters": "Scheduled re-crawls of tracked sources keep Verevon's knowledge fresh, and the UI already lets users create such schedules. Today only change_monitor schedules run, so users can create schedules that silently never fire, which erodes trust and leaves knowledge stale.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (scheduler with lease claim, deterministic jitter, skipped_overlap/skipped_no_credits, stale recovery, plain-English cron)",
+        "others": [
+          "Apify (timezone-aware cron, per-run input overrides, failure notifications)"
+        ],
+        "prevalence": "2 of 4 sources (both crawl platforms); table-stakes",
+        "mechanism": "Scheduler tick selects due schedules FOR UPDATE SKIP LOCKED and sets lease_until; fire_at = next_cron(tz) + sha256(id) mod min(interval/2, 5 min); if the previous run is still active record skipped_overlap and advance; if entitlement is insufficient record skipped_no_credits; otherwise reserve credits, start the workflow with the stored input override and advance next_run_at. Runs active past a threshold are marked failed and released. A phrase parser turns 'every 30 minutes' into cron with a 5-minute minimum. Failures notify the owner."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/schedule_wire.go:39-51",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:185-193",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/schedules/schedules.go:104-330",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:239-340",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:305-357",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:99",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:191",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardCrawlSchedules.tsx:3"
+        ],
+        "gap": "workflowFor in schedule_wire.go maps only change_monitor to a workflow; scrape, crawl and batch return an empty workflow and the orchestrator skips them (the code comment says they are not run_id-safe for recurring dispatch yet). MountScheduleAliases receives a nil Temporal client, so trigger and backfill return a typed 501. Cron is a strict 5-field expression with no timezone, and there is no jitter or skipped-reason status. The gateway UI exposes overlap policy, pause, trigger and backfill that the backend cannot fully honour (INF from comparing gateway and control code)."
+      },
+      "approach": "Ingestion Plane. Extend workflowFor to return CrawlJobWF, scrape and batch workflow names plus args, deriving a fresh replay-safe run_id from each scheduled workflow execution exactly as ChangeMonitorWF already does. Let Temporal schedules provide overlap policy (skip), jitter, timezone and backfill rather than building a custom Firecrawl-style scheduler. Inject the Temporal client into quarry-control (MountScheduleAliases) so trigger and backfill work. Add a timezone column and spec field, write skipped/failed reasons as job events, and send failure notifications via notification-core in the Application Plane. Scheduled fires must inherit the org's ZDR floor and re-check entitlement at fire time, not only at create time. Migrate with an explicit enable step so previously created schedules do not all start firing at once.",
+      "effort": "M",
+      "dependencies": [
+        "Temporal client in quarry-control",
+        "R-t2-05-06 entitlement check for a skipped_no_credits state",
+        "notification-core for failure notices"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Existing schedules will start firing after the fix, which can surprise users and spend budget; require an explicit re-enable. Recurring crawls without R-t2-05-01 scoping would repeat the off-site walk, so sequence after scoping.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md Phase 5 (Temporal start/pause/resume/backfill/cancel); code comments in schedule_wire.go and cmd/control/main.go mark the gap as a follow-up"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-010"
+      ]
+    },
+    {
+      "id": "R-t2-05-03",
+      "title": "Expose crawl and batch lifecycle controls publicly (status, cancel, pause, resume, origin, live tail)",
+      "summary": "Add authenticated, org-checked routes on the Quarry edge and the gateway for crawl status, cancel, pause and resume that map onto the Temporal signals the crawl workflow already handles. Add a live SSE tail for job events, a recorded run origin (user, agent, schedule, webhook, api) and a stage timeline on the job record, and surface the controls in the crawl UI and as Model Plane tools.",
+      "whyItMatters": "A user or agent who starts a crawl today (up to 5000 pages) has no way to stop, pause or inspect it from the product. Agents need the same controls to honour budgets, and the audit model needs to know who or what started a run.",
+      "referenceBestPractice": {
+        "bestSource": "Apify (run lifecycle contract with graceful abort, resurrect, origin)",
+        "others": [
+          "Firecrawl (recorded step timeline per job: step, startedAt, finishedAt, discoveredLinks)"
+        ],
+        "prevalence": "2 of 4 sources (both crawl platforms); common",
+        "mechanism": "A state machine is persisted on the run record with a timestamp per transition and an origin. Abort emits an aborting event, waits a grace period (30 s on Apify) and then hard-stops. State is persisted periodically and on a migrating event so a run can resume. Resurrect restarts the timer with the same storage ids. Firecrawl records an array of steps so a UI can draw a timeline."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:435-455,488-496",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:133-134",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:229-232",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:1037-1080",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:179-196"
+        ],
+        "gap": "The workflow handles pause, resume and cancel signals and checkpoints every 50 pages, but the edge exposes only POST /v1/crawl, POST /v1/batch, a jobs list and a job-events drain; no route sends the signals. The gateway offers crawl start, discover, list and events only, with no status, cancel, pause or resume. /v1/jobs/:id/events drains once instead of tailing, and run origin is not recorded (INF). ZDR runs are intentionally not resumable."
+      },
+      "approach": "Ingestion Plane edge and control, plus gateway and UI. Add GET /v1/crawl/:id, DELETE /v1/crawl/:id and POST /v1/crawl/:id/pause|resume that resolve the job in control, verify org ownership from the principal, and signal the Temporal workflow (control or orchestrator holds the Temporal client; reuse the client added for R-t2-05-02). Add an origin field to job records and audit events, store a steps timeline, and turn /v1/jobs/:id/events into a tailing SSE stream. Gateway: mirror the routes under /api/v1/knowledge/crawl/{id} and add cancel/pause buttons to the crawl progress UI. Model Plane: register crawl status and cancel as proposable crawl actions that Quarry executes.",
+      "effort": "S",
+      "dependencies": [
+        "Temporal client reachable from edge or control (shared with R-t2-05-02)"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Low because the signals exist; cancel must not leave a half-written ingest, so keep the ingest-decision step idempotent. Resume of ZDR runs stays unsupported by design.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 2,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md Phase 5 (Temporal start/pause/resume/backfill/cancel)"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-013"
+      ]
+    },
+    {
+      "id": "R-t2-05-04",
+      "title": "Reap abandoned agent runs (idle and TTL sweeper), cap concurrent runs, and make the fleet console real",
+      "summary": "Add a background sweeper in quarry-edge that closes agent runs past their lease ttl_s (derived from max_runtime_s) or an idle timeout, releases the browser lease, emits a run.expired event and denies further use of the run's grant. Add per-org and global caps on concurrent runs and a tab-count warning, move the in-process run registry to durable state for multi-instance operation (non-ZDR only), and proxy /v1/fleets through the gateway so the fleet console shows real runs.",
+      "whyItMatters": "Abandoned user or AI sessions currently hold a Chromium context and a live browser grant indefinitely. That is a resource leak on a shared browser host and a security exposure (a usable grant with no user present), and it grows with every agent run.",
+      "referenceBestPractice": {
+        "bestSource": "Aside (global run semaphore, sub-agent cap, tab warning, idle sweeper)",
+        "others": [],
+        "prevalence": "1 of 4 sources; differentiator (only Aside has code evidence, and for a local single-user product)",
+        "mechanism": "A global semaphore (200 concurrent runs) gates run start; a per-run counter limits active sub-agents (8); the agent is warned at 5 open tabs; each tab carries a last-activity timestamp and a sweeper closes agent tabs and sessions past an idle TTL (15 minutes) and emits an event; ephemeral sessions are retained for a fixed 15-minute window."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1502",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:331-340",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:26",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:131",
+          "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:127"
+        ],
+        "gap": "ttl_s is computed from max_runtime_s (default 120) and stored on the lease at agent_routes.rs:1446-1502 but nothing sweeps it; a grep of agent_routes.rs finds no idle or reaper logic. Only max_steps is enforced on the step path. Runs live in an in-process HashMap (new_runs) so they cannot be shared across edge instances. The lease pool holds 2 sessions on one shared Chromium. The fleet console is a stub with placeholder live views fetching /v1/fleets that the gateway does not proxy. Step budgets and fleet budget aggregation do exist."
+      },
+      "approach": "Ingestion Plane (quarry-edge) with a small Frontend change. Add a tokio interval task that scans the run registry and closes runs past ttl_s or an idle threshold, where last_activity is refreshed on every step, on an attached frame/WS viewer, and on user takeover; on expiry release the lease, close the CDP BrowserContext, emit run.expired and mark the grant used-up (ask Model Plane BrowserBroker to revoke). Add org-scoped and global run caps at run start returning a typed 429/RESOURCE_BUSY with retry-after. Persist run records through the existing AgentRunCheckpoint path to Postgres for non-ZDR runs so the registry works across edge instances; ZDR runs stay in memory and simply expire. Frontend: proxy /v1/fleets in the gateway and replace placeholder tiles. Implementing the ttl check also enforces max_runtime_s for agent runs.",
+      "effort": "M",
+      "dependencies": [
+        "R-t2-05-09 edge metrics for visibility",
+        "R-t2-05-05 per-org caps share the admission code",
+        "Model Plane BrowserBroker grant revocation"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Reaping a run a user is still watching or co-browsing; refresh activity on viewer and takeover activity and never auto-close takeover tabs. Run-registry persistence must respect ZDR.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-015"
+      ]
+    },
+    {
+      "id": "R-t2-05-05",
+      "title": "Per-org concurrency cap with backlog and fair-share priority",
+      "summary": "Enforce a Control-Plane-owned concurrent-job limit per organisation inside the existing Postgres request queue: work over the limit waits in an org_backlog (with expiry) instead of being rejected, queue priority degrades as an org keeps more jobs in flight, and a typed 429 with retry-after is returned only when the backlog is full. Show queue position through the existing team queue-status route.",
+      "whyItMatters": "Verevon is multi-tenant and agent-driven, and agents can fan out large crawls quickly. Without per-org admission one org's crawl or agent fleet can degrade every other org's crawls and interactive browser latency, and Quarry has no way to enforce Control Plane entitlements.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (tenant backlog with expiry, in-flight priority penalty, 429 only on backlog overflow)",
+        "others": [],
+        "prevalence": "1 of 4 sources; differentiator (Apify documents plan concurrency limits but not this mechanism)",
+        "mechanism": "Sync path: a per-tenant lease semaphore (holders with TTL, heartbeated) waits up to 2/3 of the request timeout with jittered backoff. Async path: if active(org) >= limit, insert into backlog(org, job, times_out_at) instead of the queue; when a job finishes, promote the oldest backlog entry respecting per-crawl max concurrency; a reaper expires backlog rows (max 48 h). Backlog capacity = clamp(limit x 2000, 50k, 2M); overflow returns 429 naming the limit. Fair share: priority stays at base until in_flight(org, 60 s window) exceeds a bucket limit, then base + ceil((count - bucketLimit) x planModifier)."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:889-898",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/resources_v2.go:102",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_queue.rs:74",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:518-610",
+          "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:127"
+        ],
+        "gap": "Quarry exposes only a read-only team concurrency view forwarded to control. A light grep by the comparator found no per-org admission, backlog table or priority penalty in the Postgres queue claim. The durable frontier is only used when the orchestrator has edge URL/token/secret configured; otherwise the crawl uses an in-workflow slice that no queue-level admission could govern. (Status 'absent' rests on a grep, not a full baseline record.)"
+      },
+      "approach": "Ingestion Plane enforces, Control Plane owns the numbers. Quarry reads the org's concurrency limit from the verified principal or an entitlement call, counts active rows per org in the same Postgres queue (no second store), adds an org_backlog table promoted on completion, applies an in-flight priority penalty in the claim ORDER BY (postgres_queue.rs), and returns a typed 429 with Retry-After. Count agent browser leases against the same org budget or a sibling cap so agent fleets cannot bypass it (INF). Frontend: show queue position via the existing team queue-status route. First make the durable frontier the only production crawl path (hardening of the existing queue: remove the in-workflow slice fallback, add a stall counter with max-stall fail-out).",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane entitlement for concurrency per org",
+        "durable frontier always on in production",
+        "R-t2-05-10 shares the entitlement read"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Mis-set limits block onboarding crawls; keep the count in Postgres only to avoid Firecrawl's Redis-plus-Postgres reconciler drift. Do not copy Firecrawl's broker prefetch or FoundationDB backend.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 2
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-004"
+      ]
+    },
+    {
+      "id": "R-t2-05-06",
+      "title": "Enforce crawl and agent budgets in Quarry (cost, runtime, requests per minute, entitlement clamp)",
+      "summary": "On the agent step path, add a cumulative max_cost_usd check using the per-step receipt cost the handler already computes. For crawls, accept max_cost_usd, max_requests_per_minute, max_concurrency and delay, clamp the page limit to the Control Plane's remaining entitlement at submit time and record the clamped value in the job, abort when spend reaches the cap, and give crawl results an expiry.",
+      "whyItMatters": "Agents can launch crawls and browser runs autonomously, so a cost cap enforced by the Quarry executor is the safety net behind the rule that the Model proposes and Quarry executes, and it keeps Model Plane cost ownership honest. Today the code comments claim enforcement that is not on the live edge path.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (limit clamped to remaining credits at kickoff, depth cap, per-crawl concurrency/delay, sharded usage counters, crawl TTL)",
+        "others": [
+          "Apify (maxRequestsPerMinute and a max-total-charge that aborts the run)"
+        ],
+        "prevalence": "2 of 4 sources (both crawl platforms); table-stakes",
+        "mechanism": "At submit: limit = min(requested, remaining_entitlement) and both values are stored on the job. maxDiscoveryDepth bounds link depth; per-crawl maxConcurrency and delay feed the scheduler; usage counters are sharded so huge crawls do not contend on one row; results and state carry expires_at (default 24 h). A run aborts with a recorded reason when spend reaches the max charge."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1370-1371",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2346-2360",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs:155-165",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-516",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146"
+        ],
+        "gap": "Crawl has max_depth, max_pages and checkpoints, but no entitlement clamp, requests-per-minute or per-crawl concurrency/delay option, max-charge abort or result TTL; billing is usage metering only. On the agent side, the edge step path calls enforce_step_budget, which checks only max_steps; the cost check lives in AgentLoop::over_budget, and AgentLoop is not referenced by quarry-edge (grep), even though agent_routes.rs:1370-1371 says enforcement is in AgentLoop. Receipts already carry a per-step cost (provider-billed or flat-table estimate), so the data for a cumulative check exists."
+      },
+      "approach": "Ingestion Plane. Agent side (do first, small): accumulate receipt cost_usd on RunEntry and reject the next step with a typed budget-exhausted error when it reaches constraints.max_cost_usd, alongside the existing max_steps check; ttl/max_runtime_s enforcement comes from the reaper in R-t2-05-04. Crawl side: extend CrawlRequest with max_cost_usd, max_requests_per_minute, max_concurrency and delay; at submit read remaining entitlement from the Control Plane, store requested and clamped limits and return the clamped value explicitly; enforce in the workflow and in the Rust per-host throttle; add expires_at to crawl results. Reconcile cost with Model Plane cost-core for agent-planner spend.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane remaining-entitlement read",
+        "Model Plane cost-core reconciliation",
+        "R-t2-05-04 for runtime/ttl enforcement"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Silent clamping surprises users, so return and display the clamped value. Flat-table cost estimates are approximations and must be labelled as estimated versus provider-billed.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-006"
+      ]
+    },
+    {
+      "id": "R-t2-05-07",
+      "title": "Sitemap, robots and index-assisted discovery for crawl, plus URL canonicalisation and redirect de-duplication",
+      "summary": "Extract the /v1/map sitemap code into a shared Rust discovery module that also reads robots.txt Sitemap lines, gzip sitemaps, scoped, root and registrable-domain sitemaps, and URLs already in the local index or tracked sources. Call it from crawl kickoff behind a sitemap include|only|skip option, seeding the durable frontier through the scope filter. In the same enqueue path add a canonical_url unique_key and a post-redirect check so the same page is not crawled twice.",
+      "whyItMatters": "Docs and product sites are Verevon's main knowledge sources; sitemap seeding makes crawls complete and cheap, and reusing the local index makes re-crawls incremental. Canonicalisation prevents duplicate documents reaching the Data Plane, which improves retrieval quality and cost.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (parallel sitemap kickoff, index seeding, URL permutation dedupe with redirect race handling)",
+        "others": [
+          "Apify (sitemap discovery with common-name probing)"
+        ],
+        "prevalence": "Sitemap discovery: 2 of 4 sources, table-stakes; URL canonicalisation: 1 of 4, differentiator",
+        "mechanism": "Kickoff scrapes the start page then queues sitemap jobs for every candidate in parallel (3 concurrent, 25 nested max): robots Sitemap lines, <scope dir>/sitemap.xml, /sitemap.xml and the registrable-domain sitemap (plus /sitemap.txt). It parses urlset versus sitemapindex, decompresses .gz, recurses to a cap, filters each URL through the same scope filter and enqueues at a lower priority than seed links. Map is the union of index, sitemaps and optional site search, with redirects resolved, robots filtered and results ranked by query similarity. For dedupe, normalise (drop fragment but keep hash routes, optionally strip query, lowercase host); compute permutations (http/https x www x trailing slash x index.html) and lock the canonical one in a visited set before enqueue; after fetch lock the redirect target and abort if another job holds it. The limit counts the unique set."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-516",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:132",
+          "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:26",
+          "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:38"
+        ],
+        "gap": "Live crawl has no sitemap seeding. /v1/map reads /sitemap.xml plus up to 5 nested indexes and seed links, but not robots Sitemap lines, gzip or index-assisted discovery. Crawl dedupes on the exact link string only (visited map in workflows.go); there is no canonicalisation or redirect reconciliation."
+      },
+      "approach": "Ingestion Plane. Move sitemap parsing into a shared quarry-runtime discovery module used by both map_routes.rs and crawl kickoff; add robots Sitemap lines, gzip, nested cap and URL cap with streaming into the frontier. Add canonical_url (unique_key) in quarry-core, a unique index on (queue/crawl id, unique_key) in the Postgres frontier, and a post-redirect check in run_page; keep aggressive normalisation (query stripping, index.html folding) opt-in per crawl. Seed from tracked sources and the local Tantivy index so repeat crawls only fetch new or changed URLs. Build after R-t2-05-01 so every sitemap URL passes the scope filter.",
+      "effort": "M",
+      "dependencies": [
+        "R-t2-05-01 scope filter",
+        "unique_key column on the Postgres frontier"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Huge sitemaps; cap URLs and stream. Over-aggressive normalisation merges distinct pages on query-driven sites, so keep it opt-in.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 2,
+        "INF": 0
+      },
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md Phase 5 (sitemap, robots) and docs/PLAN.md:240 (ignoreSitemap, sitemapOnly)"
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-008",
+        "C-t2-05-009"
+      ]
+    },
+    {
+      "id": "R-t2-05-08",
+      "title": "Tenant-scoped webhooks and completion-triggered follow-up actions",
+      "summary": "Phase 1: add org_id to control webhooks, front them through the edge, add an optional per-job webhook and emit one idempotent run.completed event with a summary from the end of the crawl workflow. Phase 2: let users or agents define rules that react to those events (for example crawl finished then start an extract, an agent run or a notification), with idempotency keys and a maximum chain depth.",
+      "whyItMatters": "Tenant-scoped webhooks are a correctness prerequisite for API customers: today tenants cannot register crawl webhooks at all. Event-driven follow-ups let users and agents compose pipelines (crawl, ingest, summarise, notify) without polling.",
+      "referenceBestPractice": {
+        "bestSource": "Apify (integrations: run output triggers another run with templated input, plus a test event)",
+        "others": [
+          "Firecrawl (group-empty detection that enqueues exactly one idempotent finalise job for summary, billing and webhook)"
+        ],
+        "prevalence": "2 of 4 sources (both crawl platforms); common",
+        "mechanism": "A periodic check detects groups with no queued, active or backlogged jobs, marks them completed and enqueues exactly one finalise job (idempotent on group id) that writes the summary, bills and emits webhook and notification events. An integration rule {on: run.succeeded, source, action: start Y, input_template} is evaluated by a dispatcher; a workflow_key groups related runs."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/change_webhook.go",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:94-151",
+          "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/jobs/dispatcher.go:128-313",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:412",
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:485"
+        ],
+        "gap": "Completion is deterministic inside the Temporal workflow and selective ingest to the Data Plane is shipped; change-detected webhooks reach notification-core. But control webhooks carry no org_id and are not forwarded by the edge, so tenants cannot register crawl webhooks, there is no per-job webhook, and there is no user-configurable chain. No Application Plane service for user-defined automations was found in a directory scan (INF), so the owner of phase 2 is undecided."
+      },
+      "approach": "Phase 1 (Ingestion Plane, effort S): org_id on webhooks and deliveries in quarry-control, edge routes to register and list them with org check, a run.completed event emitted at the end of CrawlJobWF with a stable idempotency key, and an optional webhook field on crawl/batch jobs. Phase 2: decide the owner of rule evaluation before building. Model Plane routines (R-t2-05-12) with event triggers is the natural fit for 'crawl finished then agent run'; notification-core covers 'crawl finished then notify'. Each hop passes through the owning plane's API; cap chain depth and require idempotency keys. Skip Apify-style metamorph (no actor model).",
+      "effort": "M",
+      "dependencies": [
+        "tenant-scoped webhooks (phase 1)",
+        "owner decision for the automation service (Application Plane or Model Plane routines)"
+      ],
+      "planeOwner": "Ingestion Plane (phase 1); Application Plane or Model Plane (phase 2, to be decided)",
+      "risks": "Cross-plane event loops; enforce idempotency keys and a maximum chain depth. Webhook payloads must not carry content for ZDR orgs.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 3,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-05-012"
+      ]
+    },
+    {
+      "id": "R-t2-05-09",
+      "title": "Edge telemetry (real /metrics, graceful drain) and memory-aware browser admission",
+      "summary": "Install a Prometheus recorder and serve /metrics on quarry-edge with low-cardinality queue depth, lease pool, per-org active runs and step latency; add SIGTERM drain to edge and the orchestrator worker. Then wrap the browser lease pool with the existing AutoscaledPool driven by cgroup memory and Chromium RSS, refusing leases above a threshold with a typed RESOURCE_BUSY the Model Plane can retry, and report the host unhealthy after repeated refusals.",
+      "whyItMatters": "Autoscaling, admission and the reaper all need real numbers. Today the metrics crates are inert, so there is no queue or lease-pool visibility, and the browser host has no protection against renderer OOM or cross-session disruption as concurrent AI and user sessions grow.",
+      "referenceBestPractice": {
+        "bestSource": "Apify (AutoscaledPool with CPU, memory and event-loop driven step scaling)",
+        "others": [
+          "Firecrawl (cgroup-aware 80% admission gate with stall reporting; per-process /health and /metrics; SIGTERM drain; write-behind batching)"
+        ],
+        "prevalence": "Autoscaling/admission: 2 of 4 sources, common; worker ops: 1 of 4, differentiator",
+        "mechanism": "Every ~0.5 s a pool checks whether current < desired and the system is not overloaded; every ~10 s the autoscaler samples CPU, memory (memory.current / memory.max from cgroup) and event-loop lag and moves desired concurrency by about 5%. Admission refuses to lease a job when CPU or memory exceeds 0.8, and after 25 consecutive refusals marks the worker unhealthy so it stops receiving work. Each process serves /health (1 s timeout) and /metrics, renews job locks on a timer and, on SIGTERM, stops claiming and finishes active jobs."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:6-14",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:331-340",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs",
+          "apps/Ingestion Plane/integration-corev2/internal/api/server.go:178"
+        ],
+        "gap": "Quarry edge serves no /metrics (the metrics and exporter dependencies are inert, per the module doc comment); tracing goes out as OTLP events only. The HTTP fast path has an AutoscaledPool and per-host AIMD, but browser leases use a fixed pool of 2 on a single shared Chromium with no memory-aware admission, and a viewport change relaunches the browser for all sessions. integration-corev2 does serve /metrics. Graceful drain and Temporal worker health were not checked."
+      },
+      "approach": "Ingestion Plane. Step 1 (S): install the Prometheus recorder in quarry-edge main.rs, mount /metrics and /healthz, instrument queue depth, lease pool occupancy, per-org active runs and step latency with no URLs or secrets in labels (ZDR/privacy), and add SIGTERM drain. Step 2: feed cgroup memory and Chromium process RSS into the existing AutoscaledPool wrapping the browser lease pool, add a typed RESOURCE_BUSY refusal with retry-after, and scale the pool above 2 (ideally a pool of Chromium processes so a viewport change does not relaunch everyone). Model Plane treats RESOURCE_BUSY as a retryable tool result.",
+      "effort": "M",
+      "dependencies": [
+        "browser pool scaling beyond 2 leases",
+        "R-t2-05-04 reaper so leases are released"
+      ],
+      "planeOwner": "Ingestion Plane",
+      "risks": "Thresholds tuned wrong can starve throughput, so ship metrics first and tune from data. Metric labels must not carry URLs, org secrets or content.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-014",
+        "C-t2-05-003"
+      ]
+    },
+    {
+      "id": "R-t2-05-10",
+      "title": "Plan-aware rate limits and platform quotas driven by Control Plane entitlements",
+      "summary": "Have the Control Plane publish a per-org plan multiplier and overrides, let the Quarry edge apply a token bucket per (org, endpoint class) from the verified principal, and count schedule, webhook and run quotas at create time with typed errors. Define explicitly which layer enforces what so the gateway and Quarry do not double-limit.",
+      "whyItMatters": "Predictable cost and abuse control for API and agent callers, and a prerequisite for exposing Quarry to external API customers.",
+      "referenceBestPractice": {
+        "bestSource": "Firecrawl (per-endpoint base limits times a plan multiplier, with org override)",
+        "others": [
+          "Apify (hard account quotas on runs, schedules, webhooks, memory and concurrency)"
+        ],
+        "prevalence": "2 of 4 sources (both crawl platforms); common",
+        "mechanism": "BASE_RATE_LIMITS per endpoint class (scrape 10, map 10, crawl 2, search 10, extract 2, browser 2, status 500 per minute) multiplied by a plan multiplier (1, 10, 50, 500), with per-org overrides per mode; a token-bucket limiter keyed by (org, mode); priority tier derived from the same multiplier. Quotas are counted on create (schedules, webhooks) and rejected with a typed error."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:1-40",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs:58-62",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vector_index.rs:41",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:516"
+        ],
+        "gap": "The gateway has a distributed token-bucket limiter keyed by org membership or user (Dragonfly with in-process fallback) and no plan multiplier appears in that file. Quarry edge has only a per-org hourly vector-retrieval budget and RateLimited error mapping for upstream sites. Not verified: Control Plane entitlements/quotas, any per-endpoint-class limits in the gateway domains, and whether Quarry reads a plan multiplier from the principal."
+      },
+      "approach": "Control Plane owns the multiplier and quota numbers and exposes them in the principal or entitlement claims. Quarry edge applies a token bucket per (org, endpoint class: scrape, map, crawl, search, extract, browser, status) with Retry-After, and checks quota counts when creating schedules and webhooks. Gateway keeps coarse inbound abuse protection only. Verify what exists in the Control Plane first.",
+      "effort": "M",
+      "dependencies": [
+        "Control Plane entitlement model",
+        "R-t2-05-05 shares the entitlement read"
+      ],
+      "planeOwner": "Control Plane",
+      "risks": "Double enforcement in gateway and Quarry if ownership is unclear; per-process buckets are inaccurate across edge replicas unless shared storage is used.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "low",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 3,
+        "DOC": 1,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-05-005"
+      ]
+    },
+    {
+      "id": "R-t2-05-11",
+      "title": "Turn- and sub-agent-scoped browser contexts with deterministic tab cleanup",
+      "summary": "Have the Model Plane send turn_id and parent_run_id on every proposed browser action. Quarry records them, supports tab marks (deliverable, handoff), exposes a turn_ended endpoint that the Model Plane calls on turn end, interrupt and sub-agent stop (closing unmarked agent-opened tabs, downloads and blobs), and lets child runs reuse the parent's browser context under the parent's grant with narrower budgets.",
+      "whyItMatters": "Deterministic cleanup at turn end is ZDR-friendly (no leftover pages or downloads) and keeps agent context small. Sub-agent sharing lets Model Plane multi-agent runs cooperate in one browser without duplicating grants.",
+      "referenceBestPractice": {
+        "bestSource": "Codex in-app browser (tab marks plus a once-only turn-ended tracker)",
+        "others": [],
+        "prevalence": "1 of 4 sources; unique",
+        "mechanism": "A registry maps sessionId to {conversationId, windowId, owner, disposeAfterSessionActivity}; child sessions inherit the parent route with dispose=true. Every tool call carries (session_id, turn_id); tabs opened in a turn get no mark. turnEnded(session, turn) clears session downloads and blobs, restores clipboards, detaches the debugger, then closes tabs with no mark, keeps deliverable tabs as output and keeps handoff tabs for the next turn (latest mark wins). A tracker keyed (session, turn) ensures cleanup runs exactly once, and Interrupt, Stop and SubagentStop hooks all call it."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:337-344",
+          "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:26"
+        ],
+        "gap": "Each agent run already gets its own CDP BrowserContext scoped to (org, actor, run) with tabs per run, behind broker grants. There is no turn concept, no tab marks, no cleanup on Model Plane interrupt or stop, and no parent/child run sharing for sub-agents (fleets are budgets only). window.open is rewritten to the same tab."
+      },
+      "approach": "Model Plane passes turn_id and parent_run_id on every proposed browser action (additive to the existing action contract). Quarry, as executor, records them, adds mark-tab actions and a turn_ended endpoint, runs cleanup at most once per (run, turn) and on the reaper path from R-t2-05-04, and lets child runs attach to the parent context while keeping their own step budgets. Never auto-close user-opened or takeover tabs.",
+      "effort": "M",
+      "dependencies": [
+        "Model Plane run/turn ids on browser actions",
+        "R-t2-05-04 reaper"
+      ],
+      "planeOwner": "Ingestion Plane (executor); Model Plane supplies turn and parent ids",
+      "risks": "Closing a tab the user is co-browsing; protect user-opened and takeover tabs. Additive contract change must stay backwards compatible with existing callers.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 7,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t2-05-016"
+      ]
+    },
+    {
+      "id": "R-t2-05-12",
+      "title": "Agent routines: scheduled, heartbeat and event-triggered agent runs with per-fire browser grants",
+      "summary": "Let the agent create persistent routines through one confirmed tool: cron or one-shot runs in a new session, heartbeats that wake the same conversation later, and event routines fired by webhook, email or notification events. Build on the Model Plane's existing cron_schedules and fire-time Control authorization, and issue a fresh BrowserBroker grant scoped to the routine's allowed domains for each unattended fire.",
+      "whyItMatters": "It turns the agent from reactive to proactive (watch a page, follow up tomorrow, react to a webhook), a visible AI-first differentiator. Event triggers can reuse integration-corev2 webhook intake and the Quarry run.completed event from R-t2-05-08.",
+      "referenceBestPractice": {
+        "bestSource": "Aside (single routine_update tool over a routines table)",
+        "others": [],
+        "prevalence": "1 of 4 sources; unique",
+        "mechanism": "routines(id, owner, kind cron|heartbeat, trigger schedule|event, schedule_kind once|recurring, rrule, tz, run_at, event_filter {source, from}, target_session_id, model, permission_mode, browser_binding, paused_by, pause_reason, expires_at, created_by_session). The scheduler fires schedule routines into a new session (cron) or appends a wake message to the target session (heartbeat); an inbox matcher fires event routines. One tool handles create, suggest, update, pause, resume, view and delete. Prompt rules: hide raw RRULE, update rather than duplicate, never pause silently. Plans cap active routines."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:16-69",
+          "apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go:18-26",
+          "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:836-858"
+        ],
+        "gap": "The Model Plane has cron_schedules CRUD at /api/v1/cron, a sweeper that claims due slots with FOR UPDATE SKIP LOCKED, creates a task from a task_template, records the fire, and reauthorizes each slot with a Control decision (model.cron.create, model.cron.fire, model.schedule.run). Not verified: whether the agent can create schedules through a tool, whether heartbeat (wake the same session) or event triggers exist, how browser grants are issued for unattended fires, and whether ZDR routines avoid storing transcripts. The comparator also flagged this cluster as unknown."
+      },
+      "approach": "Model Plane owns routines because they start agent runs and carry model and permission settings; acquisition-only automation delegates to Quarry schedules (R-t2-05-02). Extend cron_schedules (or a sibling routines table) with kind, trigger, target_session_id, event_filter, budget and allowed domains. Each fire must pass the existing Control fire authorization and obtain a fresh BrowserBroker grant; ZDR routines persist no transcript. Expose a routine tool to the agent with explicit user confirmation on create and per-routine budgets. Event routines subscribe to integration-corev2 webhook intake and Quarry completion events.",
+      "effort": "L",
+      "dependencies": [
+        "Model Plane cron sweeper and Control fire authorization (exist)",
+        "BrowserBroker grants for unattended runs",
+        "R-t2-05-02 executable schedules",
+        "R-t2-05-08 completion events",
+        "integration-corev2 webhook intake"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Unattended agent runs widen the blast radius; require explicit user approval, per-routine budgets and domain scope, and never let a stored routine act as standing authority (the existing fire-time reauthorization pattern addresses this).",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 1
+      },
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t2-05-011"
+      ]
+    }
+  ],
+  "dropped": [],
+  "strengthsToKeep": [
+    "Durable frontier at parity with Firecrawl NuQ: Postgres SKIP LOCKED request queue plus Temporal workflows and deterministic job idempotency keys (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_queue.rs:74, services/quarry-control/internal/store/pg/migrations/007_jobs_idempotency_key.sql). Keep one queue store; do not adopt Firecrawl's RabbitMQ prefetch or FoundationDB backend, which add a second source of truth that Firecrawl itself must reconcile.",
+    "Verevon combines a bulk acquisition engine (crawl, map, batch, schedules in Temporal) with an interactive agent browser; neither Codex nor Aside has a crawler, queue or scheduler (apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:94-151). Keep bulk work out of the agent tab loop and expose it to the Model as proposable crawl jobs.",
+    "Per-run isolation: each agent run gets its own CDP BrowserContext scoped to (org, actor, run) behind broker grants, with step budgets and receipts (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs), which is stronger for multi-tenant use than Codex's local storage partitions.",
+    "Temporal gives crawl durability, pause/resume/cancel signals and checkpoints every 50 pages (apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:435-455,488-496, signals.go:87-146), which is stronger than Firecrawl's Redis job state; agent runs resume via resume_run_id from stored checkpoints.",
+    "HTTP fast path already has an AutoscaledPool and per-host AIMD politeness in quarry-runtime, so browser admission control can reuse existing code rather than adding a new mechanism (apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs, comparator narrative citing pipeline.rs:330-400).",
+    "Model Plane scheduler treats a stored schedule as non-authority: each cron slot is claimed with SKIP LOCKED and reauthorized by a Control decision before a task is created (apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go, control_authorizer.go). Keep this pattern for routines."
+  ]
+}

@@ -1,0 +1,2452 @@
+[
+  {
+    "id": "v-modelplane-001",
+    "category": "Chat experience",
+    "name": "Streaming chat endpoint (/v1/invoke/stream SSE) with non-stream fallback, no fake done",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:137",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:875",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:4549"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/STUBS.md"
+    ],
+    "notes": "SRC. invoke_stream_sse is a ~3,700-line function; falls back to unary Infer chunked; honest error event on double failure."
+  },
+  {
+    "id": "v-modelplane-002",
+    "category": "Chat experience",
+    "name": "Typed rich SSE event taxonomy gated by opt-in feature families (23 ChatEvent variants)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:1-9",
+      "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:144"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/sse-event-taxonomy.md"
+    ],
+    "notes": "SRC + DOC. Families: artifacts, citations, memory, reasoning, steps, tools, usage; control events always emit. CI-generated taxonomy doc asserts SPA coverage."
+  },
+  {
+    "id": "v-modelplane-003",
+    "category": "Chat experience",
+    "name": "Unary invoke (HTTP + gRPC)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:136",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:8898",
+      "apps/Model Plane/proto/model_plane/v1/gateway.proto:19"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-004",
+    "category": "Chat experience",
+    "name": "Stream resume across reconnect/reload (detach on disconnect, replay from Last-Event-Id)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:1-24",
+      "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:59",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:7331",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:7533"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md"
+    ],
+    "notes": "SRC + DOC (live-verified 2026-08-01). Redis or bounded in-memory backend; buffers keyed by verified org/user/request."
+  },
+  {
+    "id": "v-modelplane-005",
+    "category": "Chat experience",
+    "name": "Cooperative stop/cancel of in-flight stream and bound run",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:1-13",
+      "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:39",
+      "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:76",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:140",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6970"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. In-memory, single-replica (module doc says promote to NATS later)."
+  },
+  {
+    "id": "v-modelplane-006",
+    "category": "Chat experience",
+    "name": "Mid-run user input (steer) delivered at tool-round boundary",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:163",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:142",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7406"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Thread id taken from prepared run, never from client."
+  },
+  {
+    "id": "v-modelplane-007",
+    "category": "Chat experience",
+    "name": "Idempotent send/regenerate (claim/cached/in-flight) with opaque keyed-MAC start keys",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs:161",
+      "apps/Model Plane/rust/services/model-gateway/src/managed_start_key.rs:1-6"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-008",
+    "category": "Chat experience",
+    "name": "Auto thread title generation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8033",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:4307"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Non-ZDR durable path only."
+  },
+  {
+    "id": "v-modelplane-009",
+    "category": "Chat experience",
+    "name": "Follow-up suggestions after answer",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8120",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:4354"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-010",
+    "category": "Chat experience",
+    "name": "Thread list, message reload, event replay (server-authoritative sessions)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:144",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:177",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:181",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7753-7766",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:5405",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:5289"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Session Core is the single writer."
+  },
+  {
+    "id": "v-modelplane-011",
+    "category": "Chat experience",
+    "name": "Rename / pin / per-thread persona toggle (thread presentation)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:148-151",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:8026",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:5548",
+      "apps/Model Plane/rust/services/session-core/migrations/0021_thread_presentation.sql",
+      "apps/Model Plane/rust/services/session-core/migrations/0042_thread_persona_toggle.sql"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-012",
+    "category": "Chat experience",
+    "name": "Archive and durable delete of threads (single and bulk)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:144-165",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:8136",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:5675",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:5840",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:5911"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-013",
+    "category": "Chat experience",
+    "name": "Pin a message into context (survives compaction)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6751",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1576",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5503-5526",
+      "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:491"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-014",
+    "category": "Chat experience",
+    "name": "Regenerate / edit-and-resubmit flags",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6735",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6757",
+      "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs:184"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Feed implicit dissatisfaction signals."
+  },
+  {
+    "id": "v-modelplane-015",
+    "category": "Chat experience",
+    "name": "Edit-version siblings (1/N switcher)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions.ts"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md"
+    ],
+    "notes": "DOC + SRC (file exists). Client-only, last exchange only, lost on reload; no server persistence."
+  },
+  {
+    "id": "v-modelplane-016",
+    "category": "Chat experience",
+    "name": "Conversation branching / fork (server)",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/proto/model_plane/v1/sessions.proto"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "Searched sessions.proto for branch|parent_message|supersed|sibling: no hits. Backlog #8 server persistence deferred."
+  },
+  {
+    "id": "v-modelplane-017",
+    "category": "Chat experience",
+    "name": "Checkpoint / rewind of a conversation",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:4774",
+      "apps/Model Plane/rust/services/session-core/src/compaction.rs:1-8"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "Searched rewind|restore_checkpoint|RestoreCheckpoint across rust/services: none. Run checkpoints exist (SaveCheckpoint, auto-checkpoint compaction) but no user-facing restore. Backlog #7."
+  },
+  {
+    "id": "v-modelplane-018",
+    "category": "Chat experience",
+    "name": "Server-side full-text search over chat history",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7753-7766"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "ListThreadsQuery has limit/space_id/origin only; no FTS migration among 0001-0045. Backlog #20."
+  },
+  {
+    "id": "v-modelplane-019",
+    "category": "Chat experience",
+    "name": "Projects / folders for chats",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts:1-30"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "SRC. Client-side localStorage only; server container is Spaces (separate audit). Backlog #13."
+  },
+  {
+    "id": "v-modelplane-020",
+    "category": "Chat experience",
+    "name": "Shareable read-only chat link",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md",
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "Searched share_link|shareable|public_link in model-gateway and session-core: none. Oct-1 audit: not built."
+  },
+  {
+    "id": "v-modelplane-021",
+    "category": "Chat experience",
+    "name": "Chat export (DOCX/XLSX/PPTX/print)",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/docx.ts",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/xlsx.ts",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/pptx.ts"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Client-side only; no server export/import endpoint in model-gateway."
+  },
+  {
+    "id": "v-modelplane-022",
+    "category": "Chat experience",
+    "name": "Chart/format guidance injected only when asked (chart fence rendered natively by SPA)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/format_guidance.rs:146",
+      "apps/Model Plane/rust/services/model-gateway/src/format_guidance.rs:153",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatChart.tsx"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-023",
+    "category": "Chat experience",
+    "name": "Artifacts / canvas with versioning (create/read/update_artifact)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-40",
+      "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:462",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2618",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2679",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2795",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5304"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Versions by re-emitting same id; rehydrated on reload."
+  },
+  {
+    "id": "v-modelplane-024",
+    "category": "Chat experience",
+    "name": "Context inspector (itemised context window per thread)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:153-159",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7919",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:6158"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Read-only view of GetContextAssembly with token estimates."
+  },
+  {
+    "id": "v-modelplane-025",
+    "category": "Chat experience",
+    "name": "Temporary / persistence-free (ZDR) chat turn with typed refusals",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8411",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8513",
+      "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs:1-12",
+      "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs:146"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/ZDR.md"
+    ],
+    "notes": "SRC. No thread/run/memory/cache/tool loop; one model call. Refused everywhere today because no provider is ZDR-attested (DOC PROGRAM_SUMMARY §5)."
+  },
+  {
+    "id": "v-modelplane-026",
+    "category": "Multimodal & creation",
+    "name": "Vision: image attachment analysed in chat",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/vision.rs:1-6",
+      "apps/Model Plane/rust/services/model-gateway/src/vision.rs:52",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5778",
+      "apps/Model Plane/rust/services/inference-core/src/provider/vision.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. One-shot: AnalyzeImage answer replaces the normal pipeline for that turn (INF from vision.rs doc)."
+  },
+  {
+    "id": "v-modelplane-027",
+    "category": "Multimodal & creation",
+    "name": "Image generation in chat and API (gpt-image-1 / dall-e-3)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5958",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6200",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:417",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:3641",
+      "apps/Model Plane/rust/services/inference-core/src/provider/vision.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Emits artifact event."
+  },
+  {
+    "id": "v-modelplane-028",
+    "category": "Multimodal & creation",
+    "name": "Image editing / inpainting",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:417-419"
+    ],
+    "plannedIn": [],
+    "notes": "Searched /v1/ai/images* and IC vision provider: only generate/analyze/ocr."
+  },
+  {
+    "id": "v-modelplane-029",
+    "category": "Multimodal & creation",
+    "name": "OCR (ExtractImageText)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:419",
+      "apps/Model Plane/proto/model_plane/v1/inference.proto:57"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-030",
+    "category": "Multimodal & creation",
+    "name": "Text-to-speech and dictation (STT) APIs",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:419-428",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:3951",
+      "apps/Model Plane/rust/services/inference-core/src/provider/speech.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Azure OpenAI tts/whisper; 8 MiB audio cap."
+  },
+  {
+    "id": "v-modelplane-031",
+    "category": "Multimodal & creation",
+    "name": "Realtime voice session minting",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:448-450",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:4891",
+      "apps/Model Plane/rust/services/inference-core/src/provider/realtime.rs"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. gpt-realtime session broker; no governed duplex/barge-in; ZDR voice refused (DOC)."
+  },
+  {
+    "id": "v-modelplane-032",
+    "category": "Multimodal & creation",
+    "name": "bridge-core STT->LLM->TTS voice pipeline",
+    "status": "stub",
+    "evidence": [
+      "apps/Model Plane/go/services/bridge-core/internal/voice/pipeline.go:1-25",
+      "apps/Model Plane/go/services/bridge-core/cmd/main.go:55-64"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/phase-6/voice.md"
+    ],
+    "notes": "SRC. Interfaces only; never instantiated in main."
+  },
+  {
+    "id": "v-modelplane-033",
+    "category": "Multimodal & creation",
+    "name": "Video generation jobs (Sora on Azure OpenAI)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:451-457",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:4971",
+      "apps/Model Plane/rust/services/inference-core/src/provider/video.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. API only; no chat-turn integration found."
+  },
+  {
+    "id": "v-modelplane-034",
+    "category": "Multimodal & creation",
+    "name": "Document intelligence (layout/forms/receipts/invoices)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:432-437",
+      "apps/Model Plane/rust/services/inference-core/src/provider/doc_intel.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Azure Document Intelligence prebuilt models."
+  },
+  {
+    "id": "v-modelplane-035",
+    "category": "Multimodal & creation",
+    "name": "Translation and language analytics (sentiment, NER, PII, summary)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:429-447",
+      "apps/Model Plane/rust/services/inference-core/src/provider/translation.rs",
+      "apps/Model Plane/rust/services/inference-core/src/provider/language.rs"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Azure Translator / Azure Language with LLM fallback."
+  },
+  {
+    "id": "v-modelplane-036",
+    "category": "Multimodal & creation",
+    "name": "Code interpreter for data analysis, charts and generated files",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-34",
+      "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:79-82",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2554-2617"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Python/sh, bwrap hermetic workspace, no network, timeout, scrubbed output; files returned as artifacts."
+  },
+  {
+    "id": "v-modelplane-037",
+    "category": "Multimodal & creation",
+    "name": "Office document generation (docx/xlsx/pptx/pdf)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs:1-8",
+      "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/docx.ts"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Via code interpreter output or client export; no dedicated server generator."
+  },
+  {
+    "id": "v-modelplane-038",
+    "category": "Multimodal & creation",
+    "name": "File upload into org knowledge (Data Plane ingest) with indexed signal",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:196-199",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7655",
+      "apps/Model Plane/rust/services/model-gateway/src/doc_indexed_consumer.rs:1-12"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-039",
+    "category": "Multimodal & creation",
+    "name": "Embeddings API with EU residency gate",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:415",
+      "apps/Model Plane/rust/services/inference-core/src/config.rs:283"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. MODEL_PLANE_ALLOW_NON_EU_EMBEDDING deny-by-default."
+  },
+  {
+    "id": "v-modelplane-040",
+    "category": "Research & web",
+    "name": "Web search tool (Quarry-v2) incl. forced search for time-sensitive queries",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2874",
+      "apps/Model Plane/rust/services/model-gateway/src/tools.rs:1-10",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1960-1969"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Paid providers gated by tier/retention."
+  },
+  {
+    "id": "v-modelplane-041",
+    "category": "Research & web",
+    "name": "Fetch-then-answer grounding (read real pages, select passages)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/grounding.rs:1-15",
+      "apps/Model Plane/rust/services/model-gateway/src/grounding.rs:438"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-042",
+    "category": "Research & web",
+    "name": "Source relevance gate before citation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/relevance.rs:1-15",
+      "apps/Model Plane/rust/services/model-gateway/src/relevance.rs:541"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-043",
+    "category": "Research & web",
+    "name": "Deep research pipeline (plan 9 sub-queries, concurrent search/read 16 pages, cited report artifact)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:1-48",
+      "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:91",
+      "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:131",
+      "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:233",
+      "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:3238",
+      "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:3316"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. In-process (not Temporal), 410 s wall clock, mandatory unverified section; unread sources uncitable."
+  },
+  {
+    "id": "v-modelplane-044",
+    "category": "Research & web",
+    "name": "Wide research fan-out (subagent.research_fan_out)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs:1-10",
+      "apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs:36",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2331",
+      "apps/Model Plane/rust/services/model-gateway/src/run_budget.rs:17-60"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. Do-mode only; default 4 rounds budget; DOC: never run at scale live."
+  },
+  {
+    "id": "v-modelplane-045",
+    "category": "Research & web",
+    "name": "Citations anchored to claim segments with byte offsets, persisted",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs:1-12",
+      "apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs:106"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-046",
+    "category": "Research & web",
+    "name": "Org knowledge RAG tools (hybrid, graph, wiki, contradictions, document list)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3375",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3506",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3534",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3564",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3696",
+      "apps/Model Plane/rust/services/model-gateway/src/retrieval.rs:1-30",
+      "apps/Model Plane/rust/services/model-gateway/src/retrieval_tools.rs:134",
+      "apps/Model Plane/rust/services/model-gateway/src/retrieval_metadata.rs:1-10"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Data Plane v2 owns retrieval; suggested_next_tools honoured."
+  },
+  {
+    "id": "v-modelplane-047",
+    "category": "Research & web",
+    "name": "Per-turn source scope (Auto/KnowledgeOnly/WebOnly) server-enforced with receipt",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/normalize.rs:58-62",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:932-935"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Rejected with agentic mode."
+  },
+  {
+    "id": "v-modelplane-048",
+    "category": "Research & web",
+    "name": "Grounding honesty contract (no-grounding notice, retrieval_notice)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/retrieval.rs:242",
+      "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:144"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-049",
+    "category": "Research & web",
+    "name": "Verevon in-app read connectors in chat (inbox, social, insights, Brreg, shipping quotes)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:1-12",
+      "apps/Model Plane/rust/services/model-gateway/src/verevon_actions.rs:320",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3588-3696"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Same upstreams as UI."
+  },
+  {
+    "id": "v-modelplane-050",
+    "category": "Research & web",
+    "name": "OAuth provider connectors (Microsoft, Google, Meta, LinkedIn, Slack, GitHub, Notion, Shopify, Stripe, Okta)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:8-40",
+      "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:73-102"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. Do-mode only via integration-corev2 curated catalog; gmail.messages ids only, no query filter."
+  },
+  {
+    "id": "v-modelplane-051",
+    "category": "Research & web",
+    "name": "Browser agent as inline chat research tool",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:639-644",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3099-3175"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Arm exists (BROWSER_AGENT_URL) but inline_tool_allowed excludes browser_agent from chat."
+  },
+  {
+    "id": "v-modelplane-052",
+    "category": "Agent runtime",
+    "name": "Plain-chat inline tool loop (parallel dispatch, 12 rounds default, ceiling 32, streamed tool phase)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:1-12",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:52-67",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4668",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:7156"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Read-only router; refuses side effects."
+  },
+  {
+    "id": "v-modelplane-053",
+    "category": "Agent runtime",
+    "name": "Governed Do-mode agent loop (RunAgent ReAct with capability/hook/permission/HITL gates)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1-36",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:251-274",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:567",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:850-852",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8978",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9527"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/A6_DO_MODE_TERRA_PROOF_2026-10-01.md"
+    ],
+    "notes": "SRC + DOC (A6 live proof on Terra). Gateway sends 4 rounds unless AGENTIC_MAX_ROUNDS set."
+  },
+  {
+    "id": "v-modelplane-054",
+    "category": "Agent runtime",
+    "name": "Do mode on ChatGPT-subscription route",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/crates/mp-contracts/src/agentic_subscription.rs:41-47",
+      "apps/Model Plane/rust/crates/mp-contracts/src/agentic_subscription.rs:120",
+      "apps/Model Plane/rust/services/execution-core/src/agent_route.rs:1-7"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "SRC. AGENTIC_SUBSCRIPTION_ENABLED off unless explicit; effects need second switch; read-only plan mode otherwise."
+  },
+  {
+    "id": "v-modelplane-055",
+    "category": "Agent runtime",
+    "name": "Do-mode run context seeding (thread history, persona/org/Space instructions)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1185-1200",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9135-9150"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. Fresh history = preamble + goal (+ skills, + approved plan). No prior turns, no authored instructions."
+  },
+  {
+    "id": "v-modelplane-056",
+    "category": "Agent runtime",
+    "name": "Parallel tool calls within a round (both loops)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1874",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:7156"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. futures::join_all."
+  },
+  {
+    "id": "v-modelplane-057",
+    "category": "Agent runtime",
+    "name": "Subagents (subagent.task) with isolated history, depth 1, default 8 children, ceiling 100",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:29",
+      "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:63",
+      "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:71",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2609",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2989"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Fork semantics rejected (ledger:1798); conclusions persisted on child run, consent to read back."
+  },
+  {
+    "id": "v-modelplane-058",
+    "category": "Agent runtime",
+    "name": "Subagent result read-back after restart (list/read_subagent_result)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/subagent_results.rs:1-10",
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:818"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-059",
+    "category": "Agent runtime",
+    "name": "Plan mode, structured plan.propose, plan approval as autonomy grant",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6796-6806",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7138",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6286",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9998",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8744",
+      "apps/Model Plane/rust/services/execution-core/src/plan.rs:1-10"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. Oct-1 audit: approve path not consumed by web app at that time (status may have changed; not re-verified live)."
+  },
+  {
+    "id": "v-modelplane-060",
+    "category": "Agent runtime",
+    "name": "Durable plans/todos/approvals store (linear plan steps, tenant CAS)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs:1-8",
+      "apps/Model Plane/proto/model_plane/v1/orchestration.proto:16-47",
+      "apps/Model Plane/rust/services/session-core/migrations/0003_orchestration_tables.sql"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. No DAG (GraphPlan planned)."
+  },
+  {
+    "id": "v-modelplane-061",
+    "category": "Agent runtime",
+    "name": "HITL approval pause (ask posture / capability Ask)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4558",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:519-522",
+      "apps/Model Plane/rust/services/model-gateway/src/approvals.rs:1-14"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-062",
+    "category": "Agent runtime",
+    "name": "Post-approval continuation dispatcher (exact-effect descriptor re-execution)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/main.rs:28-31",
+      "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-60",
+      "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1280-1330",
+      "apps/Model Plane/rust/services/session-core/src/continuation_crypto.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/migrations/0022_encrypted_approval_continuation_descriptors.sql"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC. Only execute_provider_action, book_shipment, tickets.create; LLM loop does not resume reasoning; idles until credentials/orgs configured."
+  },
+  {
+    "id": "v-modelplane-063",
+    "category": "Agent runtime",
+    "name": "Deterministic postcondition verification of effects + Verified Outcome",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/postcondition.rs:1-10",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/post_mutation.rs:1-8",
+      "apps/Model Plane/proto/model_plane/v1/verified_outcome.proto"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-064",
+    "category": "Agent runtime",
+    "name": "Tool-call transient retry (3 attempts) in both loops",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:37",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:149",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_retry.rs:1-10"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Shared failure vocabulary pinned by contract test."
+  },
+  {
+    "id": "v-modelplane-065",
+    "category": "Agent runtime",
+    "name": "Tool argument schema validation, MCP argument repair, argument grounding",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/crates/mp-contracts/src/tool_arguments.rs:1-5",
+      "apps/Model Plane/rust/services/model-gateway/src/argument_repair.rs:71",
+      "apps/Model Plane/rust/services/model-gateway/src/argument_repair.rs:249",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1123"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-066",
+    "category": "Agent runtime",
+    "name": "Context compaction (clear stale tool results, summarise head, reattach_context recovery)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:129",
+      "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:674",
+      "apps/Model Plane/rust/services/model-gateway/src/context_reattach.rs:87",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5560",
+      "apps/Model Plane/rust/services/execution-core/src/compaction_budget.rs:1-8"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Do loop has tier 1 only."
+  },
+  {
+    "id": "v-modelplane-067",
+    "category": "Agent runtime",
+    "name": "Prompt-too-long classification and recovery",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/provider/overflow.rs:1-10",
+      "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:950"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-068",
+    "category": "Agent runtime",
+    "name": "Server-resolved round/delegation budget and wall-clock guard with concluding round",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/run_budget.rs:1-60",
+      "apps/Model Plane/rust/services/execution-core/src/run_budget.rs:15",
+      "apps/Model Plane/rust/services/execution-core/src/run_budget.rs:41",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:484-538"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-069",
+    "category": "Agent runtime",
+    "name": "Managed-run terminalization (start/heartbeat/terminal receipts, recovery worker)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/terminalization.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/src/main.rs:190-195",
+      "apps/Model Plane/proto/model_plane/v1/sessions.proto:159-193"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC. Release-database proof pending (DOC)."
+  },
+  {
+    "id": "v-modelplane-070",
+    "category": "Agent runtime",
+    "name": "Graceful drain of in-flight turns on redeploy",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/drain.rs:103"
+    ],
+    "plannedIn": [],
+    "notes": "SRC + DOC (live-proven per PROGRAM_SUMMARY §7)."
+  },
+  {
+    "id": "v-modelplane-071",
+    "category": "Agent runtime",
+    "name": "Background processes for Space-scoped runs (process_* tools)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/process_tools.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/process_host.rs:1-8",
+      "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:349-350"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Requires Space lease with space:processes and process host enabled."
+  },
+  {
+    "id": "v-modelplane-072",
+    "category": "Agent runtime",
+    "name": "Run watchers and general Watch primitive (notify on completion/output)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:298-376",
+      "apps/Model Plane/go/services/capability-core/internal/watch/watch.go",
+      "apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:392-400"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Watch sweeper refuses to observe without Control reauthorizer."
+  },
+  {
+    "id": "v-modelplane-073",
+    "category": "Agent runtime",
+    "name": "Cron / scheduled runs",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:316-326",
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:383-400",
+      "apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher.go:46-56",
+      "apps/Model Plane/rust/services/execution-core/src/grpc.rs:497-525"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. Scheduled step = one no-tool 1024-token call on verevon-balance; no delivery of result found."
+  },
+  {
+    "id": "v-modelplane-074",
+    "category": "Agent runtime",
+    "name": "Durable Temporal workflows (8 allowlisted)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:98-160",
+      "apps/Model Plane/go/services/orchestrator-core/cmd/main.go:146-175"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/phase-0/temporal-workflows.md"
+    ],
+    "notes": "SRC. Only started by capability-core task executor; chat/Do do not use Temporal; Autoresearch excluded."
+  },
+  {
+    "id": "v-modelplane-075",
+    "category": "Agent runtime",
+    "name": "Evaluator-optimizer workflow",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/go/services/orchestrator-core/internal/evaloptimizer/loop.go",
+      "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/evaluator_optimizer.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Reachable only via StartWorkflow."
+  },
+  {
+    "id": "v-modelplane-076",
+    "category": "Agent runtime",
+    "name": "Pre/PostToolUse hook engine",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:1-18",
+      "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:113",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:557",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1923-1927",
+      "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2032-2057",
+      "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:418"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "SRC. Rules from gateway in-memory registry; passed only on browser runs; Do loop passes empty hook_context."
+  },
+  {
+    "id": "v-modelplane-077",
+    "category": "Agent runtime",
+    "name": "Offline eval suites (eval-lab-py) and SLO harness",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/python/eval-lab-py/cases/baseline/07_hitl_pause.yaml",
+      "apps/Model Plane/rust/crates/mp-slo/src/lib.rs:1-8"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. 14 YAML cases; offline only."
+  },
+  {
+    "id": "v-modelplane-078",
+    "category": "Agent runtime",
+    "name": "Trajectory recording/export (Atropos)",
+    "status": "stub",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/trajectory.rs:1-10",
+      "apps/Model Plane/rust/services/model-gateway/src/trajectory.rs:159"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. In-memory ring buffer; not durable."
+  },
+  {
+    "id": "v-modelplane-079",
+    "category": "Agent runtime",
+    "name": "Team/coordinator mode",
+    "status": "stub",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:1-20",
+      "apps/Model Plane/proto/model_plane/v1/gateway.proto:83-91"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. In-memory TeamWorkerStore via gRPC only."
+  },
+  {
+    "id": "v-modelplane-080",
+    "category": "Tools, plugins & extensibility",
+    "name": "Built-in plain-chat tool set (~26 tools)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4323-4470",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2541-3740"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-081",
+    "category": "Tools, plugins & extensibility",
+    "name": "Do-mode capability-bound tool catalogue",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4086",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4116-4330",
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:741-836"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Includes shipping booking, social publish, provider actions, browser.observe/act, code_interpreter, memory, subagents."
+  },
+  {
+    "id": "v-modelplane-082",
+    "category": "Tools, plugins & extensibility",
+    "name": "Capability policy gate before every dispatch (signed decision evidence, fail closed)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:501-552",
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:350-390",
+      "apps/Model Plane/go/services/capability-core/internal/policy/engine.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-083",
+    "category": "Tools, plugins & extensibility",
+    "name": "Capability registry: ranked listing, rollout, scopes, audit log, health attestation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/go/services/capability-core/internal/api/capabilities.go:52-76",
+      "apps/Model Plane/go/services/capability-core/internal/registry/capabilities_store.go:553",
+      "apps/Model Plane/rust/services/execution-core/src/health_attest.rs:1004",
+      "apps/Model Plane/rust/services/execution-core/src/main.rs:18-24"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Heartbeat attests runtimes execution-core owns."
+  },
+  {
+    "id": "v-modelplane-084",
+    "category": "Tools, plugins & extensibility",
+    "name": "MCP server registration, auto-connect, OAuth 2.1 + DCR, encrypted token vault, DNS revalidation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:327-343",
+      "apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs:1-15",
+      "apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs:105",
+      "apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs:1-12",
+      "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:926",
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:280-297"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Streamable HTTP only; stdio quarantined (runtime_registries.rs:55,870)."
+  },
+  {
+    "id": "v-modelplane-085",
+    "category": "Tools, plugins & extensibility",
+    "name": "MCP staged disclosure (mcp_catalog/mcp_call) and tool-result handles",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:559-616",
+      "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:830",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs:1-12"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. Threshold 40, ceiling 200."
+  },
+  {
+    "id": "v-modelplane-086",
+    "category": "Tools, plugins & extensibility",
+    "name": "MCP tool invocation by the model",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:2014-2018",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:639-644",
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3723-3731",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:654-658",
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:361-362",
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:832-836"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC. Effectively blocked: chat denies mcp__*; Do offers MCP tools but trusted_capability_id returns None so capability gate denies every call."
+  },
+  {
+    "id": "v-modelplane-087",
+    "category": "Tools, plugins & extensibility",
+    "name": "Skills: disk + learned, per-turn match, char budget, reattach_skill, CRUD with ownership",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/skills.rs:1-8",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5662-5700",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1006",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/skill_budget.rs:1-8",
+      "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:65",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs:4977"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. Max 3 injected."
+  },
+  {
+    "id": "v-modelplane-088",
+    "category": "Tools, plugins & extensibility",
+    "name": "Plugins (durable registry)",
+    "status": "stub",
+    "evidence": [
+      "apps/Model Plane/go/services/capability-core/internal/api/plugins.go:15-22",
+      "apps/Model Plane/go/services/capability-core/internal/api/plugins.go:41",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:380-391"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. Inert until a host loads manifests; searched MG/EC for manifest loading: none."
+  },
+  {
+    "id": "v-modelplane-089",
+    "category": "Tools, plugins & extensibility",
+    "name": "Slash commands (/models, /compact)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/go/services/capability-core/internal/commands/handler.go:1-60",
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:401-403",
+      "apps/Model Plane/proto/model_plane/v1/gateway.proto:159-160"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "SRC. Two delegating commands; no composer integration found (backlog #6)."
+  },
+  {
+    "id": "v-modelplane-090",
+    "category": "Tools, plugins & extensibility",
+    "name": "Authored instruction hierarchy (org/Space/agent/persona)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6844",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6850",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6859",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6375",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:6440"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. Applied in plain chat; not passed into Do runs."
+  },
+  {
+    "id": "v-modelplane-091",
+    "category": "Tools, plugins & extensibility",
+    "name": "Client-declared tools merged into runs",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6807-6811",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:659-684"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Built-ins win name collisions; still capability-gated in Do."
+  },
+  {
+    "id": "v-modelplane-092",
+    "category": "Tools, plugins & extensibility",
+    "name": "Public API: OpenAPI spec, generated SDK, gRPC ModelGateway",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/api/openapi.yaml",
+      "apps/Model Plane/api/generate-sdk.sh",
+      "apps/Model Plane/proto/model_plane/v1/gateway.proto:17-178"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-093",
+    "category": "Tools, plugins & extensibility",
+    "name": "TOON compact encoding",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:235",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:9461",
+      "apps/Model Plane/rust/crates/mp-toon/src/lib.rs:1-5"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. Narrow usage."
+  },
+  {
+    "id": "v-modelplane-094",
+    "category": "Tools, plugins & extensibility",
+    "name": "LSP bridge pass-through",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1-15",
+      "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:157",
+      "apps/Model Plane/bridges/lsp-bridge/server.py",
+      "apps/Model Plane/deploy/docker-compose.bridges.yml:41-48"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Optional overlay; not agent-visible."
+  },
+  {
+    "id": "v-modelplane-095",
+    "category": "Tools, plugins & extensibility",
+    "name": "MCP code mode (tools callable from sandbox)",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:14-16"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md",
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "Sandbox has network disabled and no tool-RPC bridge; IMPROVEMENTS §23.4 greenfield; backlog #11."
+  },
+  {
+    "id": "v-modelplane-096",
+    "category": "Computer & environment control",
+    "name": "Bubblewrap/Landlock/seccomp OS sandbox for tool processes",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:256",
+      "apps/Model Plane/rust/services/execution-core/src/sandbox.rs:402",
+      "apps/Model Plane/rust/services/execution-core/src/policy.rs:1-8",
+      "apps/Model Plane/deploy/seccomp-bwrap.json"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Linux only; probed at boot."
+  },
+  {
+    "id": "v-modelplane-097",
+    "category": "Computer & environment control",
+    "name": "shell tool (read-only host commands, human-gated)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:767",
+      "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:5-9"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Not in Do-mode offered catalogue; ExecuteStep only."
+  },
+  {
+    "id": "v-modelplane-098",
+    "category": "Computer & environment control",
+    "name": "Sandbox leases, durable Space workspace (CAS), snapshot, promote",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:1-20",
+      "apps/Model Plane/go/services/sandbox-manager/internal/workspace/store.go",
+      "apps/Model Plane/rust/services/execution-core/src/workspace_cas.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/workspace_promote.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs:1-8"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. Bookkeeping only; execution in execution-core container; no VM/container provisioning (searched docker|firecracker|gvisor|e2b|daytona in sandbox-manager: none)."
+  },
+  {
+    "id": "v-modelplane-099",
+    "category": "Computer & environment control",
+    "name": "Per-session VM / container sandbox (Manus-style computer)",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:1-20"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "Searched sandbox-manager for docker|firecracker|gvisor|kata|e2b|daytona|exec.Command: none. SandboxBackend trait deferred (ledger:1358)."
+  },
+  {
+    "id": "v-modelplane-100",
+    "category": "Computer & environment control",
+    "name": "Agent browser control (Model proposes, Quarry executes) with risk HITL",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:621",
+      "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1-8",
+      "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:138-200",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "SRC. BFF sends grant_id session:{id} that browser-broker never minted, so /v1/browser/runs fails closed."
+  },
+  {
+    "id": "v-modelplane-101",
+    "category": "Computer & environment control",
+    "name": "Single-step browser suggest-action",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:221-223",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:2013"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-102",
+    "category": "Computer & environment control",
+    "name": "Browser grants (acquire/revoke/validate)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:358",
+      "apps/Model Plane/proto/model_plane/v1/browser.proto:11-22"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Used by Quarry runtime; not by the BFF AI-run path."
+  },
+  {
+    "id": "v-modelplane-103",
+    "category": "Computer & environment control",
+    "name": "Human takeover of live browser (Model Plane)",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "No Model Plane path; manual hosted browser lives in Quarry/BFF (DOC Oct-1 audit). Backlog #24."
+  },
+  {
+    "id": "v-modelplane-104",
+    "category": "Computer & environment control",
+    "name": "Desktop / OS computer use",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "Searched computer_use/desktop in model-gateway and execution-core: none. Parked by owner."
+  },
+  {
+    "id": "v-modelplane-105",
+    "category": "Computer & environment control",
+    "name": "Channel ingress (webhook adapter, sessions, delivery)",
+    "status": "stub",
+    "evidence": [
+      "apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go:1-20",
+      "apps/Model Plane/go/services/bridge-core/cmd/main.go:55-64",
+      "apps/Model Plane/go/services/bridge-core/internal/delivery/worker.go"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/phase-6/channel-gateway.md"
+    ],
+    "notes": "SRC. Scaffolding; Channel Plane docs-only."
+  },
+  {
+    "id": "v-modelplane-106",
+    "category": "Computer & environment control",
+    "name": "Git / worktrees / deploy preview",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Not a coding product; ledger rejects worktree isolation for subagents (ledger:1821)."
+  },
+  {
+    "id": "v-modelplane-107",
+    "category": "Coding capability",
+    "name": "Code execution with file in/out (python/sh)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:24-34"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-108",
+    "category": "Coding capability",
+    "name": "Source-bound drafting review (numeric, calendar, schedule, word-count, revision preservation, campaign contract checks)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:1-3",
+      "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:2113",
+      "apps/Model Plane/rust/services/model-gateway/src/numeric_evidence.rs:1-2",
+      "apps/Model Plane/rust/services/model-gateway/src/calendar_context.rs:1-2",
+      "apps/Model Plane/rust/services/model-gateway/src/schedule_evidence.rs:1-3",
+      "apps/Model Plane/rust/services/model-gateway/src/revision_preservation.rs:1-3",
+      "apps/Model Plane/rust/services/model-gateway/src/result_validation.rs:1-6",
+      "apps/Model Plane/rust/services/model-gateway/src/document_contract.rs:1-2"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Deterministic checks over exact text vs attachments; a differentiator."
+  },
+  {
+    "id": "v-modelplane-109",
+    "category": "Coding capability",
+    "name": "Codebase indexing / tab completion / PR bots / IDE integration",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/lsp.rs:1-15"
+    ],
+    "plannedIn": [],
+    "notes": "Out of scope (Verevon is not an IDE); searched for repo index/completion code: none; only LSP pass-through."
+  },
+  {
+    "id": "v-modelplane-110",
+    "category": "Memory, learning & personalization",
+    "name": "Long-term memory store (agent_memory + Letta semantic tier) with user list/correct/delete",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:350",
+      "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:444",
+      "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:524",
+      "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:607",
+      "apps/Model Plane/rust/services/session-core/src/memory_erasure.rs:1-8",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:192-193",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:8721"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-111",
+    "category": "Memory, learning & personalization",
+    "name": "Per-turn memory prefetch with trivial-prompt gate and provenance (told vs inferred)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs:1-10",
+      "apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs:90",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:5191",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:2227",
+      "apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs:168"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Hermes and deepseek-harness MIT ports."
+  },
+  {
+    "id": "v-modelplane-112",
+    "category": "Memory, learning & personalization",
+    "name": "Memory tools (recall_memory chat; save/recall Do)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:3179",
+      "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:808-809"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Writes refused under ZDR, plan mode and subagents."
+  },
+  {
+    "id": "v-modelplane-113",
+    "category": "Memory, learning & personalization",
+    "name": "Dreaming automatic memory extraction (phrase matcher + LLM, write-time grounding, dedup)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/dreaming.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/src/dreaming.rs:145-160",
+      "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/src/memory_grounding.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/src/memory_control.rs:1",
+      "apps/Model Plane/rust/services/session-core/src/memory_dedup.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/src/main.rs:156-164"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-114",
+    "category": "Memory, learning & personalization",
+    "name": "Memory consolidation workflow (Temporal)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/go/services/orchestrator-core/cmd/activities/memoryconsolidation.go",
+      "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:137-143"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Only via StartWorkflow."
+  },
+  {
+    "id": "v-modelplane-115",
+    "category": "Memory, learning & personalization",
+    "name": "Skill learning loop (RUN_COMPLETED -> LLM review -> learned skill)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/learning_events.rs:1-12",
+      "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go:1-30",
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:742-808"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. On by default (LEARNING_REVIEW_ENABLED)."
+  },
+  {
+    "id": "v-modelplane-116",
+    "category": "Memory, learning & personalization",
+    "name": "Implicit dissatisfaction detection and skill quarantine",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs:1-15",
+      "apps/Model Plane/rust/services/model-gateway/src/dissatisfaction.rs:184",
+      "apps/Model Plane/rust/services/model-gateway/src/implicit_feedback.rs:1-15",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:10630",
+      "apps/Model Plane/go/services/orchestrator-core/cmd/activities/quarantine.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Wilson-bounded policy."
+  },
+  {
+    "id": "v-modelplane-117",
+    "category": "Memory, learning & personalization",
+    "name": "Explicit feedback with server-side skill credit",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:203",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6571",
+      "apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs:1-15"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-118",
+    "category": "Memory, learning & personalization",
+    "name": "Confidence calibration training rows from ratings",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/calibration.rs:1-15",
+      "apps/Model Plane/rust/services/model-gateway/src/calibration.rs:133"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-119",
+    "category": "Memory, learning & personalization",
+    "name": "Fine-tuning lifecycle (Azure OpenAI)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/finetune_routes.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/finetune_azure.rs:1-15",
+      "apps/Model Plane/rust/services/model-gateway/src/finetune_poller.rs:1-10",
+      "apps/Model Plane/rust/services/session-core/src/finetune_grpc.rs:1-8"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Admin-gated; monthly cap."
+  },
+  {
+    "id": "v-modelplane-120",
+    "category": "Memory, learning & personalization",
+    "name": "Session search over past chats",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7753-7766"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "See chat search absence."
+  },
+  {
+    "id": "v-modelplane-121",
+    "category": "Memory, learning & personalization",
+    "name": "Learning Plane app (apps/learning-plane)",
+    "status": "absent",
+    "evidence": [
+      "apps/learning-plane/README.md:1-5",
+      "apps/learning-plane/docs/STATUS.md"
+    ],
+    "plannedIn": [],
+    "notes": "Not model learning: it is the Teachme school product; no role in chat/agent personalization."
+  },
+  {
+    "id": "v-modelplane-122",
+    "category": "Models & routing",
+    "name": "Multi-provider fallback chain (Azure OpenAI, Anthropic direct, Azure Foundry Claude, Azure Cohere, OpenAI-compatible, ChatGPT subscription)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/config.rs:209-214",
+      "apps/Model Plane/rust/services/inference-core/src/config.rs:286-326",
+      "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:505-700",
+      "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs:33"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Bounded retries, retry-after honoured, bounded timeouts."
+  },
+  {
+    "id": "v-modelplane-123",
+    "category": "Models & routing",
+    "name": "Gemini / Google model provider",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1078"
+    ],
+    "plannedIn": [],
+    "notes": "Searched gemini in rust/services and go/services: only a test literal and roadmap data."
+  },
+  {
+    "id": "v-modelplane-124",
+    "category": "Models & routing",
+    "name": "DeepSeek native provider",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:2024",
+      "apps/Model Plane/rust/services/inference-core/src/provider/intent.rs:919-927"
+    ],
+    "plannedIn": [],
+    "notes": "Only as a model id served by the OpenAI-compatible provider (Azure MaaS)."
+  },
+  {
+    "id": "v-modelplane-125",
+    "category": "Models & routing",
+    "name": "Local models (Ollama/vLLM/LM Studio)",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/config.rs:287"
+    ],
+    "plannedIn": [],
+    "notes": "Searched ollama|vllm|llama.cpp|lmstudio: none; OPENAI_API_BASE could point at one (INF)."
+  },
+  {
+    "id": "v-modelplane-126",
+    "category": "Models & routing",
+    "name": "Verevon auto modes Budget/Balance/Genius (complexity x budget posture), runtime-editable policy",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/provider/intent.rs:1-60",
+      "apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs:127-222",
+      "apps/Model Plane/rust/services/inference-core/src/http_health.rs:1-6",
+      "apps/Model Plane/rust/services/session-core/src/routing_policy_grpc.rs:1-8"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Defaults gpt-5-nano ... claude-opus-4-8; tool-use floor and fallback ladder."
+  },
+  {
+    "id": "v-modelplane-127",
+    "category": "Models & routing",
+    "name": "Model picker catalogue with feature families",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:195",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7593",
+      "apps/Model Plane/rust/services/inference-core/src/grpc.rs:394"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-128",
+    "category": "Models & routing",
+    "name": "User-owned ChatGPT subscription route via Integration Core Codex app-server",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:1-60",
+      "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:142-156",
+      "apps/Model Plane/rust/services/model-gateway/src/subscription_failure.rs:1-10"
+    ],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/A6_DO_MODE_TERRA_PROOF_2026-10-01.md"
+    ],
+    "notes": "SRC + DOC (live-proven chat route). Model Plane never holds the OAuth token; typed refusals."
+  },
+  {
+    "id": "v-modelplane-129",
+    "category": "Models & routing",
+    "name": "Reasoning/thinking effort controls",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/thinking.rs:1-10",
+      "apps/Model Plane/rust/services/model-gateway/src/thinking.rs:36",
+      "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:402-428",
+      "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs:155",
+      "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs:444"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Anthropic thinking budget and Codex reasoning_effort; no reasoning effort on OpenAI/Azure route."
+  },
+  {
+    "id": "v-modelplane-130",
+    "category": "Models & routing",
+    "name": "Prompt caching (Anthropic cache_control; optional OpenAI stable prefix; tenant-scoped response cache)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:173-361",
+      "apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs:1-23",
+      "apps/Model Plane/rust/services/inference-core/src/cache.rs:1-6"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. OpenAI prefix order off by default."
+  },
+  {
+    "id": "v-modelplane-131",
+    "category": "Models & routing",
+    "name": "Semantic answer cache",
+    "status": "absent",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/langcache.rs:1-20"
+    ],
+    "plannedIn": [],
+    "notes": "Removed; env vars inert (documented in code)."
+  },
+  {
+    "id": "v-modelplane-132",
+    "category": "Models & routing",
+    "name": "Structured outputs (json_schema)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs:459-486",
+      "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:726-731",
+      "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription_tools.rs:15-33"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-133",
+    "category": "Models & routing",
+    "name": "Token logprobs to certainty signal",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/provider/logprobs.rs:1-10",
+      "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs:276-291"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. OpenAI-family only."
+  },
+  {
+    "id": "v-modelplane-134",
+    "category": "Models & routing",
+    "name": "Real BPE token counting for budgets",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/crates/mp-tokens/src/lib.rs:1-5"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-135",
+    "category": "Models & routing",
+    "name": "Privacy tier / residency / sovereignty routing (pre-network gating)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/config.rs:259-283",
+      "apps/Model Plane/rust/crates/mp-contracts/src/dataplane_posture.rs:1-5",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:1015"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-136",
+    "category": "Models & routing",
+    "name": "Anthropic native context editing (clear_tool_uses)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:473-613"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Flag-gated."
+  },
+  {
+    "id": "v-modelplane-137",
+    "category": "Models & routing",
+    "name": "Side-by-side model comparison",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [],
+    "notes": "Searched compare/arena in model-gateway: none."
+  },
+  {
+    "id": "v-modelplane-138",
+    "category": "Models & routing",
+    "name": "Step-level routing decision record",
+    "status": "planned",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "DOC §9; routing is request-level only."
+  },
+  {
+    "id": "v-modelplane-139",
+    "category": "Models & routing",
+    "name": "Multi-provider auth-profile failover",
+    "status": "planned",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md"
+    ],
+    "notes": "DOC backlog #25."
+  },
+  {
+    "id": "v-modelplane-140",
+    "category": "Transparency, observability & control",
+    "name": "Per-turn usage with real cost (null when unknown) and confidence",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/pricing.rs:1-12",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:10154",
+      "apps/Model Plane/rust/services/model-gateway/src/confidence.rs:299"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-141",
+    "category": "Transparency, observability & control",
+    "name": "Per-turn phase timing (turn_timing) incl. provider timing",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/turn_timing.rs:1-12",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:519-528",
+      "apps/Model Plane/rust/services/inference-core/src/provider/timing.rs:1-8"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-142",
+    "category": "Transparency, observability & control",
+    "name": "Step/tool-call trace events (step_update, tool_call, tool_result)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:10211",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:10245",
+      "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:144"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-143",
+    "category": "Transparency, observability & control",
+    "name": "Reasoning stream view (reasoning_delta)",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:3206"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Only where provider emits reasoning."
+  },
+  {
+    "id": "v-modelplane-144",
+    "category": "Transparency, observability & control",
+    "name": "Graduated confidence + low-confidence verification pass",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/confidence.rs:1-12",
+      "apps/Model Plane/rust/services/model-gateway/src/confidence.rs:306",
+      "apps/Model Plane/rust/services/model-gateway/src/verification.rs:1-10",
+      "apps/Model Plane/rust/services/model-gateway/src/verification.rs:112",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:3726"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-145",
+    "category": "Transparency, observability & control",
+    "name": "Result receipts for local checks",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:4086",
+      "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:145-146"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-146",
+    "category": "Transparency, observability & control",
+    "name": "Run history, run detail, system (cron) runs",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:207-212",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:1194",
+      "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs:1-12"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-147",
+    "category": "Transparency, observability & control",
+    "name": "Proof Bundle and verification metrics",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:286-292",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:990",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:1029",
+      "apps/Model Plane/proto/model_plane/v1/proof_bundle.proto",
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:275"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-148",
+    "category": "Transparency, observability & control",
+    "name": "Subagent lineage view",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:298-300",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:1105"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-149",
+    "category": "Transparency, observability & control",
+    "name": "Prometheus metrics + OTEL tracing (metered decorator on every inference RPC)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/gateway_metrics.rs:1-4",
+      "apps/Model Plane/rust/services/inference-core/src/metered.rs:1-8",
+      "apps/Model Plane/rust/services/inference-core/src/metrics.rs:1-8",
+      "apps/Model Plane/rust/crates/mp-telemetry/src/lib.rs:1-5"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-150",
+    "category": "Transparency, observability & control",
+    "name": "AI-action audit trail to Audit Core",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/migrations/0043_audit_outbox_requeue.sql"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md"
+    ],
+    "notes": "SRC + DOC. Fix built, not deployed; historical events undelivered."
+  },
+  {
+    "id": "v-modelplane-151",
+    "category": "Transparency, observability & control",
+    "name": "Cost ledger, analytics, Azure actual cost, pricing, budget check, billing outbox",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/go/services/cost-core/internal/server/server.go:134-149",
+      "apps/Model Plane/go/services/cost-core/internal/azurecost/sync.go",
+      "apps/Model Plane/go/services/cost-core/internal/postgres/billing_delivery.go"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. No reservation/commit."
+  },
+  {
+    "id": "v-modelplane-152",
+    "category": "Transparency, observability & control",
+    "name": "Live per-run credit meter",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "DOC: not built; no running-spend stream event found in ChatEvent enum."
+  },
+  {
+    "id": "v-modelplane-153",
+    "category": "Transparency, observability & control",
+    "name": "Model Plane implementation-status endpoint",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/go/services/capability-core/cmd/main.go:251"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-154",
+    "category": "Safety, permissions & governance",
+    "name": "Fail-closed RS256/JWKS auth on all services with per-downstream delegated bearers",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/auth.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/grpc_auth.rs:1-6",
+      "apps/Model Plane/rust/services/inference-core/src/auth.rs:1",
+      "apps/Model Plane/rust/services/session-core/src/auth.rs:1-6",
+      "apps/Model Plane/rust/services/execution-core/src/auth.rs:1-6"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-155",
+    "category": "Safety, permissions & governance",
+    "name": "Server-resolved approval posture (chat=auto, deployed_agent/Do=ask; client can only tighten)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/profile.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/profile.rs:119",
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8631"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-156",
+    "category": "Safety, permissions & governance",
+    "name": "Permission modes + risky-tool substring classifier",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:6-20",
+      "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:229-260"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. Coarse substring list."
+  },
+  {
+    "id": "v-modelplane-157",
+    "category": "Safety, permissions & governance",
+    "name": "Autonomy ladder (ReadOnly/WorkspaceWrite/DangerFullAccess) per-call with justification",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs:1-60"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "notes": "SRC. deepseek-harness design (MIT)."
+  },
+  {
+    "id": "v-modelplane-158",
+    "category": "Safety, permissions & governance",
+    "name": "Prompt-injection defences: trust-class provenance, fail-closed scan, semantic shadow pass, hash-only security events",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs:1-10",
+      "apps/Model Plane/rust/services/model-gateway/src/security_events.rs:1-10",
+      "apps/Model Plane/rust/services/execution-core/src/provenance.rs:1-8"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-159",
+    "category": "Safety, permissions & governance",
+    "name": "Opt-in PII redaction before provider calls",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:123"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-160",
+    "category": "Safety, permissions & governance",
+    "name": "Secret scrubbing of step payloads and sandbox output",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/execution-core/src/scrub.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/executor.rs:1-8",
+      "apps/Model Plane/go/services/sandbox-manager/internal/redact/redact.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-161",
+    "category": "Safety, permissions & governance",
+    "name": "SSRF guards (webhooks, MCP OAuth, MCP DNS revalidation)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tools.rs:1-10",
+      "apps/Model Plane/go/services/capability-core/internal/api/mcp_dns_revalidator.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-162",
+    "category": "Safety, permissions & governance",
+    "name": "Zero Data Retention: one resolver, non-downgradable signed claim, evidence-bound provider attestation, waiver receipts",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/crates/mp-contracts/src/retention.rs:1-5",
+      "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs:1-5",
+      "apps/Model Plane/rust/services/inference-core/src/provider/zdr.rs:1-8",
+      "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs:1-12",
+      "apps/Model Plane/rust/services/session-core/src/retention_receipt.rs:1-8"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/ZDR.md",
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/PROGRAM_SUMMARY_AND_STATUS_2026-10-07.md"
+    ],
+    "notes": "SRC. Fail-closed; no provider attested so ZDR turns are refused (DOC)."
+  },
+  {
+    "id": "v-modelplane-163",
+    "category": "Safety, permissions & governance",
+    "name": "Rate limit, org quota from Control, cost-core budget check, run budgets",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/rate_limit.rs:112",
+      "apps/Model Plane/rust/services/model-gateway/src/org_quota.rs:1-12",
+      "apps/Model Plane/rust/services/model-gateway/src/budget.rs:48"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "SRC. Org quota fails open on org-core outage; no reservation."
+  },
+  {
+    "id": "v-modelplane-164",
+    "category": "Safety, permissions & governance",
+    "name": "GDPR org/user erasure consumers and Space deletion reconciliation",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/gdpr.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/src/gdpr_nats.rs:1-8",
+      "apps/Model Plane/rust/services/session-core/src/space_deletion_reconciler.rs:1-8",
+      "apps/Model Plane/go/services/cost-core/internal/consumers/org_erasure_consumer.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-165",
+    "category": "Safety, permissions & governance",
+    "name": "Space authority via Control-signed per-effect decisions (sandbox, process, cron, watch, ticket)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/src/space_membership_nats.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/capability_client.rs:1-8",
+      "apps/Model Plane/rust/services/execution-core/src/scheduled_step_decision.rs:1-8",
+      "apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-166",
+    "category": "Safety, permissions & governance",
+    "name": "Verified tenant delegation for background workers",
+    "status": "partial",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Model Plane/MODEL_PLANE_STATUS.md"
+    ],
+    "notes": "DOC. Per-principal allowlists only."
+  },
+  {
+    "id": "v-modelplane-167",
+    "category": "Safety, permissions & governance",
+    "name": "NATS TLS/mTLS/workload identity",
+    "status": "partial",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Model Plane/MODEL_PLANE_STATUS.md"
+    ],
+    "notes": "DOC. Named principals without transport security."
+  },
+  {
+    "id": "v-modelplane-168",
+    "category": "Safety, permissions & governance",
+    "name": "Signed release artifact with rollback",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/scripts/release-artifact.sh"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/README.md",
+      "apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "DOC + SRC. Tooling exists; no artifact built."
+  },
+  {
+    "id": "v-modelplane-169",
+    "category": "UI/UX & product design",
+    "name": "Opt-in feature families keep plain chat profile minimal",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:1-9"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-170",
+    "category": "UI/UX & product design",
+    "name": "Norwegian-first prompts, report sections and trivial-prompt words",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs:1-10",
+      "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:240-246"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-171",
+    "category": "UI/UX & product design",
+    "name": "Typed localisable refusal codes (ZDR, subscription, capability)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs:1-5",
+      "apps/Model Plane/rust/services/model-gateway/src/subscription_failure.rs:1-10",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:532-548"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-172",
+    "category": "UI/UX & product design",
+    "name": "Agent pages: Run Console (real APIs), Fleet console, Chatbot studio, Workflow builder",
+    "status": "partial",
+    "evidence": [
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:229-275",
+      "apps/Frontend Plane/verevonv3/src/features/agents/components/WorkflowBuilder.tsx:13-16"
+    ],
+    "plannedIn": [],
+    "notes": "SRC + INF. WorkflowBuilder uses static node maps (design preview, low confidence)."
+  },
+  {
+    "id": "v-modelplane-173",
+    "category": "UI/UX & product design",
+    "name": "Keyboard shortcut sheet and block-level streaming re-render",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md"
+    ],
+    "notes": "DOC: not built (SPA concern)."
+  },
+  {
+    "id": "v-modelplane-174",
+    "category": "Platform architecture",
+    "name": "Service topology: 4 Rust hot-path services + 8 Go control services",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/README.md",
+      "apps/Model Plane/go/services/capability-core/cmd/main.go",
+      "apps/Model Plane/rust/services/model-gateway/src/main.rs:1-5"
+    ],
+    "plannedIn": [],
+    "notes": "SRC + DOC."
+  },
+  {
+    "id": "v-modelplane-175",
+    "category": "Platform architecture",
+    "name": "Two deliberately separate tool-dispatch loops (authority boundary)",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:2430",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:467"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/CLAUDE.md",
+      "apps/Model Plane/docs/postmortem/0001-harn-1-2-tool-dispatch-unification.md"
+    ],
+    "notes": "SRC + DOC. Unification rejected."
+  },
+  {
+    "id": "v-modelplane-176",
+    "category": "Platform architecture",
+    "name": "Protocols: HTTP+SSE edge, gRPC internal, NATS/JetStream mp.v1.*, Temporal",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/proto/model_plane/v1/gateway.proto:17",
+      "apps/Model Plane/rust/crates/mp-events/src/subjects.rs:1-5",
+      "apps/Model Plane/rust/crates/mp-events/src/temporal.rs:1-3"
+    ],
+    "plannedIn": [],
+    "notes": "SRC. No ACP/AG-UI/A2A."
+  },
+  {
+    "id": "v-modelplane-177",
+    "category": "Platform architecture",
+    "name": "Persistence: Postgres (session-core 45 migrations), Redis stream buffer, MinIO artifacts, Letta semantic memory",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/rust/services/session-core/migrations/0045_zdr_waived_runs_org_index.sql",
+      "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs:10-24",
+      "apps/Model Plane/go/services/letta-bridge/internal/agentmemory/client.go"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  },
+  {
+    "id": "v-modelplane-178",
+    "category": "Platform architecture",
+    "name": "Multi-replica safety of gateway state",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs:11-13",
+      "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:1-20",
+      "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:1-18"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/docs/GATEWAY_DEDUPLICATION_PLAN.md"
+    ],
+    "notes": "SRC. Cancel/plan-mode/team/hook/command registries are in-memory."
+  },
+  {
+    "id": "v-modelplane-179",
+    "category": "Platform architecture",
+    "name": "ACP / AG-UI / A2A interoperability protocols",
+    "status": "absent",
+    "evidence": [],
+    "plannedIn": [
+      "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md"
+    ],
+    "notes": "Searched protos and gateway routes; none (A2A mentioned only in IMPROVEMENTS expansion)."
+  },
+  {
+    "id": "v-modelplane-180",
+    "category": "Platform architecture",
+    "name": "Dev compose and signed-artifact release path",
+    "status": "partial",
+    "evidence": [
+      "apps/Model Plane/deploy/docker-compose.yml",
+      "apps/Model Plane/deploy/docker-compose.production.yml",
+      "apps/Model Plane/scripts/release-artifact.sh"
+    ],
+    "plannedIn": [
+      "apps/Model Plane/MODEL_PLANE_ROADMAP.md"
+    ],
+    "notes": "SRC + DOC."
+  },
+  {
+    "id": "v-modelplane-181",
+    "category": "Platform architecture",
+    "name": "NATS JetStream provisioning as code",
+    "status": "shipped",
+    "evidence": [
+      "apps/Model Plane/go/services/nats-provisioner/main.go",
+      "apps/Model Plane/rust/crates/mp-events/src/jetstream.rs:1-5"
+    ],
+    "plannedIn": [],
+    "notes": "SRC."
+  }
+]

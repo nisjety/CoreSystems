@@ -1,0 +1,235 @@
+{
+ "verdict": "Mostly trustworthy and close to ready to hand to the team. Every headline count in the front matter and Appendix A matches _context.json and a recount of items.verified.json: 260 baseline capabilities (142/52/22/44) and every per-category figure quoted in 1.2, tiers 24/41/12 before and 24/35/18 after verification, 61 Partial, 3 Stub, 11 Absent, 2 Planned, verdicts 8 keep, 61 reword, 8 demote, 33 efforts revised, 24 reference checks (2 confirmed, 22 corrected in part), 14 wrong prevalence counts, 786 records, 322 clusters, 10 ADR topics. The 1.4 Priority table and all five wave tables show the verified tier, effort, status and wave for all 77 items. The ADR lists in 1.5 and 9.3 match adrNeeded, and every ADR-flagged item sits under a topic. The ten headlines agree with their cards and the code verification, and the 61 common-ground rows and 14 shipped count match _inputs.table-stakes.json. The document answers all six points of the brief: common gaps (section 2), best of breed (3), differentials (7), nice-to-haves separated (section 6, W5), three tiers, and a read-only audit. Fix these before circulation: one strength contradicts a Priority card (Quarry profile routes have no ZDR check, F-t2-020); the exec summary treats the confirmed search-cache cross-tenant hole as an open question; Appendix A's '51 Priority' is not supported by the consolidator data (44 of 121); the prevalence denominator (4 vs 3) is defined inconsistently across the reading guide, section 2, cards and Appendix A; and the generated Appendix B still shows refuted best references for F-t2-001 and F-t2-024. The rest are small wording, tag and cross-reference fixes. Appendix A states REA's limits honestly: heap exhaustion, no string-literal indexing, MSIX loader refusal and timeouts, so most app evidence is SRC; Apify is documentation only; nothing was launched.",
+ "checked": [
+  "Front matter and Appendix A counts: 17 figures recomputed with node from _context.json, items.verified.json, cons/*.items.json, cmp/*.clusters.json and *.features.json (baseline 260 = 142/52/22/44 and per-category ratios in 1.2; tiers before and after; status mix; verdicts; effort changes 33 = 29 up, 4 down; refcheck 2 + 22; prevalence wrong 14; records 786 per source; clusters 322; dropped 2; consolidator Priority count)",
+  "1.4 Priority table: 24 of 24 rows checked against _titles.json for status, effort and wave",
+  "Section 9 wave tables: 77 of 77 rows checked for tier, effort and wave against _titles.json and _context.json waves; all 24 Priority items are in W1 to W3",
+  "ADR topics: 10 of 10 in 1.5 and 9.3 matched to _context.json adrNeeded; 35 of 35 adrNeeded=true items mapped to a topic",
+  "Headline findings 1.3: 10 of 10 checked against the cards and verification.verevon.exactGap (F-t2-001, 002, 003, 005, 006, 007, 008, 012, 013, 016, 021, 024)",
+  "Executive summary claims 1.1, 1.2, 1.6: 9 claims checked against the data and the cards",
+  "Section 2 common ground: 61 of 61 rows counted, 14 shipped confirmed against _inputs.table-stakes.json, and 30 rows' Verevon status checked against item status",
+  "Section 3 best of breed: 46 rows checked against _titles.json bestSource and the reference corrections (F-t2-001, 024, 034 diverge; 001 and 024 are justified by verification)",
+  "Section 7 differentials: 32 bullets with their F-t2 links checked for existence and topic fit, plus tier and quick-win claims",
+  "Section 8 strengths: 16 bullets checked against Priority cards and verification gaps (one contradiction, F-t2-020)",
+  "Appendix A honesty: REA limits checked against codexbrowser.inventory.md and aside.inventory.md (2048 MB heap, timeouts); Apify docs-only and 'nothing launched' are stated",
+  "Brief coverage: 6 of 6 brief points; reading guide, appendix pointers and acronyms reviewed; every patch find string confirmed with node to occur exactly once in its file"
+ ],
+ "issues": [
+  {
+   "id": 1,
+   "severity": "major",
+   "file": "sec-60-diff.md",
+   "where": "8. What Verevon already does well, bullet 'Browser profiles with governance'",
+   "problem": "The strength says ZDR forbids any persistent profile scope on both the gateway and Quarry sides and cites quarry-edge profile_routes.rs:102-432 as proof. The Priority card F-t2-020 and its code verification say the opposite for those routes: Quarry refuses ZDR only at run creation (agent_routes.rs:527-533), while the /v1/profiles routes check org id only, with no ZDR or owner check, and GET returns raw cookie values. A strength must not contradict a Priority card.",
+   "evidence": "items.verified.json F-t2-020 verification.verevon.exactGap ('the /v1/profiles routes check org id only, with no ZDR or owner check and GET returning raw cookie values (profile_routes.rs:102-125, 268-296)'); sec-30-p3.md F-t2-020 'Verevon today' says the same; open question 13 in sec-70-roadmap.md also asks about raw cookie values.",
+   "patch": {
+    "find": "and ZDR forbids any persistent scope on both the gateway and Quarry sides",
+    "replace": "and ZDR forbids a persistent profile at run creation on both the gateway and Quarry sides (agent_routes.rs:527-533), although Quarry's `/v1/profiles` routes themselves check org id only, with no ZDR or owner check, and `GET` returns raw cookie values ([F-t2-020](#F-t2-020))"
+   }
+  },
+  {
+   "id": 2,
+   "severity": "major",
+   "file": "sec-10-front.md",
+   "where": "1.5 Decisions leadership must make, closing paragraph (open questions)",
+   "problem": "Headline 2 and card F-t2-003 call the gateway search cache a confirmed, source-verified cross-tenant exposure, but 1.5 lists 'can smart-router search results include org-private data (if yes, ...)' as still open. Section 10.2 question 3 already says verification found yes. The executive summary contradicts itself on whether this is a live cross-tenant issue.",
+   "evidence": "sec-10-front.md headline 2 ('confirmed cross-tenant and ZDR hole'); sec-30-p1.md F-t2-003 'Why it matters' ('source-verified cross-tenant exposure'); items.verified.json F-t2-003 exactGap (Quarry /v1/search uses org-scoped private-corpus providers, search_routes.rs:503-517); sec-70-roadmap.md 10.2 Q3.",
+   "patch": {
+    "find": "can smart-router search results include org-private data (if yes, the gateway cache is a cross-tenant incident today)",
+    "replace": "was any org-private search result ever served across orgs (verification found that the Quarry search behind the gateway cache uses org-scoped private-corpus providers, so the cache is a cross-tenant exposure today)"
+   }
+  },
+  {
+   "id": 3,
+   "severity": "major",
+   "file": "sec-80-appx-A.md",
+   "where": "A.2 Process, step 6 Tier calibration",
+   "problem": "'The category consolidators had put 51 items in Priority' does not match the consolidator data: the ten cons/*.items.json files hold 121 candidates, 44 of them Priority (58 Recommended, 19 Nice to have); 119 of them map into the 77 final items and 2 were dropped. The 51 comes from final/analysis.md line 26 and is not supported by the data.",
+   "evidence": "node count over findings/t2/cons/*.items.json: 121 items, tier priority 44, recommended 58, nice-to-have 19; sourceItems of the 77 verified items cover 119 of them; final/analysis.md:26 is the only source of '51'.",
+   "patch": {
+    "find": "The category consolidators had put 51 items in Priority; the tiering pass cut that to 24",
+    "replace": "The category consolidators had proposed 121 candidates, 44 of them in Priority; the tiering pass cut Priority to 24"
+   }
+  },
+  {
+   "id": 4,
+   "severity": "major",
+   "file": "sec-10-front.md",
+   "where": "How to read this document, 'Ids and anchors' paragraph",
+   "problem": "The reading guide says prevalence is written 'n of 4 references', but section 2 deliberately uses 'n of 3' for the two browser categories (2.8, 2.9), and the cards are not consistent either (sec-30-p2.md F-t2-012 says '2 of 4 references (Codex, Aside)' while 2.8 says '2 of 3 (Aside, Codex)' for the same capability; the 2.9 credential-handoff row uses '2 of 4' inside an N=3 table). Readers cannot tell which denominator applies.",
+   "evidence": "sec-20-common.md section 2 intro ('The data counts the two browser categories (2.8 and 2.9) out of 3'); final/_inputs.table-stakes.json gives of=3 for every category 08/09 row; sec-30-p2.md F-t2-012 'Present in 2 of 4 references (Codex, Aside)'.",
+   "patch": {
+    "find": "Prevalence is written \"n of 4 references\".",
+    "replace": "Prevalence is written \"n of 4 references\", except in the section 2 tables for the two browser categories (2.8 and 2.9), which count out of 3 because Apify, documented only, has no browser shell to compare."
+   }
+  },
+  {
+   "id": 5,
+   "severity": "major",
+   "file": "appx-B-index.md",
+   "where": "Best reference column, rows F-t2-001 and F-t2-024",
+   "problem": "Appendix B (generated from _titles.json bestSource) still names the pre-verification best reference for two Priority items whose reference was corrected: F-t2-001 shows 'Codex in-app browser (hardened page hosting, iab-028/029)', which the reference check says is not an analogue of grant issuance (closest is Aside's signed-challenge token; no reference has a durable grant issuer); F-t2-024 shows 'Codex in-app browser', which the check re-attributes to Codex Cloud Browser. This contradicts section 3, the cards and Appendix C. Fix in the generator (use the corrected source) rather than by hand.",
+   "evidence": "items.verified.json F-t2-001 and F-t2-024 verification.reference.corrections; sec-20-common.md section 3 rows for F-t2-001 (Aside) and F-t2-024 (Codex Cloud Browser); sec-30-p1.md F-t2-001 'What the references do'.",
+   "patch": null
+  },
+  {
+   "id": 6,
+   "severity": "minor",
+   "file": "sec-80-appx-A.md",
+   "where": "A.1 What was analysed, sentence after the table",
+   "problem": "'Prevalence statements use N = 4.' contradicts section 2, which counts the two browser categories out of 3.",
+   "evidence": "sec-20-common.md section 2 intro; final/_inputs.table-stakes.json (of=3 for categories 08 and 09).",
+   "patch": {
+    "find": "Prevalence statements use N = 4.",
+    "replace": "Prevalence statements use N = 4, except the section 2 tables for the two browser categories, which use N = 3 because Apify has no browser shell to compare."
+   }
+  },
+  {
+   "id": 7,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "10.1 Main risks, item 10 'Effort growth'",
+   "problem": "'33 efforts rose' is wrong: 33 efforts were revised, 29 upward and 4 downward (F-t2-034, F-t2-048, F-t2-057 and F-t2-062 went L to M). Section 1.6 and the section 9 intro correctly say 'almost always upward' and 'mostly upward'.",
+   "evidence": "node over items.verified.json comparing effort with verification.verevon.effortRevised: 33 changed, 29 up, 4 down.",
+   "patch": {
+    "find": "33 efforts rose,",
+    "replace": "33 efforts were revised (29 up, 4 down),"
+   }
+  },
+  {
+   "id": 8,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "3. Best of breed, row 'Post-action settle and observation'",
+   "problem": "The row names Aside as best with Codex second, but the item's best source (_titles.json bestSource for F-t2-034) is Codex for both settle heuristics and the frame-aware AX snapshot, and card F-t2-034 and section 7.1 lead with Codex's commit, first-paint and 750 ms settle. The row conflicts with the data it says it uses.",
+   "evidence": "_titles.json F-t2-034 bestSource 'Codex: settle heuristics (codexbrowser-automation-and-safety-058, SRC) and frame-aware AX snapshot (-057, SRC)'; sec-40-r1.md F-t2-034 'Reference practice'; sec-60-diff.md 7.1 'Settle heuristics and a frame-aware accessibility snapshot'.",
+   "patch": {
+    "find": "| Post-action settle and observation | Aside, with Codex | A 350 ms quiet window with a mutation-ratio check sampled twice and ambient page notes flushed into the next tool result [SRC]; Codex adds the frame-aware accessibility snapshot [SRC]. |",
+    "replace": "| Post-action settle and observation | Codex, with Aside | Settle waits for navigation commit and first paint, then for accessibility and DOM mutation quiet capped at 750 ms, and the accessibility snapshot stitches per-frame trees under per-frame timeouts [SRC]; Aside adds a 350 ms mutation-ratio quiet window and ambient page notes flushed into the next tool result [SRC]. |"
+   }
+  },
+  {
+   "id": 9,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "2.4 Anti-bot, proxies & reliability, prose",
+   "problem": "'the parser and RobotsCache exist but are enforced only in /v1/map' contradicts the F-t2-016 code verification and headline 5, which say RobotsCache/ReqwestRobotsFetcher have no production caller and the only live robots logic is in /v1/map.",
+   "evidence": "items.verified.json F-t2-016 exactGap ('RobotsCache/ReqwestRobotsFetcher (robots_cache.rs) have no production caller; the only live scope plus robots logic is /v1/map'); sec-10-front.md headline 5.",
+   "patch": {
+    "find": "the parser and RobotsCache exist but are enforced only in /v1/map",
+    "replace": "robots rules are applied only in /v1/map, and RobotsCache itself has no production caller"
+   }
+  },
+  {
+   "id": 10,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "2.9 AI-browser control, row 'Capability- and environment-conditional tool docs'",
+   "problem": "'Unknown' is not in the status vocabulary defined in the reading guide (Absent, Partial, Stub, Planned, Shipped), and the section intro says the column shows the verified status of the covering recommendation, which for F-t2-032 is Partial.",
+   "evidence": "_inputs.table-stakes.json C-t2-09-006 status 'unknown' (no baseline record); _titles.json F-t2-032 status partial.",
+   "patch": {
+    "find": "| Unknown (not resolved by verification of [F-t2-032](#F-t2-032)) |",
+    "replace": "| Not assessed (no baseline record; item Partial) |"
+   }
+  },
+  {
+   "id": 11,
+   "severity": "minor",
+   "file": "sec-20-common.md",
+   "where": "Section 2 intro, table-stakes definition",
+   "problem": "Table-stakes is defined as present in both members of a pair or in 3 of 4 references, but several rows are below that bar: 'Tab strip operations' and 'Navigation controls' are 1 of 3 (classed table-stakes in the comparison data), 'Browser pool lifecycle' is 1 of 4 after correction, and credential handoff was corrected to a differentiator. The intro does not explain why they stay in the 61.",
+   "evidence": "final/_inputs.table-stakes.json C-t2-08-002 and C-t2-08-011 (n=1, of=3, cls table-stakes); items.verified.json F-t2-007 and F-t2-024 reference corrections.",
+   "patch": {
+    "find": "61 capabilities count as table-stakes: present in both members of a pair, or in 3 of the 4 references.",
+    "replace": "61 capabilities count as table-stakes: present in both members of a pair, or in 3 of the 4 references. A few rows fall below that bar, either because verification corrected the count or because the comparison classed a single-reference browser capability as table-stakes for a browser product; they are kept and the count shown is the corrected one."
+   }
+  },
+  {
+   "id": 12,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "10.3 Evidence limits, Codex credential handoff bullet",
+   "problem": "The Codex credential-handoff evidence is tagged [REA, INF], but the reference check found it by reading the extracted bundle (SRC), and sections 3 and 7.1 tag the same facts [SRC]. Appendix A.3 also says most app evidence is SRC because REA did not index these bundles.",
+   "evidence": "items.verified.json F-t2-024 verification.reference (checked paths are extracted-bundle reads); sec-60-diff.md 7.1 credential handoff bullet tagged [SRC].",
+   "patch": {
+    "find": "inferred from elicitation text [REA, INF]",
+    "replace": "inferred from elicitation text [SRC, INF]"
+   }
+  },
+  {
+   "id": 13,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "How to read this document, 'Verevon status vocabulary'",
+   "problem": "'\"Shipped\" appears only in the strengths and common-ground sections' is not true: section 1.2 and Appendix A report baseline counts of 142 shipped capabilities.",
+   "evidence": "sec-10-front.md 1.2; sec-80-appx-A.md A.5.",
+   "patch": {
+    "find": "\"Shipped\" appears only in the strengths and common-ground sections.",
+    "replace": "\"Shipped\" appears only in the baseline counts, the strengths section and the common-ground tables."
+   }
+  },
+  {
+   "id": 14,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "How to read this document (end, after 'Waves')",
+   "problem": "The reading guide never says what 'verified' means (it is first explained in 1.6 and A.2), and no framing section points to Appendices B, C and D, so a reader cannot find the item index or the verification logs.",
+   "evidence": "grep: no section file other than sec-80-appx-A.md mentions 'Appendix'; appx-B-index.md, appx-C-corrections.md and appx-D-verification-changes.md exist; _context.json verificationSummary.",
+   "patch": {
+    "find": "W5 is polish and long-tail bets.",
+    "replace": "W5 is polish and long-tail bets.\n\n**Verified.** Every item passed a code-verification pass on the Verevon side (status, gap, effort and approach on each card come from it), and the 24 Priority items also passed a reference-side check of the cited reference behaviour and prevalence; section 1.6 summarises both. Appendix A gives the method and limits, Appendix B indexes all 77 items, Appendix C logs the reference-side corrections and Appendix D lists what code verification changed."
+   }
+  },
+  {
+   "id": 15,
+   "severity": "minor",
+   "file": "sec-60-diff.md",
+   "where": "7.3 Firecrawl, last bullet",
+   "problem": "'Cached generated extractors (F-t2-065) stay nice-to-have' implies the item was always Nice to have; it was Recommended and demoted by code verification.",
+   "evidence": "items.verified.json F-t2-065 originalTier recommended, finalTier nice-to-have, verdict demote; sec-70-roadmap.md section 9 intro.",
+   "patch": {
+    "find": "stay nice-to-have because",
+    "replace": "were demoted to nice-to-have because"
+   }
+  },
+  {
+   "id": 16,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "9.2 Quick wins, F-t2-009 bullet",
+   "problem": "'the sniffer and both parsers exist; only PDF and DOCX routing is wired' reads as if routing is already done. Verification says /v1/scrape ignores Content-Type and runs readability on every body; the point is that only PDF and DOCX can be routed because there is no image parser.",
+   "evidence": "items.verified.json F-t2-009 exactGap (pipeline.rs:440-506; images.rs is not an image parser).",
+   "patch": {
+    "find": "only PDF and DOCX routing is wired",
+    "replace": "only PDF and DOCX routing needs wiring, since there is no image parser to route to"
+   }
+  },
+  {
+   "id": 17,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "1.4 note under the Priority table vs 9.4 dependency note 3",
+   "problem": "1.4 says F-t2-008, F-t2-025, F-t2-032 and F-t2-058 read their caps from F-t2-022; 9.4 note 3 says F-t2-022 supplies the claim channel for F-t2-008, F-t2-025, F-t2-046, F-t2-048 and F-t2-058. The two dependent lists differ (F-t2-032 versus F-t2-046 and F-t2-048) without explanation; align them.",
+   "evidence": "sec-10-front.md 1.4; sec-70-roadmap.md 9.4 note 3; final/analysis.md:91 is the source of the 1.4 list.",
+   "patch": null
+  },
+  {
+   "id": 18,
+   "severity": "minor",
+   "file": "sec-70-roadmap.md",
+   "where": "9.1 wave tables, Dependencies column for F-t2-025, F-t2-067, F-t2-072",
+   "problem": "Dependencies name a 'fail-open ADR', an 'identity ADR' and a 'Resource taxonomy ADR' that are not among the ten ADR topics in 1.5 and 9.3 (F-t2-025 sits under the policy ADR, F-t2-067 under the anti-bot ADR, F-t2-072 under the run-trace ADR). Readers cannot map these to a decision; name the 9.3 topic or say it is a separate, smaller decision.",
+   "evidence": "_context.json adrNeeded topics and items; sec-70-roadmap.md 9.3.",
+   "patch": null
+  },
+  {
+   "id": 19,
+   "severity": "minor",
+   "file": "sec-10-front.md",
+   "where": "Framing sections generally (1.2, 1.3, 1.4, 8, 9)",
+   "problem": "Several acronyms are used before or without definition in the framing sections: SSRF (1.2, section 8), AX (headline 9), TTL (headline 10, 1.4), OTP (1.4 table, defined only in 7.1), LLM (1.2, 1.4), AIMD, HMAC, QUIC, SCIM (section 8), SIEM, PII, OCR, DLQ (section 9 tables). CDP and MCP are defined only after first use (sections 3 and 2.1 tables).",
+   "evidence": "Read of sec-10-front.md, sec-20-common.md, sec-60-diff.md, sec-70-roadmap.md.",
+   "patch": null
+  }
+ ]
+}

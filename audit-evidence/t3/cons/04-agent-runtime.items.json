@@ -1,0 +1,753 @@
+{
+  "category": "Agent runtime",
+  "items": [
+    {
+      "id": "R-t3-04-01",
+      "title": "Seed Do runs with the thread history, persona, org/Space instructions and memory instead of goal-only context",
+      "summary": "Give the governed Do loop (execution-core run_rounds) a server-assembled run context: prior thread turns under the existing compaction budget, persona and response style, org and Space instructions, memory prefetch and attachments, with completeness flags on the run record. Reuse session-core GetContextAssembly (already behind the context inspector) and apply it only on the top-level Do path, keeping the fresh-context contract for subagents.",
+      "whyItMatters": "A Do run that forgets the conversation and ignores the org's and Space's instructions feels broken the first time a user follows an Ask turn with Do. It also blocks every later agent feature (approved-plan continuation, scheduled runs, goals) because each of them starts a new Do run with only a goal string. This is the highest-impact gap in the category and is moderate effort because the assembly code already exists for plain chat.",
+      "referenceBestPractice": {
+        "bestSource": "Cursor (typed RequestContext with hydration flags and a component-tree system prompt)",
+        "others": [
+          "Codex (typed turn context)",
+          "DeepSeek (workspace instruction chain with a byte budget)"
+        ],
+        "prevalence": "3 of 12 sources name it explicitly; a differentiator in the reference set, but every reference agent run inherits the conversation, and Verevon's own plain chat loop already assembles context",
+        "mechanism": "Sections are typed components rendered to role messages. A typed request context {thread_history, persona, org/Space instructions, memory prefetch, attachments, environment} is assembled server-side with completeness flags (hydrated or not). Per-turn volatile facts go in XML-tagged blocks near the tail. Entry-point variants (web, scheduled, channel) select which sections apply."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:926 (top-level Do run calls run_rounds with req.goal only)",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1172-1200 (fresh history: system preamble plus goal; comment says isolation is deliberate for subagents)",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3159 (subagent child calls the same run_rounds)",
+          "apps/Model Plane/proto/model_plane/v1/execution.proto:76-154 (RunAgentRequest fields: goal, tools, plan_mode, autonomy_rung, space_id; no history, persona or instruction field)",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:9120-9150 (gateway builds RunAgentRequest; only addition to goal is the approved-plan block)",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1161 (grounding_conversation counts every non-system message as grounding text)"
+        ],
+        "gap": "SRC-verified: a top-level Do run starts from a preamble plus the goal (plus skills and an approved plan prepended to the goal). It gets no prior thread turns, no persona, no org or Space instructions and no memory prefetch, while plain chat does assemble all of these. The same run_rounds function serves subagents, where isolation is intended, so the fix must not leak into delegation."
+      },
+      "approach": "Model Plane (model-gateway + execution-core + session-core). Add a seed field to RunAgentRequest (or let execution-core call session-core GetContextAssembly with the run's lease) and give run_rounds an optional seed parameter used only from the top-level call at agent.rs:926, never from the subagent call at agent.rs:3159. Run the seed through the same compaction budget as chat, keep Space ACLs by using the existing space_id lease (never widen), and build it in memory only on ZDR turns. Restrict the argument-grounding gate to user and tool messages so earlier assistant text cannot ground an invented value. Record per-section completeness flags on the run so the Work panel context inspector can show what the Do run saw.",
+      "effort": "M",
+      "dependencies": [
+        "session-core GetContextAssembly",
+        "compaction budget in the Do loop",
+        "Space lease (space_id) on RunAgentRequest",
+        "prompt-tier contract (R-t3-04-09) for placing volatile sections"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Context bloat inside a default 4-round budget; Space content must not leak beyond the run's lease; no persisted seed on ZDR turns; seeded assistant turns could launder earlier hallucinations through the grounding gate unless grounding is limited to user and tool text.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-018"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-02",
+      "title": "Make agent runs durable: persist loop state, resume after approval or crash, close dangling tool calls, add an effect ledger and park provider-exhausted turns",
+      "summary": "Persist the Do loop's fold inputs in session-core at each round and before each effectful tool call. Add a continuation worker in execution-core that, on an approval decision, crash or redeploy, takes a run lease, appends closers for tool calls that never returned (aborted-before-dispatch, not-started, outcome-unknown, telling the model to retry only idempotent work), re-enters run_rounds from the saved state under the original grant and re-checks authority through the Control reauthorizer. Add a per-effect action ledger keyed by (run_id, tool_call_id) with a payload digest, persist the delivered partial text as an interrupted assistant message on cancel, and park a turn whose provider chain is exhausted with a resume-at instead of failing it.",
+      "whyItMatters": "Today an approval does not continue the agent's reasoning and a crash or redeploy mid-run loses the task, which breaks trust in Do mode and blocks plan continuation, ask_user, goals and scheduled runs (they all need to re-enter a paused loop). The Model Plane already has the safer primitives (exact-effect descriptors, postcondition checks, terminalization receipts, drain), so what is missing is the loop-state resume on top of them.",
+      "referenceBestPractice": {
+        "bestSource": "DeepSeek (checkpoint before model requests, tool effects and next steps; cold resume repairs the log tail)",
+        "others": [
+          "Hermes (refreshed turn lease with stall watchdog; about 30 failover reasons with a parked-turn countdown)",
+          "Cursor (auto-continue of interrupted agents, durable question delivery)",
+          "Manus (action ledger keyed by sessionUid and actionId with payload digest and replay horizon; only source)",
+          "Claude Desktop, Codex (visible reconnect, per-step model switch)"
+        ],
+        "prevalence": "5 of 12 sources for durable resume (common), 6 of 12 for provider retry and failover (common), 1 of 12 for the exactly-once ledger (unique to Manus)",
+        "mechanism": "Persist before each model call and before each effectful tool. On resume, take write ownership via a lease row with heartbeat, append crash closers for interrupted calls, rebuild the request from the log and continue; an approval decision re-enters the same loop with the saved state rather than only re-executing the approved effect. For non-read side effects compute key = hash(run_id, action_id): a completed row with the same digest returns the stored result, a different digest is refused, otherwise execute and store. On cancel persist the delivered prefix as assistant{interrupted:true}. When the route chain is exhausted, mark the turn parked with a resume-at."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-40 (post-approval worker re-executes only execute_provider_action, book_shipment and tickets.create from an encrypted descriptor; any other tool fails closed as invalid_continuation; browser_agent and MCP deliberately not resumed)",
+          "apps/Model Plane/rust/services/session-core/src/continuation_crypto.rs:6-14 (descriptor key read from SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY)",
+          "apps/Model Plane/deploy/docker-compose.yml:755 (key defaults to empty on the default stack) versus apps/Model Plane/deploy/docker-compose.production.yml:70 (required in production)",
+          "apps/Model Plane/rust/services/session-core/src/terminalization.rs:1-8 and apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20 (receipts and drain on redeploy exist)",
+          "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:75 (FallbackChain: ordered providers, bounded retries, rate-limit wait, privacy-tier and residency gates; no stream-stall detector or parked-turn state found)",
+          "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:58 and cancel_registry.rs (in-memory cancel; persistence of the interrupted partial answer and synthetic tool results not verified)",
+          "apps/Model Plane/rust/services/execution-core/src/postcondition.rs:1-10 (postcondition verification after effects)"
+        ],
+        "gap": "Terminalization receipts, a recovery worker, drain on redeploy and stream resume are shipped, and provider fallback with bounded retry exists. Missing: after an approval the LLM loop does not resume reasoning (only three effect kinds are re-executed), the descriptor key is empty on the default compose stack so pauses report unavailable, an interrupted mid-run loop is not resumed, there is no general action ledger for provider writes beyond idempotency keys and integration receipts, and an exhausted provider chain fails the turn instead of parking it."
+      },
+      "approach": "Model Plane (session-core, execution-core, inference-core). Phase 1: a durable loop-state row per round in session-core plus the continuation worker that re-enters run_rounds under the original grant with a Control reauthorizer check; set the continuation descriptor key in every environment. Phase 2: closers for unanswered tool calls on crash or cancel, interrupted-message persistence, and an action ledger table in execution-core consulted before execute_provider_action (reuse integration-corev2 ActionReceipt idempotency). Phase 3: a typed ProviderFailure outcome with a stream-stall timeout in inference-core and a parked state with resume-at in session-core. Keep the 300 s delegated bearer constraint in mind: resume needs a renewable credential.",
+      "effort": "L",
+      "dependencies": [
+        "session-core run-state schema",
+        "durable grant carrier",
+        "renewable delegated credential (OD8, 300 s bearer today)",
+        "Control-plane reauthorizer"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Double execution if the lease is wrong; authority must be re-checked at resume; retrying an effect whose outcome is unknown must go through the ledger and postcondition check, not a blind retry; ZDR runs must not persist loop state beyond what the policy allows; provider failover must stay inside ZDR-attested routes.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-005",
+        "C-t3-04-006",
+        "C-t3-04-004",
+        "C-t3-04-007"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 26,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-03",
+      "title": "Finish the human-in-the-loop loop: plan approve-then-continue and a typed ask_user clarifying-question tool",
+      "summary": "(a) After the user approves an edited plan, the run continues on its own: persist the approval grant and approved plan in session-core instead of the in-memory PlanModeStore, and have the gateway start the execution run with the approved-plan block and grant without another user message, rendering it in place. (b) Add an ask_user tool to both loops with typed questions (single, multi, text, options, blocking, timeout) that reuses the approval pause path (durable request row, awaiting-input SSE event, decide endpoint) and resumes the run when answered. Build the tool once with category 01's R-t3-01-05, which owns the SPA question card.",
+      "whyItMatters": "Plan mode is enforced server-side, which is ahead of the references, but approval is a dead end: the user must type another message and the agent may not even carry the grant. Users also notice immediately when an agent guesses instead of asking. Plan approval with continuation and structured questions are table-stakes in Manus, Codex, Cursor and ChatGPT Work, and closing both makes Do mode feel like one approval and then the agent runs.",
+      "referenceBestPractice": {
+        "bestSource": "Codex (decision-complete proposed_plan after a read-only interview; sync and async request_user_input) for plans; Manus (typed human-request socket messages) for questions",
+        "others": [
+          "Antigravity (task boundaries with PLANNING/EXECUTION/VERIFICATION modes)",
+          "Cursor (late answers delivered durably into the paused run)",
+          "Claude Desktop, DeepSeek, T3 Code, web Manus and Perplexity (plan mode)"
+        ],
+        "prevalence": "plan mode with approval gate 9 of 12 sources (table-stakes); structured clarifying questions 6 of 12 (common)",
+        "mechanism": "Plan: a mode flag on the run; planning mode refuses risky calls at dispatch; the model calls plan.propose once; the UI renders an editable plan card; approval mints a scoped autonomy grant and the approved plan is injected into an execution run that continues automatically. Questions: tool ask_user{questions[{id,prompt,kind,options[]}], blocking, timeout_s}; the run records waiting_on_user_input; the answer is stored and injected as a typed user-input part, resuming the run; on timeout the model is released to continue independent work."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2040-2095 (approveTurnPlan calls approvePlan, turns plan mode off and waits; the error copy admits the NEXT message may lack the grant)",
+          "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:69-202 (PlanModeStore is in-memory with TTL; take_approved_plan consumed by the next run)",
+          "apps/Model Plane/rust/services/model-gateway/src/sse.rs:8844-8867 and 9120-9150 (next run prepends the approved plan block to its goal)",
+          "apps/Model Plane/proto/model_plane/v1/execution.proto:143-154 (plan_mode and autonomy_rung on RunAgentRequest)",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1645,1806 (risky calls refused in plan mode at dispatch)",
+          "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1873-1975 (approvePlan and rejectPlan client)",
+          "grep of apps/Model Plane/rust/services/{model-gateway,execution-core}/src for ask_user, request_user_input, ask_question: no tool (only unrelated prompt text in tool_loop.rs:6712)"
+        ],
+        "gap": "Plan half: enforcement, the editable plan card and the server-side approved-plan injection exist, but nothing starts the continuation run (the user must send another turn) and the grant store is in memory on one replica. Question half: no clarifying-question tool exists; only approval pauses do, and no run state says waiting on user input."
+      },
+      "approach": "Model Plane plus Frontend. Persist the plan grant and approved plan durably in session-core (thread-scoped carrier) and let the gateway auto-start the execution run on approval, with the SPA following it in place. Add ask_user to both loops reusing the approval pause path (CreateApproval-style durable row, awaiting_input SSE event, decide endpoint) and resume via the continuation worker from R-t3-04-02; add waiting_on_input to the run status enum. Restrict the tool to Do mode or ambiguous goals via prompt rules. The grant must never exceed the approved plan's autonomy rung.",
+      "effort": "L",
+      "dependencies": [
+        "R-t3-04-02 durable continuation",
+        "R-t3-04-01 context seeding (the continuation run otherwise sees only plan plus goal)",
+        "durable grant carrier in session-core",
+        "category 01 R-t3-01-05 for the SPA question card"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Grant scope creep beyond the approved plan; question overuse and nagging; ZDR threads cannot persist grants server-side, so they need an explicit, shorter-lived path; question text and answers must be treated as data.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Approve-then-continue is backlog item B7 per the cluster baseline (CHAT_PARITY_AUDIT_2026-10-01.md); the ask_user half is also a recommendation of category 01 (R-t3-01-05). File itself not re-read."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-024",
+        "C-t3-04-029"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 21,
+        "DOC": 5,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-04",
+      "title": "Persistent goals with a token budget, a completion judge and auto-continuation",
+      "summary": "Add a Goal record in session-core {objective, success_criteria, token_budget, used, status active|completed|blocked|cancelled} and a continuation driver, hosted as a Temporal workflow in orchestrator-core, that starts budgeted Do runs until a cheap judge model (verevon-balance) confirms the criteria with evidence, or a budget or blocker is hit, then notifies the user. The Agent Run Console's goal launcher is the natural UI host, with a goal bar showing budget used and compare-and-set edits.",
+      "whyItMatters": "Outcome agents that work for a long time are the core of the Manus and ChatGPT Work vision, and goals are present in 6 of 12 references. Verevon has no goal primitive, and long autonomous work is also capped by the 300 s delegated bearer and a default of 4 rounds, so a user cannot hand over a multi-step objective and come back to a result.",
+      "referenceBestPractice": {
+        "bestSource": "Codex (persisted ThreadGoal with token budget and an audited completion check)",
+        "others": [
+          "Hermes (auxiliary judge with quality gates)",
+          "DeepSeek (goal bar with compare-and-set edits)",
+          "Cursor",
+          "Antigravity",
+          "web ChatGPT"
+        ],
+        "prevalence": "6 of 12 sources (common)",
+        "mechanism": "Goal{objective, success_criteria, token_budget, used, status}. When the run goes idle, a continuation driver re-prompts with the goal state; a cheap judge checks completion against the criteria with evidence; stop on budget exhaustion or a blocker and notify. Completion is audited, not self-declared by the worker model."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "grep of apps/Model Plane/rust/services/*.rs for ThreadGoal, thread_goal, LoopGuard: no matches",
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:24 ('goal' is only the run's bound task string)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:168-330 (goal launcher UI that could host a goal bar)",
+          "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:98-160 (Temporal workflows registered, including scheduled-run supervision)"
+        ],
+        "gap": "No durable goal, budget accounting, completion judge or continuation driver. A Do run ends when its rounds end, and delegated authority lapses after 300 s."
+      },
+      "approach": "Model Plane. Goal rows and budget accounting in session-core; a GoalContinuation workflow in orchestrator-core that starts budgeted Do runs (same start path as scheduled runs), calls a judge through inference-core with the success criteria and the run's proof bundle and postcondition results, and updates the goal; renewable delegated credential so each continuation re-checks authority through the Control reauthorizer; goal bar and budget display in the Agent Run Console and the Work panel; cost reservation per continuation.",
+      "effort": "L",
+      "dependencies": [
+        "R-t3-04-02 durable continuation",
+        "R-t3-04-01 context seeding",
+        "renewable delegated bearer (OD8)",
+        "cost reservation and commit in cost-core",
+        "shared start path with R-t3-04-05 scheduled runs"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Runaway cost (hard budget, per-continuation reservation); each continuation must re-verify authority; judge model can be gamed, so tie it to deterministic postconditions and the proof bundle where available; do not auto-continue across approval-required effects without a human.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-032"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 4,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-05",
+      "title": "Turn scheduled runs into governed, tool-using Do runs with result delivery and origin attribution",
+      "summary": "Replace the single no-tool, 1,024-token call that ExecuteScheduledStep makes today with a normal budgeted Do run started by the Temporal scheduled-run supervision, under an autonomy cap pre-approved at schedule time (read-only plus draft-only effects, consistent with the 2026-09-28 owner ruling) and seeded with context. Deliver a result summary to an inbox with read state and a notification, and add origin (web|schedule|trigger|subagent|api), started_by and a unified status (idle, active, waiting_on_approval, waiting_on_input, error) to run records so the Work panel and later triggers can attribute runs.",
+      "whyItMatters": "Scheduled agent runs are the most common capability in the category (10 of 12 sources). Users expect \"every Monday, summarise my inbox\" to use tools and to show a result; today the schedule dialog and sweeper exist but the step cannot call a tool and no result is surfaced, so the feature looks finished and does nothing useful.",
+      "referenceBestPractice": {
+        "bestSource": "Hermes (cron jobs as full agent runs with skills, context chaining, multi-platform delivery and an at-most-once ledger)",
+        "others": [
+          "Claude (GitHub-event and API triggers)",
+          "Manus (schedule model with expiry and run target)",
+          "Codex (inbox summary per run)",
+          "Cursor",
+          "DeepSeek",
+          "Antigravity",
+          "ChatGPT, Claude.ai, Manus web"
+        ],
+        "prevalence": "10 of 12 sources (table-stakes); origin and status attribution 4 of 12",
+        "mechanism": "Schedule{rrule|cron, tz, prompt, model, skills, autonomy_cap, run_target new_thread|same_thread, expiry}. A sweeper claims each slot at most once with catch-up windows; each slot starts a normal budgeted Do run; the result summary lands in an inbox with read state and a notification; incidents and quota holds are recorded. ThreadStatus{idle|active{waiting_on_approval, waiting_on_input}|error} and a turn origin make runs attributable."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/grpc.rs:249-252 and 505-528 (scheduled step: system prompt says do not call tools, model verevon-balance, max_tokens 1024, tool_choice none)",
+          "apps/Model Plane/go/services/orchestrator-core/cmd/activities/activities.go:78-97 (ExecuteScheduledStepActivity calls ExecutionCore ExecuteScheduledStep)",
+          "apps/Model Plane/go/services/capability-core/cmd/main.go:316-326 and 383-400 (cron sweeper wiring); apps/Model Plane/go/services/capability-core/internal/cron",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx:56 and src/shared/api/schedule-from-chat.ts:21-65 (schedule from chat)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:169-273 and src/features/chat/components/ChatLiveRunPanel.tsx:196 (existing run status surfaces to extend)"
+        ],
+        "gap": "Cron sweeper, Temporal supervision and the schedule UI exist, but each step is one bounded, tool-less completion; the owner ruling of 2026-09-28 makes scheduled runs draft-only; no result delivery ('Se resultater') is wired; runs carry no origin or unified status."
+      },
+      "approach": "Model Plane plus Application Plane notifications. Change ExecuteScheduledStep (or the activity) to start a RunAgent with a schedule-bound autonomy rung capped at draft-only, a budget and the schedule's saved context (R-t3-04-01); store a result summary row and publish to notification-core; add an inbox view in the Frontend; add origin and started_by columns to session-core runs and a status enum on thread lists. Keep authority re-checked per run through the Control reauthorizer and never store ZDR schedule outputs.",
+      "effort": "L",
+      "dependencies": [
+        "R-t3-04-01 context seeding",
+        "R-t3-04-02 durable continuation (so a scheduled run can pause for approval)",
+        "owner ruling on scheduled effects (draft-only until revisited)",
+        "notification-core delivery"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "Unattended effects must stay draft-only until the owner ruling changes; schedule-time grants must expire with the schedule; cost control for runaway schedules; a fixed schedule in a ZDR org must not retain run content.",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-046",
+        "C-t3-04-060"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 19,
+        "DOC": 7,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-06",
+      "title": "Agent definitions, builder and persistent named agents behind the Agents pages",
+      "summary": "Introduce a versioned agent definition record (name, instructions, tool allowlist bound to capability ids, model policy, autonomy cap, schedules and triggers, owner and Space scope) stored in the Model Plane capability registry, and use it three ways: selectable roles for subagent.task, a Frontend builder with a sandbox preview run, publish and an activity log, and a persistent named agent, which is the definition plus a permanent main thread in session-core and agent-scoped memory to which goals, schedules and later channel messages attach. Sequence it as definitions first, builder second, persistent identity third; keep run origin channel-aware now and build email or Slack entry points only after the Channel Plane exists.",
+      "whyItMatters": "The Agents pages are in scope for the product but are design previews today, so users cannot configure or keep an agent. A saved, versioned agent that owns a thread, memory and automations is where Manus, ChatGPT and Hermes are heading and is a clear differentiator over plain chat.",
+      "referenceBestPractice": {
+        "bestSource": "Manus (named persistent agents with their own email, phone, computer and skills) for identity; Cursor (agent definition files with tools, model and permission mode) for roles; ChatGPT Workspace Agents (versioned spec, preview, deployment with activity log) for the builder",
+        "others": [
+          "Codex (validated roles, hidden persistent assistant)",
+          "Hermes (bots built from profiles)",
+          "Perplexity (Computer from forwarded email, Slack-bound projects)",
+          "web Claude"
+        ],
+        "prevalence": "persistent named agents 5 of 12 (common); custom roles 2 of 12; builder and deployment 2 of 12; non-app entry points 4 of 12",
+        "mechanism": "Agent{id, owner, persona, instructions, memory scope, skills, channels[], autonomy_cap, version}. A permanent main thread per agent; inbound channel messages start runs on that thread; schedules and goals attach to the agent. The builder produces a versioned spec {instructions, model, connectors with per-action ask policy, triggers}; preview runs in a sandbox thread; publish creates a deployment with a run activity log. The delegation tool lists definitions as roles while the capability gate still applies per call."
+      },
+      "verevonToday": {
+        "status": "stub",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/shared/actions/preset-agents.ts:11-85 (four presets, action sets empty until owner adapters exist, planMode always true)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentsPage.tsx:47-134 and DesignPreviewBadge.tsx:1 (role blueprints labelled design previews)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentInstallationsPage.tsx:5 (read-only Space agent installations)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:168-330 and 784-840 (goal launcher, timeline, approvals, proof bundle: a reusable run view)",
+          "apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go:1-20 (webhook channel adapter; the Channel Plane is docs-only)"
+        ],
+        "gap": "Preset agents have empty action sets, installations are read-only, workflow builder and chatbot studio are design previews, and there is no saved versioned agent spec, no persistent agent identity with its own thread, memory or channels, and no role selection in the delegation tool."
+      },
+      "approach": "Model Plane registry plus Frontend. Store definitions in capability-core with ownership and versions; bind allowlists to capability ids so the gate still applies per call; let subagent.task accept a role id; reuse the Agent Run Console for preview and activity. A persistent agent is a Space agent installation plus a main thread in session-core with memory scoped to the agent (coordinate with category 08 named persistent agents with their own memory). The agent acts only with the owner's delegated authority, never wider; shared definitions export the spec, not grants.",
+      "effort": "XL",
+      "dependencies": [
+        "owner adapters for preset actions (so action sets are non-empty)",
+        "capability registry and Space agent installations",
+        "memory scopes (category 08)",
+        "R-t3-04-04 goals and R-t3-04-05 schedules for attachment",
+        "Channel Plane for entry points (future)"
+      ],
+      "planeOwner": "Model Plane (registry, threads) with Frontend Plane (builder)",
+      "risks": "Identity and ACL: an agent must act with the owner's delegated authority and a role must never grant more than the owner-plane ACL (Space access never widens); connector write actions default to always-ask; inbound channel content is untrusted and could spoof identity.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-035",
+        "C-t3-04-052",
+        "C-t3-04-051",
+        "C-t3-04-053"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 9,
+        "DOC": 6,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-07",
+      "title": "Event and webhook triggered automations with wake gates, blueprints and consent-first suggestions, fed by Ingestion",
+      "summary": "Add trigger records in capability-core {source provider and event, structured filter plus an optional LLM predicate, prompt template, run_target, revision, dry-run} that subscribe to normalized provider events published by Ingestion (integration-corev2 to NATS) and start budgeted Do runs through the scheduled-run start path; the Model Plane never polls providers. Add per-automation state (notepad key-value, last_source_hash, cursor) and a pre-run probe executed by Quarry or integration-corev2: an unchanged hash means a no-op with no model call, and the agent may end with a silent sentinel. Layer authoring on top: blueprint templates with typed slots, a failed-run explain action (a read-only run over the run log), shareable definitions without grants, and capped, dismissible suggestions accepted with one tap under user authority.",
+      "whyItMatters": "Event-driven agents (draft a reply on new mail, triage a ticket) are where Manus, ChatGPT Tasks and Perplexity are heading, and wake gates make monitoring automations cheap and non-spammy, which matters for the Verevon Balance cost model. It depends on scheduled runs working first, so it is sequenced after the priority set.",
+      "referenceBestPractice": {
+        "bestSource": "Cursor (automations service with event triggers, LLM filtering and dry runs) for triggers; Hermes (source-hash wake gate, silent sentinel, per-job notepad, blueprints, suggestions with a dedup latch and cap of 5) for state and authoring",
+        "others": [
+          "Manus (trigger catalog with revisions, dry runs and execution history; AI triage of failed runs)",
+          "DeepSeek",
+          "web ChatGPT (task definitions shared as independent copies)",
+          "Codex (inbox summary), Perplexity"
+        ],
+        "prevalence": "event triggers 5 of 12 (common); wake gates 3 of 12; authoring and sharing 3 of 12; proactive suggestions 3 of 12",
+        "mechanism": "Trigger{source, filter, prompt template, run_target, revision}; provider webhooks normalized by the integration layer into events; dedupe and rate-limit; each match starts a budgeted run with an execution log and dry-run. Wake gate: hash the monitor source, compare with the last triggering hash, skip the model when unchanged. Suggestion{source, spec, dedup_key, status pending|accepted|dismissed} generated post-turn; accept uses the normal create path under user authority."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Model Plane/go/services/capability-core/internal/watch (S4.3 Watch primitive, cursor-bearing, authority re-checked at disclosure; only a process-output adapter)",
+          "apps/Model Plane/go/services/bridge-core/internal/channel/adapter.go:1-20 (webhook channel adapter, not a trigger system)",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx:56 and src/shared/api/schedule-from-chat.ts:21-65 ('Schedule this' dialog and /schedule only: no blueprints, triage or sharing)"
+        ],
+        "gap": "No event trigger, filter, run history for triggers, per-automation state or probe, blueprint, failure triage, sharing or suggestion surface; scheduled runs are a single stateless call."
+      },
+      "approach": "Model Plane with Ingestion events. Ingestion Plane (integration-corev2) emits normalized provider events to NATS; capability-core trigger records subscribe and start Do runs with origin=trigger; probes run via Quarry or integration-corev2 (the Model proposes, Quarry executes); notepad and probe fields live on capability-core schedules; Frontend blueprints and the explain action reuse the schedule dialog and a read-only Ask run; suggestions are written by a post-turn pass to session-core as pending rows.",
+      "effort": "L",
+      "dependencies": [
+        "R-t3-04-05 scheduled runs as Do runs",
+        "R-t3-04-02 durable continuation",
+        "integration-corev2 webhook normalisation",
+        "Watch sweeper reauthorizer"
+      ],
+      "planeOwner": "Model Plane (capability-core) with Ingestion Plane for events and probes",
+      "risks": "Cross-plane ownership: provider events and probes belong to Ingestion; event floods need dedupe and rate limits; inbound mail or ticket content is untrusted data and a prompt-injection path; shared blueprints must not carry the author's grants; suggestions must be capped and dismissible.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-047",
+        "C-t3-04-048",
+        "C-t3-04-049",
+        "C-t3-04-050"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 12,
+        "DOC": 8,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-08",
+      "title": "Loop guard, durable org hooks and universal tool-output handles in both loops",
+      "summary": "(1) A LoopGuard in mp-contracts used by both loops: a rolling window of (tool, args hash, result class) with an escalating reminder at 3, 5 and 8 identical failing calls, a stop with a typed loop_detected end reason, a repetition detector for streamed text (code-fence aware) and bounded retry on empty or length-stopped responses. (2) Persist org and Space hook rules in capability-core and pass hook_context into Do runs, which today receive none; handlers stay declarative rules plus HTTP webhooks (no shell) and hooks may only narrow authority. (3) Generalise ToolResultHandle from MCP results to every built-in tool result above a token threshold (fetch_url, knowledge, provider actions), run-scoped and never stored on ZDR turns.",
+      "whyItMatters": "A stuck run that keeps repeating a failing call wastes tokens and is exactly what users describe as \"it keeps doing the same thing\". Hooks let org admins enforce policy (for example block mail outside the domain) without code changes, and result handles protect the context window in Do runs that read large documents. All three are small wiring jobs on existing primitives.",
+      "referenceBestPractice": {
+        "bestSource": "Hermes (side-effect-free loop controller for repeat, cycle and no-progress detection with stop gates) for the guard; Cursor (generic and tool-specific pre/post hooks) for hooks; DeepSeek (private spill files with opaque locators inside a shared token budget) for output handles",
+        "others": [
+          "Cursor (streamed-text repetition detection)",
+          "DeepSeek (reminders at 3, 5 and 8 repeats)",
+          "Antigravity (hook JSON contract with step injection)",
+          "Codex (command, MCP-tool and agent hook handlers)",
+          "Hermes (per-turn output budget)"
+        ],
+        "prevalence": "loop hygiene 3 of 12 (differentiator); hooks 3 of 12 (differentiator); output spill 3 of 12 (differentiator)",
+        "mechanism": "Guard: rolling window of (tool, args hash, result class); on N identical failing calls or no new information inject an escalating reminder, then stop with a loop reason. Hooks: registry {event, matcher, handler(command|http|prompt), timeout}; pre-hooks return allow|deny|ask plus optional rewritten input and context; durable store with per-org admin rules. Spill: if output exceeds max_inline_tokens store the full text as a run-scoped blob and return {preview_head, marker, preview_tail, handle, size}; a read tool fetches ranges; blobs expire with the run."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:214 (only a truncated final tool call in a length-stopped message is refused)",
+          "grep of apps/Model Plane/rust/services/*.rs for LoopGuard, loop_guard, no_progress, repeated_call: no matches",
+          "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs:1-18 and 113 (hook engine with allow/deny/ask and glob match)",
+          "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:2003-2040 (HookRegistry is in-memory in the gateway) and apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:418-428 (hook_context sent only on browser runs via ExecuteStepRequest, apps/Model Plane/proto/model_plane/v1/execution.proto:285; RunAgentRequest has no hook field)",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs:1-27 (handles and result_query exist for MCP results)"
+        ],
+        "gap": "No repetition, cycle or no-progress detection in either loop. The hook engine is real but its rules are in memory, are not passed to Do runs, have no UI or durable store and cannot rewrite input. Result handles exist only for large MCP results, not for built-in tools."
+      },
+      "approach": "Model Plane. Add LoopGuard to mp-contracts and call it from model-gateway tool_loop.rs and execution-core agent.rs, emitting a typed loop_detected terminal reason. Persist hook rules in capability-core per org and Space, add a hook_context field to RunAgentRequest, and add a settings UI. Generalise ToolResultHandle to every tool result above a threshold in both loops with a ZDR bypass (no handle persisted).",
+      "effort": "M",
+      "dependencies": [
+        "capability-core store for hook rules",
+        "mp-contracts"
+      ],
+      "planeOwner": "Model Plane",
+      "risks": "False positives on legitimate polling (allow-list idempotent poll tools and require identical result class); hooks must never widen authority; ZDR turns must not persist handles; hook webhooks are an egress path and need allow-listing.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": "A loop-family stall detector is a proposal in MODEL_PLANE_IMPROVEMENTS section 21 per the cluster baseline (file not re-read); the other two parts are not planned."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-010",
+        "C-t3-04-016",
+        "C-t3-04-014"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 18,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-09",
+      "title": "Context architecture: prompt-tier contract with an append-only tail, cache-hit metric, todo recitation, host-activity block, compaction transactions and a context ring",
+      "summary": "Define a stable, context and volatile prompt-tier contract in mp-contracts for both loops and move volatile injections (time, recall, skills, approved plan) to an append-only tail, then measure prompt-cache hit ratio per route (never measured today). Use the tail for model-managed todo recitation from the existing orchestration_store and for a host-activity block that tells the agent what the user edited in artifacts or Space documents since the last turn, tag-escaped and framed as information, not instructions. Harden compaction with bracketed start/commit rows, an anti-thrash cooldown and optional background pre-summarisation, and wire a context ring plus /compact in the composer to the existing context inspector.",
+      "whyItMatters": "Prompt caching is a direct cost and latency lever for the Verevon Balance cost model and is invisible to users. Todo recitation keeps long Do runs on track after compaction, the host-activity block stops the agent overwriting user edits (and doubles as a prompt-injection framing pattern), and the context ring delivers the transparency the DeepSeek reference is known for with mostly existing parts.",
+      "referenceBestPractice": {
+        "bestSource": "Hermes (prefix-cache stability as an invariant, wire-only recall replayed byte-identically, todo store re-injected after compression); DeepSeek (runtime facts appended only on change; compaction as a bracketed transaction; /compact reporting tokens saved)",
+        "others": [
+          "Cursor (background summarisation persisted or discarded at turn end)",
+          "Manus (published KV-cache lessons, todo recitation)",
+          "Claude Desktop (context ring with auto-compact point; host-activity ledger framed as information)",
+          "Antigravity (truncation reasons per call)",
+          "Codex"
+        ],
+        "prevalence": "cache-stable prompts 6 of 12 (common); todo recitation 4 of 12; compaction robustness 3 of 12; context transparency 3 of 12; host-activity ledger 2 of 12",
+        "mechanism": "Order the prompt as stable, context, volatile tiers; never rewrite earlier messages; append runtime snapshots as sourced messages only on change; attach per-turn recall as a wire-only sidecar; place provider cache breakpoints at tier boundaries; measure cache-hit ratio per route. Todo: todo_write replaces the whole list with a monotonic revision; after compaction or every N rounds append it as an ephemeral tail block. Compaction: start record, summarise, revalidate the span, reject non-shrinking summaries, commit; after repeated failures a cooldown ladder and a deterministic truncation fallback with an honest marker."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:173-281 (cache_control breakpoints exist)",
+          "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs:1-8 and apps/Model Plane/proto/model_plane/v1/orchestration.proto:16-47 (durable plans and todos with tenant CAS)",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1008-1160 and 1271-1400 (Work-panel todo view)",
+          "apps/Model Plane/rust/services/model-gateway/src/compaction.rs:1-20, 129 and 1251 (tiered compaction; failed summary degrades to truncation with an honest marker)",
+          "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7919 (context inspector GET /v1/threads/:id/context with per-segment token estimates)"
+        ],
+        "gap": "Anthropic cache breakpoints exist, but cache hits were never measured on any route, no invariant governs mid-conversation injection, model-managed todo recitation is planned but not built, no host-activity block was found (status unknown), compaction has no recorded transaction, cooldown or background pre-computation, and no evidence was found that the composer uses /compact or shows a context ring."
+      },
+      "approach": "Model Plane plus a small Frontend change. Add a prompt-tier contract and a per-route cache-hit metric (inference-core usage reporting); move volatile injections to an append-only tail; feed a todo recitation block from orchestration_store in both loops (keep the prefix byte-stable); project Application Plane change events into a per-thread ledger the gateway drains per turn into a host-activity block; persist compaction start/commit rows and a cooldown counter in session-core; in the composer wire /compact to CompactNow and show a context ring from the inspector data. Respect ZDR (provider caching may be disallowed on ZDR routes).",
+      "effort": "M",
+      "dependencies": [
+        "inference-core usage reporting",
+        "R-t3-04-01 (Do loop must assemble context before tiers apply)",
+        "Application Plane change projections (status unknown)",
+        "composer slash-command wiring"
+      ],
+      "planeOwner": "Model Plane (with a small Frontend Plane change for the context ring)",
+      "risks": "ZDR routes may not allow provider caching, so caching must follow ZDR propagation; any tail injection must not break the cached prefix; host-activity events cross plane boundaries and must respect Space ACLs.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "Model-managed todo recitation is described as planned in CHAT_PARITY_AUDIT_2026-10-01.md:110 per the cluster baseline (file not re-read); the rest is not planned."
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-04-017",
+        "C-t3-04-025",
+        "C-t3-04-019",
+        "C-t3-04-021",
+        "C-t3-04-023"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 18,
+        "DOC": 6,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-10",
+      "title": "Coordinator-mode orchestration on Temporal with typed child results, a fleet panel and gated fan-out",
+      "summary": "Replace the in-memory coordinator and team-worker stub with a coordinator workflow in orchestrator-core (Temporal WideResearch and DeepTask workflows already exist but chat and Do do not use them). The coordinator run has no effect tools, writes a plan, spawns workers through the existing subagent.task (bounded concurrency, shared atomic budget), collects typed results ({status, summary, evidence, next_steps, blocker} through an optional output_schema or structured_output tool), runs a verifier pass and synthesises. Show a fan-out and cost confirmation card above a threshold, add a fleet section to the Work panel fed by child-run events, and add the missing gateway route for /v1/fleets. Later phases: best-of-N fan-out across models with a synthesis step, and model-authored deterministic workflow scripts compiled to Temporal.",
+      "whyItMatters": "Research-heavy and wide tasks are where Manus Wide Research and Perplexity Computer beat single-agent chat, and Verevon already has the hard parts (durable subagent lineage, atomic budgets, Temporal workflows). Without typed child results and a visible, stoppable fleet, parallel work is both invisible and unusable by code that must branch on outcomes.",
+      "referenceBestPractice": {
+        "bestSource": "Cursor (Project mode: non-editing orchestrator with phase gates and a single-writer progress record); Manus (deterministic Workflow Composer with confirmation above about 20 agent calls); T3 Code (task rows, fleet banner with Stop) for the UI",
+        "others": [
+          "Antigravity (pipelines, swarms, Battle Mode best-of-N)",
+          "Perplexity Computer (closest web benchmark)",
+          "Claude Desktop (task backlog)",
+          "DeepSeek (structured_output child tool with a guard)",
+          "Hermes"
+        ],
+        "prevalence": "orchestration patterns 6 of 12 (common); fleet panel 4 of 12; model-authored workflows 3 of 12; best-of-N 3 of 12; structured child results 2 of 12",
+        "mechanism": "A coordinator run with no effect tools writes a plan, spawns a worker per item with bounded concurrency, collects structured results, runs a verifier pass and synthesises; progress lives in one single-writer record and a fresh successor coordinator per milestone avoids context rot. Child tasks may declare output_schema; the child concludes by calling structured_output. The UI maps run, child-run and process events to task rows with a banner (3 agents working, Stop all)."
+      },
+      "verevonToday": {
+        "status": "stub",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs:1-25 and 401 (TeamWorkerStore is in-memory by design; coordinator mode is a gRPC stub)",
+          "apps/Model Plane/proto/model_plane/v1/gateway.proto:83-91",
+          "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go:98-160 and cmd/main.go:146-175 (WideResearch and DeepTask workflows registered but not used by chat or Do)",
+          "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:1-8 and 29 (durable subagent lineage, atomic budget, leaf restriction: keep)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:9-35 (calls GET /v1/fleets; a grep of apps/Frontend Plane/verevonv3/apps/gateway/src found no matching route)",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx:1041 (lineage fetched only for the plan panel)"
+        ],
+        "gap": "Coordinator and team mode is an in-memory stub; Temporal orchestration workflows exist but are not wired to chat or Do; the typed subagent handoff report is deferred by decision; the fleet console calls a route that does not exist; chat shows no fleet panel; no best-of-N or model-authored workflow path."
+      },
+      "approach": "Model Plane (orchestrator-core, execution-core subagent, model-gateway) plus Frontend. Build the coordinator as a Temporal workflow reusing subagent.task for workers; add output_schema validated with the existing mp-contracts tool_arguments machinery; expose it as a Do-mode option behind a fan-out and cost confirmation; add the /v1/fleets gateway route and a Work-panel fleet section fed by child-run events. Treat best-of-N and model-authored workflows as follow-ups that need an owner decision on whether model-authored fan-out is wanted.",
+      "effort": "L",
+      "dependencies": [
+        "R-t3-04-02 durable continuation",
+        "durable grants",
+        "cost reservation and fan-out confirmation",
+        "typed subagent results",
+        "owner decision on model-authored fan-out"
+      ],
+      "planeOwner": "Model Plane (orchestrator-core) with Frontend Plane for the fleet panel",
+      "risks": "Cost blow-up (confirmation above a call-count threshold, shared budget); non-determinism if workflow scripts are model-authored; delegated authority must never widen across children; coordinator effect tools must stay empty.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "The typed subagent handoff report is deferred by decision until code must branch on outcomes (cluster C-t3-04-036 baseline, status planned); the model-authored workflow question is an open owner decision."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t3-04-040",
+        "C-t3-04-036",
+        "C-t3-04-045",
+        "C-t3-04-041",
+        "C-t3-04-043"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 23,
+        "DOC": 6,
+        "INF": 1
+      }
+    },
+    {
+      "id": "R-t3-04-11",
+      "title": "Tool-execution efficiency: code mode through a gated sandbox bridge, background jobs with await and notify, and early dispatch of read-only calls",
+      "summary": "Let code_interpreter (sandbox-manager) call Verevon tools as async functions through a bridge into execution-core, so every call still passes capability-core EvaluatePolicy, with per-cell limits (native calls, output bytes, timeout, heap) and state that persists across cells. Add await(handle, timeout) and output-pattern watches to the process_* tools through the Watch primitive's process adapter so a run wakes on completion. Optionally dispatch completed read-only tool calls while the model is still streaming, keeping effectful calls behind the gate and joining results before the next round.",
+      "whyItMatters": "Data-heavy Do tasks (read several documents, filter, aggregate, then act) take many model rounds and tokens, and Verevon's default budget is 4 rounds; code mode compresses that into one cell. Background jobs with notification are needed for long data jobs, and early dispatch trims latency on multi-tool rounds. Code mode is already a planned backlog item, so this is sequencing rather than discovery.",
+      "referenceBestPractice": {
+        "bestSource": "Codex (model-written JS in a fresh V8 isolate with tools as async functions) and Manus (per-cell budgets and resumable state) for code mode; Cursor (background commands with output-pattern notifications; tee on the model stream dispatching completed tool calls) for jobs and early dispatch",
+        "others": [
+          "Hermes (programmatic tool calling)",
+          "DeepSeek (jobs scoped to the starting agent with a wake budget; PTC routes sub-calls through the policy pipeline)",
+          "Antigravity"
+        ],
+        "prevalence": "code mode 3 of 12 (differentiator); background jobs 4 of 12 (common); streaming dispatch 1 of 12 (unique to Cursor)",
+        "mechanism": "exec(source) runs in an isolate with no filesystem or network; tools are injected as async functions that go back through the normal capability gate; per-cell limits {native calls, output bytes, timeout, heap}. process_start returns a handle after block_until_ms; a registry keeps a rolling buffer; await(handle, timeout) and notify_on_output{pattern, debounce} wake the agent; jobs are owned by the starting run and cancelled with it. Streaming dispatch tees the provider stream and dispatches read-only calls on tool-call-complete."
+      },
+      "verevonToday": {
+        "status": "planned",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:43 (code mode listed as BKL #11, not built; code_interpreter cannot call Verevon tools)",
+          "apps/Model Plane/rust/services/execution-core/src/process_tools.rs:1-8 and process_host.rs:1-8 (process_* tools for Space-scoped runs under a space:processes lease, bwrap isolation)",
+          "apps/Model Plane/go/services/capability-core/cmd/main.go:298-376 and internal/watch/watch.go (Watch primitive, process adapter)",
+          "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:1-12 and 52-67 (tool phase streams; early dispatch not confirmed, join_all per round)"
+        ],
+        "gap": "Code mode is not built. Process tools exist only for Space-scoped runs and have no await or output-pattern wake. Whether read-only tool calls are dispatched during streaming is unverified; they appear to be dispatched after the response completes."
+      },
+      "approach": "Model Plane. Add a tool bridge in sandbox-manager that forwards each call to execution-core ExecuteStep so it passes EvaluatePolicy and the autonomy ladder like any other call; enforce per-cell budgets; add await and notify-on-output through the Watch process adapter; for early dispatch, tee the provider stream in model-gateway tool_loop.rs and run only read-only calls early. Coordinate with category 05, which also lists code mode.",
+      "effort": "L",
+      "dependencies": [
+        "sandbox tool bridge in sandbox-manager",
+        "capability gate (EvaluatePolicy) routing",
+        "Watch sweeper reauthorizer",
+        "category 05 code-mode item"
+      ],
+      "planeOwner": "Model Plane (sandbox-manager, execution-core, capability-core)",
+      "risks": "Gate bypass if the bridge is not routed through execution-core; runaway processes and quotas; early-dispatched calls from a response that is later cancelled must be read-only and idempotent.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "BKL #11 in CHAT_PARITY_AUDIT_2026-10-01.md:43 (code mode), per the cluster evidence"
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-04-042",
+        "C-t3-04-044",
+        "C-t3-04-012"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 11,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t3-04-12",
+      "title": "Run admission controls: credit-aware pause and resume, an org-level agent pause switch and clamped per-turn overrides",
+      "summary": "Add a Control-plane org flag (\"agents paused\") checked at run, schedule and trigger admission and again at each continuation, as an incident-response kill switch (drain.rs only handles redeploys today). Add a paused_for_credit run status when the cost reservation fails mid-run (persist state, resume on a billing event, and show queue position or a cheaper tier at admission). Add a typed per-turn override envelope (model, effort, approval posture) validated and clamped server-side against Control-plane entitlements.",
+      "whyItMatters": "Long agent runs, goals and schedules make admission control matter: enterprise admins need a fast stop, and a run should pause rather than die at a credit boundary. Per-turn overrides let users move a hard step to a stronger model without losing context. All three are cheap once runs are resumable.",
+      "referenceBestPractice": {
+        "bestSource": "Hermes (install-wide pause through a fail-safe sentinel) for the kill switch; Perplexity (pauses rather than cancels on credit exhaustion) for credit pause; Codex (typed 27-field TurnStartParams) for overrides",
+        "others": [
+          "Manus (per-tier wait estimates, idleness reporting and maintenance fence)",
+          "Claude Desktop",
+          "web Manus"
+        ],
+        "prevalence": "emergency stop 2 of 12; credit-aware admission 2 of 12 (differentiator); per-turn overrides 4 of 12 (common)",
+        "mechanism": "A global or org pause flag is checked at admission for runs, schedules and triggers. Before each round check the cost reservation; on shortfall set paused_for_credit and persist state, and a billing event resumes the run. A typed TurnStart{model, effort, approval_policy, ...} is validated server-side and clamped per surface and plan."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20 and 103 (graceful drain on redeploy with /readyz 503 and in-flight completion)",
+          "No baseline record for org-level pause, credit-aware pause or a typed per-turn override envelope; cost reservation (proposal section 18) is listed as not built per the cluster; normalize.rs not re-read"
+        ],
+        "gap": "Drain on redeploy exists. No org-level or global pause of new agent work was found, no paused_for_credit state, and whether Do runs accept a typed per-turn model or effort override clamped by entitlements was not verified."
+      },
+      "approach": "Control Plane org setting plus Model Plane admission. Gateway and capability-core read the org flag at run, schedule and trigger admission; cost-core reservation failure transitions the run to paused_for_credit via the continuation machinery; extend the invoke contract with typed per-turn overrides clamped by Control-plane entitlements.",
+      "effort": "M",
+      "dependencies": [
+        "R-t3-04-02 resumable run state",
+        "Control-plane org settings and entitlements",
+        "cost reservation and commit in cost-core"
+      ],
+      "planeOwner": "Control Plane (flag, entitlements) with Model Plane (admission)",
+      "risks": "Billing correctness around pause and resume; entitlement bypass if overrides are not clamped server-side; the policy for an unreadable pause flag (fail open or fail closed) must be an explicit, documented choice.",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "low",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t3-04-067",
+        "C-t3-04-009",
+        "C-t3-04-028"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 3,
+        "INF": 0
+      }
+    }
+  ],
+  "dropped": [
+    {
+      "cluster": "C-t3-04-003",
+      "reason": "Duplicate of category 01 item R-t3-01-07 (durable multi-replica run controls: shared stream, cancel and queue registries plus an editable queue); the Model Plane registries move there. The tool-history repair part is covered by R-t3-04-02."
+    },
+    {
+      "cluster": "C-t3-04-015",
+      "reason": "Covered by category 05 (tool search); also blocked until the capability gate stops denying mcp__* calls, so it has no effect today. Revisit once MCP invocation works."
+    },
+    {
+      "cluster": "C-t3-04-026",
+      "reason": "Duplicate of category 01 item R-t3-01-11 (selection-to-agent comments on artifacts). The optional notify tool is a small add-on once R-t3-04-03 provides the typed human-request pause."
+    },
+    {
+      "cluster": "C-t3-04-031",
+      "reason": "Covered by category 11 (auto-review classifier, C-t3-11-006); DOC-only evidence here and it touches the authority model, so it belongs with the safety and governance decision."
+    },
+    {
+      "cluster": "C-t3-04-039",
+      "reason": "No baseline record and low confidence; the thread search and recall part is category 01 R-t3-01-03, and cross-thread send or stop tools are niche."
+    },
+    {
+      "cluster": "C-t3-04-058",
+      "reason": "Covered by category 01 R-t3-01-04 (server-side artifact versions) and R-t3-01-09 (rewind); the Data Plane owns document revisions and the Model Plane only records references (OD19 scope), so nothing separate is needed here."
+    },
+    {
+      "cluster": "C-t3-04-059",
+      "reason": "Duplicate of category 01 R-t3-01-02 (server-owned message tree with durable fork and lineage) and R-t3-01-09 (rewind and side chat). Runtime side constraints (effectful turns non-rewindable, ZDR threads not forkable) are recorded in those items."
+    },
+    {
+      "cluster": "C-t3-04-063",
+      "reason": "Implementation convenience with no baseline record; belongs to the Frontend typed-action work (src/shared/actions) rather than the agent runtime."
+    },
+    {
+      "cluster": "C-t3-04-066",
+      "reason": "Category 08 owns the learning pipeline (self-improvement loop C-t3-08-017 and extraction C-t3-08-002); a post-turn sessionreview consumer already exists in capability-core/internal/sessionreview. Runtime constraints to pass on: tool allow-list for the review pass, cancel on new user activity, never on ZDR turns."
+    },
+    {
+      "cluster": "C-t3-04-070",
+      "reason": "Duplicate of category 10 replay regression tests (C-t3-10-023); test infrastructure rather than a user-visible runtime capability."
+    },
+    {
+      "cluster": "C-t3-04-071",
+      "reason": "Internal engineering practice; trajectory persistence belongs to category 10 (trajectory ledger C-t3-10-001) and A/B running to eval-lab-py."
+    },
+    {
+      "cluster": "C-t3-04-076",
+      "reason": "Covered by category 13 (one runtime many surfaces, C-t3-13-001); a public headless runs API is not on the chat and agent page critical path."
+    }
+  ],
+  "strengthsToKeep": [
+    "Server-side plan-mode enforcement at dispatch regardless of posture (risky calls refused in the loop, plan_mode and autonomy_rung on RunAgentRequest), stronger than the prompt-only plan modes of Claude Code, Cursor and DeepSeek: apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1645,1806 and apps/Model Plane/proto/model_plane/v1/execution.proto:143-154.",
+    "Capability gate on every dispatch: capability-core EvaluatePolicy, Ed25519-signed evidence for Allow, unknown tools fail closed, and an autonomy ladder checked per call (cleaner than many agent modes): apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476 and apps/Model Plane/rust/crates/mp-contracts/src/autonomy.rs:59.",
+    "Deterministic postcondition verification of provider writes with a proof bundle, stronger than prompt-only verification playbooks: apps/Model Plane/rust/services/execution-core/src/postcondition.rs:1-10 and runtime_loop/post_mutation.rs:1-8.",
+    "Tool argument pipeline: grounding gate that refuses fabricated user-only arguments, schema validation and MCP argument repair, beyond the reference sources: apps/Model Plane/rust/crates/mp-contracts/src/tool_arguments.rs and apps/Model Plane/rust/services/model-gateway/src/argument_repair.rs:71.",
+    "Tiered context compaction with need-driven reattach and a recall eval in CI (more than most references measure): apps/Model Plane/rust/services/model-gateway/src/compaction.rs, tool_loop.rs:3253-3319 and apps/Model Plane/python/eval-lab-py/cases/compaction/13_early_fact_survives_head_summary.yaml.",
+    "Durable subagent lineage with consent-gated read-back, cold resume, leaf restriction and an atomic shared budget: apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:1-63 and runtime_loop/subagent_results.rs:1-10.",
+    "Run records and delivery: CI-checked typed SSE taxonomy, terminalization receipts with finalization_pending instead of fake success, drain on redeploy, and server-side runs that survive the client closing: apps/Model Plane/rust/services/session-core/src/terminalization.rs:1-8, apps/Model Plane/rust/services/model-gateway/src/drain.rs:1-20 and apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:169-273.",
+    "Server-resolved run budget that is never taken from the client, plus a concluding round: apps/Model Plane/rust/services/model-gateway/src/run_budget.rs:1-60 and apps/Model Plane/rust/services/execution-core/src/run_budget.rs:15.",
+    "Exact-effect approval descriptors with encrypted continuation, idempotent provider calls and fail-closed handling of unsupported tools: a safer resume primitive than most references have: apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-40.",
+    "Provider fallback chain with bounded retries, rate-limit waiting and fail-closed privacy-tier and residency gates (no reference does more than warn): apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:75 and 278."
+  ]
+}

@@ -1,0 +1,98 @@
+{
+ "t1": {
+  "items": 96,
+  "originalTier": {
+   "priority": 24,
+   "recommended": 45,
+   "nice-to-have": 27
+  },
+  "finalTier": {
+   "priority": 23,
+   "recommended": 42,
+   "nice-to-have": 31
+  },
+  "verevonStatus": {
+   "partial": 68,
+   "absent": 21,
+   "stub": 4,
+   "planned": 3
+  },
+  "verdict": {
+   "keep": 9,
+   "reword": 78,
+   "demote": 9
+  },
+  "refcheck": {
+   "partial": 22,
+   "confirmed": 2
+  },
+  "stillNeedsVerification": 0,
+  "lowConfidence": 0,
+  "effortRevised": 29,
+  "prevalenceWrong": 17
+ },
+ "t2": {
+  "items": 77,
+  "originalTier": {
+   "priority": 24,
+   "recommended": 41,
+   "nice-to-have": 12
+  },
+  "finalTier": {
+   "priority": 24,
+   "recommended": 35,
+   "nice-to-have": 18
+  },
+  "verevonStatus": {
+   "partial": 61,
+   "stub": 3,
+   "absent": 11,
+   "planned": 2
+  },
+  "verdict": {
+   "keep": 8,
+   "reword": 61,
+   "demote": 8
+  },
+  "refcheck": {
+   "partial": 22,
+   "confirmed": 2
+  },
+  "stillNeedsVerification": 0,
+  "lowConfidence": 0,
+  "effortRevised": 33,
+  "prevalenceWrong": 14
+ },
+ "t3": {
+  "items": 98,
+  "originalTier": {
+   "priority": 23,
+   "recommended": 45,
+   "nice-to-have": 30
+  },
+  "finalTier": {
+   "priority": 22,
+   "recommended": 46,
+   "nice-to-have": 30
+  },
+  "verevonStatus": {
+   "partial": 78,
+   "absent": 16,
+   "stub": 2,
+   "planned": 2
+  },
+  "verdict": {
+   "keep": 13,
+   "reword": 81,
+   "demote": 4
+  },
+  "refcheck": {
+   "partial": 21,
+   "confirmed": 2
+  },
+  "stillNeedsVerification": 0,
+  "lowConfidence": 0,
+  "effortRevised": 40,
+  "prevalenceWrong": 14
+ }
+}

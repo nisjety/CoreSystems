@@ -1,0 +1,1882 @@
+{
+ "category": "Observability & operations",
+ "excluded": [
+  {
+   "id": "aside-agent-control-architecture-012",
+   "reason": "Implementation trivia: aside_proxy.exe is a Chromium versioned-payload launcher with no agent or ops role (REA)."
+  },
+  {
+   "id": "aside-agent-control-architecture-013",
+   "reason": "Implementation trivia: upstream Chromium components (IWA key distribution, MEI preload) with no agent or ops role."
+  }
+ ],
+ "clusters": [
+  {
+   "id": "C-t2-07-001",
+   "name": "Agent- and user-readable run/console logs",
+   "description": "Stream or pull per-run and per-tab logs (console messages, run logs) filtered by level/substring with a limit, for both humans (console UI) and the agent (debugging pages it tests).",
+   "prevalence": {
+    "sourcesWith": [
+     "apify",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "common"
+   },
+   "members": [
+    "apify-platform-088",
+    "codexbrowser-automation-and-safety-126",
+    "codexbrowser-in-app-browser-023"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-023",
+     "codexbrowser-automation-and-safety-126"
+    ],
+    "why": "q4/q3 SRC: a single typed tool call tab.dev.logs({filter,levels,limit}) returning {level,message,timestamp,url} gives the model a cheap pull API instead of always pushing summaries. Apify's run log (q4, DOC) is the better human/API surface (size cap, secret redaction) but is not agent-oriented."
+   },
+   "mechanism": "Driver collects CDP Runtime.consoleAPICalled/Log.entryAdded into a bounded per-tab ring buffer (level, text, ts, source url). Expose GET .../tabs/{id}/console?levels=warn,error&filter=substr&limit=N and a Model Plane read-only tool browser.console that maps to it. Apply a size cap and secret redaction at write time (Apify caps logs at about 10M chars and redacts env vars flagged secret).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-052"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:199",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1784",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1061-1072"
+    ],
+    "gap": "Humans get a DevTools drawer (console/dom/network/vision) and Quarry serves devtools events paged only by after_sequence/limit (SRC agent_routes.rs:1061). There is no level/substring filter and no model-facing pull tool; the model only sees console summaries pushed inside each observation.",
+    "strengths": "The DevTools drawer is already Quarry-owned and ZDR-flagged (DevtoolsEventsData.zdr)."
+   },
+   "benefit": "Lets the agent debug a page it is testing (frontend QA) at bounded token cost without granting arbitrary evaluate.",
+   "approach": "Ingestion Plane: add levels/filter query params to the existing devtools events route. Model Plane: add a read-only browser.console tool in execution-core that calls it through the grant-checked run. ZDR runs stay live-only.",
+   "effort": "S",
+   "dependencies": [
+    "Quarry devtools collectors (shipped)",
+    "execution-core browser tool registry"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Console text can carry prompt injection or secrets; it must pass the same redaction and untrusted-content labelling as observations.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Small and useful for QA-style runs; does not block the product vision.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-002",
+   "name": "Structured logs with privacy-classified fields and native log capture",
+   "description": "A logger API that separates safe fields (ids, counts) from sensitive ones (URLs, errors) so diagnostics can be exported without content, plus capture of logs from native (Rust) modules back into the host logger with request context.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser",
+     "firecrawl"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-024",
+    "firecrawl-engine-and-infra-064"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-024"
+    ],
+    "why": "q5 SRC: every lifecycle log entry is {safe:{...}, sensitive:{...}} with stable prefixes (IAB_LIFECYCLE/IAB_ADOPTION), which makes the ZDR-friendly split structural rather than a convention. Firecrawl's native-log capture (q4) matters only for polyglot hosts."
+   },
+   "mechanism": "A log helper whose signature forces two maps: safe (tenant-free ids, enum outcomes, durations, counts) and sensitive (URL, error text, selectors). Export sinks drop or hash sensitive; local debug sinks keep it; ZDR requests always drop sensitive. In Rust: a tracing Layer that strips fields under a sensitive. prefix unless an env flag allows, and suppresses events inside spans with zdr=true.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [
+     "v-quarry-104"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:1-25"
+    ],
+    "gap": "Quarry emits tracing JSON events with 'explicit low-cardinality fields' by convention (SRC telemetry.rs header comment). No safe/sensitive split or sink-level stripping was found. To check: grep quarry-edge, quarry-runtime and the Go services for url=/error= fields in tracing calls, and whether any Layer filters them.",
+    "strengths": "Low-cardinality field discipline is already documented in telemetry.rs."
+   },
+   "benefit": "Logs can go to shared observability backends without breaking ZDR or leaking customer URLs. This is a prerequisite for SIEM export and support diagnostics.",
+   "approach": "Ingestion Plane first (quarry-edge, quarry-runtime): a shared obs crate with safe/sensitive helpers and a stripping Layer, mirrored in the quarryotel Go package. Then the gateway and execution-core adopt it.",
+   "effort": "M",
+   "dependencies": [
+    "C-t2-07-008 ZDR-aware telemetry"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "The retrofit is broad, and partial adoption gives false confidence. Enforce with a test or lint that no url field is logged outside sensitive.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Cheap insurance for ZDR and enterprise trust; pairs with C-t2-07-008.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-003",
+   "name": "Operational metrics endpoint and persisted per-run statistics",
+   "description": "A Prometheus-style /metrics per process (queues, semaphores, cache, webhooks, event loop) plus per-crawl statistics (counters, durations, retry histogram, status codes, error tracker) persisted with the run.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl",
+     "apify"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "firecrawl-engine-and-infra-063",
+    "apify-platform-091"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-063"
+    ],
+    "why": "q3 SRC but concrete: every worker and the API expose prom-client registries with semaphore active/waiting/wait/hold metrics and one canonical log line per operation with a fixed outcome label. Apify Crawlee Statistics (q4 DOC) is the best per-run stats model (persisted, survives migrations)."
+   },
+   "mechanism": "Install the metrics-exporter-prometheus recorder at startup in quarry-edge and serve /metrics on an internal port. Instrument queue depth, the browser pool (active/idle/launch latency), driver outcome counters by {driver,outcome}, egress broker health, cache hit/miss and webhook delivery. Per run, keep a Statistics struct (finished/failed/retried requests, retry histogram, status-code counts, top error signatures) persisted to the run row and emitted at the end, as Crawlee does in its KV store.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-quarry-103"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:6-14",
+     "apps/Control Plane/observability/prometheus.yml"
+    ],
+    "gap": "Quarry edge has no /metrics and its metrics crates are inert (SRC comment). integration-corev2 serves /metrics and a Control Plane prometheus.yml exists, so the scrape side is ready, but Quarry exports nothing. There is no per-run statistics object beyond receipts and telemetry.",
+    "strengths": "BrowserTelemetry on each observation (startup, latency, renderer CPU/heap, challenge rate) already exists and can seed the metrics."
+   },
+   "benefit": "Without metrics there are no SLOs, capacity planning or alerts for the browser/crawl layer that users and agents depend on.",
+   "approach": "Ingestion Plane: install the recorder in telemetry.rs, add an internal /metrics route (not on the public edge listener) and about 20 low-cardinality series, and add RunStatistics to the run/job record in control. Scrape it from the existing Control Plane Prometheus.",
+   "effort": "S",
+   "dependencies": [
+    "Control Plane observability stack (prometheus.yml)"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Label cardinality (never label hot series by URL or org id) and exposing /metrics publicly.",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "Small effort; unblocks alerting (C-t2-07-006) and honest scoreboard claims. It is the most basic ops gap in Quarry.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-004",
+   "name": "Distributed tracing spans across the scrape/browser pipeline",
+   "description": "OpenTelemetry spans for each pipeline stage and each browser command, with outcome attributes (engine winner, engines attempted, cache state) and durations that exclude time spent waiting for human approval.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "firecrawl-engine-and-infra-065",
+    "codexbrowser-automation-and-safety-069"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-069"
+    ],
+    "why": "q4 SRC: per-command spans carry only url.origin plus snapshot size, and their duration subtracts user-approval wait, so human wait does not pollute agent latency SLOs. Firecrawl (q3) has the richer pipeline attribute vocabulary (engine.winner, engines_attempted, unsupported_features, cache_state)."
+   },
+   "mechanism": "Wrap each /step and driver command in a span browser.<action> with attributes {url.origin, driver, outcome, snapshot.bytes}. Record approval wait as a child span or event and set agent.net_ms = total - wait. For scrape: a scrape.pipeline span with engine.attempted[], engine.winner, cache.state, proxy.used. Propagate W3C traceparent from the gateway through the Model Plane to Quarry.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-104"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:1-25",
+     "apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/quarryotel.go"
+    ],
+    "gap": "OTLP export runs only when OTEL_EXPORTER_OTLP_ENDPOINT is set. There is no evidence of a span vocabulary for driver escalation or of approval-wait exclusion, and no traceparent propagation was found in Quarry (grep: none).",
+    "strengths": "tracing plus tracing-opentelemetry are already wired in Rust, and quarryotel in Go."
+   },
+   "benefit": "End-to-end latency attribution (gateway, then the Model proposing, then Quarry executing) is how Verevon will debug slow or failing agent runs.",
+   "approach": "Ingestion Plane and Model Plane: adopt a shared span/attribute vocabulary, propagate traceparent on gateway -> execution-core -> Quarry calls, and exclude approval wait in execution-core where approvals are decided.",
+   "effort": "M",
+   "dependencies": [
+    "C-t2-07-005 correlation ids",
+    "C-t2-07-008 ZDR sampler"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Spans must not be recorded for ZDR runs until the sampler exists.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "High debugging value, but ZDR-safe sampling must come first.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-005",
+   "name": "Request correlation ids and run origin attribution",
+   "description": "Accept a caller x-request-id and propagate it through every hop, and record how a run started (UI, API, MCP, schedule, webhook) in a standard identity envelope (org, actor, session, run, turn).",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl",
+     "codexbrowser",
+     "apify"
+    ],
+    "n": 3,
+    "of": 4,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "firecrawl-api-surface-092",
+    "codexbrowser-automation-and-safety-127",
+    "apify-platform-090"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-api-surface-092"
+    ],
+    "why": "q4 SRC: the caller's x-request-id is logged, forwarded upstream and reused as the idempotency key for paid charges, and request rows carry kind, origin, integration and the ZDR flag. Codex's identity block (q3) and Apify's meta.origin (q3 DOC) add the run/turn ids and the origin enum."
+   },
+   "mechanism": "Edge middleware reads x-request-id (or generates one), puts it in a tracing span field and the response header, forwards it on every internal call (control HMAC, NATS headers, provider calls) and stores it on run and receipt rows. Add an origin enum {ui, api, agent, schedule, webhook, mcp} and a correlation envelope {org_id, actor_id, run_id, turn_id, request_id} on every event.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/httpx/httpx.go:26-30",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1739"
+    ],
+    "gap": "quarry-control echoes X-Request-Id, but quarry-edge mints its own request_id per handler (RequestKind::new(), agent_routes.rs:1739), and no x-request-id intake was found in edge (grep). No origin enum on runs was found. No baseline record covers this; gateway forwarding still needs checking.",
+    "strengths": "Runs are already org- and actor-scoped (v-quarry-107), which covers most of the identity envelope."
+   },
+   "benefit": "One id follows a user-visible run across the gateway, Model Plane, Quarry and audit-core, which makes support and incident response workable.",
+   "approach": "Frontend Plane gateway generates or forwards x-request-id; Ingestion Plane edge adopts it through a tower layer and propagates it to control and NATS; Model Plane execution-core forwards it on Quarry calls.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Never use the request id as an authorization or tenancy key; cap its length and charset.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Small and foundational for tracing and audit joins.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-006",
+   "name": "Monitoring and alerting on runs and data quality",
+   "description": "Threshold alerts on run metrics and run status, plus dataset field statistics (missing fields, outliers), delivered by email, Slack or in-app.",
+   "prevalence": {
+    "sourcesWith": [
+     "apify"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "apify-platform-089"
+   ],
+   "bestInClass": {
+    "source": "apify",
+    "recordIds": [
+     "apify-platform-089"
+    ],
+    "why": "The only source (q4, DOC only): alerts when a metric falls below or rises above a threshold, on run status (aggregated every 20 minutes) and on dataset field statistics checked against an output schema."
+   },
+   "mechanism": "Each monitor or schedule defines alert rules {metric, comparator, threshold, window}, evaluated after each run and on a timer. For data quality, compute per-field null rate and numeric/array-size z-scores on the run output against the last N runs, and route alerts through the existing notification plane.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-quarry-110"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs"
+    ],
+    "gap": "There are no alert rules or alertmanager anywhere in Quarry (SRC search). Change monitoring exists, but schedules get no failure or quality alerts.",
+    "strengths": "Change-detected webhooks already flow edge -> control -> notification-core, the delivery path alerts would reuse."
+   },
+   "benefit": "Users running scheduled monitors and crawls need to know when they silently break, and ops needs paging on driver failure spikes.",
+   "approach": "Two layers: (1) infrastructure alerts as Prometheus rules after C-t2-07-003; (2) user-facing run and quality alerts in quarry-control (rule store and evaluator), delivered through Application Plane notification-core.",
+   "effort": "M",
+   "dependencies": [
+    "C-t2-07-003 metrics",
+    "notification-core"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Alert fatigue. Quality statistics must not retain content for ZDR orgs (counts only).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "DOC-only provenance. Valuable once metrics exist, but not a launch blocker.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-007",
+   "name": "Per-run cost attribution, hard cost caps and browser-time metering",
+   "description": "Every run shows its cost; LLM and action costs inside a run add up in a run-scoped tracker that aborts at a cap; hosted browser sessions reserve on create and settle exactly once on stop, with reconciliation.",
+   "prevalence": {
+    "sourcesWith": [
+     "apify",
+     "firecrawl"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "common"
+   },
+   "members": [
+    "apify-platform-092",
+    "firecrawl-engine-and-infra-066",
+    "firecrawl-engine-and-infra-078"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-078",
+     "firecrawl-engine-and-infra-066"
+    ],
+    "why": "q4 and q3 SRC: reserve-then-settle-once under a row lock, with a reconciliation sweep, is the right shape for browser leases, and a request-scoped CostTracking that throws CostLimitExceededError makes caps real. Apify (q4 DOC) has the best user-facing per-run cost display."
+   },
+   "mechanism": "On browser grant or session create: check entitlement and reserve a concurrency slot and estimated cost. On stop: SELECT ... FOR UPDATE the session row, compute duration-based cost (separate rates for human, AI-driven and ZDR use) and mark it settled. A periodic sweep settles sessions whose stop was missed. Per step: add action and LLM cost to a run-scoped accumulator and fail the step with BUDGET_EXCEEDED when it passes max_cost_usd.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go:26-31,124",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:255,666",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1370-1372",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:300-302"
+    ],
+    "gap": "The Model Plane cost-core ledger has run_id dimensions and budget errors, and browser runs accept max_cost_usd, but Quarry never enforces max_cost_usd or max_runtime_s on the /step path (baseline known gap 10; a code comment claims otherwise). There is no reserve/settle metering of browser time, per-action cost is a flat table, provider cost is None for local Chromium, and the team credit-usage UI is dead code.",
+    "strengths": "A cost ledger with run_id and a budget guard already exists in Model Plane cost-core."
+   },
+   "benefit": "Stops runaway agent spend and shows users what a browser run cost. It is required for any paid tier and for Model Plane cost ownership.",
+   "approach": "The Model Plane owns cost (cost-core). Quarry enforces the cap it is given on the step path (reject the step once the run's accumulated cost or runtime passes the grant budget) and emits usage events. cost-core settles browser lease time from Quarry session start/stop events, with a reconciliation job.",
+   "effort": "M",
+   "dependencies": [
+    "cost-core ledger",
+    "BrowserBroker grants (budget carried in the grant)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Double counting between Quarry action costs and cost-core LLM costs, and clock skew on settle (use Quarry's authoritative timestamps).",
+   "tier": "priority",
+   "significance": 4,
+   "rationale": "A documented budget that is not enforced is a correctness and trust bug that users and finance would notice.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-008",
+   "name": "ZDR-aware telemetry: unrecorded spans, filtered logs, header propagation, network kill switch",
+   "description": "Telemetry for zero-data-retention requests is never recorded or exported, including third-party library spans and requests found to be ZDR only after they start. ZDR-tagged log lines are dropped, downstream services receive a ZDR header, and one switch turns off all ambient telemetry.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "firecrawl-engine-and-infra-061",
+    "firecrawl-engine-and-infra-062",
+    "codexbrowser-automation-and-safety-094"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-061",
+     "firecrawl-engine-and-infra-062"
+    ],
+    "why": "q5 and q5 SRC, unique: a ZeroDataRetentionSampler that returns NOT_RECORD; a bounded registry of trace ids flagged ZDR late, so descendants and in-flight spans are dropped; a winston filter for ZDR log metadata; an X-Zero-Data-Retention header honoured by helper services; session retention that can only get stricter; and a delayed cleanup queue. Codex's BROWSER_USE_DISABLE_AMBIENT_NETWORK (q3) is the matching kill switch."
+   },
+   "mechanism": "Rust: a custom opentelemetry Sampler that returns Drop when the parent context or attributes carry zdr=true; a bounded LRU of trace ids flagged ZDR after start, checked in a SpanProcessor on_end to drop them; and a tracing Layer that keeps events inside zdr=true spans out of the JSON fmt layer. Propagate posture as an internal header (for example x-verevon-zdr) and a NATS header so receivers skip request-correlated logs. Add QUARRY_DISABLE_AMBIENT_TELEMETRY to turn off all exporters.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-102",
+     "v-quarry-104",
+     "v-browser-app-056"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:110-118",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:25-40",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3860"
+    ],
+    "gap": "ZDR events are live-only and artifacts are withheld, but telemetry.rs always installs a JSON fmt layer and an OTLP layer, with no ZDR sampler or filter (SRC: no 'zdr' in telemetry.rs or quarryotel). Any URL or content logged during a ZDR request reaches logs and OTLP. The model gateway skips vision summaries under ZDR, but no cross-plane ZDR telemetry contract exists.",
+    "strengths": "ZDR posture is already carried on requests, events (emit_for_zdr) and artifact paths, and model-gateway refuses browser runs under issuer ZDR."
+   },
+   "benefit": "Enforces the 'ZDR must propagate' rule at the observability boundary, the most likely place for a silent leak.",
+   "approach": "Ingestion Plane first: a ZDR sampler and log-filter Layer in quarry-edge telemetry.rs and quarryotel, and a shared ZDR propagation header in the cross-plane contracts. Then the Model Plane and the gateway adopt them. Add a test that a ZDR scrape exports zero spans and no log line containing the URL.",
+   "effort": "M",
+   "dependencies": [
+    "C-t2-07-002 structured logging"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Over-suppression hides incidents for ZDR tenants; keep content-free counters (outcome, duration) outside the ZDR filter.",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "Architecture-rule compliance: a leak here would be a contractual breach for ZDR customers.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-009",
+   "name": "Per-feature ZDR capability matrix with explicit refusal",
+   "description": "Each endpoint or feature declares whether it honours ZDR, degrades, or refuses (400/409) a ZDR request, so a feature that needs persistence cannot silently break retention.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "firecrawl-api-surface-112"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-api-surface-112"
+    ],
+    "why": "The only source (q4 SRC): an explicit per-feature honour/refuse/degrade list plus team modes disabled|allowed|forced."
+   },
+   "mechanism": "A static table feature -> {honours, degrades (with a warning), refuses (status)} checked during request validation. A team-level ZDR mode (disabled/allowed/forced) overrides request flags, and response warnings name skipped features.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-056",
+     "v-quarry-102"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3846-3870",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:575-588"
+    ],
+    "gap": "Verevon refuses durable crawls, persistent profiles, receipts, checkpoints and resume under ZDR and withholds artifacts, but there is no single declared matrix. A ZDR scrape returns no page text at all (baseline), and the gateway search-web cache key has no org or ZDR gating (v-browser-app baseline, search.rs:216-232).",
+    "strengths": "Verevon's refusals are broader and stricter than Firecrawl's: no ZDR browser persistence, ZDR runs are not resumable, and ZDR events are live-only."
+   },
+   "benefit": "Makes ZDR behaviour predictable for users and auditable for compliance, and closes the known cache leak.",
+   "approach": "The Ingestion Plane owns the matrix (a contracts JSON next to cross-plane-token-requests.json), enforced at edge validation. The Frontend Plane gateway reads it to gate caches and UI. Fix ZDR scrape to return inline, non-persisted content.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "The matrix can drift from code; generate it from route attributes or cover it with tests.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Verevon is already ahead on strictness; the gaps are the missing declaration and one real cache leak.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-010",
+   "name": "Run history with retention, TTL access and ZDR-scrubbed records",
+   "description": "Every job keeps a request row plus child rows, with results in object storage and a short-lived access row. Retention auto-expires unnamed storage, and ZDR runs keep only outcome, timing and cost, with target and options redacted.",
+   "prevalence": {
+    "sourcesWith": [
+     "apify",
+     "firecrawl",
+     "aside"
+    ],
+    "n": 3,
+    "of": 4,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "apify-platform-099",
+    "firecrawl-engine-and-infra-104",
+    "aside-agent-control-architecture-065"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-104"
+    ],
+    "why": "q4 SRC: a concrete row shape that satisfies ZDR (keep outcome, timing and cost; redact URL and options; schedule deletion), plus a TTL access row for result retrieval. Apify's retention (q3 DOC) is a plan-level policy, and Aside (q3) adds explicit visibility classes (artifacts vs tmp)."
+   },
+   "mechanism": "requests(id, org, kind, origin, outcome, started_at, ended_at, cost, zdr, target_hint or redacted) plus request_children. Result blobs live in object storage keyed by id, and job_access(id, org, expires_at) is checked on retrieval. A retention janitor deletes rows and blobs past plan retention, and ZDR rows are written with target and options replaced by a redaction marker.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-102",
+     "v-quarry-111",
+     "v-browser-app-054"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_event_history.rs:31",
+     "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/janitor/janitor.go:58-62",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/evidence.rs:24"
+    ],
+    "gap": "Durable event history, receipts and an evidence timeline exist, but the retention janitor does nothing unless QUARRY_RETENTION_DAYS>0 and dry-run is off. ZDR runs leave no durable record at all, so users and finance cannot see that a ZDR run happened or what it cost.",
+    "strengths": "Actor-scoped immutable step receipts and an Ingestions evidence timeline in the UI."
+   },
+   "benefit": "Users need a run list they can trust that expires on policy. A content-free ZDR run row keeps billing and audit honest without retaining content.",
+   "approach": "Ingestion Plane control: turn the janitor on by default with plan-derived retention from the Control Plane, and add a ZDR tombstone run row (outcome, timings, cost, no target).",
+   "effort": "S",
+   "dependencies": [
+    "Control Plane plan/retention settings"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "A ZDR tombstone must be reviewed against the ZDR contract (metadata only).",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Mostly configuration plus one schema addition.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-011",
+   "name": "Canonical agent run trace / activity stream surfaced to the UI",
+   "description": "An ordered, versioned event stream for every agent run (run, agent, tool, browser-session, artifact and error events with a producer sequence and parent-agent identity), plus bounded tool-activity logs and tool-result metadata so the host UI can show agent state without parsing observations.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "firecrawl-api-surface-091",
+    "codexbrowser-automation-and-safety-044",
+    "codexbrowser-automation-and-safety-067",
+    "codexbrowser-automation-and-safety-068"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-api-surface-091"
+    ],
+    "why": "q5 SRC, unique: a shared envelope {schemaVersion, eventId, runId, occurredAt, producerSequence, agent{id, role, parentId}} with typed events, artifact snapshot versions and structured errors {code, source, retryable}. Codex adds the UI-side pieces: size-capped WebMCP activity (q3), toolSurface and tab metadata on every result (q3), and async browser notifications appended to the next result (q3)."
+   },
+   "mechanism": "The Model Plane (planning, tool calls) and Quarry (browser session, step receipts, artifacts) emit TraceEvent{schema_version, event_id, run_id, occurred_at, producer_seq, agent{id, role, parent_id}, type, payload} onto NATS. Non-ZDR events are persisted. GET /runs/{id}/trace serves them with a cursor plus an SSE tail by from_seq, and artifacts are referenced by snapshot id. Each step response carries surface_meta {surface, tab list, sanitized url} and the drained async notifications (popups, dialogs, downloads).",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-browser-app-051",
+     "v-browser-app-053",
+     "v-browser-app-055",
+     "v-quarry-102"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:625",
+     "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:1053",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:371",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3680-3713"
+    ],
+    "gap": "The browser timeline is shipped and the AI-run event stream client is wired, but upstream run start likely fails (grant/bearer regression, INF high). Quarry's step and egress receipts, procedure compile/replay-check, live view and typed events stream are not surfaced in Verevon at all (absent). No unified envelope with a producer sequence spans the Model Plane and Quarry, and the fleet console is a stub.",
+    "strengths": "Quarry already has typed events, a NATS bus, durable history, an agent events SSE with ?from_seq replay and immutable receipts, so the hard server-side parts exist."
+   },
+   "benefit": "This is what users watch while the agent browses. Without it, 'Model proposes, Quarry executes' is invisible and approvals lack context. It blocks the vision of a browser shared by humans and AI.",
+   "approach": "The Model Plane owns the run trace contract (it owns runs). Quarry publishes browser-session and receipt events in the same envelope, the Application Plane projects them for realtime, and the Frontend Plane renders one run timeline (replacing the FleetRunConsole placeholder). Fix the grant/bearer wiring first.",
+   "effort": "L",
+   "dependencies": [
+    "v-browser-app-053 run start fix",
+    "C-t2-07-005 correlation ids"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Event volume and ordering across planes. ZDR runs must stay live-only (no trace persistence).",
+   "tier": "priority",
+   "significance": 5,
+   "rationale": "The most user-visible gap in this category, and most of the server pieces already exist.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-012",
+   "name": "Structured audit record for every permission and approval decision",
+   "description": "Each security decision (navigation, origin access, upload, download, credential use, full CDP) emits a versioned record: which permission, the decision, decided_by (user, automated reviewer, saved permission, policy, built-in rule), the reason, the origin only and the duration. A closed approval-outcome taxonomy supports analytics.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-025",
+    "codexbrowser-automation-and-safety-027",
+    "codexbrowser-automation-and-safety-107"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-027",
+     "codexbrowser-in-app-browser-025"
+    ],
+    "why": "q5 and q5 SRC: a schema_version 1 record with a permission enum, decision_context (evaluated|not_required|cached|cancelled|error), a decided_by enum, an origin-only target and duration_ms. Allowed URL-policy checks are not recorded (only denials) to limit volume, and error paths are explicit (error_fail_closed). The outcome taxonomy (q4) lets reviewer and human decisions be compared."
+   },
+   "mechanism": "Whichever component decides (Model Plane risk gate and approvals, BrowserBroker grant validation, Quarry policy denials) emits AuthzDecision{schema_version, permission, decision, decision_context, decided_by, policy_id, reason_code, origin, run_id, actor_id, duration_ms} to verevon.audit.v2.* so audit-core persists it. Outcome enum: {not_needed, policy_allowed, reviewer_approved, reviewer_denied, user_approved, user_approved_for_session, user_denied, user_aborted, timeout}.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:144-148,345,426",
+     "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:34",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1729-1733"
+    ],
+    "gap": "Browser approvals record (decision, decided_by, reason), with system values for cancel and timeout. The Model Plane publishes tool_action audit events with ZDR flags, and Quarry appends a privacy-bounded audit event on control transfer. Missing: one schema across planes, a decided_by enum that separates user, saved, policy and reviewer, BrowserBroker grant validations and Quarry policy denials flowing to audit-core, and duration. Grants are in-memory, so their history is lost on restart.",
+    "strengths": "audit-core with NATS subjects already exists in the Control Plane, and tool-action audit already carries ZDR tags."
+   },
+   "benefit": "Completes the evidence chain for 'Model proposes, Quarry executes or rejects' and supports enterprise compliance reviews without retaining content.",
+   "approach": "Control Plane audit-core defines the AuthzDecision event type. The Model Plane (execution-core approvals, browser-broker) and the Ingestion Plane (Quarry policy denials, sensitive grants) publish it. Record only denials for high-volume URL checks.",
+   "effort": "M",
+   "dependencies": [
+    "audit-core subjects",
+    "BrowserBroker durable grant store"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Volume from per-navigation checks, and storing URLs (use the origin only).",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "High compliance value and partly present, but not visible to users on day one.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-013",
+   "name": "Per-organisation SIEM export of activity and audit",
+   "description": "Enterprise orgs stream scrape and browser activity (who, URL/domain, result, threat decision, ZDR flag, end-user attribution) to their SIEM, with batching, bounded queues and a retry ladder.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "firecrawl-api-surface-093",
+    "firecrawl-engine-and-infra-067"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-067",
+     "firecrawl-api-surface-093"
+    ],
+    "why": "q5 SRC: schema-versioned events; a RabbitMQ confirm channel; a bounded queue (100k) that drops the oldest; per-org batches (200 events or 1 s); a fixed retry ladder (5 s, 30 s, 5 min, 30 min, then a DLQ kept 7 days); and encrypted per-org config whose destination must be an Azure Monitor ingestion host. Callers can pass auditMetadata.username."
+   },
+   "mechanism": "An audit-core consumer per org with export config {kind: sentinel|splunk|s3, endpoint allowlist, encrypted credentials}: batch and gzip, a bounded queue that drops the oldest with a delivery-lag metric, a retry ladder then a DLQ, and a test-delivery endpoint.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Control Plane/audit-core/internal/subscriber/subscriber.go:27-29"
+    ],
+    "gap": "audit-core persists verevon.audit.v2.> and usage events, but no SIEM or export integration was found (grep siem|sentinel: no audit-core hits). Quarry does not publish to audit-core subjects (grep).",
+    "strengths": "A central audit-core with NATS JetStream subjects is the right foundation."
+   },
+   "benefit": "Enterprise buyers ask for SIEM export of agent browsing. It becomes an easy procurement checkbox once audit is unified.",
+   "approach": "A Control Plane audit-core exporter, with the Ingestion Plane publishing browser and scrape activity events (origin only, ZDR-flagged) to audit subjects.",
+   "effort": "M",
+   "dependencies": [
+    "C-t2-07-012 decision audit"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Exporting URLs for ZDR orgs, and destination SSRF (allowlist hosts).",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Single source and enterprise-only; do it after unified audit.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-014",
+   "name": "Product usage analytics with privacy controls",
+   "description": "Coarse, URL-free counters for browser feature adoption (navigation, omnibox, annotation, approvals, tool calls) with opt-out and ZDR suppression, plus hygiene such as keeping internal UI pages out of the user's history.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser",
+     "aside"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "codexbrowser-in-app-browser-026",
+    "aside-browser-product-077",
+    "aside-agent-control-architecture-066",
+    "codexbrowser-automation-and-safety-090"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-in-app-browser-026",
+     "codexbrowser-automation-and-safety-090"
+    ],
+    "why": "q3 SRC: typed events (recordBrowserNavigation, address commit, autocomplete impressions, approval requested/resolved, tool called with terminal status) without URLs. Aside (q2-q3) adds opt-out and history hygiene."
+   },
+   "mechanism": "A typed analytics event catalogue in the SPA and the Model Plane. Properties are enums and counts only, events are disabled for ZDR orgs and by user opt-out, and forwarding happens server-side through the gateway (no third-party script in the page).",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. To check: the SPA for an analytics/telemetry client (posthog|statsig|track\\() and gateway forwarding, and ZDR gating of any such events.",
+    "strengths": ""
+   },
+   "benefit": "Shows the team which browser features users and agents actually use (for example takeover and approvals), to prioritise parity work.",
+   "approach": "Frontend Plane: a small typed event module that posts to a gateway endpoint, which forwards to the Control Plane usage/audit stream; suppressed under ZDR.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Privacy. Third-party analytics vendors conflict with ZDR and sovereignty positioning.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Useful for product decisions but invisible to users.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-015",
+   "name": "Agent-safe credential vault with origin-bound injection",
+   "description": "The agent can log in and fill forms through a vault without secret values entering the model context: opaque item refs, URL/origin-matched fills, user policy and per-fill audit. External password managers inject only into password fields of the bound origin.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-agent-control-architecture-054",
+    "aside-agent-control-architecture-055"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-054",
+     "aside-agent-control-architecture-055"
+    ],
+    "why": "q5 and q4 SRC, unique: the REPL API returns summaries and opaque refs only. Fills run in an isolated world through Runtime.callFunctionOn, which re-checks that protocol and host equal the bound origin and that the target is a connected, enabled input[type=password]. Every agent fill is attributed to the agent session."
+   },
+   "mechanism": "An encrypted per-user vault exposes list_items (summary only) and fill(ref, field_ref) to the planner. Quarry executes the fill: it resolves the @eN ref to a backend node, asserts in an isolated world that location.origin == item.origin and that the element is a writable password or username input, sets the value with CDP Input.insertText, and never returns the value in observations (the snapshot shows [redacted]). Each fill is audited.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "v-quarry.baseline.md (Credential vaults section)",
+     "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs"
+    ],
+    "gap": "There is no credential vault, autofill or secret-reference action. Logins rely on user takeover plus persistent profiles whose captured cookies are unencrypted (baseline SRC), and login pages trigger a HITL approval. integration-corev2 has an AES-GCM token vault, but only for OAuth tokens.",
+    "strengths": "User takeover with recorded control transfer is a sound fallback, and the IC token vault crypto can be reused."
+   },
+   "benefit": "Unblocks unattended agent tasks on logged-in sites while keeping secrets out of the model, a core promise of an AI-first browser.",
+   "approach": "The Control Plane or integration-corev2 stores secrets (reuse the IC vault). The Model Plane proposes fill(item_ref, target_ref) and Quarry executes the origin-checked injection (Model proposes, Quarry executes). Decide explicitly how vault use interacts with ZDR.",
+   "effort": "L",
+   "dependencies": [
+    "C-t2-07-016 redaction",
+    "sensitive one-shot grants (shipped)",
+    "encrypted profile storage"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "High: credential exfiltration through prompt injection. Mitigate with origin binding, per-item user policy and approval on first use.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "High value, but large and security-sensitive; build it after audit and redaction.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-016",
+   "name": "Secret redaction in snapshots, logs and captures",
+   "description": "Password fields always appear redacted in agent snapshots. Durable captures and logs redact tokens, keys, OTPs and card numbers by field semantics and value shape, and env vars marked secret are encrypted and redacted from run logs.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "apify"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "aside-agent-control-architecture-056",
+    "apify-platform-096"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-056"
+    ],
+    "why": "q4 SRC: two tiers of rules. The interactive snapshot always redacts non-empty password inputs; durable capture also redacts by input type, autocomplete semantics and value shape, with deliberately narrow patterns. Apify (q4 DOC) covers run-log redaction of secret env vars."
+   },
+   "mechanism": "In the snapshot builder, replace the value of input[type=password] (and autocomplete=one-time-code/cc-*) with [redacted]. For persisted evidence, OCR and logs, run a redactor with typed detectors (JWT, API-key prefixes, Luhn-valid PANs, 6-digit OTPs near OTP labels). Secrets injected into runs are registered so their literal values are scrubbed from logs.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "v-quarry.baseline.md (Safety gaps: agent_memory::redact_sensitive unwired)"
+    ],
+    "gap": "Egress receipts are redacted, but agent_memory::redact_sensitive and the scratchpad are unwired, and neither password-field redaction in snapshots nor OCR/evidence redaction was confirmed. To check: quarry-browser snapshot code for input[type=password] handling.",
+    "strengths": "Redacted egress receipts and origin-only frames in snapshots."
+   },
+   "benefit": "Keeps secrets that users type during takeover away from the model and from durable evidence; a prerequisite for a vault.",
+   "approach": "Ingestion Plane: wire redact_sensitive into the observation, evidence and OCR paths, add password-field redaction to the AX/DOM snapshot builder, and test against a hermetic page.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Over-redaction breaks extraction; keep the rules narrow and typed.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Small effort; closes a real leak path from takeover sessions.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-017",
+   "name": "Least-privilege permissions for agents and run tokens",
+   "description": "Agents and runs get limited permissions by default, and broad access needs explicit approval. Tokens are scoped and expiring and pass their scope into runs and webhooks. Privileged browser/tab mutations are blocked for the agent, and commands match Allow/Prompt/Forbidden rules.",
+   "prevalence": {
+    "sourcesWith": [
+     "apify",
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 3,
+    "of": 4,
+    "cls": "table-stakes"
+   },
+   "members": [
+    "apify-platform-094",
+    "apify-platform-095",
+    "aside-agent-control-architecture-009",
+    "aside-agent-control-architecture-075",
+    "codexbrowser-automation-and-safety-106"
+   ],
+   "bestInClass": {
+    "source": "apify",
+    "recordIds": [
+     "apify-platform-094",
+     "apify-platform-095"
+    ],
+    "why": "q5 and q4 DOC: Actor permissions are limited by default with explicit one-time approval for full access, and scoped, expiring tokens pass their scope into runs and webhooks. Aside (q4 SRC) shows the browser-side equivalent: read methods are whitelisted and lifecycle mutations go only through tools that track ownership. Codex's Allow/Prompt/Forbidden triad (q4) is the policy vocabulary."
+   },
+   "mechanism": "Grant = {principal, scopes[], allowed_domains[], budget, expires_at, parent_grant}. Child runs and webhooks inherit min(parent scopes), escalation requires a recorded human approval, and policy rules evaluate to allow|prompt|forbid. Read-only browser queries are free; mutations go only through typed tools.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-107",
+     "v-quarry-108"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:32-36,62-74",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2257-2266",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json"
+    ],
+    "gap": "BrowserBroker grants (15-minute TTL, host allowlist, org/owner scope) are validated before every action, and sensitive actions need one-shot grants. But grants are in-memory only and no production code path issues them (baseline). evaluate and raw-CSS actions are still allowed on normal runs without approval, and control webhooks are not org-scoped.",
+    "strengths": "Verevon is ahead of the web-only sources on per-action grant validation, ref-only model actions and one-shot sensitive grants."
+   },
+   "benefit": "Keeps the authority model credible: Quarry executes only what a grant allows, and scope cannot widen through child runs or webhooks.",
+   "approach": "Model Plane browser-broker: a durable grant store, a production issuance path and scope inheritance for child runs and fleets. Ingestion Plane: put evaluate and raw CSS behind a sensitive grant, and org-scope control webhooks.",
+   "effort": "M",
+   "dependencies": [
+    "browser-broker persistence"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "Breaking existing dev flows that rely on dev-bypass tokens.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Strong design, but operationally incomplete.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 3,
+    "DOC": 2,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-018",
+   "name": "Approval preferences persisted and synced per user",
+   "description": "Per-user approval modes and per-origin rules (always/session) persisted server-side with revision checks and mirrored locally.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-026"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-026"
+    ],
+    "why": "The only source (q4 SRC): a server document with revision-based PATCH and conflict recovery, mirrored in a local 0600 TOML file."
+   },
+   "mechanism": "The Control Plane stores user browser_prefs {approval_mode, per_origin_rules[], revision}, updated with PATCH and If-Match revision, and clients cache it. The Model Plane risk gate reads it to auto-approve saved decisions, recorded as decided_by=saved_user_permission.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. To check: Model Plane approvals for 'approve for session/always' persistence, and Control Plane user settings for browser approval preferences.",
+    "strengths": ""
+   },
+   "benefit": "Reduces approval fatigue on repeat sites while keeping decisions auditable.",
+   "approach": "Control Plane user settings plus Model Plane risk-gate integration. Never auto-approve ZDR-forbidden or sensitive one-shot actions.",
+   "effort": "S",
+   "dependencies": [
+    "C-t2-07-012 decision audit"
+   ],
+   "planeOwner": "Control Plane",
+   "risks": "Saved permissions widen authority silently; scope them to an origin and make them expire.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "A quality-of-life feature for after core approvals work end to end.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-019",
+   "name": "Per-run isolated execution environment for browsers/workers",
+   "description": "Each run executes in its own isolated environment (own FS/CPU/memory) that is destroyed afterwards, with least-privilege run tokens and no state left on the worker.",
+   "prevalence": {
+    "sourcesWith": [
+     "apify"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "apify-platform-093"
+   ],
+   "bestInClass": {
+    "source": "apify",
+    "recordIds": [
+     "apify-platform-093"
+    ],
+    "why": "The only source in this category (q4 DOC): isolated per-run containers and SOC 2 Type II; the runtime technology is not disclosed."
+   },
+   "mechanism": "Lease a container or microVM per browser session (or per tenant) from a sandbox manager, with its own Chromium, a tmpfs profile dir, cgroup limits and egress only through the egress broker. Destroy it at session end, and export persistent profiles encrypted to storage.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-browser-app-057"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go:84"
+    ],
+    "gap": "Browser isolation is a per-session CDP browser context inside a shared quarry-edge Chromium. sandbox-manager leases only code/workspace sandboxes, and Kernel (which would provide VM isolation) is unwired. A renderer exploit or a cross-context leak would cross tenants.",
+    "strengths": "Chromium sandbox on by default, per-session contexts (the cookie-leak fix), and isolated-egress proof required for agent runs."
+   },
+   "benefit": "Tenant isolation for a browser that both users and agents drive on arbitrary sites; also needed for persistent profiles and downloads.",
+   "approach": "The Ingestion Plane owns the browser fleet. Reuse Model Plane sandbox-manager leasing primitives or build a dedicated browser-pool service: per-org container pools first, per-session later.",
+   "effort": "L",
+   "dependencies": [
+    "sandbox-manager",
+    "egress broker"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Cold-start latency and cost; keep a warm pool per org.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "Important for multi-tenant safety. The reference is DOC-only, but the gap is SRC-verified.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-020",
+   "name": "Local OS-level sandbox for agent shell and code (desktop)",
+   "description": "Agent-run shell commands and scripts on the user's machine run in Windows AppContainer, restricted-token or job-object sandboxes with declared read/write roots, offline env hints and elevated provisioning, plus a QuickJS/Node REPL sandbox and a downloadable tool runtime.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "aside-agent-control-architecture-057",
+    "aside-browser-product-076",
+    "codexbrowser-automation-and-safety-099",
+    "codexbrowser-automation-and-safety-100",
+    "codexbrowser-automation-and-safety-101",
+    "codexbrowser-automation-and-safety-102",
+    "codexbrowser-automation-and-safety-104",
+    "codexbrowser-automation-and-safety-105",
+    "codexbrowser-in-app-browser-027",
+    "aside-browser-product-098"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-100",
+     "codexbrowser-automation-and-safety-101",
+     "codexbrowser-automation-and-safety-099"
+    ],
+    "why": "q5 SRC: a runner using a restricted token, job object, private desktop and ConPTY; a declarative filesystem profile that fails closed; and dedicated sandbox users with firewall scoping. Aside (q4) has the lighter AppContainer plus QuickJS two-layer split."
+   },
+   "mechanism": "Spawn a helper with a restricted token and capability SIDs per writable root, inside a job object (kill on close) on a private desktop. The FS profile compiles to ACLs and unsupported profiles are refused. Network goes only through a loopback proxy, with offline env vars (NPM_CONFIG_OFFLINE and similar).",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [
+     "v-browser-app-057"
+    ],
+    "evidence": [
+     "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go:84"
+    ],
+    "gap": "Verevon has no desktop or local agent runtime (Verevon v3 is a web SPA plus gateway; no Tauri or Electron found). Server-side code sandboxes exist in Model Plane sandbox-manager.",
+    "strengths": "Server-side sandbox leasing exists, and the architecture keeps execution remote."
+   },
+   "benefit": "Relevant only if Verevon ships a desktop companion; server-side sandboxes already cover agent code.",
+   "approach": "Nothing now. If a desktop companion is ever built, copy the fail-closed profile and restricted-token pattern.",
+   "effort": "XL",
+   "dependencies": [
+    "desktop shell (none)"
+   ],
+   "planeOwner": "Model Plane",
+   "risks": "n/a",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Does not fit Verevon's remote-execution architecture (the browser is a leased remote Chromium streamed as frames).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 2,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-021",
+   "name": "Managed egress proxy with domain policy and destination validation",
+   "description": "Agent network traffic goes only through a managed proxy that enforces domain allow/deny lists and can inject headers (credentials) server-side. Remote tunnel and provider destinations are validated against a packaged allowlist.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-103",
+    "codexbrowser-automation-and-safety-118"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-103"
+    ],
+    "why": "q5 SRC: proxy config with domain policy, header injection for credentials, and unix-socket and local-binding toggles explicitly named dangerously_*, bound to a restricting SID."
+   },
+   "mechanism": "A per-run egress policy {allowed_domains, denied_domains, inject_headers{host:{name:secret_ref}}}. The proxy resolves secret refs server-side, adds headers only on matching hosts and logs redacted egress receipts. Provider endpoints are validated against an allowlist of origins without credentials or paths.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1131-1141",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-339",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/egress_broker.rs"
+    ],
+    "gap": "Server-side header or credential injection by secret reference is missing (pairs with C-t2-07-015).",
+    "strengths": "Verevon is at or ahead of parity: governed allowed_domains come only from the broker grant, domains are checked before and after each action, agent runs are refused unless the driver proves isolated egress, egress receipts are redacted, and the proxy pool is sticky."
+   },
+   "benefit": "Keep it: this is the enforcement point that makes 'Quarry executes or rejects' real.",
+   "approach": "Keep. Later, add secret-ref header injection for API-style sites.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Strength.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-022",
+   "name": "Local daemon/companion security and lifecycle",
+   "description": "A local agent daemon bound to loopback with Host-header and CORS checks, challenge-response auth bound to a TPM-held installation key, supervised helper processes, updates gated on daemon health, a consent dialog for remote debugging, and a hardened pair of first-party extensions.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "aside-agent-control-architecture-002",
+    "aside-agent-control-architecture-003",
+    "aside-agent-control-architecture-004",
+    "aside-agent-control-architecture-010",
+    "aside-agent-control-architecture-011",
+    "aside-browser-product-075",
+    "aside-agent-control-architecture-086",
+    "aside-agent-control-architecture-063"
+   ],
+   "bestInClass": {
+    "source": "aside",
+    "recordIds": [
+     "aside-agent-control-architecture-003",
+     "aside-agent-control-architecture-004",
+     "aside-agent-control-architecture-002"
+    ],
+    "why": "q5 SRC: no static shared secret. Clients prove possession of an installation key (TPM/CNG with software fallback) through 30-second challenges, and the daemon rejects non-loopback Host headers (DNS-rebinding defence)."
+   },
+   "mechanism": "A loopback-only listener with a Host allowlist and PNA headers; a challenge (32 random bytes, 30-second TTL) signed by the device key yields a short-lived bearer; helpers are supervised over JSON lines with owner-generation binding.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3 (no desktop shell found)"
+    ],
+    "gap": "Verevon has no local daemon or browser extension; by design the browser is remote.",
+    "strengths": "A remote leased browser avoids the whole local attack surface."
+   },
+   "benefit": "None today.",
+   "approach": "Skip. Revisit only if a desktop companion or an 'attach to your own browser' grant is built; then copy the loopback plus Host check and the device-key challenge.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "n/a",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Does not fit the remote-browser architecture.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 8,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-023",
+   "name": "Operator health, readiness and setup diagnostics",
+   "description": "Dependency health probes, queue dashboards, readiness gating and diagnostics that explain why a browser or provider session cannot start.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "firecrawl-engine-and-infra-075",
+    "codexbrowser-automation-and-safety-128"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-128"
+    ],
+    "why": "q3 SRC: agent-callable diagnostics that explain setup failures. Firecrawl's admin plane (q2) is a negative example: a secret in the path, with no identity or audit."
+   },
+   "mechanism": "/ready with per-dependency status; refuse to start on unsafe production config; a diagnostics endpoint or tool that returns structured reasons (provider unreachable, grant missing, driver capability absent).",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-105"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:312-334",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:690-704",
+     "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:63-117"
+    ],
+    "gap": "Optional: there is no agent- or user-callable 'why can't this browser session start' diagnostic for remote providers.",
+    "strengths": "Readiness reports durability; production refuses ephemeral stores and default control keys; internal control uses HMAC rather than path secrets (ahead of Firecrawl)."
+   },
+   "benefit": "Keep.",
+   "approach": "Keep. Optionally return a structured diagnostics response when session start fails.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Strength.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-024",
+   "name": "Explicit fail-open vs fail-closed policy for entitlement lookups",
+   "description": "Entitlements and limits are cached with a short TTL. When the entitlement service is unreachable, requests proceed with generous default limits for 60 seconds instead of blocking.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "firecrawl-engine-and-infra-079"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-079"
+    ],
+    "why": "The only source (q3 SRC): a cached ACUC chunk under a lock, with FAIL_OPEN_LIMITS and a 60-second TTL."
+   },
+   "mechanism": "Cache entitlements per org (10 minutes). During a Control Plane outage, use fail-open defaults with a short TTL for limits only; billing, ZDR posture and grants always fail closed.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "No baseline record. To check: how Quarry and the gateway behave when the Control Plane or billing-core is unreachable (limits, ZDR posture lookup).",
+    "strengths": ""
+   },
+   "benefit": "Stays available during Control Plane incidents without weakening ZDR or authority.",
+   "approach": "Document the choice per dependency in Quarry RUNBOOKS: fail open for rate limits, fail closed for ZDR, grants and billing.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Failing open on the wrong check widens access.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Mostly a documented decision.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-025",
+   "name": "Ambient desktop activity capture with observation policy",
+   "description": "An optional recorder of the user's desktop and browser activity (accessibility, DOM snapshots, OCR) for agent recall, with per-app and per-domain exclusion rules, pause timers, an indicator and clear-history.",
+   "prevalence": {
+    "sourcesWith": [
+     "aside",
+     "codexbrowser"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "differentiator"
+   },
+   "members": [
+    "aside-agent-control-architecture-064",
+    "codexbrowser-automation-and-safety-133"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-133"
+    ],
+    "why": "q3 SRC: start/pause/resume/stop, a menu-bar indicator, include/exclude rules per app or domain, and clear-history by scope. Aside (q3) adds redaction and plan gating."
+   },
+   "mechanism": "A native recorder with policy {rules[{scope app|url, behavior}], pause_until}, a visible indicator, redaction before persistence, and clearing by scope and interval.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [],
+    "gap": "Not present and not planned.",
+    "strengths": "Local web history stays in the browser and is purged under ZDR."
+   },
+   "benefit": "Low; it conflicts with the ZDR posture and the remote-browser architecture.",
+   "approach": "Skip.",
+   "effort": "XL",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "Privacy and ZDR conflict.",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "Does not fit Verevon (ZDR, no desktop runtime).",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-026",
+   "name": "Memory pollution guard for web-derived content",
+   "description": "Threads or runs that consumed web or MCP tool output are excluded from long-term memory generation (or quarantined first), so untrusted web content cannot persist as memories.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-109"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-109"
+    ],
+    "why": "The only source (q4 SRC, medium confidence): a no_memories_if_mcp_or_web_search flag and a 'polluted' thread memory mode."
+   },
+   "mechanism": "Mark a run or thread memory_mode=polluted when any web, browser or MCP tool result enters context. Memory extraction skips polluted runs or routes them to a review queue; optionally, only user-confirmed memories are allowed.",
+   "verevon": {
+    "status": "unknown",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:23",
+     "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4469"
+    ],
+    "gap": "The model gateway labels web results as data, not instructions, and web-only turns skip memory recall, but no guard on memory writes after web or browser tool use was found. To check: execution-core and model-gateway memory extraction, and Data Plane graph writes, for a taint flag.",
+    "strengths": "The model gateway already frames tool results against prompt injection."
+   },
+   "benefit": "Stops prompt injection from becoming persistent (memories, graph facts), a cross-session risk specific to AI-first products with memory.",
+   "approach": "Model Plane: set a taint flag on runs when web or browser tools return content, and have the memory and graph write path refuse or quarantine tainted runs. The Data Plane enforces this when ingesting agent-derived facts.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Model Plane",
+   "risks": "A guard that is too strict disables useful memory from research tasks; offer user-confirmed promotion.",
+   "tier": "recommended",
+   "significance": 4,
+   "rationale": "Cheap, high-leverage safety control for an AI-first product.",
+   "confidence": "low",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-027",
+   "name": "Embedded webview / app-sandbox hardening",
+   "description": "Locked-down webviews for third-party agent UIs (scheme allowlist, popups denied) and forced safe webPreferences on every attached webview.",
+   "prevalence": {
+    "sourcesWith": [
+     "codexbrowser"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "codexbrowser-automation-and-safety-115",
+    "codexbrowser-automation-and-safety-116"
+   ],
+   "bestInClass": {
+    "source": "codexbrowser",
+    "recordIds": [
+     "codexbrowser-automation-and-safety-116",
+     "codexbrowser-automation-and-safety-115"
+    ],
+    "why": "q5 and q4 SRC: will-attach-webview strips preload and disablewebsecurity and forces sandbox and contextIsolation; MCP app webviews use an isolated origin and a strict request allowlist."
+   },
+   "mechanism": "An Electron will-attach-webview handler, a session request filter that allowlists https/wss/data/blob, and denial of navigation and popups.",
+   "verevon": {
+    "status": "absent",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3 (web SPA; no tauri.conf.json or electron found)"
+    ],
+    "gap": "Not applicable today: Verevon renders the remote browser as streamed frames, not an embedded webview. If third-party agent UIs ('apps in Spaces') are ever rendered, use sandboxed cross-origin iframes with CSP.",
+    "strengths": "The remote-frame architecture removes the webview attack surface."
+   },
+   "benefit": "None today.",
+   "approach": "Skip; revisit with any plugin or app UI feature.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "n/a",
+   "tier": "skip",
+   "significance": 1,
+   "rationale": "A desktop-shell concern; Verevon is a web app with a remote browser.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-028",
+   "name": "Self-host stack with hardened browser container",
+   "description": "A Compose/Kubernetes stack that runs the whole engine, with a browser container that drops capabilities and runs with no-new-privileges, noexec tmpfs and resource limits, plus documented production duties.",
+   "prevalence": {
+    "sourcesWith": [
+     "apify",
+     "firecrawl"
+    ],
+    "n": 2,
+    "of": 4,
+    "cls": "common"
+   },
+   "members": [
+    "apify-platform-100",
+    "firecrawl-api-surface-094",
+    "firecrawl-engine-and-infra-072"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-072",
+     "firecrawl-api-surface-094"
+    ],
+    "why": "q3 SRC: concrete container hardening (cap_drop ALL, no-new-privileges, noexec/nosuid tmpfs, CPU and memory limits), but it ships unauthenticated and without persistence by default, which makes it a negative example on defaults. Apify does not offer self-hosting (INF)."
+   },
+   "mechanism": "A Compose service for the browser engine with security_opt no-new-privileges, cap_drop ALL (add SYS_ADMIN only if the Chromium sandbox requires it; prefer user namespaces), noexec tmpfs and memory/CPU limits. Production refuses insecure defaults.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-quarry-106",
+     "v-quarry-105"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/deploy/compose/docker-compose.yml",
+     "apps/Ingestion Plane/Quarry-v2/deploy/compose/Dockerfile.edge:100-150"
+    ],
+    "gap": "To check: whether the edge container has cap_drop, no-new-privileges, tmpfs and resource limits equivalent to Firecrawl's playwright-service (not confirmed in the baseline).",
+    "strengths": "Verevon is ahead on defaults: production refuses ephemeral stores and default control keys, Chromium is pinned, and the stack is complete (postgres, dragonfly, temporal, control, orchestrator, searxng)."
+   },
+   "benefit": "Keep; add the container hardening flags if they are missing.",
+   "approach": "Ingestion Plane deploy: add security_opt, cap_drop, tmpfs and limits to the quarry-edge service.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "The Chromium sandbox may need specific seccomp or userns settings.",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Strength, with one small hardening check.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 1
+   }
+  },
+  {
+   "id": "C-t2-07-029",
+   "name": "Build provenance and database operations as code",
+   "description": "Multi-stage builds that verify artifacts and stamp the git SHA (served at /version), and Postgres maintenance (WAL tuning, autovacuum, scheduled concurrent reindex, a watchdog) shipped as migrations.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "firecrawl-engine-and-infra-073",
+    "firecrawl-engine-and-infra-074"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-074",
+     "firecrawl-engine-and-infra-073"
+    ],
+    "why": "q4 and q3 SRC: maintenance as SQL, with per-index cron slots and a watchdog that cancels runaway reindexes, and a build stage that checks outputs are non-empty."
+   },
+   "mechanism": "pg_cron jobs run REINDEX CONCURRENTLY per hot index in staggered low-traffic slots, a watchdog job cancels long reindexes, and autovacuum is tuned on queue and event tables. Docker stages run test -s checks and stamp the SHA.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:336-343"
+    ],
+    "gap": "/version exposes the git SHA (shipped). No Postgres maintenance-as-code for the Quarry queue and event-history tables was found, but this was not checked in depth; verify the deploy/compose Postgres config and migrations.",
+    "strengths": "/version SHA and a pinned Chromium build."
+   },
+   "benefit": "Keeps the Postgres SKIP LOCKED queue and event history healthy as volume grows.",
+   "approach": "Ingestion Plane migrations: autovacuum settings on hot tables, plus scheduled maintenance once volume justifies it.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Reindex load in production.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Not needed until scale.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-030",
+   "name": "API surface hardening and opaque upstream errors",
+   "description": "No permissive CORS, per-route body limits and no secret-in-path admin. Upstream browser-provider errors are replaced by generic messages (they can contain capability URLs), and recording playlists are validated before relaying.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "firecrawl-engine-and-infra-076",
+    "firecrawl-engine-and-infra-077"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-077"
+    ],
+    "why": "q4 SRC: hosted-browser errors are mapped to fixed messages with the body cancelled, and HLS playlists are fetched with redirect:error, an 8 MB cap and same-origin segments. Record 076 (q2) is a negative example (open CORS, 10 MB bodies)."
+   },
+   "mechanism": "The provider client maps non-2xx responses to typed errors without echoing bodies, live-view and replay URLs are never forwarded raw to clients, and manifests are validated before proxying.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2608 (live_view)"
+    ],
+    "gap": "Quarry edge sets no CORS layer (SRC grep: none), which is good. Not verified: whether provider (Browserbase/Browserless/Kernel) error bodies or live-view capability URLs reach clients unredacted. To check: the quarry-browser provider drivers and the live_view route.",
+    "strengths": "No permissive CORS on Quarry edge, plus the gateway SSRF guard and header normalisation."
+   },
+   "benefit": "Prevents leaking provider capability URLs (which allow session takeover) to users or logs.",
+   "approach": "Ingestion Plane: a typed ProviderError without upstream bodies, and live-view URLs proxied through the gateway with short-lived tokens.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Less detailed errors; keep the detail in sensitive logs only.",
+   "tier": "nice-to-have",
+   "significance": 2,
+   "rationale": "Small hardening; providers are mostly unwired today.",
+   "confidence": "medium",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 2,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-031",
+   "name": "Scrape/browser quality evals, hermetic test site and record/replay",
+   "description": "PR-triggered scrape-quality evals and post-deploy production benchmarks, a local hermetic test website (robots, redirects, bot walls, PDFs, prompt-injection pages), end-to-end 'snips' through the real API, and deterministic HTTP mock record/replay.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "firecrawl-api-surface-095",
+    "firecrawl-engine-and-infra-069",
+    "firecrawl-engine-and-infra-070",
+    "firecrawl-engine-and-infra-071"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-071",
+     "firecrawl-engine-and-infra-070",
+     "firecrawl-engine-and-infra-069"
+    ],
+    "why": "q5 SRC: a controlled Astro test site plus e2e snips gated by environment, with a CI matrix over engine, proxy and queue backends. Mock record/replay (q4) makes the engine waterfall testable offline, and evals run on a PR hashtag and after each deploy."
+   },
+   "mechanism": "Serve a lab/test-site in CI with fixture pages and run e2e tests against quarry-edge through the gateway. Record mode writes driver HTTP/CDP exchanges to JSON fixtures; replay mode serves them by name (path-confined). A CI job runs lab/evals on a labelled PR and after deploy, writing results to SCOREBOARD with the commit SHA.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-109"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/lab/evals/src/main.rs",
+     "apps/Ingestion Plane/Quarry-v2/lab/evals/src/browser_benchmark.rs"
+    ],
+    "gap": "An eval harness exists (bakeoff, browser_benchmark, provider_matrix, release_matrix, web_rerank_gate), but every scoreboard suite is '_pending_', and no CI trigger, hermetic target site or record/replay was found.",
+    "strengths": "A substantial Rust eval harness already exists."
+   },
+   "benefit": "Keeps parity claims honest and catches regressions in driver escalation, ZDR behaviour and prompt-injection handling.",
+   "approach": "Ingestion Plane: add a hermetic fixture site (including prompt-injection and ZDR cases), wire lab/evals into CI on a label and after deploy, and publish SCOREBOARD automatically.",
+   "effort": "M",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Flaky live-site evals; run live evals only after deploy.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "A process gap with direct quality impact; the harness already exists.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 4,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-032",
+   "name": "Shadow traffic / A/B mirroring for engine changes",
+   "description": "Mirror a sample of non-ZDR production requests to a staging engine and diff the outputs asynchronously.",
+   "prevalence": {
+    "sourcesWith": [
+     "firecrawl"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "firecrawl-engine-and-infra-068"
+   ],
+   "bestInClass": {
+    "source": "firecrawl",
+    "recordIds": [
+     "firecrawl-engine-and-infra-068"
+    ],
+    "why": "The only source (q4 SRC): a sampled mirror or split to staging, skipped for ZDR and agent jobs, with outputs compared asynchronously."
+   },
+   "mechanism": "When a scrape completes, with probability r and only for consenting non-ZDR tenants, enqueue a mirror job to the candidate driver, compare markdown similarity and latency, and record the result in the experiments table.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [
+     "v-quarry-112"
+    ],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/canary.rs:1-15",
+     "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/experiments.rs:1-20"
+    ],
+    "gap": "A canary splitter and experiment tagging exist; there is no mirror-and-diff mode.",
+    "strengths": "Canary splitting and A/B tagging are shipped."
+   },
+   "benefit": "Safer driver and readability changes, validated on real traffic.",
+   "approach": "Add a mirror mode to canary.rs, skipped for ZDR and agent runs.",
+   "effort": "S",
+   "dependencies": [
+    "C-t2-07-031 evals"
+   ],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Mirroring doubles third-party load; consent and ZDR exclusion are required.",
+   "tier": "nice-to-have",
+   "significance": 1,
+   "rationale": "An increment on the shipped canary.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 1,
+    "DOC": 0,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-033",
+   "name": "Reliable, tenant-scoped webhook delivery",
+   "description": "Webhook POSTs retried with exponential backoff, timeouts, dispatch ids, a test button and static source IPs, with scope inherited from the creating token.",
+   "prevalence": {
+    "sourcesWith": [
+     "apify"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "apify-platform-098"
+   ],
+   "bestInClass": {
+    "source": "apify",
+    "recordIds": [
+     "apify-platform-098"
+    ],
+    "why": "The only source here (q4 DOC): 11 retries over about 32 hours, a 2-minute timeout, a dispatch-id header and a test button, but no HMAC signing."
+   },
+   "mechanism": "Webhook(org_id, url, secret, events). The dispatcher signs with HMAC-SHA256, retries with exponential backoff out to about a day, sends a dispatch id for idempotency, and falls back to a DLQ; there is a test endpoint. Registration happens only through edge, with org scope.",
+   "verevon": {
+    "status": "partial",
+    "baselineIds": [],
+    "evidence": [
+     "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-34",
+     "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:376-383"
+    ],
+    "gap": "Delivery is HMAC-signed with 5 attempts (1 s to 1 h) and then a DLQ, but the webhook model has no org_id and the routes are not exposed through edge, so tenants cannot self-register and webhooks are not tenant-isolated.",
+    "strengths": "HMAC signing and the DLQ are ahead of Apify's documented model."
+   },
+   "benefit": "Webhooks must be tenant-isolated before crawl or monitor webhooks are exposed to customers.",
+   "approach": "Ingestion Plane: add org_id to webhooks, front CRUD through edge with JWT org scoping, extend the retry ladder, and add a dispatch-id header and a test endpoint.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Ingestion Plane",
+   "risks": "Migrating existing rows that have no scope.",
+   "tier": "recommended",
+   "significance": 3,
+   "rationale": "A cross-tenant security gap that takes little effort to close.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  },
+  {
+   "id": "C-t2-07-034",
+   "name": "Operations console for runs, schedules, storage and integrations",
+   "description": "A console that organises runs, tasks, schedules, storage, integrations and billing, with keyboard shortcuts.",
+   "prevalence": {
+    "sourcesWith": [
+     "apify"
+    ],
+    "n": 1,
+    "of": 4,
+    "cls": "unique"
+   },
+   "members": [
+    "apify-platform-097"
+   ],
+   "bestInClass": {
+    "source": "apify",
+    "recordIds": [
+     "apify-platform-097"
+    ],
+    "why": "The only source (q3 DOC)."
+   },
+   "mechanism": "A sectioned console with a run list, schedule list, storage browser, integrations and G+key shortcuts.",
+   "verevon": {
+    "status": "shipped",
+    "baselineIds": [
+     "v-browser-app-054"
+    ],
+    "evidence": [
+     "apps/Frontend Plane/verevonv3/src/features/insights/components/InsightsPage.tsx:112",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/evidence.rs:24"
+    ],
+    "gap": "The fleet console is a stub that calls an unrouted /v1/fleets (see C-t2-07-011).",
+    "strengths": "An Ingestions console with runs, schedules, monitoring, sources, evidence and profiles, plus an ingestion section in Insights."
+   },
+   "benefit": "Keep.",
+   "approach": "Keep; fold fleet runs into it once the run trace exists.",
+   "effort": "S",
+   "dependencies": [],
+   "planeOwner": "Frontend Plane",
+   "risks": "",
+   "tier": "n/a",
+   "significance": 2,
+   "rationale": "Strength.",
+   "confidence": "high",
+   "provenanceMix": {
+    "REA": 0,
+    "SRC": 0,
+    "DOC": 1,
+    "INF": 0
+   }
+  }
+ ]
+}

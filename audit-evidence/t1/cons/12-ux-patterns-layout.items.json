@@ -1,0 +1,626 @@
+{
+  "category": "UX patterns & layout",
+  "items": [
+    {
+      "id": "R-t1-12-01",
+      "title": "Contextual right-hand pane (AuxPane) with a thread side panel as its first kind",
+      "summary": "Generalise the read-only \"room pulse\" rail in SpacePage into one AuxPane shell (standard header with title/actions/back/close, persisted width, resize handle, docked-vs-overlay by width, focus hand-off) and register \"thread\" as the first pane kind, bound to a ?thread= URL param. The thread_id deep links that the Activity feed already emits then open the panel instead of being ignored; later kinds are run/agent-session, approval details and members.",
+      "whyItMatters": "Agent runs produce long threads, and today replies continue inline (up to 30 turns per post), so a human cannot follow or approve a run without losing the room. A thread panel is table stakes in Slack, Teams and Buzz, and the AuxPane is the single container that live runs, approvals and members will also need, so every later visibility feature stops being per-feature layout work.",
+      "referenceBestPractice": {
+        "bestSource": "Slack (thread panel, pop-out window, Threads view) for the pattern; Grok Bot for the pane mechanics",
+        "others": [
+          "Teams (reply in place from an inbox thread card via a tree-grid compose box)",
+          "Buzz (one shared right panel for threads, canvas, members and agent sessions)",
+          "Slack help text on the Threads view (DOC)"
+        ],
+        "prevalence": "thread panel 3 of 5 (Slack, Teams, Buzz); contextual right pane 3 of 5 (Grok Bot, Teams, Slack); table-stakes",
+        "mechanism": "Message carries thread_root_id; the pane route ?thread=<id> renders root plus replies with its own composer and scroll state; follow state per user feeds a Threads list with per-thread unread; pop-out opens the same route in a new window. The shell is one <AuxPane kind title actions onBack onDismiss> with an open -> closing (inert + aria-hidden, ~300 ms linger) -> closed state machine, width persisted per user, a role=separator handle with aria-valuenow and arrow-key resize, focus moved to the first enabled control, and a width breakpoint that decides docked vs overlay."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1253-1324 (SpacePulse: read-only status rail in the third column)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:497-607 (replies continue inline per post)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:200 (emits /spaces/<owner>?thread_id=<id>#chat links)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:150-151 (only the #hash is read; grep of features/spaces finds no URLSearchParams or useSearchParams, so ?thread_id= is never consumed)",
+          "apps/Frontend Plane/verevonv3/src/features/inbox/components/InboxPage.tsx:1194 and src/features/chat/components/ChatWorkspaceCanvas.tsx:178-183 (existing role=separator resize handles with aria-valuenow to reuse)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:201 (transcript read failure is swallowed to an empty turn list)"
+        ],
+        "gap": "The third column exists with a responsive collapse, but it cannot host a thread, run, member list or any interactive content; it has no standard header or resize. There is no thread panel, no followed-threads view and no consumer of the ?thread_id= links Activity generates. A shared-read refusal on the transcript currently renders as an empty thread rather than a \"you cannot read these turns\" state."
+      },
+      "approach": "Frontend Plane only for the first slice. (1) Build AuxPane in features/spaces/components, lifting the separator and persisted-width logic from the Inbox/Chat canvas code, keeping the existing 720 px collapse. (2) Add kind \"thread\": read ?thread= in SpacePage, fetch with the existing getSpaceThreadTranscript path (Model Plane Session Core stays the transcript owner), render root plus replies and the existing composer in reply mode; show an explicit \"you cannot read these turns\" state for refusals instead of an empty list. (3) Follow/unread-per-thread and a Threads view need the participant/unread projection (S1.7) in Application Plane and later push realtime. Pop-out window = same route in a new tab.",
+      "effort": "L",
+      "dependencies": [
+        "Model Plane Session Core thread transcript read via the gateway (exists)",
+        "S1.7 participant/unread projection in Application Plane (for follow state and per-thread unread)",
+        "Push realtime or the Application delivery/projection outbox (category 09) for live replies",
+        "Run console components for the later run/agent-session kind (R-t1-12-03)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Partial transcripts under deny-by-default shared reads must be shown as such. Keep the room-definition rule that configuration does not live in the room (docs/space-defenition.md: a room that shows configuration becomes a Copilot side panel): the pane should host conversation, run and approval content only. Focus traps and layout thrash at medium widths.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-005",
+        "C-t1-12-006"
+      ],
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 5,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-02",
+      "title": "Cross-room navigation destinations: Home (\"needs you\"), Agents and Activity in the Core sidebar",
+      "summary": "Add a typed destinations registry to the Core sidebar so a person can leave a single room: a Home/\"needs you\" page (unread, awaiting-approval and working counts across all Spaces they belong to), an Agents directory across rooms, and a cross-room Activity view, each permission-checked like any other action. Name the Home destination so it is not confused with the existing support Inbox (Zammad tickets and email at features/inbox).",
+      "whyItMatters": "Once a user belongs to several Spaces with several agents, \"what needs me\" must be answered across rooms; approvals need a place to land. Four of five references have a first-class home/inbox/activity destination and the Space vision (Teams plus Slack) is hard to navigate without it. It is also the frame the thread panel, finder and sidebar organisation hang on.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz (Agents, Workflows and inbox as first-class sidebar destinations, one shared right panel); Teams for app-bar mechanics",
+        "others": [
+          "Slack (Home, Activity, Later/Saved rail destinations)",
+          "QM (permission-checked destinations() list)",
+          "Teams (app bar with pin/unpin, See-all flyout and keyboard drag-and-drop with spoken narration)"
+        ],
+        "prevalence": "4 of 5 (Buzz, Slack, QM, Teams); table-stakes",
+        "mechanism": "File-based routes per destination; a pinned header component holds search plus fixed feature entries, below it fixed conversation groups plus user sections; a narrow rail switches tenants. Teams models the app bar as {appId, pinned, order} with a keyboard drag state machine (pickup, move, place/cancel) announced through a live region. Build as a <Rail> of route entries from a typed destinations registry, checked for permission the way QM does."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:356-490",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232 (Channels, Personal Space, All conversations for the selected room only)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts (module-level store holds only rooms whose page has published; unobserved room = unknown)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts and apps/Application Plane/convex-core/convex/spaceReadMarkers.ts (durable per-room, per-subject read marker already exists)",
+          "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md (about lines 1455-1461 and 1790-1797: cross-room unread/presence aggregate recorded as an open item)"
+        ],
+        "gap": "One sidebar panel, scoped to the room that is open. No cross-room Home/needs-you, Agents or Activity destination, no DMs or Later, no workspace rail; agents and members are reachable only through cockpit tabs. Sidebar dots exist only for the room open in this browser because deriving unread needs that room's thread list and the sidebar must not poll per room."
+      },
+      "approach": "Application Plane: add a per-viewer aggregate over the Spaces the viewer belongs to, {spaceRef, latestActivityAt, unreadCount (read markers joined to the Model Plane latest-activity-per-Space call), awaitingApprovalCount, workingCount}, re-checking membership per Space and returning an explicit unavailable flag per row (never zero). Gateway: one typed read action that proxies it. Frontend Plane: a destinations registry in the Core sidebar (Home, Spaces, Agents, Activity, later DMs/Files) and the Home page rendering the aggregate, reusing SpaceApprovalPanel and the activity grammar for rows. Reuse the Inbox layout/separator code only; keep the support Inbox as is.",
+      "effort": "L",
+      "dependencies": [
+        "Per-Space latest-activity aggregate from Model Plane (one call) and an Application Plane cross-room unread/presence aggregate (both recorded open in SPACE_PAGE_AUDIT)",
+        "Notification events for Space (category 05)",
+        "DM/group-DM kinds (category 01) for a DMs destination"
+      ],
+      "planeOwner": "Frontend Plane (Application Plane owns the aggregate)",
+      "risks": "Destinations built before the aggregates exist show empty or browser-local views (the current dots are already local). The aggregate must never imply visibility the owner plane does not grant: per-Space ACL checked on every row, and unknown shown as unknown.",
+      "tier": "priority",
+      "significance": 5,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md records the cross-room unread and presence aggregate as \"what remains open\" (about lines 1455-1461 and 1790-1797); the destinations themselves are not scheduled there."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-001"
+      ],
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-03",
+      "title": "Make agent work visible in the room: ambient activity strip with latch/threshold rules, then typed transcript rows with grouping",
+      "summary": "Slice 1 (S): turn the status-only lines (\"Verevon is working in X\", per-post working row, pulse card) into an activity strip near the composer with a headline derived from the latest run step and click-through to the run in the AuxPane, using latch and minimum-display-threshold helpers in a pure, tested lib. Slice 2 (M): replace the flat post list with a Row discriminated union (message, system/event, approval, tool or step, delegation, day and unread dividers, group) and a grouping pass that folds consecutive machine rows of one run into a collapsible group, collapsing completed work behind a \"worked for N\" disclosure while the answer stays open.",
+      "whyItMatters": "Agent work is opaque in the room today: status lines exist but no step headline, no click-through, no tool or step rows and no grouping. This is the baseline's top \"agent visibility\" gap and the precondition for showing tool calls, delegations and approvals without drowning humans in a multi-agent room.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz for the strip interaction; Grok Bot for the latch/threshold rules and the row-kind contract; QM for collapsing completed work",
+        "others": [
+          "Buzz (headline rotation about every 2.2 s, hover list of working agents, agent badge with managed-by owner, address prefix)",
+          "QM (prompts over 2 lines collapse, completed tool steps collapse into one disclosure, paged history that does not yank the reader)"
+        ],
+        "prevalence": "activity strip 2 of 5 (Buzz, Grok Bot; differentiator); typed rows 3 of 5 (Buzz, Grok Bot, QM; table-stakes for human+agent rooms)",
+        "mechanism": "Per room: typingUsers (presence TTL) plus workingAgents (run state from the owner projection). A committed-ids latch admits an agent to the visible set when it commits to a turn (not while reading) and releases it only at run end; a phase label shows only after a minimum display threshold. Headline = derive(lastStep) from the run event stream, rotated on a timer, with non-owners getting a generic \"working\". Rows: Row = message | send-message | event | notice | approval | attachment | spend | synthetic(day, unread, group); agent rows carry {agentRef, ownerRef}; a grouping pass folds consecutive machine rows of the same run into a group row with count and expand."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:616-627 and components/SpaceRoomTimeline.tsx:349-369 (status-only working lines with aria-live)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:134-416 (flat <ol> of posts; MAX_TURNS_PER_POST = 30 at line 50; no day or unread dividers, no system rows, no grouping)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx (an approval is already a typed in-timeline row)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts and lib/space-presence.ts (projection kept apart from the browser's own stream; typing presence; unknown subjects are never named)",
+          "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md (about lines 239-245: visible working state, agent actions as transcript events, 3 of Buzz's 15 render classes, owner-private tool transcript)"
+        ],
+        "gap": "Honest status exists in three places but carries no step headline, no click-through, no latch or threshold (a 6 s poll hides flicker today, push realtime will expose it) and no typed step, tool or system rows, no grouping and no collapsed completed work."
+      },
+      "approach": "Frontend Plane: put the latch and threshold logic and the headline derivation in a pure module under features/spaces/lib with unit tests, fed by Model Plane run step events through the gateway; click opens the AuxPane run kind (R-t1-12-01) built from AgentRunConsole step components (as SPACE_PAGE_AUDIT S2.5 already asks). Define the Row union and grouping pass in lib with tests, then refactor SpaceRoomTimeline to render rows. Audience filtering per entry (S1.7): step text and tool output only for viewers entitled to read the run; everyone else gets the generic \"working\" and a group count.",
+      "effort": "M",
+      "dependencies": [
+        "Run step events available at room scope through the gateway (Model Plane run stream)",
+        "AuxPane shell (R-t1-12-01) for click-through",
+        "Per-entry audience filtering / owner-private vs room-public output (S1.7)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Leaking step or tool content to members without read entitlement (the silent 403 handling at SpaceRoomTimeline.tsx:201 must be replaced with an explicit state first). Flicker if the latch rules are skipped once realtime lands. Row types multiply render cost until the timeline is virtualised (R-t1-12-06).",
+      "tier": "priority",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md section 6.1 rows on visible working state, agent actions as transcript events and owner-private tool transcript (about lines 239-245), and S2.5 reuse of AgentRunConsole panels (about line 104); a 2026-09-06 snapshot recorded as gaps (section 15, item 1b, later shipped the status-only working row); step headlines, typed rows and grouping are not scheduled as UI work."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-010",
+        "C-t1-12-012"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 9,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-04",
+      "title": "Personal sidebar organisation: stars, sections, per-group sort, hide, drag-and-drop, plus computed system sections",
+      "summary": "Give each user a synced sidebar preference document (stars, custom sections, per-group sort, hidden refs) edited with drag-and-drop and a batch-selection mode, and add computed system sections over the same conversation summaries (Agent runs, Waiting for approval, Unread, Muted) that can be toggled without deleting anything. Ship layout changes behind a feature flag with a switch-back that only flips the preference.",
+      "whyItMatters": "With agents creating many threads, a flat list degrades quickly. Per-user organisation keeps humans oriented without changing anyone else's view or any ACL, and \"Agent runs\" and \"Waiting for approval\" sections keep agent-generated conversations out of the human list without hiding them, which matters more here than in Teams.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz (sort per group, synced sections and stars, dnd-kit sorting, More-unread pill); Teams for computed system sections and switch-back",
+        "others": [
+          "Grok Bot (hide from sidebar, batch move/hide/delete for agents)",
+          "Slack (Priority sort, VIP break-through)",
+          "QM"
+        ],
+        "prevalence": "organisation 4 of 5 (Buzz, Grok Bot, QM, Slack; table-stakes); system sections and view modes 1 of 5 (Teams; unique)",
+        "mechanism": "Per-user blob {stars:[ref], sections:[{id,name,refs[]}], sort:{group -> alpha|recent|priority}, hidden:[ref]} stored server-side and synced; groups render in fixed order, then user sections; sortable lists with a keyboard sensor; an IntersectionObserver on unread rows outside the viewport drives a \"More unread\" pill; selection mode with shift-range and bulk actions. Teams: system folders RECENT/MUTED/MEETING_CHATS as computed views toggled in settings, and a switch-back modal that preserves custom sections."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:104-232 and 281-321 (org room pinned first, thread pinned/unread/working dots, filter box)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts (unread mirrors Application Plane read markers, but only for the open room)"
+        ],
+        "gap": "No user stars, custom sections, sort modes, drag-and-drop, hide or bulk actions, no filters or system sections, and unread dots exist only for the room open in this browser."
+      },
+      "approach": "Application Plane owns a per-user preference document (refs only, no room names, so retention and ZDR are not touched) read and written through typed gateway actions. Frontend Plane renders groups and computed sections from the conversation summaries, with the drag-and-drop and selection mode. Priority sort waits on the salience model already used by the Activity grammar. Note: package.json has no drag-and-drop or virtualisation library and runs Solid 2.0 RC, so check compatibility of solid-dnd or build keyboard-first sorting on existing primitives.",
+      "effort": "M",
+      "dependencies": [
+        "Cross-room destinations and unread aggregate (R-t1-12-02)",
+        "Run and approval state present in conversation summaries (for system sections)"
+      ],
+      "planeOwner": "Application Plane (preferences); Frontend Plane (UI)",
+      "risks": "Low authority risk, since preferences are per user and touch no Space ACL. Solid 2 RC library compatibility. Too many default sections clutters the list.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-002",
+        "C-t1-12-003"
+      ],
+      "provenanceMix": {
+        "REA": 2,
+        "SRC": 5,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-05",
+      "title": "Composer for real work: attachments, slash commands, paste chips and ref-based \"discuss with an agent\" context",
+      "summary": "Extend SpaceRoomComposer with attachments (including folder drop), a slash-command menu fed by the typed action registry and room skills, long-paste chips with a view/edit dialog, and saved model presets (QM allows up to 8). Add a selection mode to the Work, Knowledge and Activity lists so a human can select items and hand them to an agent as visible context chips that carry references, not copied content. Scheduled send and clips are later slices.",
+      "whyItMatters": "Attachments and slash commands are what make a room usable for real work, and paste chips keep long pasted context legible for both humans and agents. Passing refs instead of text gives the human precise control over what the agent receives while owner planes re-check ACL and ZDR at use time, which fits the authority model and is a Buzz-only differentiator.",
+      "referenceBestPractice": {
+        "bestSource": "QM for a human+agent composer; Slack for the human messaging set; Buzz for selection-to-context",
+        "others": [
+          "Slack (formatting toolbar, clips, send-later)",
+          "Buzz (selectable list groups, count menu, discuss action, capped context block builder opening an agent chat or channel)"
+        ],
+        "prevalence": "composer 2 of 5 (Slack, QM; common, likely under-counted since attachments are industry-standard, INF); selection-to-context 1 of 5 (Buzz; unique)",
+        "mechanism": "Composer state {text, attachments[], chips[], loadout}; a paste handler turns text over N characters into a chip atom labelled from its first line; loadout presets upserted with cap 8; a slash token parser opens a command menu from a registry; scheduled send writes a job owned by the message plane. Buzz: buildContext(selection) produces a quoted, capped block of object refs and the action opens an agent chat or new channel with the block pre-attached as visible chips."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:597-772 (two-row textarea, model picker, skill chips, reply banner, ZDR refusals surfaced)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceWorkPanel.tsx:106-192 and components/SpaceKnowledgePanel.tsx:82-243 (read-only lists, no selection)"
+        ],
+        "gap": "No attachments, formatting, emoji, slash commands, clips, scheduled send, presets or paste chips, and no multi-select or \"ask an agent about these\" action. Every send is an AI invocation."
+      },
+      "approach": "Frontend Plane: composer state with chips that hold refs (documentId, runRef, threadRef) resolved by Data/Model planes at use time; attachments go through Data Plane documents with Space-bound ACL (never widened) and respect ZDR; slash menu reads human-eligible entries from shared/actions/action-registry.ts. Each append still needs a Control thread:append decision bound to the final bytes. Scheduled send needs an owner (Model Plane session or an Application Plane scheduler) and is deferred. Selection mode lands on the three read-only lists once chips exist.",
+      "effort": "L",
+      "dependencies": [
+        "Human-only message path (category 01)",
+        "Attachments in Data Plane (category 08)",
+        "Room skills (S3.5) for slash completion"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Copying content into prompts would bypass owner ACL and ZDR, so pass refs. Content-bound append decisions complicate drafts and scheduled send. ZDR content must not reach external preview or embedding services. Attachments are table stakes in practice (INF): promote to priority if the category 01 human-only path lands first.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-009",
+        "C-t1-12-028"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 2,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-06",
+      "title": "Virtualised room timeline with scroll anchoring, jump-to-latest and history paging",
+      "summary": "Window the SpaceRoomTimeline rows, add a pure, unit-tested anchoring policy (keep the anchor offset on prepend, auto-scroll on append only while pinned to the bottom, show \"Jump to latest\" otherwise) and page older turns on demand instead of loading the whole thread on every poll. Keep aria-setsize/posinset so screen-reader order and find-in-page survive.",
+      "whyItMatters": "Needed before push realtime and streamed agent output, otherwise the room jumps under the reader and long agent threads get slow. Not visible at today's low volume, but cheaper to build before the typed-row model hardens.",
+      "referenceBestPractice": {
+        "bestSource": "Buzz (written, tested anchoring policy on a patched virtual list, mobile IME handling)",
+        "others": [
+          "Grok Bot (FLIP animation for rows shifting under late content, epoch-keyed layout cache)"
+        ],
+        "prevalence": "2 of 5 (Buzz, Grok Bot); differentiator",
+        "mechanism": "Virtual list with measured row heights; anchoring state {pinnedToBottom, anchorRowId, anchorOffset}: on prepend preserve anchor offset, on append scroll only if pinned, show Jump-to-latest when not pinned and new rows arrive; ResizeObserver plus FLIP animates siblings when a row grows, disabled under reduced motion."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:134-416 (plain <ol>; MAX_TURNS_PER_POST = 30 at line 50; no scrollTop or scrollIntoView use anywhere in features/spaces)",
+          "apps/Frontend Plane/verevonv3/package.json (no virtualisation library; solid-js ^2.0.0-rc.0)"
+        ],
+        "gap": "No virtualisation, no scroll anchoring and no paging: the full thread list loads on every 6 s poll, so the view will jump once realtime or streaming lands."
+      },
+      "approach": "Frontend Plane: a windowing layer for the timeline with a standalone anchoring-policy module and lifecycle tests, plus a turn-paged history call from Model Plane through the gateway. Because the app is on Solid 2.0 RC with no virtual-list dependency, first confirm that @tanstack/solid-virtual works on Solid 2, otherwise implement windowing with IntersectionObserver and measured heights.",
+      "effort": "M",
+      "dependencies": [
+        "Typed row model (R-t1-12-03)",
+        "Turn-based history paging API in Model Plane",
+        "Push realtime (category 09) is the consumer that makes this necessary"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Virtualisation breaks find-in-page and screen-reader reading order unless handled; Solid 2 RC compatibility of third-party list libraries; unmeasured rows cause scroll jumps.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-014"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-07",
+      "title": "Universal finder: Cmd/Ctrl+K quick switcher over rooms, threads, agents and people, then the unified \"To:\" new-conversation picker",
+      "summary": "Rebuild the Cmd/Ctrl+K overlay as a command palette with fuzzy match over rooms, threads, agents, people and human-eligible action-registry entries, with unread jumping and a hold-Cmd/Ctrl hint overlay; keep web search as a palette mode. Once DMs and a people directory exist, add a recipient-token \"To:\" field that finds or creates agents, people and groups, replacing the separate \"+ New room\", Create-agent and Bind-agent entry points.",
+      "whyItMatters": "A switcher is a cheap daily-productivity win, and a palette over the typed action registry lets humans trigger agent actions under the same guardrails as buttons. The \"To:\" field collapses three creation flows into one entry point, which suits the Teams-plus-agents hybrid vision.",
+      "referenceBestPractice": {
+        "bestSource": "Slack for the keyboard model (switcher, unread navigation, All-unreads, F6 section cycling); Grok Bot for hold-to-reveal hints and the \"To:\" picker",
+        "others": [
+          "Teams and Buzz almost certainly ship quick switchers (INF; no records)"
+        ],
+        "prevalence": "switcher 2 of 5 in records (Slack, Grok Bot; common, under-counted); \"To:\" picker 1 of 5 (Grok Bot; unique)",
+        "mechanism": "A global keydown router with scope (app, room, composer) and conflict rules; a palette component with fuzzy match over a combined directory; unread navigation iterates the cross-room unread list; hold-to-reveal arms a ~500 ms timer on modifier keydown, cancelled by other modifiers, keyup or blur, then shows numeric badges bound to Ctrl+1..9. Picker: a recipient token input over agents, team agents and people, free text offers \"Create <name> agent\", more than one recipient creates a group conversation."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/core/components/CoreNavbar.tsx:122 (Cmd/Ctrl+K opens web search)",
+          "apps/Frontend Plane/verevonv3/docs/UI_UX_AUDIT_2026-09-29.md:71 (the CTRL+K overlay lacks a focus trap, focus return and arrow/Enter keys)",
+          "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:11 and apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:170-179 (composer keys and tablist arrows only)",
+          "apps/Frontend Plane/verevonv3/src/shared/actions/ActionCommand.tsx:1-40 (typed action registry that can feed the palette)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:87-239 and components/SpaceBindAgentDialog.tsx:26-153 (separate flows)"
+        ],
+        "gap": "No room, thread or agent switcher, no unread jumping and no shortcut hints; creation is three separate flows and there are no people search, DMs or group DMs, so there is no single entry point."
+      },
+      "approach": "Frontend Plane. Phase 1 (S): extend the existing overlay shell into a palette fed by the rooms/threads/agents lists and human-eligible registry actions, fixing its keyboard model (trap, restore, listbox with arrows and Enter) per the UI/UX audit, and rebind Cmd/Ctrl+K with web search as a mode. Phase 2 (M): the \"To:\" picker over the Control roster (people) and Application agent bindings; creation still runs the two-step Application -> Control lifecycle and renders as pending, with born-narrow agent policy unchanged.",
+      "effort": "M",
+      "dependencies": [
+        "Cross-room room and thread list (R-t1-12-02)",
+        "DM/group-DM kinds (category 01) and people directory (category 02) for phase 2"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Shortcut conflicts with the browser and the existing Cmd/Ctrl+K web-search habit; creating agents too casually (keep born-narrow policy and the human-only creation path).",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-008",
+        "C-t1-12-029"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 2,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-08",
+      "title": "Agent computer view in the room: thumbnail preview that expands to an interactive modal with a control indicator",
+      "summary": "Show an agent's browser or computer as a glanceable preview card in the room (periodic frame or low-rate stream) that expands to an interactive modal with a screen switcher, a \"control: agent | you\" badge and an idle pause. Build it in the Frontend Plane as a UI over Quarry-executed browser sessions, hosted in the AuxPane for the run, and gated on read entitlement for the run.",
+      "whyItMatters": "Core to the vision that agents work like a human with their own PC and browser: members see what the agent is doing in the room they share, and human takeover for secrets or CAPTCHAs has a natural home. Only Grok Bot has the glanceable-to-interactive progression, which makes it a high-leverage differentiator.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (preview card to interactive modal, multi-screen, control owner badge)",
+        "others": [],
+        "prevalence": "1 of 5 (Grok Bot); unique",
+        "mechanism": "Computer view modes {preview, interactive}: preview is a periodic frame or low-rate VNC stream in a card; the modal is interactive VNC with a screen switcher and a control-owner badge (agent or you); an idle pause with wake and retry; a REC overlay while recording."
+      },
+      "verevonToday": {
+        "status": "absent",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497 (browser with human takeover, dashboard only)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:551-569 (run screenshots, run console only)"
+        ],
+        "gap": "Nothing is reachable from a Space and there is no per-agent computer; the takeover browser and run screenshots are reusable building blocks only."
+      },
+      "approach": "Frontend Plane card plus modal in the AuxPane. Model proposes browser actions, Quarry executes or rejects them under BrowserBroker grants; the preview streams frames Quarry exposes, and takeover requires a human grant. Show only to members entitled to read the run, never share credentials across members, and do not retain frames beyond policy.",
+      "effort": "L",
+      "dependencies": [
+        "Per-agent browser or sandbox capability (agents category)",
+        "Quarry frame streaming",
+        "AuxPane shell (R-t1-12-01)"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Frames may contain sensitive or ZDR data, so respect privacy tier and read entitlement and never copy frames to retention paths; takeover must not widen what the room can do.",
+      "tier": "recommended",
+      "significance": 4,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-021"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 1,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-09",
+      "title": "Room header and pulse rail: live counts, pinned posts first, user-added tabs and a budget meter",
+      "summary": "Keep the six fixed cockpit tabs as the default but add header counts (open approvals, running work, documents) from existing projections, show pinned posts first, and allow user-pinnable extra tabs (link, document, later canvas) stored as Space metadata. Add a usage meter with warning thresholds to the pulse rail once per-Space cost attribution exists.",
+      "whyItMatters": "Lets people see what an agent can use and what it is doing before invoking it, matching the Teams tabs-on-a-channel habit and QM's \"the room's computer\" view. Since every post is a paid model turn, shared rooms also need visible budgets before the limit is hit instead of only a refusal after.",
+      "referenceBestPractice": {
+        "bestSource": "QM (scope-centred page and top-bar tool buttons with 60 s cached counts); Slack for user-added tabs and bookmarks; Grok Bot for the usage meter",
+        "others": [
+          "Slack (Pins tab auto-created on first pin, bookmark folders)"
+        ],
+        "prevalence": "header shelf 2 of 5 (Slack, QM; differentiator); usage meter 1 of 5 (Grok Bot; unique)",
+        "mechanism": "Scope model {personal|project|channel|group} drives contextMeta(scope) panels with manage actions; the top bar shows breadcrumb plus tool buttons whose counts are cached per scope for 60 s, and opening a tool keeps the session scope. Slack lists tabs per conversation with \"show by default\". Grok Bot: usage policy {thresholds:[75,90]} feeding a meter component and a limit-hit state with upgrade or credit options."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-110 and components/SpacePage.tsx:408-486 (six fixed tabs, no counts)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4890-4925 (space_actions echoes the org catalog only)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:541-567 and lib/activity-grammar.ts:694-730 (budget_exceeded rendered as a refusal linking to the spend ceiling)"
+        ],
+        "gap": "No user-added tabs or bookmarks, no counts in the header, pins not shown first, no room-level view of skills, connectors or memory (S3.x), and no proactive meter or per-room spend (token counts are 0 from Session Core, so a meter would mislead)."
+      },
+      "approach": "Frontend Plane: header counts from existing Work, Activity and Knowledge projections, with unknown rendered as unknown; a user-pinnable tab type stored as Space metadata in Application Plane (link and document first, canvas after category 08); pinned posts first. The meter is last: Model Plane cost service publishes per-org and per-Space usage summaries and Session Core must return real token counts before the pulse rail shows a meter.",
+      "effort": "M",
+      "dependencies": [
+        "Collaborative artifacts and canvas (category 08)",
+        "S3.x skills/connectors/memory room panels",
+        "Per-Space cost attribution in Model Plane and non-zero token counts from Session Core (meter only)"
+      ],
+      "planeOwner": "Frontend Plane (meter data from Model Plane)",
+      "risks": "Tab sprawl; counts and meter must show unknown, never zero, when a projection is unavailable; the meter must not expose another member's spend.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md section 17 (The later tier, about lines 1595-1625) records per-room spend as blocked, and S3.x covers room skills/connectors/memory panels (about lines 253-257)."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-004",
+        "C-t1-12-031"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 4,
+        "DOC": 1,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-10",
+      "title": "Agent identity in the room: surface the persisted avatar colour (then shape) and add a hover card that leads with blocking state",
+      "summary": "Pass the avatarColor that the Application Plane already stores and projects through the gateway agent composition and the SpaceAgent type, then render a deterministic non-human shape-by-colour avatar on posts, agent cards, the roster and the sidebar. Add a hover/focus card for agents and members whose preview leads with what blocks a human (awaiting approval), then a draft, then the last entry.",
+      "whyItMatters": "Agents must be instantly distinguishable from people in a mixed room and must never look like a human colleague. The colour is already collected and stored, so this is a bug-level fix with immediate visible effect; the hover card surfaces \"waiting for your approval\" wherever an agent name appears.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (14+ shapes by 11 colours, crop upload, describe-to-generate; hover card ordered by blocking state)",
+        "others": [
+          "Buzz (BotIdenticon, agent badge with managed-by owner)"
+        ],
+        "prevalence": "avatars 1 of 5 (Grok Bot; Buzz has a similar idea); hover card 1 of 5 (Grok Bot); unique",
+        "mechanism": "Agent identity fields {avatar_shape, avatar_color, avatar_version, image_ref}; a deterministic SVG character from shape by colour, with the colour token reused as an accent in agent rows. Hover card preview = awaitingReason ? localized(awaitingReason) : draft ? draftLabel + first line : lastEntry ? preview(lastEntry) : emptyText, opened with a delay and on keyboard focus."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCreateAgentDialog.tsx:91,106-132 (collects a colour and sends avatarColor)",
+          "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:3324-3354 (create path forwards avatar_color) versus lines 4114-4135 (agent composition whitelist omits avatarColor)",
+          "apps/Application Plane/convex-core/convex/spaceAgents.ts:89,194 and convex/schema.ts:328-330 (colour stored and projected)",
+          "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts:704 (SpaceAgent type has no avatar field)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:911-915 (cards show an initial only)",
+          "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx:245-321 (no hover card; no HoverCard component in src per a 2026-10-13 grep)"
+        ],
+        "gap": "The colour is persisted in the Application Plane but the gateway agent listing drops it, the client type has no field for it and cards render an initial only, so the collected colour is never shown. No shapes, uploads or generated avatars and no hover card."
+      },
+      "approach": "Slice 1 (S, no new plane work): add avatar_color to the gateway composition whitelist (spaces.rs around 4114-4135), to SpaceAgent in spaces-client.ts, and render a shared <AgentAvatar> on posts, cards, roster and sidebar. Slice 2: avatar shape persisted on the Application Plane agent definition. Slice 3: a hover card built on @kobalte/core (check HoverCard availability in the pinned alpha) reading status and pending approvals from existing projections.",
+      "effort": "S",
+      "dependencies": [
+        "Agent status projection (exists)"
+      ],
+      "planeOwner": "Frontend Plane (gateway passthrough); Application Plane for shape later",
+      "risks": "Generated avatars that resemble real people (keep non-human characters); the hover card must not reveal approval details to anyone but the run owner, who is the only person who can decide today.",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "high",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md section 6.1 row on agent identity lists avatar as an initial only (about line 236); baseline known gap 16."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-020",
+        "C-t1-12-022"
+      ],
+      "provenanceMix": {
+        "REA": 0,
+        "SRC": 6,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-11",
+      "title": "Space UI quality baseline: localised activity grammar, shared announcer, reduced-motion and density, and failure screens",
+      "summary": "Four independent small tasks. (1) Move the activity grammar labels and the forced nb-NO date formatting onto the i18n catalog and the viewer locale, with an optional friendlier phrasing layer. (2) Promote the page-local chat live region into a shared announcer (tick-keyed so repeats are read), add agent state to row aria-labels and a navigate-with-focus helper. (3) Audit Space animations for prefers-reduced-motion and add a density token. (4) Add a root error boundary with an honest failure screen, a static cannot-connect page from the gateway, a redacted diagnostic export and start-up milestones to telemetry.",
+      "whyItMatters": "English-speaking users currently see Norwegian activity labels on the product's strongest UX asset; Agent rooms change constantly, so without an announcer every live row is a noisy live region and enterprise buyers expect accessibility; and a blank page on a gateway or render failure contradicts the \"never go dark\" stance applied everywhere else in the Space. All are cheap now and costly to retrofit.",
+      "referenceBestPractice": {
+        "bestSource": "Grok Bot (friendly activity vocabulary, announcer and pane focus rules); Teams (row narration, start-up milestones); Slack (cannot-connect page with log download); Buzz (reduced-motion gate, 3-level density)",
+        "others": [
+          "QM (agent-facing copy reviewed like UI)",
+          "Teams (device-memory efficiency mode)"
+        ],
+        "prevalence": "friendly copy 2 of 5 (Grok Bot, QM); accessibility 2 of 5 (Grok Bot, Teams); motion/density 2 of 5 (Buzz, Teams); shell failure UX 2 of 5 (Slack, Teams); differentiators",
+        "mechanism": "Catalog map from activity kind to localised friendly label. Announcer: two hidden regions (role=status, role=alert) each wrapping a span keyed by a counter so identical messages repeat, with announce(text, politeness). Pane navigation: outgoing pane inert and aria-hidden until animationend, then focus to the landing target once headings exist, skipped if focus is already elsewhere. Density: a data attribute scaling spacing variables; motion components check prefers-reduced-motion. Failure UX: milestone events (loaderStarted, firstPaint) to telemetry, critical load failure routes to an error page listing network checks and a \"download logs\" bundle."
+      },
+      "verevonToday": {
+        "status": "partial",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts:122-137 (status labels hard-coded Norwegian) and lib/space-thread-presentation.ts:73,90 (dates forced to nb-NO)",
+          "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:765 (page-local sr-only role=status region, not a shared module)",
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:1387-1397 and components/SpaceActivityFeed.tsx:79-112 (aria-live on live rows, colour-independent status shapes)",
+          "apps/Frontend Plane/verevonv3/src/styles/global.css:4630 (reduced-motion rules exist elsewhere; none under features/spaces; no density setting)",
+          "apps/Frontend Plane/verevonv3/src/shared/lib/create-resource-compat.ts:5 (states the app has no Suspense or ErrorBoundary usage)",
+          "apps/Frontend Plane/verevonv3/docs/onboarding-audit.md:297 (no aria-live in onboarding either)"
+        ],
+        "gap": "Activity labels and dates are Norwegian-only; no shared announcer or row narration for agent states and no focus hand-off rules; no reduced-motion handling or density setting in Space; no root error boundary, no cannot-reach-Verevon page, no diagnostic export and no start-up milestones."
+      },
+      "approach": "Frontend Plane. Use the existing i18n.tr(nb, en) pattern (as in SpacePage) for the grammar labels and the viewer locale for dates. Create shared/lib/announcer and route Space completions and approvals through it, polite by default and assertive only for approvals addressed to the viewer. Add the density attribute and spacing tokens and gate Space motion on reduced motion. Add a root boundary and a static gateway-served fallback page; the diagnostic bundle must redact tokens and exclude ZDR content.",
+      "effort": "M",
+      "dependencies": [],
+      "planeOwner": "Frontend Plane",
+      "risks": "Over-announcing; diagnostic bundles must never include secrets or ZDR content; Solid 2 boundary semantics differ from Solid 1 (the compat shim exists because of this).",
+      "tier": "recommended",
+      "significance": 3,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": true,
+        "where": "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md section 4 item 5 (hygiene pass, partly done for the index page); the activity-grammar labels were not covered."
+      },
+      "needsVerification": false,
+      "coversClusters": [
+        "C-t1-12-011",
+        "C-t1-12-023",
+        "C-t1-12-024",
+        "C-t1-12-018"
+      ],
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 12,
+        "DOC": 0,
+        "INF": 0
+      }
+    },
+    {
+      "id": "R-t1-12-12",
+      "title": "Long-tail Space UX, build on demand: multiview tiling, agent-led first-run welcome, What's New and admin notices, non-web link interstitial",
+      "summary": "Four independent slices, none of which blocks the vision. (a) Multiview: tile several rooms or agent sessions with a dockview-style layout once AuxPane and run components are self-contained. (b) Welcome: seed the org room with an agent introduction and role/tools questions that feed the three agent templates. (c) What's New panel and admin-only notices for policy rollout. (d) Route non-http(s) links in agent-posted content through a confirmation with per-host memory.",
+      "whyItMatters": "Multiview is a real edge for operators supervising several agents (QM only); a welcome post where an agent introduces itself removes the empty-room first impression; admin notices help owners learn which deny-by-default agent policies to enable; and a link gate reduces risk from model-generated links.",
+      "referenceBestPractice": {
+        "bestSource": "QM (multiview with tile limits and per-pane density); Grok Bot (onboarding flow and fail-open gate); Teams (feedback, What's New, admin campaigns); Slack (protocol interstitial with per-host allowlist)",
+        "others": [
+          "Buzz (agent-led welcome channel)"
+        ],
+        "prevalence": "multiview 1 of 5 (QM); onboarding 2 of 5 (Grok Bot, Buzz); What's New 1 of 5 (Teams); link interstitial 1 of 5 (Slack); differentiator to unique",
+        "mechanism": "Multiview: dockview-core layout with MAX_TILES = 16, per-pane drag payloads and a serialised layout synced per user. Onboarding: gate state machine checking -> probe -> landed | onboarding | shell with a saved seen flag that fails open for returning users. What's New: feed items with an index and campaigns targeted by role and flag. Interstitial: intercept non-http(s) schemes, show a modal, store an allowlist of {protocol, hostname} per user."
+      },
+      "verevonToday": {
+        "status": "unknown",
+        "evidence": [
+          "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx:356-490 (one room at a time)",
+          "apps/Frontend Plane/verevonv3/src/features/onboarding/components/steps/IntroStep.tsx and apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacesIndexPage.tsx:36-47 (org onboarding and self-healing /spaces exist; no Space first run)",
+          "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx (reusable run components for multiview)"
+        ],
+        "gap": "Multiview absent; no Space-specific first run (welcome content, agent introduction, role/tools questions); a grep for whats-new/WhatsNew finds nothing, though \"feedback\" appears in 36 files of unknown purpose; how agent-posted non-web links are rendered (markdown link sanitiser in chat components) is not checked."
+      },
+      "approach": "Frontend Plane for all four. Multiview after AuxPane (R-t1-12-01), push realtime (a 6 s poll per tile multiplies polling cost) and self-contained room and run components. Welcome: seed a post and template agent proposals that a human confirms (agents may not create bindings themselves), with claims derived from observed facts, not timers. What's New from a static release feed, admin notices through Control role targeting. Link gate: extend the markdown link sanitiser so non-http(s) schemes never auto-open.",
+      "effort": "L",
+      "dependencies": [
+        "AuxPane shell (R-t1-12-01) and push realtime (category 09) for multiview",
+        "Human-only post path (category 01) and existing agent templates for the welcome",
+        "Notifications (category 05) for admin notices"
+      ],
+      "planeOwner": "Frontend Plane",
+      "risks": "Tile polling cost; agents must not self-create bindings; notice noise. Verify the link-rendering and feedback surfaces before scoping slices (c) and (d).",
+      "tier": "nice-to-have",
+      "significance": 2,
+      "confidence": "medium",
+      "alreadyPlanned": {
+        "is": false,
+        "where": ""
+      },
+      "needsVerification": true,
+      "coversClusters": [
+        "C-t1-12-007",
+        "C-t1-12-016",
+        "C-t1-12-026",
+        "C-t1-12-030"
+      ],
+      "provenanceMix": {
+        "REA": 1,
+        "SRC": 5,
+        "DOC": 0,
+        "INF": 0
+      }
+    }
+  ],
+  "dropped": [],
+  "strengthsToKeep": [
+    "Six-tab cockpit (Chat, Work, Knowledge, Activity, Agent, Members) exposes more of an agent's working context than Slack or Teams, with hash-tab deep links and legacy-hash handling: apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx:61-110, 150-151.",
+    "Activity grammar (verb, object, outcome) is ordered by consequence and salience, mutates live rows in place and has lenses, equal to or ahead of Buzz and QM on \"one event log, many lenses\": apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts and components/SpaceActivityFeed.tsx (keep it as the single vocabulary).",
+    "Honest-state UX is enforced in code: the unavailable[] contract, tabs that tell empty from could-not-load from not-published, an unobserved room treated as unknown rather than idle (apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-live-work.ts), and unknown authors kept distinct from former members. One exception to fix: the swallowed transcript read failure at apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx:201.",
+    "Destructive actions arm in place before they run (apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceConfirmButton.tsx), and personal-Space deletion returns a receipt from each plane (apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts), more careful than the references.",
+    "Approvals are already a typed in-timeline row with a composer-visible refusal path for ZDR and budget limits: apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx and components/SpaceRoomComposer.tsx:541-567.",
+    "Durable per-room read markers with a browser mirror that defers to the owner plane (apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts, apps/Application Plane/convex-core/convex/spaceReadMarkers.ts) and a typed action registry (apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts) provide the authority-checked foundation for the palette and cross-room aggregates."
+  ]
+}
