@@ -1,0 +1,14 @@
+docs(space-w2): correct the Phase 1 ledger: Model Plane results and Space test status
+
+The first Phase 1 commit (a2ac65b3f) said the Model Plane run was in progress and
+that the Space-only frontend result would be added later. Both are now known:
+
+- session-core / model-gateway / execution-core: completed, 112 test binaries, 11
+  failing targets, 23 failing tests. Each failing group is classified in the ledger.
+  Two are Space-caused (offline_downstreams_contract: AppState gRPC client count
+  22 expected, 35 found, including Space clients; orchestration_http_test approval
+  continuation is possibly Space-caused and not yet diagnosed).
+- features/spaces, shared/api/spaces*, shared/actions: 99 files, 1473 passed,
+  2 skipped. None of the 24 failing full-suite files are under those paths.
+
+Also records where the raw logs live and why they are not committed.

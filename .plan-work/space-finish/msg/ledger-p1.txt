@@ -1,0 +1,9 @@
+docs(space-w2): record Phase 1 post-merge verification in the W2 ledger
+
+Adds a Phase 1 section to docs/plans/space-w2-build-ledger.md: the four fixes
+(W2-P1-01..03 and F6) with their commits and evidence, the suite-by-suite result
+and classification (environment, real defect, stale test), and what was not run
+(live proof, DB tier, Playwright, gateway clippy). Model Plane and full-SPA numbers
+are marked as in progress; a follow-up commit records them when the reruns finish.
+
+Logs are in .plan-work/space-finish/logs/.

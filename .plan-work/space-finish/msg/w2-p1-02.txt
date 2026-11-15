@@ -1,0 +1,10 @@
+test(audit-core): W2-P1-02 give the Model broker ACL test the quarry-trace-producer password
+
+Stale test, not a Space defect. apps/Model Plane/deploy/nats.conf gained the
+quarry-trace-producer user (password $MODEL_QUARRY_TRACE_NATS_PASSWORD, from the
+quarryv2-next merge), so natsserver.ProcessConfigFile refused the config with
+"variable reference for 'MODEL_QUARRY_TRACE_NATS_PASSWORD' can not be found" and
+TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer failed before any ACL
+assertion ran. The fixture map now carries the variable like its ten siblings.
+
+Evidence: .plan-work/space-finish/logs/p1-go.log (FAIL), p1-audit-fix.log (ok).
