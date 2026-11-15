@@ -14,8 +14,15 @@
 //! `allow_subscription` is set. Each call carries the request's zero-retention flag, so inference-core
 //! applies its own zero-retention, privacy and residency gates to every member. A member that
 //! inference-core refuses is reported with its code and is never retried on another model. A waived
-//! token is refused as a route mismatch, since a council names no connection. Nothing is stored: the
-//! answers go back to the caller only.
+//! token is refused as a route mismatch on the platform chain, since a council names no connection there.
+//! On a thread whose turns were written under a connection (W4-BYO, DEC-V-R8) every member and the synthesis
+//! are served on that connection with the models the request names; a subscription connection needs
+//! `allow_subscription`, as a subscription route does on the platform chain. A customer gateway returns no
+//! structured reply, and the synthesis needs one, so a council on one is refused typed before any call. A named thread
+//! that is a Space thread, or holds a zero-retention or waived run, is refused 409 before any call, as a side chat
+//! refuses it (V3-mg-2-rel2). Nothing is
+//! stored: the answers go back to the caller only. A failed call on a subscription connection keeps the subscription
+//! catalogue's code, `retryable` and timing beside its status, never the upstream message (V3-mg-2-rel1).
 
 use axum::{extract::State, http::StatusCode, routing::post, Extension, Json, Router};
 use futures::future::join_all;
@@ -26,15 +33,19 @@ use mp_contracts::model_plane::v1::{
 use mp_contracts::user_content::UserContent;
 use mp_ids::new_ulid;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
 use tonic::transport::Channel;
 
-use crate::auth::{Claims, VerifiedInferenceBearer};
+use crate::auth::{Claims, VerifiedInferenceBearer, VerifiedSessionBearer};
 use crate::catalogue_prices::{model_price, ModelPrice};
 use crate::http_routes::{authenticated_inference_request, grpc_status_to_http, HttpJsonError};
 use crate::pricing::{CostBasis, RateSnapshot};
+use crate::side_chat_routes::side_chat_inference_error;
 use crate::state::AppState;
+use crate::thread_connection::{
+    feature_connection, refuse_without_structured_output, ThreadConnection,
+};
 
 /// The opt-in switch. Only the literal `true` turns it on.
 pub const ENABLED_ENV: &str = "MODEL_GATEWAY_MODEL_COUNCIL_ENABLED";
@@ -155,6 +166,9 @@ pub(crate) struct CouncilRequest {
     allow_subscription: bool,
     zdr: bool,
     estimate_only: bool,
+    /// The thread the question belongs to (W4-BYO, DEC-V-R8). Read only while `MODEL_GATEWAY_BYO_GATEWAY` is on: on a
+    /// thread whose turns were written under a connection the council runs on that connection, or is refused typed.
+    thread_id: String,
 }
 
 /// A request the gateway refuses before any model call. Each is a 400 with its own code.
@@ -263,6 +277,65 @@ fn named_synthesizer(raw: Option<&str>) -> Result<Option<String>, InputError> {
 struct Member {
     model: String,
     provider: String,
+    /// The thread's connection every call to this member is served on, or `None` on the platform chain.
+    connection: Option<ThreadConnection>,
+}
+
+impl Member {
+    /// The cost basis of a call to this member, before the serving provider is known. A call on a thread's connection is
+    /// billed as that connection is; a platform call by its provider.
+    fn basis(&self) -> CostBasis {
+        match &self.connection {
+            Some(connection) => connection.basis(),
+            None => CostBasis::of_route(&self.provider, ""),
+        }
+    }
+
+    /// Puts the member's connection on a call. A platform member's call is left as it was built.
+    fn apply_to(&self, request: &mut InferRequest) {
+        if let Some(connection) = &self.connection {
+            connection.apply_to(&self.model, request);
+        }
+    }
+
+    /// Whether every call to this member is served on a subscription connection, so a failed call ends on the
+    /// subscription catalogue (V3-mg-2-rel1).
+    fn on_subscription(&self) -> bool {
+        matches!(self.connection, Some(ThreadConnection::Subscription(_)))
+    }
+}
+
+/// Where a council's calls are served: the platform chain, whose catalogue says which provider serves each model and
+/// which of them is a subscription route, or one connection of the thread, which serves every call (W4-BYO, DEC-V-R8).
+enum Served<'a> {
+    Catalogue(&'a [ModelInfo]),
+    Connection(&'a ThreadConnection),
+}
+
+impl Served<'_> {
+    /// The providers a call to `model` is served by: the catalogue's for the platform chain, the connection's for a thread.
+    fn providers(&self, model: &str) -> Vec<String> {
+        match self {
+            Self::Catalogue(catalogue) => providers_of(catalogue, model),
+            Self::Connection(connection) => vec![connection.provider().to_owned()],
+        }
+    }
+
+    /// The connection every call is served on, or none on the platform chain.
+    fn connection(&self) -> Option<ThreadConnection> {
+        match self {
+            Self::Catalogue(_) => None,
+            Self::Connection(connection) => Some((*connection).clone()),
+        }
+    }
+
+    /// The provider the model-policy check names: none on the platform chain, the connection's provider on a thread.
+    fn admit_provider(&self) -> &'static str {
+        match self {
+            Self::Catalogue(_) => "",
+            Self::Connection(connection) => connection.provider(),
+        }
+    }
 }
 
 /// The chat catalogue inference-core lists. It says which provider serves each model id, and that is
@@ -323,13 +396,14 @@ async fn admit_model(
     bearer: &VerifiedInferenceBearer,
     org_id: &str,
     model: &str,
+    provider: &str,
 ) -> Result<(), HttpJsonError> {
     crate::model_access::admit(
         &state.inference_client,
         authenticated_inference_request((), bearer).metadata(),
         org_id,
         model,
-        "",
+        provider,
     )
     .await
     .map_err(|refusal| crate::model_access::http(&refusal))?;
@@ -342,44 +416,54 @@ async fn admit_model(
     }
 }
 
-/// The named synthesizer, admitted like a member. A subscription route is refused unless
-/// `allow_subscription` is set, because the synthesis is a call of the run as much as a member is.
+/// The named synthesizer, admitted like a member, then planned on its route.
 async fn admit_named_synthesizer(
     state: &AppState,
     bearer: &VerifiedInferenceBearer,
     org_id: &str,
-    catalogue: &[ModelInfo],
+    served: &Served<'_>,
     model: String,
     allow_subscription: bool,
 ) -> Result<Member, HttpJsonError> {
-    admit_model(state, bearer, org_id, &model).await?;
-    let providers = providers_of(catalogue, &model);
+    admit_model(state, bearer, org_id, &model, served.admit_provider()).await?;
+    named_member(served, model, allow_subscription).map_err(input_refusal)
+}
+
+/// The named synthesizer on its route. A subscription route is refused unless `allow_subscription` is set, because the
+/// synthesis is a call of the run as much as a member is.
+fn named_member(
+    served: &Served<'_>,
+    model: String,
+    allow_subscription: bool,
+) -> Result<Member, InputError> {
+    let providers = served.providers(&model);
     if is_subscription_route(&providers) && !allow_subscription {
-        return Err(input_refusal(InputError::SynthesizerNotAllowed));
+        return Err(InputError::SynthesizerNotAllowed);
     }
     Ok(Member {
         provider: single_provider(&providers),
         model,
+        connection: served.connection(),
     })
 }
 
-/// The members the council asks, in the order they were named, and the models it drops as
-/// subscription routes.
+/// The members the council asks, in the order they were named, and the models it drops as subscription routes.
 fn plan_members(
     models: &[String],
-    catalogue: &[ModelInfo],
+    served: &Served<'_>,
     allow_subscription: bool,
 ) -> (Vec<Member>, Vec<String>) {
     let mut members = Vec::new();
     let mut dropped = Vec::new();
     for model in models {
-        let providers = providers_of(catalogue, model);
+        let providers = served.providers(model);
         if is_subscription_route(&providers) && !allow_subscription {
             dropped.push(model.clone());
         } else {
             members.push(Member {
                 model: model.clone(),
                 provider: single_provider(&providers),
+                connection: served.connection(),
             });
         }
     }
@@ -407,7 +491,7 @@ fn chat_message(role: &str, content: String) -> ChatMessage {
 /// One member's call: the question, no tools, the run's zero-retention flag. Each member's request id
 /// is its own, so no two members share one.
 fn member_request(run: &Run<'_>, index: usize, member: &Member) -> InferRequest {
-    InferRequest {
+    let mut request = InferRequest {
         request_id: format!("{}-council-{index}", run.nonce),
         purpose: InferPurpose::Answer as i32,
         org_id: run.org_id.to_owned(),
@@ -421,7 +505,9 @@ fn member_request(run: &Run<'_>, index: usize, member: &Member) -> InferRequest 
         max_tokens: MEMBER_MAX_TOKENS,
         zdr: run.zdr,
         ..Default::default()
-    }
+    };
+    member.apply_to(&mut request);
+    request
 }
 
 /// The user message of the synthesis: the question, then each answer labelled with the model that
@@ -454,7 +540,7 @@ fn synthesis_request(
     answers: &[(&str, &str)],
     synthesizer: &Member,
 ) -> InferRequest {
-    InferRequest {
+    let mut request = InferRequest {
         request_id: format!("{}-council-synthesis", run.nonce),
         purpose: InferPurpose::Answer as i32,
         org_id: run.org_id.to_owned(),
@@ -472,28 +558,65 @@ fn synthesis_request(
         structured_output_schema: synthesis_schema().to_string(),
         zdr: run.zdr,
         ..Default::default()
-    }
+    };
+    synthesizer.apply_to(&mut request);
+    request
 }
 
 /// The one call to inference-core this route makes, with the caller's inference credential. Every
 /// member and the synthesis go through it, so each is governed by inference-core's own gates. A
-/// refusal comes back as the typed body the gateway answers with.
+/// refusal comes back as the typed body the gateway answers with. A failed call on a subscription
+/// connection (`subscription_route`) ends on the subscription catalogue, as a side chat's does (V3-mg-2-rel1).
 async fn council_infer(
     client: &InferenceCoreClient<Channel>,
     bearer: &VerifiedInferenceBearer,
     request: InferRequest,
+    subscription_route: bool,
 ) -> Result<InferResponse, HttpJsonError> {
     client
         .clone()
         .infer(authenticated_inference_request(request, bearer))
         .await
         .map(tonic::Response::into_inner)
-        .map_err(|e| grpc_status_to_http(&e))
+        .map_err(|e| side_chat_inference_error(&e, subscription_route))
 }
 
-/// The catalogue code a typed refusal body carries. An untyped failure has none.
+/// The catalogue code a failed call's body carries. A typed refusal names it under `error.code`. A failed subscription
+/// call names its catalogue code beside its words in `error` (V3-mg-2-rel1), and only a code the catalogue knows counts.
+/// An untyped failure has none.
 fn refusal_code(body: &Value) -> Option<String> {
-    body["error"]["code"].as_str().map(str::to_owned)
+    body["error"]["code"]
+        .as_str()
+        .or_else(|| {
+            let code = body["code"].as_str()?;
+            let subscription = body["error"].is_string()
+                && crate::subscription_failure::known_code(code).is_some();
+            subscription.then_some(code)
+        })
+        .map(str::to_owned)
+}
+
+/// The keys a failed subscription call's body carries beside its code: whether a retry can succeed, and the timing the
+/// catalogue gives. Only a body whose `error` is its words has them, so every other failure carries none.
+const RETRY_KEYS: [&str; 4] = ["retryable", "retry_after_ms", "resets_at", "retry_at"];
+
+/// The retry keys of a failed call's body, as the caller is told them (V3-mg-2-rel1).
+fn retry_fields(body: &Value) -> Map<String, Value> {
+    if !body["error"].is_string() {
+        return Map::new();
+    }
+    RETRY_KEYS
+        .into_iter()
+        .filter_map(|key| body.get(key).map(|value| (key.to_owned(), value.clone())))
+        .collect()
+}
+
+/// `fields` with a failed subscription call's retry keys added beside them. Any other answer keeps its fields as they are.
+fn with_retry(mut fields: Value, retry: &Map<String, Value>) -> Value {
+    if let Some(object) = fields.as_object_mut() {
+        object.extend(retry.clone());
+    }
+    fields
 }
 
 /// The tokens one billed call used, and its cost. The cost is null under zero retention, and null
@@ -515,12 +638,13 @@ impl Usage {
     }
 }
 
-/// The usage of one call that answered. It is priced on the provider that served it.
-async fn usage_of(state: &AppState, zdr: bool, hint: &str, resp: &InferResponse) -> Usage {
+/// The usage of one call that answered. It is priced on the basis of the route the call was made on, once the provider
+/// that served it is known.
+async fn usage_of(state: &AppState, zdr: bool, basis: CostBasis, resp: &InferResponse) -> Usage {
     let cost_usd = if zdr {
         None
     } else {
-        let basis = CostBasis::of_route(hint, "").served_by(&resp.provider_used);
+        let basis = basis.served_by(&resp.provider_used);
         state
             .pricing
             .cost_usd_for(
@@ -543,26 +667,31 @@ async fn usage_of(state: &AppState, zdr: bool, hint: &str, resp: &InferResponse)
 /// What one member's call came back with.
 struct MemberResult {
     member: Member,
-    /// `answered`; `refused` for a typed refusal from the platform; `error` for any other failure
-    /// and for an empty answer.
+    /// `answered`; `refused` for a typed refusal, from the platform or a subscription's catalogue; `error` for any other
+    /// failure and for an empty answer.
     status: &'static str,
     /// The provider that served the call, or the one it was asked on when no call answered.
     served_by: String,
     answer: Option<String>,
     code: Option<String>,
+    /// The retry keys of a failed subscription call (see [`RETRY_KEYS`]); empty for any other answer.
+    retry: Map<String, Value>,
     usage: Option<Usage>,
 }
 
 impl MemberResult {
     fn json(&self) -> Value {
-        json!({
-            "model": self.member.model,
-            "provider": self.served_by,
-            "status": self.status,
-            "answer": self.answer,
-            "code": self.code,
-            "usage": self.usage.as_ref().map(Usage::json),
-        })
+        with_retry(
+            json!({
+                "model": self.member.model,
+                "provider": self.served_by,
+                "status": self.status,
+                "answer": self.answer,
+                "code": self.code,
+                "usage": self.usage.as_ref().map(Usage::json),
+            }),
+            &self.retry,
+        )
     }
 }
 
@@ -577,7 +706,7 @@ async fn settle_member(
 ) -> MemberResult {
     match outcome {
         Ok(resp) => {
-            let usage = usage_of(state, zdr, &member.provider, &resp).await;
+            let usage = usage_of(state, zdr, member.basis(), &resp).await;
             let answer = resp.content.trim().to_owned();
             let served_by = if resp.provider_used.trim().is_empty() {
                 member.provider.clone()
@@ -591,23 +720,29 @@ async fn settle_member(
                 served_by,
                 answer: answered.then_some(answer),
                 code: (!answered).then(|| "empty_answer".to_owned()),
+                retry: Map::new(),
                 usage: Some(usage),
             }
         }
-        Err((_, Json(body))) => {
-            let (status, code) = match refusal_code(&body) {
-                Some(code) => ("refused", code),
-                None => ("error", "member_failed".to_owned()),
-            };
-            MemberResult {
-                served_by: member.provider.clone(),
-                member,
-                status,
-                answer: None,
-                code: Some(code),
-                usage: None,
-            }
-        }
+        Err((_, Json(body))) => failed_member(member, &body),
+    }
+}
+
+/// The result of a member whose call failed: the catalogue code the failure carries, a typed refusal's or a subscription
+/// failure's, with the retry keys a subscription failure carries (V3-mg-2-rel1). An untyped failure is `member_failed`.
+fn failed_member(member: Member, body: &Value) -> MemberResult {
+    let (status, code) = match refusal_code(body) {
+        Some(code) => ("refused", code),
+        None => ("error", "member_failed".to_owned()),
+    };
+    MemberResult {
+        served_by: member.provider.clone(),
+        member,
+        status,
+        answer: None,
+        code: Some(code),
+        retry: retry_fields(body),
+        usage: None,
     }
 }
 
@@ -625,6 +760,7 @@ async fn run_members(
             &state.inference_client,
             bearer,
             member_request(run, index, member),
+            member.on_subscription(),
         )
     });
     let outcomes = join_all(calls).await;
@@ -685,6 +821,8 @@ struct Synthesis {
     doc: Option<SynthesisDoc>,
     text: Option<String>,
     code: Option<String>,
+    /// The retry keys of a failed subscription call (see [`RETRY_KEYS`]); empty for any other answer.
+    retry: Map<String, Value>,
     usage: Option<Usage>,
 }
 
@@ -697,22 +835,26 @@ impl Synthesis {
             doc: None,
             text: None,
             code: None,
+            retry: Map::new(),
             usage: None,
         }
     }
 
     fn json(&self) -> Value {
-        json!({
-            "status": self.status,
-            "model": self.model,
-            "provider": self.provider,
-            "agreement": self.doc.as_ref().map_or_else(|| json!([]), |doc| json!(doc.agreement)),
-            "disagreement": self.doc.as_ref().map_or_else(|| json!([]), |doc| json!(doc.disagreement)),
-            "unique": self.doc.as_ref().map_or_else(|| json!([]), |doc| json!(doc.unique)),
-            "text": self.text,
-            "code": self.code,
-            "usage": self.usage.as_ref().map(Usage::json),
-        })
+        with_retry(
+            json!({
+                "status": self.status,
+                "model": self.model,
+                "provider": self.provider,
+                "agreement": self.doc.as_ref().map_or_else(|| json!([]), |doc| json!(doc.agreement)),
+                "disagreement": self.doc.as_ref().map_or_else(|| json!([]), |doc| json!(doc.disagreement)),
+                "unique": self.doc.as_ref().map_or_else(|| json!([]), |doc| json!(doc.unique)),
+                "text": self.text,
+                "code": self.code,
+                "usage": self.usage.as_ref().map(Usage::json),
+            }),
+            &self.retry,
+        )
     }
 }
 
@@ -729,19 +871,9 @@ async fn settle_synthesis(
     let provider = Some(synthesizer.provider.clone());
     let resp = match outcome {
         Ok(resp) => resp,
-        Err((_, Json(body))) => {
-            return Synthesis {
-                status: "failed",
-                model,
-                provider,
-                doc: None,
-                text: None,
-                code: Some(refusal_code(&body).unwrap_or_else(|| "synthesis_failed".to_owned())),
-                usage: None,
-            };
-        }
+        Err((_, Json(body))) => return failed_synthesis(&synthesizer, &body),
     };
-    let usage = usage_of(state, zdr, &synthesizer.provider, &resp).await;
+    let usage = usage_of(state, zdr, synthesizer.basis(), &resp).await;
     let raw = resp.content.trim().to_owned();
     if raw.is_empty() {
         return Synthesis {
@@ -751,6 +883,7 @@ async fn settle_synthesis(
             doc: None,
             text: None,
             code: Some("empty_synthesis".to_owned()),
+            retry: Map::new(),
             usage: Some(usage),
         };
     }
@@ -762,6 +895,7 @@ async fn settle_synthesis(
             doc: Some(doc),
             text: None,
             code: None,
+            retry: Map::new(),
             usage: Some(usage),
         },
         None => Synthesis {
@@ -771,8 +905,24 @@ async fn settle_synthesis(
             doc: None,
             text: Some(raw),
             code: None,
+            retry: Map::new(),
             usage: Some(usage),
         },
+    }
+}
+
+/// The synthesis of a call that failed: the catalogue code the failure carries, a typed refusal's or a subscription
+/// failure's, with its retry keys (V3-mg-2-rel1). An untyped failure is `synthesis_failed`.
+fn failed_synthesis(synthesizer: &Member, body: &Value) -> Synthesis {
+    Synthesis {
+        status: "failed",
+        model: Some(synthesizer.model.clone()),
+        provider: Some(synthesizer.provider.clone()),
+        doc: None,
+        text: None,
+        code: Some(refusal_code(body).unwrap_or_else(|| "synthesis_failed".to_owned())),
+        retry: retry_fields(body),
+        usage: None,
     }
 }
 
@@ -801,7 +951,13 @@ async fn run_synthesis(
     };
     let models: Vec<&str> = answers.iter().map(|(model, _)| *model).collect();
     let request = synthesis_request(run, &answers, &synthesizer);
-    let outcome = council_infer(&state.inference_client, bearer, request).await;
+    let outcome = council_infer(
+        &state.inference_client,
+        bearer,
+        request,
+        synthesizer.on_subscription(),
+    )
+    .await;
     settle_synthesis(state, run.zdr, synthesizer, &models, outcome).await
 }
 
@@ -849,7 +1005,9 @@ impl Planned {
         output_tokens: i64,
         zdr: bool,
     ) -> Self {
-        let price = if zdr {
+        // A call on a thread's connection has no list price: the connection's own account bills it, so no catalogue
+        // row applies to it.
+        let price = if zdr || member.connection.is_some() {
             None
         } else {
             model_price(rates, &member.model, &member.provider, "chat")
@@ -935,11 +1093,59 @@ fn estimate_json(
     })
 }
 
-/// The council once the switch is on: check the input, decide the posture, check every model, plan
-/// the members, then either price the run or make its calls.
+/// The synthesis asks for a structured reply. A customer gateway connection returns none, so a council on one is refused
+/// typed before any call: otherwise its members would answer and its synthesis would fail inside inference-core (W4-BYO).
+fn refuse_unstructured_synthesis(
+    connection: Option<&ThreadConnection>,
+) -> Result<(), HttpJsonError> {
+    match connection {
+        None => Ok(()),
+        Some(connection) => refuse_without_structured_output(connection, "a council"),
+    }
+}
+
+/// The members and the named synthesizer of one run, admitted and planned on one route.
+struct RunPlan {
+    members: Vec<Member>,
+    dropped: Vec<String>,
+    named: Option<Member>,
+}
+
+/// Admits every model and the named synthesizer on `served`, then plans the members. The order is the platform's: each
+/// model first, then the synthesizer.
+async fn plan_run(
+    state: &AppState,
+    bearer: &VerifiedInferenceBearer,
+    org_id: &str,
+    models: &[String],
+    named: Option<String>,
+    allow_subscription: bool,
+    served: &Served<'_>,
+) -> Result<RunPlan, HttpJsonError> {
+    for model in models {
+        admit_model(state, bearer, org_id, model, served.admit_provider()).await?;
+    }
+    let named = match named {
+        Some(model) => Some(
+            admit_named_synthesizer(state, bearer, org_id, served, model, allow_subscription)
+                .await?,
+        ),
+        None => None,
+    };
+    let (members, dropped) = plan_members(models, served, allow_subscription);
+    Ok(RunPlan {
+        members,
+        dropped,
+        named,
+    })
+}
+
+/// The council once the switch is on: check the input, decide the posture, resolve the route the thread's connection
+/// gives, check every model, plan the members, then either price the run or make its calls.
 pub(crate) async fn council_with(
     state: AppState,
     claims: Claims,
+    session_bearer: Option<VerifiedSessionBearer>,
     inference_bearer: VerifiedInferenceBearer,
     req: CouncilRequest,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -948,25 +1154,51 @@ pub(crate) async fn council_with(
     let named = named_synthesizer(req.synthesizer_model.as_deref()).map_err(input_refusal)?;
     let zdr =
         crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(req.zdr))?;
-    let catalogue = chat_catalogue(&state, &inference_bearer).await?;
-    for model in &models {
-        admit_model(&state, &inference_bearer, &claims.org_id, model).await?;
-    }
-    let named = match named {
-        Some(model) => Some(
-            admit_named_synthesizer(
+    let connection = feature_connection(
+        &state,
+        &claims,
+        session_bearer.as_ref(),
+        &req.thread_id,
+        req.zdr,
+        "a council",
+    )
+    .await?;
+    refuse_unstructured_synthesis(connection.as_ref())?;
+    // A council on a thread's connection is never zero retention: `feature_connection` refuses a zero-retention request
+    // on one, and the calls carry no flag, as a side chat's do.
+    let zdr = if connection.is_some() { false } else { zdr };
+    let plan = match &connection {
+        None => {
+            let catalogue = chat_catalogue(&state, &inference_bearer).await?;
+            plan_run(
                 &state,
                 &inference_bearer,
                 &claims.org_id,
-                &catalogue,
-                model,
+                &models,
+                named,
                 req.allow_subscription,
+                &Served::Catalogue(&catalogue),
             )
-            .await?,
-        ),
-        None => None,
+            .await?
+        }
+        Some(connection) => {
+            plan_run(
+                &state,
+                &inference_bearer,
+                &claims.org_id,
+                &models,
+                named,
+                req.allow_subscription,
+                &Served::Connection(connection),
+            )
+            .await?
+        }
     };
-    let (members, dropped) = plan_members(&models, &catalogue, req.allow_subscription);
+    let RunPlan {
+        members,
+        dropped,
+        named,
+    } = plan;
     if members.len() < MIN_MODELS {
         return Err(input_refusal(InputError::TooFewModels));
     }
@@ -1011,9 +1243,597 @@ pub(crate) async fn council_with(
 async fn post_council(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    session_bearer: Option<VerifiedSessionBearer>,
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<CouncilRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     switch_gate(enabled())?;
-    council_with(state, claims, inference_bearer, req).await
+    council_with(state, claims, session_bearer, inference_bearer, req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http_routes::speech_route_tests::{bearer, state_with, SpeechInference};
+    use crate::pricing::PricingCache;
+    use crate::thread_connection::{
+        connection_posture, thread_connection, CUSTOMER_GATEWAY_PROVIDER,
+    };
+    use mp_contracts::agentic_subscription::PROVIDER_ID;
+    use mp_contracts::model_plane::v1::SessionMessage;
+    use mp_contracts::zdr_refusal::code;
+
+    fn claims(zdr: bool, org_zdr: Option<bool>) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    fn refusal_code(error: &HttpJsonError) -> &str {
+        let Json(body) = &error.1;
+        body["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    fn catalogue_entry(id: &str, provider: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_owned(),
+            provider: provider.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn ids(models: &[&str]) -> Vec<String> {
+        models.iter().map(|model| (*model).to_owned()).collect()
+    }
+
+    fn run_on<'a>(question: &'a str, nonce: &'a str) -> Run<'a> {
+        Run {
+            org_id: "org-a",
+            question,
+            nonce,
+            zdr: false,
+        }
+    }
+
+    fn gateway() -> ThreadConnection {
+        ThreadConnection::CustomerGateway("conn-a".to_owned())
+    }
+
+    fn subscription() -> ThreadConnection {
+        ThreadConnection::Subscription("conn_sub".to_owned())
+    }
+
+    #[test]
+    fn a_byo_council_is_refused_typed_before_any_call_as_its_synthesis_needs_a_structured_reply() {
+        let connection = gateway();
+        let error = refuse_unstructured_synthesis(Some(&connection))
+            .expect_err("a customer gateway returns no structured synthesis");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        let Json(body) = &error.1;
+        assert_eq!(body["error"]["code"], "feature_not_supported");
+        assert!(
+            refuse_unstructured_synthesis(None).is_ok(),
+            "a platform council is unchanged"
+        );
+        let subscription = subscription();
+        assert!(refuse_unstructured_synthesis(Some(&subscription)).is_ok());
+    }
+
+    #[test]
+    fn a_byo_thread_council_runs_every_member_on_the_connection_with_its_model() {
+        let connection = gateway();
+        let (members, dropped) = plan_members(
+            &ids(&["m-a", "m-b"]),
+            &Served::Connection(&connection),
+            false,
+        );
+        assert!(dropped.is_empty());
+        assert_eq!(members.len(), 2);
+        let nonce = "nonce-1".to_owned();
+        let run = run_on("Hva?", &nonce);
+        let request = member_request(&run, 1, &members[1]);
+        assert_eq!(request.request_id, "nonce-1-council-1");
+        assert_eq!(request.model, "m-b");
+        assert_eq!(request.model_connection_id, "conn-a");
+        assert_eq!(request.provider_hint, CUSTOMER_GATEWAY_PROVIDER);
+        assert!(request.subscription_connection_id.is_empty());
+        assert!(!request.zdr);
+    }
+
+    #[test]
+    fn a_byo_council_member_is_billed_by_the_customer_gateway() {
+        let connection = gateway();
+        let (members, _) = plan_members(
+            &ids(&["m-a", "m-b"]),
+            &Served::Connection(&connection),
+            false,
+        );
+        assert_eq!(members[0].basis(), CostBasis::CustomerBilled);
+    }
+
+    #[test]
+    fn the_synthesis_of_a_byo_council_runs_on_the_connection_with_the_named_model() {
+        let connection = gateway();
+        let synthesizer = named_member(&Served::Connection(&connection), "m-s".to_owned(), false)
+            .expect("a customer-gateway model is no subscription route");
+        let nonce = "nonce-1".to_owned();
+        let run = run_on("Hva?", &nonce);
+        let request = synthesis_request(&run, &[("m-a", "A"), ("m-b", "B")], &synthesizer);
+        assert_eq!(request.request_id, "nonce-1-council-synthesis");
+        assert_eq!(request.model, "m-s");
+        assert_eq!(request.model_connection_id, "conn-a");
+        assert_eq!(request.provider_hint, CUSTOMER_GATEWAY_PROVIDER);
+        assert!(request.subscription_connection_id.is_empty());
+        assert!(!request.zdr);
+    }
+
+    #[test]
+    fn a_subscription_thread_council_needs_allow_subscription_as_a_subscription_route_does() {
+        let connection = subscription();
+        let served = Served::Connection(&connection);
+        let (members, dropped) = plan_members(&ids(&["m-a", "m-b"]), &served, false);
+        assert!(members.is_empty(), "every member is a subscription route");
+        assert_eq!(dropped, ids(&["m-a", "m-b"]));
+        assert!(
+            members.len() < MIN_MODELS,
+            "the handler refuses: too few models"
+        );
+
+        let (members, dropped) = plan_members(&ids(&["m-a", "m-b"]), &served, true);
+        assert!(dropped.is_empty());
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].provider, PROVIDER_ID);
+        assert_eq!(members[0].connection, Some(subscription()));
+        assert_eq!(members[0].basis(), CostBasis::Subscription);
+    }
+
+    #[test]
+    fn a_subscription_thread_synthesizer_needs_allow_subscription() {
+        let connection = subscription();
+        let served = Served::Connection(&connection);
+        let refused = named_member(&served, "m-s".to_owned(), false)
+            .expect_err("a subscription synthesizer needs allow_subscription");
+        assert_eq!(refused, InputError::SynthesizerNotAllowed);
+        assert_eq!(refused.code(), "council_synthesizer_not_allowed");
+        assert!(named_member(&served, "m-s".to_owned(), true).is_ok());
+    }
+
+    #[test]
+    fn a_platform_council_plans_as_before_and_drops_a_subscription_route() {
+        let catalogue = vec![
+            catalogue_entry("m-a", "azure-openai"),
+            catalogue_entry("m-sub", PROVIDER_ID),
+        ];
+        let served = Served::Catalogue(&catalogue);
+        let (members, dropped) = plan_members(&ids(&["m-a", "m-sub"]), &served, false);
+        assert_eq!(dropped, ids(&["m-sub"]));
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].connection, None);
+        assert_eq!(members[0].basis(), CostBasis::Metered);
+        let nonce = "nonce-1".to_owned();
+        let request = member_request(&run_on("Hva?", &nonce), 0, &members[0]);
+        assert_eq!(request.provider_hint, "azure-openai");
+        assert!(request.model_connection_id.is_empty());
+        assert!(request.subscription_connection_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_connection_member_is_never_priced_from_the_platform_catalogue() {
+        let rates = PricingCache::with_rate_for_test("m-a", 1.0, 2.0)
+            .snapshot()
+            .await;
+        let connection = gateway();
+        let (on_connection, _) = plan_members(
+            &ids(&["m-a", "m-b"]),
+            &Served::Connection(&connection),
+            false,
+        );
+        let catalogue = vec![
+            catalogue_entry("m-a", "azure-openai"),
+            catalogue_entry("m-b", "azure-openai"),
+        ];
+        let (on_platform, _) =
+            plan_members(&ids(&["m-a", "m-b"]), &Served::Catalogue(&catalogue), false);
+        assert_eq!(
+            Planned::of(&rates, &on_connection[0], 1_000, 500, false).cost_usd,
+            None
+        );
+        let priced = Planned::of(&rates, &on_platform[0], 1_000, 500, false)
+            .cost_usd
+            .expect("a platform member is priced from the catalogue");
+        assert!((priced - 0.002).abs() < 1e-9, "{priced}");
+    }
+
+    #[tokio::test]
+    async fn a_council_estimate_on_a_connection_is_unpriced() {
+        let rates = PricingCache::with_rate_for_test("m-a", 1.0, 2.0)
+            .snapshot()
+            .await;
+        let connection = gateway();
+        let (members, dropped) = plan_members(
+            &ids(&["m-a", "m-b"]),
+            &Served::Connection(&connection),
+            false,
+        );
+        let estimate = estimate_json(&rates, 40, &members, &members[0], &dropped, false);
+        assert!(estimate["total_estimated_cost_usd"].is_null());
+        assert!(estimate["members"][0]["list_price"].is_null());
+        assert!(estimate["members"][0]["estimated_cost_usd"].is_null());
+        assert!(estimate["synthesis"]["estimated_cost_usd"].is_null());
+    }
+
+    #[test]
+    fn a_zero_retention_council_on_a_connection_thread_is_refused_typed() {
+        let refused = connection_posture(&claims(true, Some(true)), &gateway(), false)
+            .expect_err("a ZDR org cannot run a council on a customer gateway");
+        assert_eq!(refusal_code(&refused), code::CONNECTION_NOT_ACKNOWLEDGED);
+    }
+
+    #[test]
+    fn with_the_switch_off_a_byo_thread_is_a_platform_council() {
+        let messages = vec![SessionMessage {
+            role: "user".to_owned(),
+            content: "Hva?".to_owned(),
+            model_connection_id: "conn-a".to_owned(),
+            ..Default::default()
+        }];
+        assert_eq!(
+            thread_connection(false, &messages).expect("not refused"),
+            None
+        );
+        let catalogue = vec![
+            catalogue_entry("m-a", "azure-openai"),
+            catalogue_entry("m-b", "azure-openai"),
+        ];
+        let (members, dropped) =
+            plan_members(&ids(&["m-a", "m-b"]), &Served::Catalogue(&catalogue), false);
+        assert!(dropped.is_empty());
+        assert!(members.iter().all(|member| member.connection.is_none()));
+    }
+
+    /// A failed call as inference-core declares it on a subscription connection: its reason on the trailer, the timing
+    /// trailers given, and an upstream message that must never reach the caller.
+    fn subscription_status(kind: &str, timing: &[(&'static str, &str)]) -> tonic::Status {
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            kind.parse().expect("ascii"),
+        );
+        for (key, value) in timing {
+            metadata.insert(*key, value.parse().expect("ascii"));
+        }
+        tonic::Status::with_metadata(
+            tonic::Code::ResourceExhausted,
+            "upstream said: quota for acct 42",
+            metadata,
+        )
+    }
+
+    /// The error a failed call of `member` answers with, as `council_infer` makes it.
+    fn call_error(member: &Member, status: &tonic::Status) -> HttpJsonError {
+        side_chat_inference_error(status, member.on_subscription())
+    }
+
+    #[test]
+    fn a_failed_member_on_a_subscription_connection_keeps_its_catalogue_code_retry_and_timing() {
+        let connection = subscription();
+        let (members, _) = plan_members(
+            &ids(&["m-a", "m-b"]),
+            &Served::Connection(&connection),
+            true,
+        );
+        let member = members[0].clone();
+        let status = subscription_status(
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT,
+            &[
+                (
+                    crate::subscription_failure::RETRY_AFTER_MS_TRAILER,
+                    "52260000",
+                ),
+                (
+                    crate::subscription_failure::RESETS_AT_TRAILER,
+                    "2026-09-26T01:21:00Z",
+                ),
+            ],
+        );
+        let (_, Json(body)) = call_error(&member, &status);
+        let member_json = failed_member(member, &body).json();
+        assert_eq!(member_json["status"], "refused", "{member_json}");
+        assert_eq!(
+            member_json["code"],
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT,
+            "{member_json}"
+        );
+        assert_eq!(member_json["retryable"], false, "{member_json}");
+        assert_eq!(member_json["retry_after_ms"], 52_260_000, "{member_json}");
+        assert_eq!(
+            member_json["resets_at"], "2026-09-26T01:21:00Z",
+            "{member_json}"
+        );
+        assert_eq!(
+            member_json["retry_at"], "2026-09-26T01:21:00Z",
+            "{member_json}"
+        );
+        assert!(
+            !member_json.to_string().contains("acct 42"),
+            "{member_json}"
+        );
+    }
+
+    #[test]
+    fn a_failed_member_on_the_platform_is_answered_as_before() {
+        let catalogue = vec![
+            catalogue_entry("m-a", "azure-openai"),
+            catalogue_entry("m-b", "azure-openai"),
+        ];
+        let (members, _) =
+            plan_members(&ids(&["m-a", "m-b"]), &Served::Catalogue(&catalogue), false);
+        let member = members[0].clone();
+        let status = tonic::Status::unavailable("upstream said: token expired for acct 42");
+        let (flat_status, Json(flat)) = crate::http_routes::grpc_status_to_http(&status);
+        let (got_status, Json(body)) = call_error(&member, &status);
+        assert_eq!((got_status, &body), (flat_status, &flat), "{body}");
+        let member_json = failed_member(member, &body).json();
+        assert_eq!(member_json["status"], "error", "{member_json}");
+        assert_eq!(member_json["code"], "member_failed", "{member_json}");
+        for key in ["retryable", "retry_after_ms", "resets_at", "retry_at"] {
+            assert!(member_json.get(key).is_none(), "{key}: {member_json}");
+        }
+        assert!(
+            !member_json.to_string().contains("acct 42"),
+            "{member_json}"
+        );
+    }
+
+    #[test]
+    fn a_typed_refusal_of_a_subscription_member_keeps_its_own_code() {
+        let connection = subscription();
+        let (members, _) = plan_members(
+            &ids(&["m-a", "m-b"]),
+            &Served::Connection(&connection),
+            true,
+        );
+        let member = members[0].clone();
+        let status = mp_contracts::zdr_refusal::Refusal::CONNECTION_NOT_ACKNOWLEDGED
+            .grpc_status(tonic::Code::FailedPrecondition);
+        let (_, Json(body)) = call_error(&member, &status);
+        let member_json = failed_member(member, &body).json();
+        assert_eq!(member_json["status"], "refused", "{member_json}");
+        assert_eq!(
+            member_json["code"],
+            code::CONNECTION_NOT_ACKNOWLEDGED,
+            "{member_json}"
+        );
+        assert!(member_json.get("retryable").is_none(), "{member_json}");
+    }
+
+    #[test]
+    fn a_failed_subscription_synthesis_keeps_its_catalogue_code_and_retry() {
+        let connection = subscription();
+        let synthesizer = named_member(&Served::Connection(&connection), "m-s".to_owned(), true)
+            .expect("a subscription synthesizer is allowed with allow_subscription");
+        let status = subscription_status(
+            crate::subscription_failure::SUBSCRIPTION_REAUTH_REQUIRED,
+            &[],
+        );
+        let (_, Json(body)) = call_error(&synthesizer, &status);
+        let synthesis = failed_synthesis(&synthesizer, &body).json();
+        assert_eq!(synthesis["status"], "failed", "{synthesis}");
+        assert_eq!(
+            synthesis["code"],
+            crate::subscription_failure::SUBSCRIPTION_REAUTH_REQUIRED,
+            "{synthesis}"
+        );
+        assert_eq!(synthesis["retryable"], false, "{synthesis}");
+        assert!(!synthesis.to_string().contains("acct 42"), "{synthesis}");
+    }
+
+    #[test]
+    fn only_a_catalogue_code_beside_a_subscription_failures_words_is_read_as_its_code() {
+        // `super::refusal_code` is the body reader; this module's own `refusal_code` helper reads an error instead.
+        let typed = json!({ "error": { "code": "model_not_entitled" } });
+        assert_eq!(
+            super::refusal_code(&typed).as_deref(),
+            Some("model_not_entitled")
+        );
+        let subscription = json!({
+            "error": "words",
+            "code": crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT,
+        });
+        assert_eq!(
+            super::refusal_code(&subscription).as_deref(),
+            Some(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT)
+        );
+        let unknown = json!({ "error": "words", "code": "not_in_the_catalogue" });
+        assert_eq!(super::refusal_code(&unknown), None);
+        let flat = json!({ "error": "words" });
+        assert_eq!(super::refusal_code(&flat), None);
+        assert!(retry_fields(&flat).is_empty());
+    }
+
+    /// The state of a call that fails to connect: inference-core's channel points at a closed port.
+    async fn failing_inference_state() -> AppState {
+        let mut state = state_with(SpeechInference::default()).await;
+        state.inference_client = InferenceCoreClient::new(
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+        );
+        state
+    }
+
+    /// A member on the thread's subscription connection, admitted with `allow_subscription` as the council plans it.
+    fn subscription_member(model: &str) -> Member {
+        let connection = subscription();
+        let (mut members, _) = plan_members(&ids(&[model]), &Served::Connection(&connection), true);
+        members.remove(0)
+    }
+
+    /// A member on the platform chain, planned from a catalogue that lists its model under a metered provider.
+    fn platform_member(model: &str) -> Member {
+        let catalogue = vec![catalogue_entry(model, "azure-openai")];
+        let (mut members, _) = plan_members(&ids(&[model]), &Served::Catalogue(&catalogue), false);
+        members.remove(0)
+    }
+
+    /// The named synthesizer on the thread's subscription connection, admitted with `allow_subscription`.
+    fn subscription_synthesizer(model: &str) -> Member {
+        let connection = subscription();
+        named_member(&Served::Connection(&connection), model.to_owned(), true)
+            .expect("a subscription synthesizer is allowed with allow_subscription")
+    }
+
+    /// A member whose call answered `answer`, as `run_members` settles an answer.
+    fn answered(member: Member, answer: &str) -> MemberResult {
+        MemberResult {
+            served_by: member.provider.clone(),
+            member,
+            status: "answered",
+            answer: Some(answer.to_owned()),
+            code: None,
+            retry: Map::new(),
+            usage: None,
+        }
+    }
+
+    /// The status a failed call of `request` carries before any mapping.
+    async fn raw_failure(state: &AppState, request: InferRequest) -> tonic::Status {
+        state
+            .inference_client
+            .clone()
+            .infer(authenticated_inference_request(request, &bearer()))
+            .await
+            .err()
+            .expect("the stand-in refuses the call")
+    }
+
+    #[tokio::test]
+    async fn a_failed_council_member_is_answered_by_its_route() {
+        let state = failing_inference_state().await;
+        let nonce = "nonce-1".to_owned();
+        let run = run_on("Hva?", &nonce);
+        let results = run_members(
+            &state,
+            &bearer(),
+            &run,
+            vec![subscription_member("m-sub"), platform_member("m-plat")],
+        )
+        .await;
+        assert_eq!(results.len(), 2);
+
+        let on_subscription = results[0].json();
+        assert_eq!(on_subscription["model"], "m-sub", "{on_subscription}");
+        assert_eq!(on_subscription["status"], "refused", "{on_subscription}");
+        assert_eq!(
+            on_subscription["code"],
+            crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+            "{on_subscription}"
+        );
+        assert_eq!(on_subscription["retryable"], true, "{on_subscription}");
+
+        let on_platform = results[1].json();
+        assert_eq!(on_platform["model"], "m-plat", "{on_platform}");
+        assert_eq!(on_platform["status"], "error", "{on_platform}");
+        assert_eq!(on_platform["code"], "member_failed", "{on_platform}");
+        for key in ["retryable", "retry_after_ms", "resets_at", "retry_at"] {
+            assert!(on_platform.get(key).is_none(), "{key}: {on_platform}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_council_synthesis_is_answered_by_its_route() {
+        let state = failing_inference_state().await;
+        let nonce = "nonce-1".to_owned();
+        let run = run_on("Hva?", &nonce);
+
+        let subscription_answers = [
+            answered(subscription_member("m-a"), "A"),
+            answered(subscription_member("m-b"), "B"),
+        ];
+        let synthesis = run_synthesis(
+            &state,
+            &bearer(),
+            &run,
+            &subscription_answers,
+            Some(subscription_synthesizer("m-s")),
+        )
+        .await
+        .json();
+        assert_eq!(synthesis["status"], "failed", "{synthesis}");
+        assert_eq!(
+            synthesis["code"],
+            crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+            "{synthesis}"
+        );
+        assert_eq!(synthesis["retryable"], true, "{synthesis}");
+
+        let platform_answers = [
+            answered(platform_member("m-a"), "A"),
+            answered(platform_member("m-b"), "B"),
+        ];
+        let synthesis = run_synthesis(
+            &state,
+            &bearer(),
+            &run,
+            &platform_answers,
+            Some(platform_member("m-s")),
+        )
+        .await
+        .json();
+        assert_eq!(synthesis["status"], "failed", "{synthesis}");
+        assert_eq!(synthesis["code"], "synthesis_failed", "{synthesis}");
+        assert!(synthesis.get("retryable").is_none(), "{synthesis}");
+    }
+
+    #[tokio::test]
+    async fn council_infer_maps_a_failed_call_by_its_route() {
+        let state = failing_inference_state().await;
+        let nonce = "nonce-1".to_owned();
+        let run = run_on("Hva?", &nonce);
+        let member = subscription_member("m-sub");
+        let raw = raw_failure(&state, member_request(&run, 0, &member)).await;
+        let (flat_status, Json(flat)) = grpc_status_to_http(&raw);
+
+        let (status, Json(body)) = council_infer(
+            &state.inference_client,
+            &bearer(),
+            member_request(&run, 0, &member),
+            true,
+        )
+        .await
+        .err()
+        .expect("the stand-in refuses the call");
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(
+            body["code"],
+            crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+            "{body}"
+        );
+        assert_eq!(body["retryable"], true, "{body}");
+
+        let (status, Json(body)) = council_infer(
+            &state.inference_client,
+            &bearer(),
+            member_request(&run, 0, &member),
+            false,
+        )
+        .await
+        .err()
+        .expect("the stand-in refuses the call");
+        assert_eq!((status, &body), (flat_status, &flat), "{body}");
+    }
 }

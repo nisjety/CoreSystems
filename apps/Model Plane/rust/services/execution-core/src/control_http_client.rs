@@ -78,11 +78,10 @@ pub fn env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Whether `name` is set to the exact literal `true`: no trimming and no case folding, so
+/// `TRUE` and ` true` leave it off.
 pub fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    std::env::var(name).ok().as_deref() == Some("true")
 }
 
 #[cfg(test)]
@@ -117,10 +116,27 @@ mod tests {
     #[test]
     fn env_helpers_treat_blank_as_absent() {
         std::env::set_var("CONTROL_HTTP_CLIENT_TEST_VALUE", "  ");
-        std::env::set_var("CONTROL_HTTP_CLIENT_TEST_FLAG", "TRUE");
+        std::env::set_var("CONTROL_HTTP_CLIENT_TEST_FLAG", "true");
         assert_eq!(env_value("CONTROL_HTTP_CLIENT_TEST_VALUE"), None);
         assert!(env_flag("CONTROL_HTTP_CLIENT_TEST_FLAG"));
         std::env::remove_var("CONTROL_HTTP_CLIENT_TEST_VALUE");
         std::env::remove_var("CONTROL_HTTP_CLIENT_TEST_FLAG");
+    }
+
+    #[test]
+    fn env_flag_is_the_exact_literal_true() {
+        const NAME: &str = "CONTROL_HTTP_CLIENT_TEST_EXACT_FLAG";
+        for (raw, on) in [
+            ("true", true),
+            ("TRUE", false),
+            (" true", false),
+            ("true ", false),
+            ("1", false),
+        ] {
+            std::env::set_var(NAME, raw);
+            assert_eq!(env_flag(NAME), on, "{raw:?}");
+        }
+        std::env::remove_var(NAME);
+        assert!(!env_flag(NAME), "unset is off");
     }
 }

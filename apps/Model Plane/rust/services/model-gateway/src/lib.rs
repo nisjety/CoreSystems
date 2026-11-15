@@ -136,6 +136,7 @@ pub mod stream_buffer;
 pub mod subscription_failure;
 pub mod teach_routes;
 pub mod thinking;
+pub mod thread_connection;
 pub mod thread_export_routes;
 pub mod thread_goal;
 pub mod thread_goal_routes;

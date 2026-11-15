@@ -14,7 +14,7 @@
 //! QUARRY_EDGE_URL=https://quarry-edge.internal \
 //! AUTH_CORE_URL=http://auth-core:3011 \
 //! EXECUTION_CORE_SERVICE_API_KEY=<credential> \
-//! QUARRY_BROWSER_AGENT_LLM=1 \
+//! QUARRY_BROWSER_AGENT_LLM=true \
 //! INFERENCE_CORE_URL=http://inference-core:9092 \
 //! E2E_INFERENCE_BEARER=<short-lived-aud-inference-core-user-token> \
 //! E2E_ORG_ID=org_real \

@@ -114,9 +114,9 @@ func startScheduledStepHeartbeat(ctx context.Context) func() {
 }
 
 // scheduledAgentLaneEnabled reads the switch that gates the scheduled Do lane (WS20 S6). Only the
-// literal true enables it, as execution-core reads it.
+// exact literal "true" enables it, with no trimming and no case folding, as execution-core reads it.
 func scheduledAgentLaneEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("EXECUTION_SCHEDULED_AGENT_ENABLED")), "true")
+	return os.Getenv("EXECUTION_SCHEDULED_AGENT_ENABLED") == "true"
 }
 
 // ExecuteScheduledStepActivity is the dedicated service-owned scheduled turn

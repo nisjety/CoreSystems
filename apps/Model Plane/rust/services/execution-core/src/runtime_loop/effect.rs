@@ -45,13 +45,14 @@ impl Drop for LedgerSwitch {
     }
 }
 
-/// Whether the effect ledger is switched on. Off by default.
+/// Whether the effect ledger is switched on. Off by default. Only the exact literal `true`
+/// turns it on: no trimming and no case folding.
 pub(crate) fn ledger_enabled() -> bool {
     #[cfg(test)]
     if let Some(forced) = TEST_SWITCH.with(std::cell::Cell::get) {
         return forced;
     }
-    std::env::var(LEDGER_ENV).is_ok_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    std::env::var(LEDGER_ENV).ok().as_deref() == Some("true")
 }
 
 /// The effect class of one call, from the tool and its actual arguments.

@@ -1877,20 +1877,23 @@ impl PlanCeilings {
                 built_in.max_total_failures,
             ),
             procedure: browser_agent::procedure::ProcedureId::from_lookup(&lookup),
-            // Literal `1`, `true` or `on` enables; anything else is off.
-            widened_actions: lookup("QUARRY_BROWSER_AGENT_WIDENED_ACTIONS")
-                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
+            // Only the exact literal `true` enables these, with no trimming and no case folding.
+            widened_actions: lookup("QUARRY_BROWSER_AGENT_WIDENED_ACTIONS").as_deref()
+                == Some("true"),
+            // Read as `1`, `true` or `on` (trimmed) on purpose, not as the exact literal: this is a
+            // require switch, and the strict reading would turn an operator's `1` into the
+            // unprotected state. Kept for the owner to decide.
             require_quarry_redaction_stamp: lookup(
                 "EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP",
             )
             .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
-            approval_redirect: lookup("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT")
-                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
+            approval_redirect: lookup("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT").as_deref()
+                == Some("true"),
             steer: browser_agent::steer_enabled_from(
                 lookup(browser_agent::STEER_ENV).as_deref(),
             ),
-            observation_quality: lookup("QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY")
-                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
+            observation_quality: lookup("QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY").as_deref()
+                == Some("true"),
         }
     }
 
@@ -2871,11 +2874,8 @@ mod tests {
     fn approval_redirect_default_off_and_only_literal_values_enable() {
         assert!(!ceilings_with(&[]).approval_redirect);
         assert!(!PlanCeilings::default().approval_redirect);
-        for on in ["1", "true", "on", " 1 "] {
-            let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT", on)]);
-            assert!(set.approval_redirect, "{on:?}");
-        }
-        for off in ["0", "false", "yes", "", "TRUE"] {
+        assert!(ceilings_with(&[("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT", "true")]).approval_redirect);
+        for off in ["0", "1", "on", " 1 ", " true", "true ", "false", "yes", "", "TRUE"] {
             let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT", off)]);
             assert!(!set.approval_redirect, "{off:?}");
         }
@@ -2885,11 +2885,8 @@ mod tests {
     fn observation_quality_default_off_and_only_literal_values_enable() {
         assert!(!ceilings_with(&[]).observation_quality);
         assert!(!PlanCeilings::default().observation_quality);
-        for on in ["1", "true", "on"] {
-            let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY", on)]);
-            assert!(set.observation_quality, "{on:?}");
-        }
-        for off in ["0", "false", "yes", "", "TRUE"] {
+        assert!(ceilings_with(&[("QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY", "true")]).observation_quality);
+        for off in ["0", "1", "on", " 1 ", " true", "true ", "false", "yes", "", "TRUE"] {
             let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY", off)]);
             assert!(!set.observation_quality, "{off:?}");
         }
@@ -2899,10 +2896,8 @@ mod tests {
     fn steer_default_off_and_only_literal_values_enable() {
         assert!(!ceilings_with(&[]).steer);
         assert!(!PlanCeilings::default().steer);
-        for on in ["1", "true", "on", " on "] {
-            assert!(ceilings_with(&[("QUARRY_BROWSER_AGENT_STEER", on)]).steer, "{on:?}");
-        }
-        for off in ["0", "false", "yes", "", "TRUE"] {
+        assert!(ceilings_with(&[("QUARRY_BROWSER_AGENT_STEER", "true")]).steer);
+        for off in ["0", "1", "on", " on ", " true", "true ", "false", "yes", "", "TRUE"] {
             assert!(!ceilings_with(&[("QUARRY_BROWSER_AGENT_STEER", off)]).steer, "{off:?}");
         }
     }
@@ -2924,11 +2919,8 @@ mod tests {
     #[test]
     fn widened_actions_default_off_and_only_literal_values_enable() {
         assert!(!ceilings_with(&[]).widened_actions);
-        for on in ["1", "true", "on", " 1 "] {
-            let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_WIDENED_ACTIONS", on)]);
-            assert!(set.widened_actions, "{on:?}");
-        }
-        for off in ["0", "", "yes", "TRUE", "enabled", "2"] {
+        assert!(ceilings_with(&[("QUARRY_BROWSER_AGENT_WIDENED_ACTIONS", "true")]).widened_actions);
+        for off in ["0", "1", "on", " 1 ", " true", "", "yes", "TRUE", "enabled", "2"] {
             let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_WIDENED_ACTIONS", off)]);
             assert!(!set.widened_actions, "{off:?}");
         }

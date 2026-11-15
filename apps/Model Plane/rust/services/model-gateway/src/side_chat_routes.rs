@@ -21,7 +21,8 @@
 //! gives (required: 400 `side_chat_model_required` without it), and a thread whose turns name two or more
 //! connections, of either kind, is refused 409 `connection_ambiguous`. A turn written before those columns
 //! existed names no connection, so such a thread is answered as before. With `MODEL_GATEWAY_BYO_GATEWAY` not
-//! the literal `true` every thread is answered as before.
+//! the literal `true` every thread is answered as before. The resolution is `thread_connection`, shared with the
+//! other side features that run on a thread (reasoning translation, the model council, the review run).
 
 use axum::{
     extract::{Path, State},
@@ -30,25 +31,20 @@ use axum::{
     Extension, Json, Router,
 };
 use chrono::{DateTime, Utc};
-use mp_contracts::agentic_subscription::PROVIDER_ID;
-use mp_contracts::model_plane::v1::{
-    ArchiveFilter, ChatMessage, InferPurpose, InferRequest, ListConversationRequest,
-    ListThreadsRequest, SessionMessage,
-};
+use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest, SessionMessage};
 use mp_contracts::user_content::UserContent;
-use mp_contracts::zdr_refusal::Refusal;
 use mp_ids::new_ulid;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::{Claims, VerifiedInferenceBearer, VerifiedSessionBearer};
-use crate::http_routes::{
-    authenticated_inference_request, authenticated_session_request, grpc_status_to_http,
-    session_thread_error, HttpJsonError,
-};
-use crate::pricing::CostBasis;
+use crate::http_routes::{authenticated_inference_request, grpc_status_to_http, HttpJsonError};
 use crate::state::AppState;
 use crate::subscription_failure::{FailureContext, SubscriptionFailure};
+use crate::thread_connection::{
+    answer_basis, connection_posture, read_active_path, refuse_unavailable_thread, side_route,
+    thread_connection, SideRoute, ThreadConnection,
+};
 
 /// The opt-in switch. Only the literal `true` turns it on.
 pub const ENABLED_ENV: &str = "MODEL_GATEWAY_SIDE_CHAT_ENABLED";
@@ -62,8 +58,6 @@ const SNAPSHOT_READ_TURNS: u32 = 40;
 const SIDE_CHAT_MAX_TOKENS: i32 = 1_500;
 /// Low, so that the answer follows the transcript rather than inventing one.
 const SIDE_CHAT_TEMPERATURE: f32 = 0.2;
-/// The provider hint a customer-gateway call carries, as `normalize` names it for a customer-gateway turn.
-const CUSTOMER_GATEWAY_PROVIDER: &str = "customer-gateway";
 
 const SYSTEM_PROMPT: &str = concat!(
     "You answer one question about one conversation between a person and an assistant. ",
@@ -261,154 +255,6 @@ fn user_message(question: &UserContent, transcript: &Transcript, nonce: &str) ->
     message
 }
 
-/// Where the one call of a side chat is served (W4-BYO, DEC-V-R8).
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SideRoute {
-    /// The platform chain, as a side chat always was: the call names neither a model nor a connection.
-    Platform,
-    /// The thread's own connection, with the model the request names for it. A customer gateway or subscription call
-    /// names its own model, and inference-core serves it on that connection alone.
-    Connection {
-        connection: ThreadConnection,
-        model: String,
-    },
-}
-
-/// A connection a thread's turns were written under: one of the caller's customer-gateway connections (W4-BYO,
-/// `messages.model_connection_id`), or the caller's own ChatGPT subscription connection (DEC-V-R8,
-/// `messages.subscription_connection_id`). Both are opaque Integration Core ids, never keys.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum ThreadConnection {
-    CustomerGateway(String),
-    Subscription(String),
-}
-
-impl ThreadConnection {
-    /// The provider the call names for this connection: the customer-gateway registry id, or the subscription one.
-    fn provider(&self) -> &'static str {
-        match self {
-            Self::CustomerGateway(_) => CUSTOMER_GATEWAY_PROVIDER,
-            Self::Subscription(_) => PROVIDER_ID,
-        }
-    }
-
-    /// The opaque connection id.
-    fn id(&self) -> &str {
-        match self {
-            Self::CustomerGateway(id) | Self::Subscription(id) => id,
-        }
-    }
-}
-
-/// The connection a thread's turns were written under, read over the turns the side chat reads. `None` when the
-/// switch is off, or when no turn names one: a platform thread, served as before. A thread whose turns name two or
-/// more connections, of either kind, has no one connection that can serve its whole transcript, so it is refused
-/// rather than served on one of them or on the platform chain.
-fn thread_connection(
-    byo_enabled: bool,
-    messages: &[SessionMessage],
-) -> Result<Option<ThreadConnection>, HttpJsonError> {
-    if !byo_enabled {
-        return Ok(None);
-    }
-    let mut named: Vec<ThreadConnection> = Vec::new();
-    for message in messages {
-        let gateway = message.model_connection_id.trim();
-        if !gateway.is_empty() {
-            named.push(ThreadConnection::CustomerGateway(gateway.to_owned()));
-        }
-        let subscription = message.subscription_connection_id.trim();
-        if !subscription.is_empty() {
-            named.push(ThreadConnection::Subscription(subscription.to_owned()));
-        }
-    }
-    named.sort_unstable();
-    named.dedup();
-    match named.len() {
-        0 => Ok(None),
-        1 => Ok(named.pop()),
-        _ => Err(typed(
-            StatusCode::CONFLICT,
-            "connection_ambiguous",
-            "side chat is not available for a thread whose turns were written under more than one connection",
-        )),
-    }
-}
-
-/// The posture of a side chat served on a connection. The connection route decides it, as it decides a chat turn
-/// that names the connection: a zero-retention token or an explicit zero-retention request is refused typed before
-/// any call, because neither a customer gateway nor a subscription is zero retention. A waiver binds one
-/// subscription connection, so on any other connection it is refused as a route mismatch.
-fn connection_posture(
-    claims: &Claims,
-    connection: &ThreadConnection,
-    explicit_zdr: bool,
-) -> Result<(), HttpJsonError> {
-    let zdr = crate::zdr_posture::zdr_or_refuse(
-        claims,
-        &crate::zdr_posture::Route::named(
-            Some(connection.provider()),
-            Some(connection.id()),
-            explicit_zdr,
-        ),
-    )?;
-    if zdr {
-        // The resolver refuses every zero-retention request on a connection route, so this is not reached. It is
-        // kept so that a change there fails closed here.
-        return Err(crate::zdr_posture::http(
-            &Refusal::CONNECTION_NOT_ACKNOWLEDGED,
-        ));
-    }
-    Ok(())
-}
-
-/// The route the one call is served on. A platform thread is served on the platform chain. A thread on a connection
-/// is served on that connection with the model the request names: a customer gateway or subscription call names its
-/// own model, so a request that names none is refused, and so is a model the deployment allowlist leaves out, as on
-/// every turn.
-fn side_route(
-    connection: Option<ThreadConnection>,
-    model: &str,
-    allowed: Option<&[String]>,
-) -> Result<SideRoute, HttpJsonError> {
-    let Some(connection) = connection else {
-        return Ok(SideRoute::Platform);
-    };
-    let model = model.trim();
-    if model.is_empty() {
-        return Err(typed(
-            StatusCode::BAD_REQUEST,
-            "side_chat_model_required",
-            "a side chat on a customer gateway or subscription thread names the model the connection serves",
-        ));
-    }
-    if let Some(refusal) = crate::normalize::deployment_allowlist_refusal(allowed, model) {
-        return Err(refusal);
-    }
-    Ok(SideRoute::Connection {
-        connection,
-        model: model.to_owned(),
-    })
-}
-
-/// The cost basis of the answer. A platform answer is priced as it always was. A customer-gateway answer is billed
-/// by the gateway, and a subscription answer is the user's own subscription, so neither carries a platform price. A
-/// call the platform served is never labelled as either.
-fn answer_basis(route: &SideRoute, provider_used: &str) -> CostBasis {
-    let basis = match route {
-        SideRoute::Platform => CostBasis::of_route("", ""),
-        SideRoute::Connection {
-            connection: ThreadConnection::CustomerGateway(id),
-            ..
-        } => CostBasis::of_gateway(id),
-        SideRoute::Connection {
-            connection: ThreadConnection::Subscription(id),
-            ..
-        } => CostBasis::of_route(PROVIDER_ID, id),
-    };
-    basis.served_by(provider_used)
-}
-
 /// The one model call of a side chat: no tools, a low temperature, the caller's org and posture. On the platform
 /// route it names neither a model nor a connection, as before; on a connection route it names the connection and
 /// its model. Its request id is fresh. Nothing here is stored by this route.
@@ -420,36 +266,10 @@ fn side_chat_request(
     zdr: bool,
     route: &SideRoute,
 ) -> InferRequest {
-    // The call names the connection of its kind: a customer-gateway id, or a subscription id with its provider.
-    let (model, provider_hint, model_connection_id, subscription_connection_id) = match route {
-        SideRoute::Platform => (String::new(), String::new(), String::new(), String::new()),
-        SideRoute::Connection {
-            connection: ThreadConnection::CustomerGateway(id),
-            model,
-        } => (
-            model.clone(),
-            CUSTOMER_GATEWAY_PROVIDER.to_owned(),
-            id.clone(),
-            String::new(),
-        ),
-        SideRoute::Connection {
-            connection: ThreadConnection::Subscription(id),
-            model,
-        } => (
-            model.clone(),
-            PROVIDER_ID.to_owned(),
-            String::new(),
-            id.clone(),
-        ),
-    };
-    InferRequest {
+    let mut request = InferRequest {
         request_id: format!("{nonce}-side-chat"),
         purpose: InferPurpose::Answer as i32,
         org_id: org_id.to_owned(),
-        model,
-        provider_hint,
-        model_connection_id,
-        subscription_connection_id,
         messages: vec![
             ChatMessage {
                 compaction_summary: String::new(),
@@ -468,91 +288,10 @@ fn side_chat_request(
         max_tokens: SIDE_CHAT_MAX_TOKENS,
         zdr,
         ..Default::default()
-    }
-}
-
-/// Refuses a Space thread before its transcript is read (DEC-06). Session Core's conversation read
-/// carries no Space id, so the thread's own summary is read by id, through the owner-bound thread
-/// listing. A thread the caller does not own is not listed, and Session Core refuses its read.
-///
-/// The same answer also carries `holds_retention_run`: a thread holding a ZDR or waived run is
-/// refused with 409 `side_chat_thread_retention_refused` (DEC-32), so its transcript is never read
-/// and never reaches the org default chain. The Space check comes first, then the retention check.
-async fn refuse_unavailable_thread(
-    state: &AppState,
-    claims: &Claims,
-    session_bearer: &VerifiedSessionBearer,
-    thread_id: &str,
-) -> Result<(), HttpJsonError> {
-    let response = state
-        .session_client
-        .clone()
-        .list_threads(authenticated_session_request(
-            ListThreadsRequest {
-                org_id: claims.org_id.clone(),
-                user_id: claims.user_id.clone(),
-                limit: 1,
-                thread_id: thread_id.to_owned(),
-                archived: ArchiveFilter::All as i32,
-                ..Default::default()
-            },
-            session_bearer,
-        )?)
-        .await
-        .map_err(|e| session_thread_error("session-core list_threads failed", &e))?
-        .into_inner();
-    if response
-        .threads
-        .iter()
-        .any(|thread| !thread.space_id.is_empty())
-    {
-        return Err(typed(
-            StatusCode::CONFLICT,
-            "scope_not_available_in_space",
-            "side chat is not available in a Space thread",
-        ));
-    }
-    if response
-        .threads
-        .iter()
-        .any(|thread| thread.holds_retention_run)
-    {
-        return Err(typed(
-            StatusCode::CONFLICT,
-            "side_chat_thread_retention_refused",
-            "side chat is not available for a thread that holds a zero-retention or waived run",
-        ));
-    }
-    Ok(())
-}
-
-/// The newest turns of the thread's active path, and whether older ones exist. Human posts stay
-/// out, so the model reads the conversation's turns and never a post a member wrote in a room.
-/// Session Core checks that the caller owns the thread.
-async fn read_active_path(
-    state: &AppState,
-    claims: &Claims,
-    session_bearer: &VerifiedSessionBearer,
-    thread_id: &str,
-) -> Result<(Vec<SessionMessage>, bool), HttpJsonError> {
-    let response = state
-        .session_client
-        .clone()
-        .list_conversation(authenticated_session_request(
-            ListConversationRequest {
-                org_id: claims.org_id.clone(),
-                thread_id: thread_id.to_owned(),
-                include_inactive: false,
-                limit: SNAPSHOT_READ_TURNS,
-                include_human_posts: false,
-                ..Default::default()
-            },
-            session_bearer,
-        )?)
-        .await
-        .map_err(|e| session_thread_error("session-core list_conversation failed", &e))?
-        .into_inner();
-    Ok((response.messages, response.has_more))
+    };
+    // The connection of its kind, and the model the request gives for it; the platform route names neither.
+    route.apply_to(&mut request);
+    request
 }
 
 /// The answer to a failed `infer` (V2-mg-1). A call on the thread's subscription connection ends on the subscription
@@ -620,9 +359,15 @@ pub(crate) async fn side_chat_with(
             "thread_id is required",
         ));
     }
-    refuse_unavailable_thread(&state, &claims, &session_bearer, thread_id).await?;
-    let (messages, has_more) =
-        read_active_path(&state, &claims, &session_bearer, thread_id).await?;
+    refuse_unavailable_thread(&state, &claims, &session_bearer, thread_id, "side chat").await?;
+    let (messages, has_more) = read_active_path(
+        &state,
+        &claims,
+        &session_bearer,
+        thread_id,
+        SNAPSHOT_READ_TURNS,
+    )
+    .await?;
     let transcript = newest_transcript(&messages, has_more);
     let connection = thread_connection(crate::normalize::byo_gateway_enabled(), &messages)?;
     let zdr = match &connection {
@@ -695,6 +440,9 @@ pub(crate) async fn side_chat_with(
 mod tests {
     use super::*;
     use crate::auth::ZdrWaiverClaim;
+    use crate::pricing::CostBasis;
+    use crate::thread_connection::CUSTOMER_GATEWAY_PROVIDER;
+    use mp_contracts::agentic_subscription::PROVIDER_ID;
     use mp_contracts::zdr_refusal::code;
 
     fn claims(zdr: bool, org_zdr: Option<bool>) -> Claims {

@@ -333,7 +333,8 @@ impl WebToolsClient {
 // `knowledge.batch`), governed as `cap.web.crawl|map|batch`.
 // ---------------------------------------------------------------------------------------------
 
-/// The deployment switch for the three tools. Default OFF: only `1`, `true` or `on` enables it.
+/// The deployment switch for the three tools. Default OFF: only the exact literal `true` enables
+/// it, with no trimming and no case folding.
 pub const CRAWL_TOOLS_ENV: &str = "EXECUTION_CORE_WEB_CRAWL_TOOLS";
 /// Tighten-only page-count approval threshold: a value above [`DEFAULT_APPROVAL_PAGES`], zero or
 /// a non-number leaves the default; a smaller one lowers it.
@@ -359,12 +360,10 @@ pub fn crawl_tools_enabled() -> bool {
     crawl_tools_enabled_from(std::env::var(CRAWL_TOOLS_ENV).ok().as_deref())
 }
 
+/// Only the exact literal `true` enables the tools: `1`, `on`, `TRUE` and padded values stay off.
 #[must_use]
 pub fn crawl_tools_enabled_from(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "on")
-    )
+    value == Some("true")
 }
 
 /// The effective approval threshold: [`DEFAULT_APPROVAL_PAGES`], or a smaller configured value.
@@ -644,10 +643,11 @@ pub fn reader_enabled() -> bool {
     reader_enabled_from(std::env::var(WEB_READER_ENV).ok().as_deref())
 }
 
-/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+/// Only the exact literal `true` enables it: no trimming and no case folding. `1`, `on` and
+/// anything else stay off.
 #[must_use]
 pub fn reader_enabled_from(value: Option<&str>) -> bool {
-    value.map(str::trim) == Some("true")
+    value == Some("true")
 }
 
 /// Whether a tool is a page fetch: the one result kind the reader holds for reading.
@@ -1111,15 +1111,15 @@ mod crawl_tool_tests {
     use super::*;
 
     #[test]
-    fn the_crawl_tools_are_off_unless_explicitly_switched_on() {
+    fn the_crawl_tools_are_off_unless_the_exact_literal_true() {
         assert_eq!(CRAWL_TOOLS_ENV, "EXECUTION_CORE_WEB_CRAWL_TOOLS");
         assert!(!crawl_tools_enabled_from(None));
-        for off in ["", "0", "false", "off", "no", "2", "yes"] {
+        for off in [
+            "", "0", "1", "false", "off", "on", "no", "2", "yes", "TRUE", " true", "true ", " on ",
+        ] {
             assert!(!crawl_tools_enabled_from(Some(off)), "{off:?}");
         }
-        for on in ["1", "true", "TRUE", "on", " on "] {
-            assert!(crawl_tools_enabled_from(Some(on)), "{on:?}");
-        }
+        assert!(crawl_tools_enabled_from(Some("true")));
     }
 
     #[test]
@@ -1228,8 +1228,16 @@ mod reader_tests {
     #[test]
     fn the_reader_switch_is_read_only_from_the_literal_true() {
         assert!(reader_enabled_from(Some("true")));
-        assert!(reader_enabled_from(Some(" true ")));
-        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some("on"), Some("yes")] {
+        for raw in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some("True"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some(" true "),
+        ] {
             assert!(!reader_enabled_from(raw), "{raw:?}");
         }
     }

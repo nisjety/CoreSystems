@@ -1220,7 +1220,7 @@ mod tests {
     #[test]
     fn only_the_literal_true_turns_the_bus_on() {
         assert!(enabled_from(Some("true")));
-        assert!(enabled_from(Some(" TRUE ")));
+        assert!(!enabled_from(Some(" TRUE ")));
         for off in [
             None,
             Some(""),

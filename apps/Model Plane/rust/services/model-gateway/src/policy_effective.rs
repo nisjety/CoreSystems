@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn the_switch_is_strict_and_off_by_default() {
         assert!(policy_effective_from(Some("true")));
-        assert!(policy_effective_from(Some(" TRUE ")));
+        assert!(!policy_effective_from(Some(" TRUE ")));
         for off in [
             None,
             Some(""),

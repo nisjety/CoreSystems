@@ -709,13 +709,14 @@ pub struct PlanConfig {
 
 /// E3.3-f: the switch for steering a live browser run. execution-core's pause and
 /// resume handlers read it per call (they refuse a steer text while it is off), the
-/// tool bridge copies it into [`PlanConfig::steer`]. Literal `1`, `true` or `on`.
+/// tool bridge copies it into [`PlanConfig::steer`]. Only the exact literal `true` enables it.
 pub const STEER_ENV: &str = "QUARRY_BROWSER_AGENT_STEER";
 
-/// Whether `value` (an env value) turns steering on.
+/// Whether `value` (an env value) turns steering on: the exact literal `true`, with no trimming
+/// and no case folding.
 #[must_use]
 pub fn steer_enabled_from(value: Option<&str>) -> bool {
-    value.is_some_and(|value| matches!(value.trim(), "1" | "true" | "on"))
+    value == Some("true")
 }
 
 /// Whether steering is on in this process.
@@ -4496,10 +4497,8 @@ mod tests {
         assert!(!PlanConfig::default().steer);
         assert!(!test_config().steer);
         assert!(!steer_enabled_from(None));
-        for on in ["1", "true", "on", " 1 "] {
-            assert!(steer_enabled_from(Some(on)), "{on:?}");
-        }
-        for off in ["0", "false", "yes", "", "TRUE", "enabled"] {
+        assert!(steer_enabled_from(Some("true")));
+        for off in ["0", "1", "false", "on", "yes", "", "TRUE", " true", " 1 ", "enabled"] {
             assert!(!steer_enabled_from(Some(off)), "{off:?}");
         }
     }

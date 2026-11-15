@@ -28,8 +28,8 @@
 //!
 //! # Off by default
 //!
-//! [`ENABLED_ENV`] must say so explicitly (`1`, `true`, `on`, `yes`,
-//! `enabled`). With it unset every write returns exactly what it did before:
+//! [`ENABLED_ENV`] must say so explicitly, with the exact literal `true`. With it unset
+//! every write returns exactly what it did before:
 //! no extra request, no extra line. The read-back costs a round trip per
 //! write (bounded by [`VERIFY_DEADLINE`]) and a wrong read-back can mislead
 //! the model, so an operator opts in once a connector has been seen to answer
@@ -77,14 +77,11 @@ const SHORTENED_MARKER: &str =
     "\n[…result shortened so the verification line fits the step record]";
 
 /// Whether an explicit env value turns the verification on. Pure so the policy
-/// is unit-testable without touching the process environment.
+/// is unit-testable without touching the process environment. Only the exact literal
+/// `true` does: no trimming and no case folding, so `1`, `on`, `yes` and `enabled` do not.
 #[must_use]
 pub(crate) fn parse_enabled(raw: Option<&str>) -> bool {
-    matches!(
-        raw.map(|value| value.trim().to_ascii_lowercase())
-            .as_deref(),
-        Some("1" | "true" | "on" | "yes" | "enabled")
-    )
+    raw == Some("true")
 }
 
 /// Whether this deployment verifies writes in the loop right now.
@@ -368,11 +365,12 @@ mod tests {
     // --- The switch ----------------------------------------------------------
 
     #[test]
-    fn only_an_explicit_value_turns_verification_on() {
-        for on in ["1", "true", "TRUE", " on ", "yes", "Enabled"] {
-            assert!(parse_enabled(Some(on)), "{on:?} must turn it on");
-        }
-        for off in ["", "0", "false", "off", "no", "disabled", "maybe", "2"] {
+    fn only_the_exact_literal_true_turns_verification_on() {
+        assert!(parse_enabled(Some("true")), "the exact literal turns it on");
+        for off in [
+            "1", "TRUE", " true", "true ", " on ", "on", "yes", "Enabled", "enabled", "", "0",
+            "false", "off", "no", "disabled", "maybe", "2",
+        ] {
             assert!(!parse_enabled(Some(off)), "{off:?} must leave it off");
         }
         assert!(!parse_enabled(None), "unset is off");

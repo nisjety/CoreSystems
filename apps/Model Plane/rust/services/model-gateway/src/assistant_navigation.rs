@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn navigation_switch_is_the_literal_true_and_nothing_else() {
         assert!(mp_contracts::loop_fold::switch_from(Some("true")));
-        assert!(mp_contracts::loop_fold::switch_from(Some("TRUE")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
         assert!(!mp_contracts::loop_fold::switch_from(None));
         assert!(!mp_contracts::loop_fold::switch_from(Some("false")));
         assert!(!mp_contracts::loop_fold::switch_from(Some("1")));

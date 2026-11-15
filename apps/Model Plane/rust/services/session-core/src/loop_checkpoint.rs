@@ -83,7 +83,8 @@ pub(crate) fn park_ttl_seconds() -> i64 {
 }
 
 /// Whether the fold store is switched on. Off by default: a loop keeps its fold in
-/// memory and a pause cannot be resumed from the store.
+/// memory and a pause cannot be resumed from the store. Only the exact literal `true`
+/// enables it, with no trimming and no case folding, as every durable-loop switch reads.
 pub(crate) fn enabled() -> bool {
     // A test that serves an RPC through its trait method forces the answer for its own thread,
     // so it does not race the tests that set the process environment. Compiled out of the binary.
@@ -91,7 +92,7 @@ pub(crate) fn enabled() -> bool {
     if let Some(forced) = test_switch::forced() {
         return forced;
     }
-    std::env::var(ENABLED_ENV).is_ok_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    std::env::var(ENABLED_ENV).ok().as_deref() == Some("true")
 }
 
 /// A per-thread override of [`enabled`] for tests. It holds only for a test that runs its call
@@ -1471,6 +1472,8 @@ mod tests {
         std::env::set_var(ENABLED_ENV, "false");
         assert!(!enabled());
         std::env::set_var(ENABLED_ENV, " TRUE ");
+        assert!(!enabled(), "a padded or cased true leaves the store off");
+        std::env::set_var(ENABLED_ENV, "true");
         assert!(enabled());
         std::env::remove_var(ENABLED_ENV);
     }

@@ -598,9 +598,8 @@ impl LlmPlanner {
     /// `crate::planner_policy` and calls `connect`.
     #[must_use]
     pub fn from_env(inference_bearer: Option<&str>) -> Option<Self> {
-        let enabled = std::env::var("QUARRY_BROWSER_AGENT_LLM")
-            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
-            .unwrap_or(false);
+        // Only the exact literal `true` enables the legacy gate: no trimming and no case folding.
+        let enabled = std::env::var("QUARRY_BROWSER_AGENT_LLM").is_ok_and(|v| v == "true");
         if !enabled {
             return None;
         }
