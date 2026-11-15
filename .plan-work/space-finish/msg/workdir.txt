@@ -1,0 +1,18 @@
+chore(space-w2): commit the Phase 1 working scripts and notes
+
+Reusable drivers and evidence notes from the Wave 2 verification pass, kept with the
+branch so the Phase 1 results can be re-run and audited:
+
+- bg.ps1: background runner. Writes .plan-work/space-finish/logs/<id>.log, .exit,
+  .start and .end, so each long cargo or vitest run is recorded.
+- commit.ps1: commits with a message file. Puts a local gitleaks binary on PATH
+  because the Docker engine was down; the hook scans the same staged diff.
+- run-go.ps1, run-node-install.ps1: go vet/test and pnpm install drivers.
+- hash-candidates.ps1, ledger-hash.ps1: find which init_better_auth.sql blob matches
+  the live ledger checksum (F6). The blob b4e1d53c0 restored in cd2845300 matches.
+- phase1-notes.md: suite results, environment notes, and the F6 and F12 analysis.
+- p1-rows.txt: the 100 P1 rows from the W1 depth register, extracted.
+- vitest-failing-r1.txt: the 24 SPA test files that failed in the first full run.
+
+Not committed: the raw logs (ignored by *.log) and the per-run wrapper scripts,
+which duplicate bg.ps1. The logs are the evidence cited in the W2 ledger.

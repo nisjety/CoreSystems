@@ -1,0 +1,25 @@
+fix(auth-core): F6 restore the Better Auth bootstrap migration and refuse to boot without it
+
+Space W1 live proof F6: auth-core could not initialise an empty database because
+gdpr_hard_delete.sql ran before the Better Auth "user" table existed.
+
+Root cause: migrations/init_better_auth.sql was deleted from main in 932b30d26
+(2026-09-23), while docker-entrypoint.sh still names it first and skipped any
+missing file (`[ -f "$f" ] || continue`). Existing databases were unaffected (their
+ledger already holds the row); every fresh database failed. The Postgres spec
+gdpr-outbox-erasure.postgres.spec.ts reads the same file and could not run either.
+
+- Restore init_better_auth.sql byte-identical to its last committed blob
+  (b4e1d53c0). Its CRLF hash equals the checksum in the live ledger captured on
+  2026-10-27 (9d2492d1...), so a CRLF checkout keeps matching the existing row and a
+  fresh database gets the same schema the live one was bootstrapped with.
+- The entrypoint refuses to start when either named bootstrap file is missing,
+  before any migration runs: the files are listed explicitly, so their absence is a
+  packaging error, not an optional step.
+- deployment-contract.spec.ts pins both: the files ship, and the guard precedes the
+  migration loop.
+
+Tests: jest src/auth/deployment-contract.spec.ts 30/30
+(.plan-work/space-finish/logs/f6-jest.log); bash -n docker-entrypoint.sh clean.
+Not run: a boot against an empty Postgres (Docker engine down on this host); that
+is a Phase 3 boot-smoke step.

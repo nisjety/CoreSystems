@@ -1,0 +1,16 @@
+test(gateway): W2-P1-03 the relay-list guard names the room live view as its second caller
+
+Stale test from the Wave 2 merge. tests/continue_error_vocabulary.rs
+(`only_the_continue_handler_relays_upstream_error_codes`, written for WS03 S7c-A5 on
+2026-10-18) allowed exactly one caller of `proxy_sse_stream_with_data_plane` to pass
+a non-empty relay list: `continue_run`. WS09-S4 (60db2b789, member live attach) added
+`space_run_live` in spaces/run_live.rs, which passes its own closed list `RELAYED`
+(model-gateway's typed refusals of an attach, each with the BFF's fixed words, the
+same contract the guard protects). The guard was never re-run after Wave 2.
+
+The guard now names both callers with their list and enclosing function, and still
+fails for any third caller, a wrong list name, or a list passed from another
+function. The production code is unchanged.
+
+Evidence: p1-gw-cargo2.log (FAILED: found orchestration.rs CONTINUE_RELAYED_ERRORS
+and spaces/run_live.rs RELAYED), p1-gw-continue.log (7 passed).
