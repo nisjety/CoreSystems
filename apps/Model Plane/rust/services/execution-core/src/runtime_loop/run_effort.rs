@@ -12,12 +12,12 @@ use tracing::warn;
 pub(crate) const RUN_EFFORT_ENV: &str = "EXECUTION_CORE_RUN_EFFORT";
 
 /// Whether an explicit value turns the switch on. Pure so the policy is testable without
-/// the process environment. Only the literal `true` counts (after trimming), the same
-/// strict parser as model-gateway's `parse_ladder`: a stray `1`, `on` or `yes` must not
-/// start spending reasoning on a deployed agent.
+/// the process environment. Only the exact literal `true` counts: no trimming and no case
+/// folding. A stray `1`, `on` or `yes`, or a padded or cased `true`, must not start spending
+/// reasoning on a deployed agent.
 #[must_use]
 pub(crate) fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    raw == Some("true")
 }
 
 #[cfg(test)]
@@ -84,8 +84,9 @@ mod tests {
     #[test]
     fn run_effort_switch_accepts_only_the_literal_true() {
         assert!(parse_enabled(Some("true")));
-        assert!(parse_enabled(Some(" true\n")));
-        for raw in ["1", "on", "yes", "TRUE", "True", ""] {
+        for raw in [
+            "1", "on", "yes", "TRUE", "True", "", " true", " true\n", "true ",
+        ] {
             assert!(
                 !parse_enabled(Some(raw)),
                 "{raw:?} must not turn the switch on"

@@ -26,10 +26,10 @@ const SCREEN_DEADLINE: Duration = Duration::from_secs(3);
 /// The rule id a result carries when only the gateway's verdict flagged it. An id, never text.
 pub const GATEWAY_RULE_ID: &str = "gateway.content_screen";
 
-/// Only the literal `true` enables the verdict, as the other content-safety switches do.
+/// Only the exact literal `true` enables the verdict: no trimming and no case folding.
 #[must_use]
 pub fn parse_switch(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    raw == Some("true")
 }
 
 /// Whether this process asks the gateway for a verdict. Read once.
@@ -505,6 +505,9 @@ mod tests {
             None,
             Some(""),
             Some("TRUE"),
+            Some("True"),
+            Some(" true"),
+            Some("true "),
             Some("1"),
             Some("yes"),
             Some("false"),

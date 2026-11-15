@@ -48,8 +48,8 @@ pub fn permitted(admission_table: bool, retention_bound: bool) -> bool {
     admission_table && !retention_bound
 }
 
-/// Whether this deployment's admission switch names the table. Strict like Capability Core: only
-/// the literal `table` admits the owner reads.
+/// Whether this deployment's admission switch names the table. Strict like Capability Core, and
+/// read raw the same way: only the exact literal `table` admits the owner reads, with no trimming.
 #[must_use]
 pub fn admission_table() -> bool {
     #[cfg(test)]
@@ -58,7 +58,7 @@ pub fn admission_table() -> bool {
             return on;
         }
     }
-    crate::control_http_client::env_value("MODEL_ACTION_ADMISSION").as_deref() == Some("table")
+    std::env::var("MODEL_ACTION_ADMISSION").ok().as_deref() == Some("table")
 }
 
 /// Whether this deployment refuses the listing on a Space-scoped run (`OWNER_LIST_SPACE_REFUSE`).

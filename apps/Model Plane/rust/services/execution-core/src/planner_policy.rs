@@ -142,7 +142,7 @@ pub struct PlannerPolicy {
     /// The EFFECTIVE mode: what the boot guard left of the requested one.
     pub mode: PlannerMode,
     pub allow_orgs: BTreeSet<String>,
-    /// `QUARRY_BROWSER_AGENT_LLM` was set: the planner for every org.
+    /// `QUARRY_BROWSER_AGENT_LLM` is the exact literal `true`: the planner for every org.
     pub legacy_all: bool,
     /// `default_on` was requested without the full acknowledgement, so the
     /// mode in force is `org_opt_in`.
@@ -238,8 +238,8 @@ impl PlannerPolicy {
                     .collect()
             })
             .unwrap_or_default();
-        let legacy_all = lookup(LEGACY_ENV)
-            .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"));
+        // The exact literal `true`: no trimming and no case folding.
+        let legacy_all = lookup(LEGACY_ENV).is_some_and(|v| v == "true");
         Self {
             mode,
             allow_orgs,
@@ -430,14 +430,14 @@ mod tests {
                     .map(|(_, v)| (*v).to_owned())
             }
         };
-        let legacy = PlannerPolicy::from_lookup(env(&[(LEGACY_ENV, "1")]));
+        let legacy = PlannerPolicy::from_lookup(env(&[(LEGACY_ENV, "true")]));
         assert!(legacy.legacy_all);
         assert_eq!(legacy.mode, PlannerMode::Off, "the legacy variable leaves the mode alone");
         for org in ["org_a", "org_b", "org_c"] {
             assert_eq!(legacy.resolve(org, false, F::Unset), LLM, "{org}");
             assert_eq!(legacy.resolve(org, false, F::Unavailable), LLM, "{org}");
         }
-        for off_spelling in ["0", "false", "no", ""] {
+        for off_spelling in ["0", "1", "false", "no", "yes", "TRUE", " true", "true ", ""] {
             let lookup = move |name: &str| (name == LEGACY_ENV).then(|| off_spelling.to_owned());
             assert!(!PlannerPolicy::from_lookup(lookup).legacy_all, "{off_spelling:?}");
         }

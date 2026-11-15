@@ -2641,10 +2641,17 @@ mod tests {
 
     #[test]
     fn api_key_principal_parser_takes_only_literal_true() {
-        for raw in ["true", " true "] {
-            assert!(api_key_principal_enabled(Some(raw)), "{raw:?}");
-        }
-        for raw in [None, Some(""), Some("1"), Some("on"), Some("yes"), Some("false")] {
+        assert!(api_key_principal_enabled(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("false"),
+            Some(" true "),
+            Some("TRUE"),
+        ] {
             assert!(!api_key_principal_enabled(raw), "{raw:?}");
         }
     }

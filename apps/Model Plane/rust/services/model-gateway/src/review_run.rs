@@ -11,7 +11,8 @@
 //! A reply that does not match the contract is `unreadable`, never a clean review. Zero findings
 //! is `clean` only when the reply was read and nothing in it had to be dropped.
 //!
-//! The switch is [`ENABLED_ENV`], off unless it is the literal `true`. The HTTP surface is in
+//! The switch is [`ENABLED_ENV`], off unless it is `true` in any case, with surrounding whitespace
+//! ignored (the flag registry records that reading on purpose). The HTTP surface is in
 //! `review_run_routes`, which answers 404 while the switch is off.
 
 use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest};
@@ -68,7 +69,7 @@ pub fn enabled() -> bool {
 /// [`enabled`] over an injected lookup, so the parsing is testable.
 #[must_use]
 pub fn enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    mp_contracts::loop_fold::switch_from(get(ENABLED_ENV).as_deref())
+    mp_contracts::loop_fold::switch_from_any_case(get(ENABLED_ENV).as_deref())
 }
 
 /// What the text is. The kind frames the review and says how line numbers count.

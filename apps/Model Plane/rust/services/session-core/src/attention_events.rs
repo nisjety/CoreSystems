@@ -698,7 +698,7 @@ mod tests {
     #[test]
     fn the_switch_reads_only_the_literal_true() {
         assert!(enabled_from(Some("true")));
-        assert!(enabled_from(Some(" TRUE ")));
+        assert!(!enabled_from(Some(" TRUE ")));
         for off in [None, Some("1"), Some("on"), Some("yes"), Some("")] {
             assert!(!enabled_from(off), "{off:?} must not start the sweep");
         }

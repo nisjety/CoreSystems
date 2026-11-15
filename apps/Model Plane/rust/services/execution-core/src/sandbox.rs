@@ -439,9 +439,10 @@ pub fn process_host_enabled() -> bool {
 }
 
 /// The pure half of [`process_host_enabled`] — env mutation is forbidden in
-/// this crate, so the parsing is tested through here instead.
+/// this crate, so the parsing is tested through here instead. Only the exact
+/// word `enabled`: no trimming and no case folding.
 fn process_host_enabled_from(value: Option<&str>) -> bool {
-    value.is_some_and(|raw| raw.trim().eq_ignore_ascii_case("enabled"))
+    value == Some("enabled")
 }
 
 /// Return the substrate contract measured on this process. This is intentionally
@@ -690,7 +691,6 @@ mod tests {
         // Not truthy-parsing: "true"/"1"/"yes" do NOT enable a capability
         // whose claim Control signs and two services act on.
         assert!(process_host_enabled_from(Some("enabled")));
-        assert!(process_host_enabled_from(Some("  ENABLED  ")));
         for value in [
             None,
             Some(""),
@@ -699,6 +699,10 @@ mod tests {
             Some("yes"),
             Some("on"),
             Some("disabled"),
+            Some("ENABLED"),
+            Some("  ENABLED  "),
+            Some(" enabled"),
+            Some("enabled "),
         ] {
             assert!(
                 !process_host_enabled_from(value),

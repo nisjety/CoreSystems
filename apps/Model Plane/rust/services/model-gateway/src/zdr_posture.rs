@@ -1155,7 +1155,7 @@ pub(crate) mod tests {
             (
                 "review_run_routes.rs",
                 "review_run_with",
-                "the request's route, plain (zdr_or_refuse); read-only, nothing stored",
+                "the request's route, plain (zdr_or_refuse), or the thread's connection (feature_connection) when the request names a thread on one; read-only, nothing stored",
             ),
             (
                 "side_chat_routes.rs",
@@ -1165,12 +1165,12 @@ pub(crate) mod tests {
             (
                 "reasoning_translate_routes.rs",
                 "reasoning_translate_with",
-                "the request's route, plain (zdr_or_refuse); a ZDR turn is refused with reasoning_translation before this call, so the call only runs persistent; nothing stored",
+                "the request's route, plain (zdr_or_refuse), or the thread's connection (feature_connection) when the request names a thread on one; a ZDR turn is refused with reasoning_translation before this call, so the call only runs persistent; nothing stored",
             ),
             (
                 "council_routes.rs",
                 "council_infer",
-                "the request's route, plain (zdr_or_refuse in council_with); every member and the synthesis carry that zdr flag, and a refused call is reported, never retried",
+                "the request's route, plain (zdr_or_refuse in council_with), or the thread's connection (feature_connection) for every member and the synthesis; every call carries that zdr flag (false on a connection), and a refused call is reported, never retried",
             ),
             (
                 "council_routes.rs",

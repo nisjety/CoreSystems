@@ -54,9 +54,10 @@ const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 pub(crate) const SWEEP_BATCH: i64 = 500;
 
-/// The strict reading of a switch: only the literal `true` enables it.
+/// The strict reading of a switch: only the exact literal `true` enables it, with no trimming
+/// and no case folding. This is the same rule as `mp_contracts::loop_fold::switch_from`.
 fn switch_from(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    raw == Some("true")
 }
 
 pub(crate) fn enabled() -> bool {
@@ -485,11 +486,20 @@ mod tests {
 
     #[test]
     fn switches_take_only_the_literal_true() {
-        for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE"), Some("yes")] {
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("on"),
+            Some("TRUE"),
+            Some("yes"),
+            Some(" true "),
+            Some(" true"),
+            Some("True"),
+        ] {
             assert!(!switch_from(raw), "{raw:?}");
         }
         assert!(switch_from(Some("true")));
-        assert!(switch_from(Some(" true ")));
     }
 
     #[test]

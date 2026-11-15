@@ -460,8 +460,13 @@ mod tests {
         );
         assert_eq!(shell_rule_proposals_from(Some("yes"), None), Ok(false));
         assert_eq!(shell_rule_proposals_from(None, Some("true")), Ok(false));
+        // Exact: a padded or cased `true` leaves the shell-rule switch off, so nothing is refused.
         assert_eq!(
             shell_rule_proposals_from(Some(" TRUE "), Some("true")),
+            Ok(false)
+        );
+        assert_eq!(
+            shell_rule_proposals_from(Some("true"), Some("true")),
             Ok(true)
         );
         assert_eq!(

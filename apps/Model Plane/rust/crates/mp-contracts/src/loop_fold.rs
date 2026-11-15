@@ -311,14 +311,11 @@ pub enum ParkReason {
 /// (build plan WS03 S3): a loop-owned approval that nothing consumes is stranded.
 pub const CONTINUE_AFTER_APPROVAL_ENV: &str = "AGENT_CONTINUE_AFTER_APPROVAL_ENABLED";
 
-/// Parse the switch. Only an explicit on-value enables it; anything else,
-/// including an unset or malformed value, leaves it off.
+/// Parse the switch. Only the exact literal `true` enables it: no trimming and no case
+/// folding. Anything else, including an unset value, `1`, `on` and `yes`, leaves it off.
 #[must_use]
 pub fn continue_after_approval_from(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "on" | "yes")
-    )
+    value == Some("true")
 }
 
 /// Whether the switch is on in this process.
@@ -336,21 +333,29 @@ pub const EXT_NOT_RESUMABLE: &str = "not_resumable";
 /// without it cannot be reconciled and its effectful calls are closed as unknown.
 pub const EXT_EFFECT_LEDGER: &str = "effect_ledger";
 
-/// The one strict parser for every durable-loop environment switch added from
-/// WS03 S6 on: `true`, in any case and with surrounding whitespace, and nothing
-/// else. `1`, `on` and `yes` do **not** enable a switch parsed here, so a typo or
-/// a half-recognised value never turns a durable store on.
+/// The one strict parser for the environment switches read through it, the durable-loop
+/// switches from WS03 S6 on among them: the exact literal `true`, with no trimming and no
+/// case folding, and nothing else. `TRUE`, ` true `, `1`, `on` and `yes` do **not** enable
+/// a switch parsed here, so a typo or a half-recognised value never turns a durable store
+/// on.
 ///
-/// [`continue_after_approval_from`] predates this and also accepts `1`, `on` and
-/// `yes`; it is left as it is, a known inconsistency, because changing it would
-/// flip a switch that may already be set in a deployment.
+/// [`continue_after_approval_from`] follows the same rule.
 #[must_use]
 pub fn switch_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The lenient reading, kept on purpose for the two switches whose flag-registry row says
+/// `true` in any case: teach mode and review runs. Surrounding whitespace is trimmed and
+/// `true` matches in any case, and nothing else. Do not use it for a new switch:
+/// [`switch_from`] is the exact one.
+#[must_use]
+pub fn switch_from_any_case(value: Option<&str>) -> bool {
     value.is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
 /// The environment switch for the in-place resume of a paused Do loop (build plan WS03
-/// S7). Default off; parsed by [`switch_from`] (`true` and nothing else).
+/// S7). Default off; parsed by [`switch_from`] (the exact literal `true`, nothing else).
 ///
 /// Two services read it, each through [`loop_resume_enabled`] and never by this name:
 /// execution-core restores the paused loop from its claimed fold, and model-gateway
@@ -536,7 +541,7 @@ pub const PARK_DEFAULT_WAIT_SECS: i64 = 300;
 pub const PARK_SHORT_WAIT_SECS: i64 = 60;
 
 /// The environment switch for parking a recoverable stop of a pinned Do loop (build plan
-/// WS03 S8-A). Default off; parsed by [`switch_from`] (`true` and nothing else).
+/// WS03 S8-A). Default off; parsed by [`switch_from`] (the exact literal `true`, nothing else).
 ///
 /// Two services read it, each through [`loop_parking_enabled`] and never by this name,
 /// and with different meanings under the one name: execution-core WRITES parks (it also
@@ -1012,7 +1017,19 @@ mod tests {
         assert!(!continue_after_approval_from(Some("maybe")));
         assert!(!continue_after_approval_from(Some("0")));
         assert!(continue_after_approval_from(Some("true")));
-        assert!(continue_after_approval_from(Some(" ON ")));
+        for not_on in [
+            Some(" ON "),
+            Some("on"),
+            Some("1"),
+            Some("yes"),
+            Some(" true"),
+            Some("TRUE"),
+        ] {
+            assert!(
+                !continue_after_approval_from(not_on),
+                "{not_on:?} must stay off"
+            );
+        }
         // `persistent` is the first argument (it was `zdr`): a run that keeps state.
         assert_eq!(
             crate::durable_gate::loop_mode_for_persistent(true, true),
@@ -1336,14 +1353,46 @@ mod tests {
     #[test]
     fn the_strict_switch_accepts_only_true() {
         assert!(switch_from(Some("true")));
-        assert!(switch_from(Some(" TRUE ")));
-        assert!(switch_from(Some("True")));
-        for not_on in [None, Some(""), Some(" "), Some("1"), Some("on"), Some("yes"), Some("maybe"), Some("false"), Some("truee")] {
+        for not_on in [
+            None,
+            Some(""),
+            Some(" "),
+            Some(" true"),
+            Some("true "),
+            Some("TRUE"),
+            Some(" TRUE "),
+            Some("True"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("maybe"),
+            Some("false"),
+            Some("truee"),
+        ] {
             assert!(!switch_from(not_on), "{not_on:?} must stay off");
         }
-        // The older, looser parser is unchanged and is a different function.
-        assert!(continue_after_approval_from(Some("1")));
+        // The continue parser follows the same exact rule: `1`, `on` and `yes` do not enable it.
+        assert!(continue_after_approval_from(Some("true")));
+        assert!(!continue_after_approval_from(Some("1")));
+        assert!(!continue_after_approval_from(Some("yes")));
         assert!(!switch_from(Some("1")));
+    }
+
+    #[test]
+    fn the_lenient_reading_is_the_one_teach_and_review_keep() {
+        assert!(switch_from_any_case(Some("true")));
+        assert!(switch_from_any_case(Some(" TRUE ")));
+        assert!(switch_from_any_case(Some("True")));
+        for not_on in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("truee"),
+        ] {
+            assert!(!switch_from_any_case(not_on), "{not_on:?} must stay off");
+        }
     }
 
     #[test]
@@ -1351,8 +1400,8 @@ mod tests {
         // The env var name is a contract: compose, the executor and the gateway all name it
         // through this const, never as a literal.
         assert_eq!(LOOP_RESUME_ENV, "EXECUTION_LOOP_RESUME_ENABLED");
-        // The parser is the strict one: `1`, `on`, `yes` and a typo never turn the in-place
-        // resume on, and neither does the lenient continue parser's vocabulary.
+        // The parser is the exact one: `1`, `on`, `yes` and a typo never turn the in-place
+        // resume on, and neither does any case or padding of `true`.
         for not_on in [
             None,
             Some(""),
@@ -1364,12 +1413,15 @@ mod tests {
             Some("maybe"),
             Some("false"),
             Some("truee"),
+            Some(" true"),
+            Some("true "),
+            Some("TRUE"),
+            Some(" TRUE "),
+            Some("True"),
         ] {
             assert!(!switch_from(not_on), "{not_on:?} must stay off");
         }
-        for on in [Some("true"), Some(" TRUE "), Some("True")] {
-            assert!(switch_from(on), "{on:?}");
-        }
+        assert!(switch_from(Some("true")));
         // The reader of the process environment is that parser applied to the one variable.
         // A test process does not set the variable, so the default is off.
         assert_eq!(
@@ -1383,8 +1435,8 @@ mod tests {
         // The name is a contract: compose, the executor and the gateway all name the
         // variable through this const, never as a literal.
         assert_eq!(LOOP_PARKING_ENV, "EXECUTION_LOOP_PARKING_ENABLED");
-        // `true` in any case, and nothing else: `1`, `on` and `yes` never turn a park
-        // writer on.
+        // The exact literal `true`, and nothing else: `1`, `on` and `yes`, and any case or
+        // padding of `true`, never turn a park writer on.
         for not_on in [
             None,
             Some(""),
@@ -1396,12 +1448,15 @@ mod tests {
             Some("maybe"),
             Some("false"),
             Some("truee"),
+            Some(" true"),
+            Some("true "),
+            Some("TRUE"),
+            Some(" TRUE "),
+            Some("True"),
         ] {
             assert!(!switch_from(not_on), "{not_on:?} must stay off");
         }
-        for on in [Some("true"), Some(" TRUE "), Some("True")] {
-            assert!(switch_from(on), "{on:?}");
-        }
+        assert!(switch_from(Some("true")));
         // The reader of the process environment is that parser applied to the one
         // variable. A test process does not set it, so the default is off.
         assert_eq!(

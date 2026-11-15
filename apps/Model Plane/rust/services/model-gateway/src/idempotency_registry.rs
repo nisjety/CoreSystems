@@ -1139,7 +1139,7 @@ mod tests {
     #[test]
     fn the_shared_switch_is_on_for_true_and_nothing_else() {
         assert!(shared_idempotency_enabled_from(Some("true")));
-        assert!(shared_idempotency_enabled_from(Some(" TRUE ")));
+        assert!(!shared_idempotency_enabled_from(Some(" TRUE ")));
         for off in [None, Some(""), Some("1"), Some("yes"), Some("on"), Some("truee")] {
             assert!(!shared_idempotency_enabled_from(off), "{off:?}");
         }

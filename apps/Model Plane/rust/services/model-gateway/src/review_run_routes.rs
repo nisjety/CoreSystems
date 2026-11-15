@@ -5,8 +5,14 @@
 //! `MODEL_GATEWAY_REVIEW_RUN_ENABLED` is not the literal `true`. An input the gateway cannot review
 //! is a typed 400, or 413 for material over its limit, and makes no model call. A zero-retention
 //! turn is honoured: the flag reaches inference-core and the cost is null. A waived token is refused
-//! as a route mismatch, since a review names no connection. Nothing is stored; the card goes back to
-//! the caller only.
+//! as a route mismatch on the platform chain, since a review names no connection there. A request that names a
+//! `thread_id` whose turns were written under a connection is reviewed on that connection, with the `model` the request
+//! names for it (W4-BYO, DEC-V-R8); such a review is never served on the platform chain. A customer gateway returns no
+//! structured reply, and a review needs one, so a review on one is refused typed before its call. A named thread that is
+//! a Space thread, or holds a zero-retention or waived run, is refused 409 before the call, as a side chat refuses it
+//! (V3-mg-2-rel2). Nothing is stored;
+//! the card goes back to the caller only. A failed call on a subscription connection ends on the subscription
+//! catalogue, as a side chat's does (V3-mg-2-rel1).
 
 use axum::{extract::State, http::StatusCode, routing::post, Extension, Json, Router};
 use mp_contracts::user_content::UserContent;
@@ -15,13 +21,18 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Instant;
 
-use crate::auth::{Claims, VerifiedInferenceBearer};
-use crate::http_routes::{authenticated_inference_request, grpc_status_to_http, HttpJsonError};
-use crate::pricing::CostBasis;
+use crate::auth::{Claims, VerifiedInferenceBearer, VerifiedSessionBearer};
+use crate::http_routes::{authenticated_inference_request, HttpJsonError};
 use crate::review_run::{
-    self, card_json, parse_review_reply, review_request, InputError, RunUsage,
+    self, card_json, parse_review_reply, review_request, InputError, ReviewInput, RunUsage,
 };
+use crate::side_chat_routes::side_chat_inference_error;
 use crate::state::AppState;
+use crate::thread_connection::{
+    answer_basis, feature_connection_with, refuse_without_structured_output, side_route, SideRoute,
+    ThreadConnection,
+};
+use mp_contracts::model_plane::v1::InferRequest;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new().route("/v1/ai/review", post(post_review_run))
@@ -36,6 +47,11 @@ pub(crate) struct ReviewRunRequest {
     brief: UserContent,
     locale: String,
     zdr: bool,
+    /// The thread the text belongs to (W4-BYO, DEC-V-R8). Read only while `MODEL_GATEWAY_BYO_GATEWAY` is on: on a thread
+    /// whose turns were written under a connection the review runs on that connection, or is refused typed.
+    thread_id: String,
+    /// The model the thread's connection serves. Read only on such a thread.
+    model: String,
 }
 
 fn typed(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
@@ -69,18 +85,74 @@ fn input_refusal(error: InputError) -> HttpJsonError {
 async fn post_review_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    session_bearer: Option<VerifiedSessionBearer>,
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<ReviewRunRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     switch_gate(review_run::enabled())?;
-    review_run_with(state, claims, inference_bearer, req).await
+    review_run_with(
+        crate::normalize::byo_gateway_enabled(),
+        state,
+        claims,
+        session_bearer,
+        inference_bearer,
+        req,
+    )
+    .await
 }
 
-/// The review once the switch is on: check the input, decide the posture, make the one read-only
-/// call, and read its reply.
+/// A review asks for a structured reply. A customer gateway connection returns none, so a review on one is refused
+/// typed before its call (W4-BYO); the platform and a subscription route return one.
+fn refuse_unstructured_route(route: &SideRoute) -> Result<(), HttpJsonError> {
+    match route {
+        SideRoute::Platform => Ok(()),
+        SideRoute::Connection { connection, .. } => {
+            refuse_without_structured_output(connection, "a review")
+        }
+    }
+}
+
+/// The review's one call: the request the review builds, put on the route it is served on. On a thread's connection the
+/// call names that connection and the model the request gives; on the platform chain the call is as it was built.
+fn review_call(
+    input: &ReviewInput,
+    run_id: &str,
+    org_id: &str,
+    zdr: bool,
+    route: &SideRoute,
+) -> InferRequest {
+    let mut request = review_request(input, run_id, org_id, zdr);
+    route.apply_to(&mut request);
+    request
+}
+
+/// Whether the call is served on a subscription connection, which ends a failed call on the subscription catalogue.
+fn on_subscription(route: &SideRoute) -> bool {
+    matches!(
+        route,
+        SideRoute::Connection {
+            connection: ThreadConnection::Subscription(_),
+            ..
+        }
+    )
+}
+
+/// The answer to a failed `infer` (V3-mg-2-rel1). A call on the thread's subscription connection ends on the subscription
+/// catalogue, as a side chat's does: its typed code, or the generic route failure, with the catalogue's words, `retryable`
+/// and timing, and never the upstream message. A typed refusal keeps its own body, and a platform or customer-gateway call
+/// keeps `grpc_status_to_http`, as before.
+fn review_inference_error(error: &tonic::Status, route: &SideRoute) -> HttpJsonError {
+    side_chat_inference_error(error, on_subscription(route))
+}
+
+/// The review once the switch is on: check the input, decide the posture, resolve the route the thread's connection
+/// gives, make the one read-only call, and read its reply. `byo_enabled` is the `MODEL_GATEWAY_BYO_GATEWAY` switch,
+/// passed in so a test decides it without the environment variable.
 pub(crate) async fn review_run_with(
+    byo_enabled: bool,
     state: AppState,
     claims: Claims,
+    session_bearer: Option<VerifiedSessionBearer>,
     inference_bearer: VerifiedInferenceBearer,
     req: ReviewRunRequest,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -94,20 +166,36 @@ pub(crate) async fn review_run_with(
     .map_err(input_refusal)?;
     let zdr =
         crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(req.zdr))?;
+    let connection = feature_connection_with(
+        byo_enabled,
+        &state,
+        &claims,
+        session_bearer.as_ref(),
+        &req.thread_id,
+        req.zdr,
+        "a review",
+    )
+    .await?;
+    let route = side_route(
+        connection,
+        &req.model,
+        crate::normalize::load_allowed_models().as_deref(),
+    )?;
+    refuse_unstructured_route(&route)?;
     let run_id = new_ulid();
-    let request = review_request(&input, &run_id, &claims.org_id, zdr);
+    let request = review_call(&input, &run_id, &claims.org_id, zdr, &route);
     let started = Instant::now();
     let resp = state
         .inference_client
         .clone()
         .infer(authenticated_inference_request(request, &inference_bearer))
         .await
-        .map_err(|e| grpc_status_to_http(&e))?
+        .map_err(|e| review_inference_error(&e, &route))?
         .into_inner();
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let lines: Vec<&str> = input.material.expose_for_model().lines().collect();
     let parse = parse_review_reply(&resp.content, &lines);
-    let cost_basis = CostBasis::of_route("", "").served_by(&resp.provider_used);
+    let cost_basis = answer_basis(&route, &resp.provider_used);
     let cost_usd = if zdr {
         None
     } else {
@@ -139,6 +227,10 @@ mod tests {
     use super::*;
     use crate::auth::ZdrWaiverClaim;
     use crate::http_routes::speech_route_tests::{bearer, state_with, SpeechInference};
+    use crate::thread_connection::{
+        thread_connection, ThreadConnection, CUSTOMER_GATEWAY_PROVIDER,
+    };
+    use mp_contracts::agentic_subscription::PROVIDER_ID;
     use mp_contracts::model_plane::v1 as pb;
 
     fn claims(zdr: bool) -> Claims {
@@ -218,7 +310,154 @@ mod tests {
     ) -> Result<Json<Value>, HttpJsonError> {
         let mut state = state_with(inference.clone()).await;
         state.pricing = crate::pricing::PricingCache::with_rate_for_test("test-model", 1.0, 2.0);
-        review_run_with(state, claims, bearer(), request(extra)).await
+        review_run_with(false, state, claims, None, bearer(), request(extra)).await
+    }
+
+    /// The review input the tests send, checked the way the route checks it.
+    fn review_input() -> ReviewInput {
+        review_run::validate(
+            "artifact_revision",
+            "Tilbud",
+            &UserContent::from(String::new()),
+            &UserContent::from("Prisen er 900 kr.".to_owned()),
+            "nb",
+        )
+        .expect("a review input is valid")
+    }
+
+    /// A thread whose user turn was written under the customer-gateway connection `connection`.
+    fn gateway_thread(connection: &str) -> Vec<pb::SessionMessage> {
+        vec![pb::SessionMessage {
+            role: "user".to_owned(),
+            content: "Prisen er 900 kr.".to_owned(),
+            model_connection_id: connection.to_owned(),
+            ..Default::default()
+        }]
+    }
+
+    /// A thread whose user turn was written under the subscription connection `connection`.
+    fn subscription_thread(connection: &str) -> Vec<pb::SessionMessage> {
+        vec![pb::SessionMessage {
+            role: "user".to_owned(),
+            content: "Prisen er 900 kr.".to_owned(),
+            subscription_connection_id: connection.to_owned(),
+            ..Default::default()
+        }]
+    }
+
+    fn review_on(route: &SideRoute) -> pb::InferRequest {
+        review_call(&review_input(), "run-1", "org-a", false, route)
+    }
+
+    #[test]
+    fn a_platform_review_is_the_request_the_review_builds() {
+        let built = review_request(&review_input(), "run-1", "org-a", false);
+        assert_eq!(review_on(&SideRoute::Platform), built);
+    }
+
+    #[test]
+    fn a_byo_thread_review_is_one_call_on_its_connection_with_the_model_named() {
+        let connection = thread_connection(true, &gateway_thread("conn-a")).expect("not refused");
+        let route = side_route(connection, " gpt-4o-mini ", None).expect("a named model is served");
+        let request = review_on(&route);
+        assert_eq!(
+            request.request_id, "run-1-review",
+            "still one call of the run"
+        );
+        assert_eq!(request.model, "gpt-4o-mini");
+        assert_eq!(request.model_connection_id, "conn-a");
+        assert_eq!(request.provider_hint, CUSTOMER_GATEWAY_PROVIDER);
+        assert!(request.subscription_connection_id.is_empty());
+        assert!(
+            request.role_fallback_model.is_empty(),
+            "a connection call has no platform fallback"
+        );
+        assert!(request.tools.is_empty(), "no tools are offered");
+        assert!(!request.zdr);
+        assert_eq!(request.purpose, pb::InferPurpose::Validation as i32);
+    }
+
+    #[test]
+    fn a_byo_thread_review_is_refused_typed_before_the_call_as_it_needs_a_structured_reply() {
+        let connection = thread_connection(true, &gateway_thread("conn-a")).expect("not refused");
+        let route = side_route(connection, "gpt-4o-mini", None).expect("a named model is served");
+        let error = refuse_unstructured_route(&route)
+            .expect_err("a customer gateway returns no structured reply");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        let Json(body) = &error.1;
+        assert_eq!(body["error"]["code"], "feature_not_supported");
+    }
+
+    #[test]
+    fn a_subscription_or_platform_review_keeps_its_structured_reply() {
+        let connection =
+            thread_connection(true, &subscription_thread("conn_sub")).expect("not refused");
+        let route = side_route(connection, "gpt-4o-mini", None).expect("a named model is served");
+        assert!(refuse_unstructured_route(&route).is_ok());
+        assert!(refuse_unstructured_route(&SideRoute::Platform).is_ok());
+    }
+
+    #[test]
+    fn a_subscription_thread_review_is_one_call_on_its_subscription_connection() {
+        let connection =
+            thread_connection(true, &subscription_thread("conn_sub")).expect("not refused");
+        let route = side_route(connection, "gpt-4o-mini", None).expect("a named model is served");
+        let request = review_on(&route);
+        assert_eq!(request.model, "gpt-4o-mini");
+        assert_eq!(request.subscription_connection_id, "conn_sub");
+        assert_eq!(request.provider_hint, PROVIDER_ID);
+        assert!(request.model_connection_id.is_empty());
+    }
+
+    #[test]
+    fn a_connection_review_without_a_model_is_refused_before_the_call() {
+        let connection = thread_connection(true, &gateway_thread("conn-a")).expect("not refused");
+        let error = side_route(connection, "", None).expect_err("no model, no call");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        let Json(body) = &error.1;
+        assert_eq!(body["error"]["code"], "side_chat_model_required");
+    }
+
+    #[test]
+    fn a_review_on_a_connection_is_billed_on_the_connection() {
+        let route = SideRoute::Connection {
+            connection: ThreadConnection::CustomerGateway("conn-a".to_owned()),
+            model: "gpt-4o-mini".to_owned(),
+        };
+        assert_eq!(
+            answer_basis(&route, "customer-gateway.conn-a"),
+            crate::pricing::CostBasis::CustomerBilled
+        );
+    }
+
+    #[test]
+    fn a_zero_retention_review_on_a_connection_thread_is_refused_before_the_call() {
+        let zdr = Claims {
+            org_zdr: Some(true),
+            ..claims(true)
+        };
+        let refused = crate::thread_connection::connection_posture(
+            &zdr,
+            &ThreadConnection::Subscription("conn_sub".to_owned()),
+            false,
+        )
+        .expect_err("a ZDR org cannot review on a subscription");
+        let Json(body) = &refused.1;
+        assert_eq!(
+            body["error"]["code"],
+            mp_contracts::zdr_refusal::code::CONNECTION_NOT_ACKNOWLEDGED
+        );
+    }
+
+    #[test]
+    fn with_the_switch_off_a_byo_thread_is_reviewed_on_the_platform_chain() {
+        let connection = thread_connection(false, &gateway_thread("conn-a")).expect("not refused");
+        let route = side_route(connection, "gpt-4o-mini", None).expect("a platform route");
+        assert_eq!(route, SideRoute::Platform);
+        assert_eq!(
+            review_on(&route),
+            review_request(&review_input(), "run-1", "org-a", false)
+        );
     }
 
     #[test]
@@ -343,5 +582,129 @@ mod tests {
             .expect_err("a waiver names a connection, and a review names none");
         assert!(status.is_client_error(), "{status}");
         assert!(inference.cleanups().is_empty(), "no model call");
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_a_review_naming_a_thread_is_the_platform_call() {
+        let inference = SpeechInference::default();
+        inference.answering(reply(price_finding()));
+        let mut state = state_with(inference.clone()).await;
+        state.pricing = crate::pricing::PricingCache::with_rate_for_test("test-model", 1.0, 2.0);
+        let Json(body) = review_run_with(
+            false,
+            state,
+            claims(false),
+            None,
+            bearer(),
+            request(json!({ "thread_id": "thread-1", "model": "x" })),
+        )
+        .await
+        .expect("a switch-off review is served without a session credential");
+        let run_id = body["data"]["run"]["runId"].as_str().expect("a run id");
+        let sent = inference.cleanups();
+        assert_eq!(sent.len(), 1, "exactly one model call");
+        let built = request(json!({}));
+        let input = review_run::validate(
+            &built.target,
+            &built.label,
+            &built.brief,
+            &built.material,
+            &built.locale,
+        )
+        .expect("the review input is valid");
+        assert_eq!(sent[0], review_request(&input, run_id, "org-a", false));
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_on_a_review_on_a_thread_without_a_session_credential_is_refused() {
+        let inference = SpeechInference::default();
+        inference.answering(reply(price_finding()));
+        let (status, Json(body)) = review_run_with(
+            true,
+            state_with(inference.clone()).await,
+            claims(false),
+            None,
+            bearer(),
+            request(json!({ "thread_id": "thread-1", "model": "x" })),
+        )
+        .await
+        .expect_err("the thread's connection cannot be read without the session credential");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "delegated_credential_required");
+        assert!(inference.cleanups().is_empty(), "no model call");
+    }
+
+    /// A failed call as inference-core declares it on a subscription connection: its reason on the trailer, and an
+    /// upstream message that must never reach the caller.
+    fn subscription_status(kind: &str) -> tonic::Status {
+        let mut status = tonic::Status::resource_exhausted("upstream said: quota for acct 42");
+        status.metadata_mut().insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            kind.parse().expect("ascii"),
+        );
+        status
+    }
+
+    fn subscription_route() -> SideRoute {
+        let connection =
+            thread_connection(true, &subscription_thread("conn_sub")).expect("not refused");
+        side_route(connection, "gpt-4o-mini", None).expect("a named model is served")
+    }
+
+    fn gateway_route() -> SideRoute {
+        let connection = thread_connection(true, &gateway_thread("conn-a")).expect("not refused");
+        side_route(connection, "gpt-4o-mini", None).expect("a named model is served")
+    }
+
+    #[test]
+    fn a_failed_review_on_a_subscription_thread_ends_on_the_subscription_catalogue() {
+        let status = subscription_status(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT);
+        let (http_status, Json(body)) = review_inference_error(&status, &subscription_route());
+        assert_eq!(http_status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert_eq!(
+            body["code"].as_str(),
+            Some(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT),
+            "{body}"
+        );
+        assert_eq!(body["retryable"].as_bool(), Some(false), "{body}");
+        assert!(!body.to_string().contains("acct 42"), "{body}");
+    }
+
+    #[test]
+    fn a_failure_with_no_typed_reason_on_a_subscription_thread_is_the_generic_route_failure() {
+        let status = tonic::Status::unavailable("upstream said: token expired for acct 42");
+        let (http_status, Json(body)) = review_inference_error(&status, &subscription_route());
+        assert_eq!(http_status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(
+            body["code"].as_str(),
+            Some(crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE),
+            "{body}"
+        );
+        assert_eq!(body["retryable"].as_bool(), Some(true), "{body}");
+        assert!(!body.to_string().contains("acct 42"), "{body}");
+    }
+
+    #[test]
+    fn a_failed_review_on_the_platform_or_a_customer_gateway_keeps_grpc_status_to_http() {
+        let status = subscription_status(crate::subscription_failure::SUBSCRIPTION_REAUTH_REQUIRED);
+        let (flat_status, Json(flat)) = crate::http_routes::grpc_status_to_http(&status);
+        for route in [SideRoute::Platform, gateway_route()] {
+            let (http_status, Json(body)) = review_inference_error(&status, &route);
+            assert_eq!((http_status, &body), (flat_status, &flat), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_typed_refusal_on_a_subscription_thread_keeps_its_own_body() {
+        let zdr = mp_contracts::zdr_refusal::Refusal::CONNECTION_NOT_ACKNOWLEDGED
+            .grpc_status(tonic::Code::FailedPrecondition);
+        let (flat_status, Json(flat)) = crate::http_routes::grpc_status_to_http(&zdr);
+        let (http_status, Json(body)) = review_inference_error(&zdr, &subscription_route());
+        assert_eq!((http_status, &body), (flat_status, &flat), "{body}");
+        assert_eq!(
+            body["error"]["code"],
+            mp_contracts::zdr_refusal::code::CONNECTION_NOT_ACKNOWLEDGED,
+            "{body}"
+        );
     }
 }

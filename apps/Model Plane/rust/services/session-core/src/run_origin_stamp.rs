@@ -309,8 +309,9 @@ mod tests {
 
     #[test]
     fn inherit_parser_takes_only_literal_true() {
-        for raw in ["true", " true ", "TRUE"] {
-            assert!(inherit_enabled(Some(raw)), "{raw:?}");
+        assert!(inherit_enabled(Some("true")));
+        for raw in [" true ", "TRUE"] {
+            assert!(!inherit_enabled(Some(raw)), "{raw:?}");
         }
         for raw in [
             None,

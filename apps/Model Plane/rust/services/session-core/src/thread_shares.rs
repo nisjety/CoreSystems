@@ -1333,7 +1333,7 @@ mod tests {
         assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
         assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
         assert!(mp_contracts::loop_fold::switch_from(Some("true")));
-        assert!(mp_contracts::loop_fold::switch_from(Some("TRUE")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
     }
 
     #[test]

@@ -62,11 +62,11 @@ pub fn enabled() -> bool {
     parse_enabled(std::env::var(EXECUTION_RESULT_HANDLES_ENV).ok().as_deref())
 }
 
-/// `on` and `true` enable (trimmed, any case); `1`, `yes`, an empty value and anything else stay off.
+/// Only the exact literal `true` enables handles: no trimming and no case folding. `on`, `1`,
+/// `yes`, an empty value and anything else stay off.
 #[must_use]
 pub fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim)
-        .is_some_and(|v| v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true"))
+    raw == Some("true")
 }
 
 /// The store for one run, or `None` when handles do not apply to it: the switch
@@ -791,11 +791,24 @@ mod tests {
     }
 
     #[test]
-    fn only_on_and_true_enable_handles() {
-        for raw in ["true", " true ", "on", "ON", "TRUE"] {
-            assert!(parse_enabled(Some(raw)), "{raw:?} must enable handles");
-        }
-        for raw in [None, Some("1"), Some("yes"), Some("off"), Some("")] {
+    fn only_the_exact_literal_true_enables_handles() {
+        assert!(
+            parse_enabled(Some("true")),
+            "the exact literal enables handles"
+        );
+        for raw in [
+            None,
+            Some(""),
+            Some(" true"),
+            Some("true "),
+            Some(" true "),
+            Some("TRUE"),
+            Some("on"),
+            Some("ON"),
+            Some("1"),
+            Some("yes"),
+            Some("off"),
+        ] {
             assert!(!parse_enabled(raw), "{raw:?} must not enable handles");
         }
     }

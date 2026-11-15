@@ -584,8 +584,8 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
 /// Read through the one strict parser, so only a literal `true` enables it.
 pub const DENIAL_MEMORY_ENV: &str = "APPROVAL_DENIAL_MEMORY_ENABLED";
 
-/// Parse the denial-memory switch: `true` in any case and with surrounding whitespace, and
-/// nothing else. An unset or malformed value leaves denial memory off.
+/// Parse the denial-memory switch: the exact literal `true`, with no trimming and no case
+/// folding, and nothing else. An unset or malformed value leaves denial memory off.
 #[must_use]
 pub fn denial_memory_from(value: Option<&str>) -> bool {
     switch_from(value)
@@ -597,8 +597,9 @@ pub fn denial_memory_enabled() -> bool {
     denial_memory_from(std::env::var(DENIAL_MEMORY_ENV).ok().as_deref())
 }
 
-/// Parse the "Always" rule-proposals switch (build plan WS13 S7): `true` in any case and with
-/// surrounding whitespace, and nothing else. The variable is [`crate::shell_rule::RULE_PROPOSALS_ENV`].
+/// Parse the "Always" rule-proposals switch (build plan WS13 S7): the exact literal `true`, with
+/// no trimming and no case folding, and nothing else. The variable is
+/// [`crate::shell_rule::RULE_PROPOSALS_ENV`].
 #[must_use]
 pub fn rule_proposals_from(value: Option<&str>) -> bool {
     switch_from(value)
@@ -624,8 +625,8 @@ pub const THREAD_GRANT_TTL_DEFAULT_SECS: i64 = 3600;
 /// The longest lifetime a standing grant may be given.
 pub const THREAD_GRANT_TTL_MAX_SECS: i64 = 28800;
 
-/// Parse the scope-grants switch: `true` in any case and with surrounding whitespace, and nothing
-/// else. An unset or malformed value leaves grants off.
+/// Parse the scope-grants switch: the exact literal `true`, with no trimming and no case folding,
+/// and nothing else. An unset or malformed value leaves grants off.
 #[must_use]
 pub fn scope_grants_from(value: Option<&str>) -> bool {
     switch_from(value)
@@ -786,18 +787,18 @@ mod tests {
     #[test]
     fn denial_memory_is_off_unless_the_switch_reads_true() {
         assert!(!denial_memory_from(None), "an unset switch is off");
-        for value in ["", "1", "yes", "on", "false", "truee"] {
+        for value in [
+            "", "1", "yes", "on", "false", "truee", "TRUE", " True ", " true", "true ",
+        ] {
             assert!(
                 !denial_memory_from(Some(value)),
                 "{value:?} does not enable denial memory"
             );
         }
-        for value in ["true", "TRUE", " True "] {
-            assert!(
-                denial_memory_from(Some(value)),
-                "{value:?} enables denial memory"
-            );
-        }
+        assert!(
+            denial_memory_from(Some("true")),
+            "the exact literal enables denial memory"
+        );
     }
 
     #[test]
@@ -1001,7 +1002,6 @@ mod tests {
     #[test]
     fn the_scope_grants_switch_is_strict() {
         assert!(scope_grants_from(Some("true")));
-        assert!(scope_grants_from(Some(" TRUE ")));
         for value in [
             None,
             Some(""),
@@ -1009,6 +1009,10 @@ mod tests {
             Some("yes"),
             Some("on"),
             Some("false"),
+            Some(" TRUE "),
+            Some("TRUE"),
+            Some(" true"),
+            Some("True"),
         ] {
             assert!(!scope_grants_from(value), "{value:?}");
         }
@@ -1205,7 +1209,6 @@ mod tests {
     #[test]
     fn the_rule_proposals_switch_is_strict() {
         assert!(rule_proposals_from(Some("true")));
-        assert!(rule_proposals_from(Some(" TRUE ")));
         for value in [
             None,
             Some(""),
@@ -1213,6 +1216,10 @@ mod tests {
             Some("yes"),
             Some("on"),
             Some("false"),
+            Some(" TRUE "),
+            Some("TRUE"),
+            Some(" true"),
+            Some("True"),
         ] {
             assert!(!rule_proposals_from(value), "{value:?}");
         }

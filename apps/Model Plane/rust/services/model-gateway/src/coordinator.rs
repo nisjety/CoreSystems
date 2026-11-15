@@ -1034,8 +1034,8 @@ mod tests {
     #[test]
     fn the_plan_execute_switch_is_strict_and_defaults_off() {
         assert!(plan_execute_from(Some("true")));
-        assert!(plan_execute_from(Some("  TRUE ")));
-        assert!(plan_execute_from(Some("True")));
+        assert!(!plan_execute_from(Some("  TRUE ")));
+        assert!(!plan_execute_from(Some("True")));
         for not_on in [
             None,
             Some(""),
@@ -1407,17 +1407,19 @@ mod tests {
         store.clear_grant("org-1", "thread-2");
     }
 
-    /// The durable grant switch (WS04 S4): strict like the execute switch (only `true`, in any
-    /// case, around whitespace), off for a store nobody configured, kept by every clone.
+    /// The durable grant switch (WS04 S4): strict like the execute switch (only the exact literal
+    /// `true`, with no case folding and no trimming), off for a store nobody configured, kept by
+    /// every clone.
     #[test]
     fn the_durable_grant_switch_is_strict_and_defaults_off() {
         assert!(!durable_plan_grant_from(None));
         for value in ["", "false", "0", "1", "yes", "on", "enabled", "tru", "truee", "t"] {
             assert!(!durable_plan_grant_from(Some(value)), "{value:?} must not enable it");
         }
-        for value in ["true", "TRUE", "True", " true ", "\ttrue\n"] {
-            assert!(durable_plan_grant_from(Some(value)), "{value:?} enables it");
+        for value in ["TRUE", "True", " true ", "\ttrue\n"] {
+            assert!(!durable_plan_grant_from(Some(value)), "{value:?} must not enable it");
         }
+        assert!(durable_plan_grant_from(Some("true")));
         let store = PlanModeStore::default();
         assert!(!store.durable_grant_enabled());
         assert!(store.durable_grant_client().is_none(), "no reader while the switch is off");

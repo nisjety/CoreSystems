@@ -992,8 +992,9 @@ mod tests {
         for off in ["", "false", "1", "yes", "on", "tru", "truee", "enabled"] {
             assert!(!send_receipts_enabled_from(Some(off)), "{off:?}");
         }
-        for on in ["true", "TRUE", " True "] {
-            assert!(send_receipts_enabled_from(Some(on)), "{on:?}");
+        assert!(send_receipts_enabled_from(Some("true")));
+        for off in ["TRUE", " True ", " true", "true "] {
+            assert!(!send_receipts_enabled_from(Some(off)), "{off:?}");
         }
     }
 

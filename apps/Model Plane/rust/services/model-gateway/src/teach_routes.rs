@@ -9,7 +9,8 @@
 //! inbox. Nothing is live until then, and nothing the model writes grants a permission.
 //!
 //! The route answers 404 `teach_mode_disabled` while `MODEL_GATEWAY_TEACH_MODE_ENABLED` is not the
-//! literal `true` (case-insensitive, as the other model-gateway switches read it). It refuses a
+//! literal `true`, in any case (the flag registry records that reading on purpose, so this switch
+//! keeps it and does not use the exact `switch_from`). It refuses a
 //! zero-retention or waived caller with the `teach_mode` feature before anything is read, sent or
 //! written: a taught skill is durable content, and a run's steps are retained content. The switch
 //! is read at each call.
@@ -153,9 +154,10 @@ fn typed_with_reason(status: StatusCode, code: &str, message: &str, reason: &str
 }
 
 /// Whether teach mode is on in this process. Read at each call, as the other turn switches are.
+/// The lenient reading on purpose: `true` in any case, with surrounding whitespace ignored.
 #[must_use]
 pub fn enabled() -> bool {
-    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+    mp_contracts::loop_fold::switch_from_any_case(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
 /// The switch first, so a deployment without the feature answers the same for every caller.

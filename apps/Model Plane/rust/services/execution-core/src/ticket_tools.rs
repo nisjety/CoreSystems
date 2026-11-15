@@ -245,9 +245,9 @@ impl AgentTicketActionClient {
                 "Control model-action-view service token",
             )?);
         }
-        // Strict like Capability Core: only the literal "table" asks for named actions.
+        // Read raw like Capability Core: only the exact literal "table" asks for named actions.
         client.model_action_admission_table =
-            env_value("MODEL_ACTION_ADMISSION").as_deref() == Some("table");
+            std::env::var("MODEL_ACTION_ADMISSION").ok().as_deref() == Some("table");
         Ok(Some(client))
     }
 
