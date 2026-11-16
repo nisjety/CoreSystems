@@ -97,6 +97,7 @@ import {
 } from '../lib/space-room-features'
 import { createRoomLiveArtifacts, type RoomLiveArtifacts } from '../lib/room-live-artifacts'
 import { SpaceArtifactsTab } from './SpaceArtifactsTab'
+import { SpaceCanvasPanel } from './SpaceCanvasPanel'
 import { SpaceFilesPanel } from './SpaceFilesPanel'
 import { resolveOpenSpacePane } from '../lib/space-pane-registry'
 import { readSpaceMessageParam, spaceEntryLinksEnabled } from '../lib/space-entity-link'
@@ -867,6 +868,12 @@ export default function SpacePage() {
                         }
                       />
                       </>
+                    ),
+                    lerret: (
+                      <SpaceCanvasPanel
+                        spaceRef={current().space.space_ref}
+                        roster={() => (roster.error ? [] : roster() ?? [])}
+                      />
                     ),
                     arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} liveRuns={agentWork()?.live === true} />,
                     kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,

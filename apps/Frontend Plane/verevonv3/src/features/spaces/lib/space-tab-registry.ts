@@ -11,6 +11,7 @@
 
 import { roomArtifactsEnabled } from './room-artifacts'
 import { roomFilesTabEnabled } from './room-files'
+import { canvasTabEnabled } from './space-canvas'
 import { DM_SPACE_FEATURE } from './space-kind'
 import { spaceRoomFeature } from './space-room-features'
 
@@ -40,6 +41,16 @@ export const SPACE_TABS = [
     purposeNo: 'Alle tråder i rommet.',
     purposeEn: 'All threads in the Space.',
     owner: 'Model Plane',
+  },
+  {
+    id: 'lerret',
+    labelNo: 'Lerret',
+    labelEn: 'Canvas',
+    purposeNo: 'Rommets delte dokument.',
+    purposeEn: "The room's shared document.",
+    owner: 'Data Plane',
+    // Hidden until the gateway reports the canvas (WS19-S4, features.canvas). Placed second, after Chat.
+    enabled: canvasTabEnabled,
   },
   {
     id: 'arbeid',
@@ -117,6 +128,7 @@ const LEGACY_HASH_ALIASES: Readonly<Record<string, SpaceTabId>> = {
   members: 'medlemmer',
   work: 'arbeid',
   activity: 'aktivitet',
+  canvas: 'lerret',
 }
 
 /** The tabs to show now: the registry minus any whose `enabled` says no. */

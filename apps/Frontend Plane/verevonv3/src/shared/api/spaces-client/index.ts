@@ -5,6 +5,7 @@
 export * from './core'
 export * from './agent-policy'
 export * from './agents'
+export * from './canvas'
 export * from './directory'
 export * from './dm'
 export * from './entries'

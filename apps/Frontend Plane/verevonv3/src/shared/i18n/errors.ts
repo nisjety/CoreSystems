@@ -100,6 +100,15 @@ export const INTERNAL_FAILURE_COPY: ErrorCopy = {
   en: 'The request could not be completed. Try again, or contact support if the problem persists.',
 }
 
+/**
+ * A zero-retention refusal of the room canvas (WS19-S5). The gateway labels it `details.surface` `room_canvas`, and the
+ * catalogue's feature-less words for `zdr_durable_mutation_forbidden` would wrongly speak of changes for a read as well.
+ */
+export const CANVAS_ZDR_COPY: ErrorCopy = {
+  no: 'Lerret er ikke tilgjengelig når Zero Data Retention er slått på.',
+  en: 'Canvas is not available when zero data retention is on.',
+}
+
 export const ERROR_COPY: Record<string, ErrorCopy> = {
   // Cross-cutting / structural
   validation_error: { no: 'Noen av feltene er ikke gyldige. Sjekk og prøv igjen.', en: 'Some fields are invalid. Check and try again.' },
@@ -1613,6 +1622,29 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   principal_not_in_org: { no: 'En av personene du har valgt, er ikke med i organisasjonen. Fjern dem og prøv igjen.', en: 'One of the people you picked is not in the organization. Remove them and try again.' },
   room_role_insufficient: { no: 'Rollen din i rommet er ikke høy nok til å legge til agenter.', en: 'Your role in this room is not high enough to add agents.' },
   space_not_active: { no: 'Rommet er ikke aktivt akkurat nå, så agenten kan ikke legges til.', en: 'This room is not active right now, so the agent cannot be added.' },
+
+  // WS19-S5 room canvas (gateway domains/spaces/canvas.rs). The canvas routes word their refusals through
+  // canvasErrorMessage below, so a code that also means something elsewhere (space_decision_unavailable,
+  // delegated_auth_unavailable, ...) gets the canvas sentence there. invalid_space is an internal-only code and
+  // has no copy on purpose (gateway-error-codes.test.ts).
+  space_canvas_disabled: { no: 'Lerretet er ikke slått på i denne installasjonen.', en: 'The room canvas is not turned on in this installation.' },
+  canvas_not_entitled: { no: 'Lerret er ikke slått på for denne organisasjonen, eller du kan ikke lese det.', en: 'Canvas is not enabled for this organization or you cannot read it.' },
+  canvas_read_not_authorized: { no: 'Lerret er ikke slått på for denne organisasjonen, eller du kan ikke lese det.', en: 'Canvas is not enabled for this organization or you cannot read it.' },
+  canvas_write_not_authorized: { no: 'Du kan lese lerretet, men ikke endre det her. Ingenting er endret.', en: 'You can read the canvas but cannot change it here. Nothing was changed.' },
+  canvas_not_found: { no: 'Rommet har ikke et lerret ennå.', en: 'This room has no canvas yet.' },
+  canvas_version_not_found: { no: 'Denne versjonen finnes ikke i lerretet.', en: 'That version is not in this canvas.' },
+  canvas_head_moved: { no: 'Noen andre har lagret en nyere versjon. Last den inn, se over endringene og lagre på nytt.', en: 'Someone else saved a newer version. Load it, review the changes, and save again.' },
+  canvas_too_large: { no: 'Teksten er større enn grensen på 64 KiB for lerretet. Ingenting er lagret.', en: 'The text is larger than the 64 KiB canvas limit. Nothing was saved.' },
+  canvas_unavailable: { no: 'Lerretet er midlertidig utilgjengelig. Ingenting er endret. Prøv igjen om litt.', en: 'The room canvas is temporarily unavailable. Nothing was changed. Try again shortly.' },
+  canvas_rate_limited: { no: 'Du har lagret for ofte på kort tid. Vent litt og prøv igjen.', en: 'You have saved too often in a short time. Wait a moment and try again.' },
+  canvas_run_write_limit: { no: 'Agenten har nådd grensen for lagringer i denne kjøringen.', en: 'The agent has reached its save limit for this run.' },
+  invalid_canvas_request: { no: 'Forespørselen til lerretet er ikke gyldig. Ingenting er endret.', en: 'The canvas request is not valid. Nothing was changed.' },
+  space_history_floor_unsupported: { no: 'Lerret er ikke tilgjengelig i rom som viser historikk fra din innmeldingsdato.', en: 'Canvas is not available in rooms that show history from your join date.' },
+  space_decision_required: { no: 'Tilgangen til lerretet kunne ikke bekreftes. Last siden på nytt og prøv igjen.', en: 'Access to the canvas could not be confirmed. Reload the page and try again.' },
+  space_decision_invalid: { no: 'Tilgangen til lerretet kunne ikke bekreftes. Last siden på nytt og prøv igjen.', en: 'Access to the canvas could not be confirmed. Reload the page and try again.' },
+  space_decision_mismatch: { no: 'Tilgangen til lerretet kunne ikke bekreftes. Last siden på nytt og prøv igjen.', en: 'Access to the canvas could not be confirmed. Reload the page and try again.' },
+  space_decision_digest_mismatch: { no: 'Lerretet ble endret mens du lagret. Last det inn på nytt og prøv igjen.', en: 'The canvas changed while you were saving. Reload it and try again.' },
+  zdr_persistence_forbidden: CANVAS_ZDR_COPY,
 }
 
 /**
@@ -1840,4 +1872,78 @@ export function describeApiError(
   fallback?: ErrorCopy,
 ): ApiErrorDescription {
   return describe(err, tr, fallback)
+}
+
+/**
+ * The codes the room canvas (WS19-S5) answers with its own sentence in ERROR_COPY. A refusal of a canvas route keeps
+ * its code but not the Space denial or posting words that share it, so canvasErrorMessage reads these before describe.
+ */
+const CANVAS_OWN_CODES: ReadonlySet<string> = new Set([
+  'space_canvas_disabled',
+  'canvas_not_entitled',
+  'canvas_read_not_authorized',
+  'canvas_write_not_authorized',
+  'canvas_not_found',
+  'canvas_version_not_found',
+  'canvas_head_moved',
+  'canvas_too_large',
+  'canvas_unavailable',
+  'canvas_rate_limited',
+  'canvas_run_write_limit',
+  'invalid_canvas_request',
+  'space_history_floor_unsupported',
+  'space_decision_required',
+  'space_decision_invalid',
+  'space_decision_mismatch',
+  'space_decision_digest_mismatch',
+  'zdr_persistence_forbidden',
+])
+
+/**
+ * Shared codes that a canvas route can answer, worded for the canvas. Their ERROR_COPY entries describe a message
+ * send (space_decision_unavailable, idempotency_key_conflict), an integration (delegated_auth_unavailable) or a
+ * history page (invalid_cursor), so the canvas says its own thing instead.
+ */
+const CANVAS_SHARED_COPY: Readonly<Record<string, ErrorCopy>> = {
+  space_decision_unavailable: {
+    no: 'Tilgangen til lerretet kunne ikke bekreftes akkurat nå. Ingenting er endret. Prøv igjen om litt.',
+    en: 'Access to the canvas could not be confirmed right now. Nothing was changed. Try again shortly.',
+  },
+  delegated_auth_unavailable: {
+    no: 'Lerretet kan ikke nås akkurat nå. Prøv igjen om litt.',
+    en: 'The canvas cannot be reached right now. Try again shortly.',
+  },
+  space_lifecycle_unavailable: {
+    no: 'Rommet kunne ikke kontrolleres akkurat nå. Ingenting er endret. Prøv igjen om litt.',
+    en: 'The room could not be checked right now. Nothing was changed. Try again shortly.',
+  },
+  idempotency_key_conflict: {
+    no: 'Lagringen er allerede sendt med annet innhold. Last lerretet inn på nytt og lagre igjen.',
+    en: 'This save was already sent with different content. Reload the canvas and save again.',
+  },
+  invalid_cursor: {
+    no: 'Historikken er ikke gyldig lenger. Last den inn på nytt.',
+    en: 'That part of the history is no longer valid. Load it again.',
+  },
+}
+
+/**
+ * The sentence for a failed room canvas call (WS19-S5), in the reader's language. A canvas refusal is worded for the
+ * canvas: its `details.reason` is a Space reason that the Space denial words would otherwise speak for. A
+ * zero-retention refusal of the canvas (`details.surface` `room_canvas`) has its own sentence. Anything else keeps
+ * {@link translateApiError}'s words.
+ */
+export function canvasErrorMessage(err: unknown, tr: (noText: string, enText: string) => string): string {
+  const like = (err && typeof err === 'object' ? err : null) as ApiErrorLike
+  const code = typeof like?.code === 'string' ? like.code : null
+  if (code) {
+    const details = like?.details
+    const surface = details && !Array.isArray(details) ? details.surface : undefined
+    const copy =
+      code === 'zdr_durable_mutation_forbidden' && surface === 'room_canvas'
+        ? CANVAS_ZDR_COPY
+        : (CANVAS_SHARED_COPY[code] ?? (CANVAS_OWN_CODES.has(code) ? ERROR_COPY[code] : undefined))
+    if (copy) return tr(copy.no, copy.en)
+  }
+  return translateApiError(err, tr)
 }

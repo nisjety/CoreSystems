@@ -1,0 +1,10 @@
+/* WS19-S5: the room Canvas tab. Tokens are the Space panels' own (space-files.css, space-artifacts.css). */
+.verevon-space-canvas__meta {
+  margin: 0 0 12px;
+  color: var(--verevon-text-muted);
+  font-size: 0.8125rem;
+}
+
+.verevon-space-canvas__body {
+  overflow-wrap: anywhere;
+}
