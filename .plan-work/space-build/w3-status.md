@@ -624,3 +624,10 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - P0 FOUND: skill delete + plugin uninstall trigger a Postgres rule (0064_skill_revisions.sql) that snapshots the deleted skill's TEXT into skill_revisions, even for a ZDR org -- D20's premise ("deletion persists nothing") is false for these two.
 - OWNER ANSWER: fix the snapshot, then allow all 6. W3-DEC-ZDRSKILL running: new session-core migration makes the trigger skip content under ZDR (session var set by capability-core at the DELETE call site; non-ZDR unchanged).
 - P1 carried: session-core migration 0108 says ZDR credentials cannot write agent_skills at all -- D20 reverses that for deletes; both claims should be settled together (handled by ZDRSKILL).
+
+### W3-DEC-ZDRSKILL (bab5947bd) BUILT — D20 now end-to-end for its 6 named routes
+- Migration 0134 replaces agent_skills_revision_fn: ZDR posture (set by capability-core at the DELETE/UPDATE call site) -> metadata-only revision row, content_free=true; unset or non-ZDR -> unchanged snapshot (fail-safe: unset defaults to KEEPING the snapshot, never to dropping it).
+- Also caught: draft discard is an UPDATE that already wrote a full-text revision on every discard -- now content-free under ZDR too (ZDRDEL3 had wrongly assumed this path was unread/unaffected).
+- NEW P0, PRE-EXISTING, OUT OF WAVE SCOPE: a global plugin kill (UninstallKilled, platform-principal posture) still snapshots a ZDR org's skill text during a platform-wide kill, because it runs under the platform's posture, not each affected org's. This predates Wave 3 and D20; it is not one of the 6 routes D20 covers. NOT FIXED. Flagged to the owner as a separate follow-up (needs per-affected-org posture lookup during a global kill, or a fail-closed rule that changes non-ZDR global-kill behaviour).
+- P1 follow-up: session-core's revision restore/undo reader should get a typed refusal for a content_free row instead of reusing the `truncated` marker shape.
+- P2 pre-existing, unfixed: a content-only skill edit over 64 KiB records no revision at all under either posture.
