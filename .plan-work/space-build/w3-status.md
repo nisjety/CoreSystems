@@ -587,3 +587,10 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - P1 NOT EFFECTIVE -> W3-DEC-ZDRDEL2 running: model-gateway proxy_to_capability_core refuses every non-GET under ZDR regardless, so these deletes still 412.
 - P2: DURABLE_MUTATIONS comment in zdr_posture.rs already says deletes are allowed; code doesn't implement it for this proxy.
 - Pin churns with every registry commit; digest for zdr-contract-sync.test.sh:235 not final until the last registry commit of the wave.
+
+### W3-DEC-REVOKE (4e7276b5a) BUILT
+- New principal model-gateway-browser-admin (browser-broker audience, browser:write); model-gateway mints its own org-scoped token, caches it, falls back to the ingress bearer when unset/refused.
+- P1: NOT EFFECTIVE until the credential is deployed (compose env, principal-train acceptance) -- until then revoke behaves exactly as before (no regression).
+- P1 test-gap: 3 policy spec pins in auth-core will fail until the train updates them.
+- P2 OWNER NOTE: the scope is browser:write (as named in D16), so this token also authorises AcquireGrant/DeriveRunGrant for its org, not revoke-only. A narrower scope needs a broker change. Accepting as built unless told otherwise.
+- P3: dispatch paths that never reach a terminal state still revoke nothing (unchanged gap).
