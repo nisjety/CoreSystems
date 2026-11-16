@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -47,6 +48,25 @@ const (
 	CanvasOpSave    = "save"
 	CanvasOpRestore = "restore"
 )
+
+// The canvas run-action rows of the Space self-API registry (WS19-S9). An agent
+// reaches the same canvas a person does, so a run action meets the same checks
+// (ValidateForCanvasRunAction) before Control issues or re-checks its decision.
+const (
+	canvasRunActionReadID  = "space.canvas.read"
+	canvasRunActionWriteID = "space.canvas.write"
+)
+
+// CanvasHistoryFloorCode is the typed refusal wiki-store answers a canvas decision
+// that carries a since_join history floor (its CodeHistoryFloor). Control answers the
+// same code for a canvas run action that would carry one, because a run-action
+// decision has no floor claim for Data Plane to read. It is not in the closed Space
+// denial vocabulary, which is pinned across planes.
+const CanvasHistoryFloorCode = "space_history_floor_unsupported"
+
+// ErrCanvasHistoryFloorUnsupported is the refusal of a canvas run action in a
+// since_join room whose member has a history floor. Its text is CanvasHistoryFloorCode.
+var ErrCanvasHistoryFloorUnsupported = errors.New(CanvasHistoryFloorCode)
 
 // CanvasDecisionRequest carries only the operation-bound fields the verified
 // gateway path supplies. It names no actor, organisation, role, audience, policy,
@@ -197,6 +217,35 @@ func (e PersonalThreadDecisionEvidence) ValidateForCanvas(write bool) error {
 	}
 	if e.Privacy.ZeroDataRetention {
 		return zdrForbidsDenial("canvas", "the canvas is not available under zero data retention")
+	}
+	return nil
+}
+
+// CanvasRunActionWrite reports whether actionID is a canvas run-action row and, when
+// it is, whether that row writes the canvas.
+func CanvasRunActionWrite(actionID string) (write bool, canvas bool) {
+	switch strings.TrimSpace(actionID) {
+	case canvasRunActionReadID:
+		return false, true
+	case canvasRunActionWriteID:
+		return true, true
+	}
+	return false, false
+}
+
+// ValidateForCanvasRunAction authorizes a canvas run action (write true for
+// space.canvas.write). It is ValidateForCanvas, so a run action meets the kind, role
+// floor, canvas_entitled and Zero Data Retention rules a person does, plus the one
+// refusal only a run action adds: a room carrying a since_join history floor is
+// refused with ErrCanvasHistoryFloorUnsupported. Archived rooms need no check here,
+// because the agent evidence resolvers read active rooms only. The agent gate
+// (ValidateForAgentAction) still runs first, so an agent's canvas read needs an editor.
+func (e PersonalThreadDecisionEvidence) ValidateForCanvasRunAction(write bool) error {
+	if err := e.ValidateForCanvas(write); err != nil {
+		return err
+	}
+	if e.HistoryFloorRevision > 0 {
+		return ErrCanvasHistoryFloorUnsupported
 	}
 	return nil
 }

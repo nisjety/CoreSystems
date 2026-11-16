@@ -122,16 +122,18 @@ type PersonalThreadDecisionEvidence struct {
 	ResourceAuthorizationRef  string
 	// HistoryFloorRevision (WS04-S11) is the first recipient-audience revision
 	// the subject may read from in a since_join room; 0 means no floor. Filled
-	// only by ResolveSharedThreadReadDecisionEvidence, only while
-	// SPACE_HISTORY_WINDOW_CLAIM is on. A presentation rule, never authority.
+	// only by ResolveSharedThreadReadDecisionEvidence and ApplyCanvasRunActionFloor,
+	// only while SPACE_HISTORY_WINDOW_CLAIM is on. A presentation rule for a thread
+	// read, never authority; a canvas run action refuses a floor instead (WS19-S9).
 	HistoryFloorRevision int64
 	// WS12-S5: the message-lifecycle bits and the org's original-text rule,
 	// filled only by the thread-revise resolvers.
 	MessageReviseEntitled   bool
 	MessageModerateEntitled bool
 	OriginalRetention       string
-	// CanvasEntitled (WS19-S2) is the room canvas bit, filled only by the canvas
-	// resolvers and resolvePersonalDecisionEvidence. Deny by default.
+	// CanvasEntitled (WS19-S2) is the room canvas bit, filled by the canvas
+	// resolvers, resolvePersonalDecisionEvidence and ResolveSharedThreadDecisionEvidence
+	// (the agent path, WS19-S9). Deny by default.
 	CanvasEntitled bool
 	// BrowserEntitled (WS20-S1) is the room browser run bit, filled only by the
 	// browser run resolvers and resolvePersonalDecisionEvidence. Deny by default.

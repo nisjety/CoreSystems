@@ -1161,7 +1161,7 @@ func (r *Repository) ResolveSharedThreadDecisionEvidence(ctx context.Context, sp
 		       a.audience_ref, a.audience_hash,
 		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
 		       p.third_party_processing_allowed, p.retention_class, p.residency,
-		       p.deletion_scope, p.zero_data_retention, p.thread_create_entitled, p.agent_action_entitled, p.schedule_fire_entitled
+		       p.deletion_scope, p.zero_data_retention, p.thread_create_entitled, p.agent_action_entitled, p.schedule_fire_entitled, p.canvas_entitled
 		FROM registered_spaces s
 		JOIN space_memberships m ON m.space_ref=s.space_ref
 		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
@@ -1183,7 +1183,7 @@ func (r *Repository) ResolveSharedThreadDecisionEvidence(ctx context.Context, sp
 		&evidence.Privacy.PolicyRef, &evidence.Privacy.Purpose, &evidence.Privacy.LawfulBasis,
 		&evidence.Privacy.PrivacyClass, &evidence.Privacy.ThirdPartyAllowed,
 		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
-		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadCreateEntitled, &evidence.AgentActionEntitled, &evidence.ScheduleFireEntitled,
+		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadCreateEntitled, &evidence.AgentActionEntitled, &evidence.ScheduleFireEntitled, &evidence.CanvasEntitled,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
@@ -1628,6 +1628,17 @@ func (r *Repository) ResolveAgentActionDecisionEvidence(ctx context.Context, spa
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid Space agent action authority: %w", err)
 	}
 	return evidence, nil
+}
+
+// ApplyCanvasRunActionFloor fills the since_join history floor a canvas run action is
+// refused on (WS19-S9). The floor is read only for a room whose canvas bit is on, since
+// an unentitled room is refused on that bit alone. With SPACE_HISTORY_WINDOW_CLAIM off
+// the floor is never set, as for a person's canvas decision.
+func (r *Repository) ApplyCanvasRunActionFloor(ctx context.Context, evidence *PersonalThreadDecisionEvidence) error {
+	if evidence == nil || !evidence.CanvasEntitled {
+		return nil
+	}
+	return r.applyHistoryFloor(ctx, evidence)
 }
 
 func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {

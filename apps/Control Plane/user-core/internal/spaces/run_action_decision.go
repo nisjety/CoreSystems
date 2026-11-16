@@ -196,6 +196,13 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 	if RoleRank(evidence.Membership.Role) < RoleRank(spec.MinRole) {
 		return RunActionDecision{}, fmt.Errorf("run action requires a higher space role")
 	}
+	// WS19-S9: a canvas row needs the canvas authority a person's canvas decision
+	// needs (kind, role floor, canvas_entitled, ZDR, and the since_join history refusal).
+	if write, canvas := CanvasRunActionWrite(spec.ActionID); canvas {
+		if err := evidence.ValidateForCanvasRunAction(write); err != nil {
+			return RunActionDecision{}, err
+		}
+	}
 	// The run is bound to the thread's original creation authorization. This is
 	// proof of the run's source context only; the agent-action entitlement above
 	// is current Control policy and neither reference authorizes a target owner
@@ -262,6 +269,12 @@ func ValidateCurrentRunActionDecision(evidence PersonalThreadDecisionEvidence, d
 	if !found || spec.DecisionType != runActionDecisionKind || !runActionSelfAPIIssuable(spec.ActionID) ||
 		RoleRank(evidence.Membership.Role) < RoleRank(spec.MinRole) {
 		return fmt.Errorf("run action decision is no longer authorized by the registry")
+	}
+	// WS19-S9: effect-time freshness repeats the canvas checks for a canvas row.
+	if write, canvas := CanvasRunActionWrite(spec.ActionID); canvas {
+		if err := evidence.ValidateForCanvasRunAction(write); err != nil {
+			return fmt.Errorf("run action decision is no longer authorized for the canvas: %w", err)
+		}
 	}
 	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if !runClaimsMatchEvidence(

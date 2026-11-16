@@ -334,7 +334,7 @@ func IssueModelActionViewV2(evidence PersonalThreadDecisionEvidence, authority R
 	if !authorityMatchesEvidence(authority, evidence, expectedSourceRef) {
 		return ModelActionViewV2{}, fmt.Errorf("model action view authority does not match current Control authority")
 	}
-	actions, err := admittedModelActionViewV2Actions(evidence.Membership.Role)
+	actions, err := admittedModelActionViewV2Actions(evidence)
 	if err != nil {
 		return ModelActionViewV2{}, err
 	}
@@ -371,12 +371,17 @@ func IssueModelActionViewV2(evidence PersonalThreadDecisionEvidence, authority R
 
 // admittedModelActionViewV2Actions lists, in registry order, the run-action rows
 // the operator allowlist names and the caller's role meets. The schedule row has
-// another decision type and is never listed here.
-func admittedModelActionViewV2Actions(role string) ([]ModelActionRowV2, error) {
+// another decision type and is never listed here. A canvas row is listed only for
+// a room the canvas admits (WS19-S9): an unentitled room, a kind without a canvas,
+// a ZDR room or a since_join floor omits it.
+func admittedModelActionViewV2Actions(evidence PersonalThreadDecisionEvidence) ([]ModelActionRowV2, error) {
 	actions := make([]ModelActionRowV2, 0)
 	for _, id := range runActionRegistryIDs() {
 		spec, found := runActionSpec(id)
-		if !found || spec.DecisionType != runActionDecisionKind || !runActionAllowlisted(id) || RoleRank(role) < RoleRank(spec.MinRole) {
+		if !found || spec.DecisionType != runActionDecisionKind || !runActionAllowlisted(id) || RoleRank(evidence.Membership.Role) < RoleRank(spec.MinRole) {
+			continue
+		}
+		if write, canvas := CanvasRunActionWrite(spec.ActionID); canvas && evidence.ValidateForCanvasRunAction(write) != nil {
 			continue
 		}
 		actions = append(actions, ModelActionRowV2{ActionID: spec.ActionID, ActionSchemaHash: spec.SchemaSHA256, Level: spec.DefaultLevel})

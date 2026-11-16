@@ -83,6 +83,12 @@ func (s *Server) issueModelActionView(c *gin.Context) {
 		return
 	}
 	if request.ViewVersion == 2 {
+		// WS19-S9: a canvas row is offered only once the room's since_join floor is
+		// read. A failed read clears the canvas bit for this view, so no canvas row is
+		// offered; the other rows are unaffected.
+		if err := s.spaceRepo.ApplyCanvasRunActionFloor(c.Request.Context(), &evidence); err != nil {
+			evidence.CanvasEntitled = false
+		}
 		viewV2, err := spaces.IssueModelActionViewV2(evidence, authority, spaces.ModelActionViewRequest{
 			DecisionRef: decisionRef,
 			Nonce:       nonce,
@@ -148,6 +154,14 @@ func (s *Server) issueRunActionDecision(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// WS19-S9: a canvas run action is refused in a since_join room whose member has a
+	// floor, so the floor is read before the decision is issued.
+	if _, canvas := spaces.CanvasRunActionWrite(request.ActionID); canvas {
+		if err := s.spaceRepo.ApplyCanvasRunActionFloor(c.Request.Context(), &evidence); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "current Space authority is unavailable"})
+			return
+		}
+	}
 	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "run action signer unavailable"})
@@ -169,6 +183,9 @@ func (s *Server) issueRunActionDecision(c *gin.Context) {
 		DecisionRef: decisionRef, Nonce: nonce,
 	}, time.Now().UTC())
 	if err != nil {
+		if refuseCanvasHistoryFloor(c, err) {
+			return
+		}
 		c.JSON(http.StatusForbidden, gin.H{"error": "run action is not authorized"})
 		return
 	}
@@ -193,6 +210,17 @@ func (s *Server) resolveRunActionEvidence(c *gin.Context, spaceRef, orgID, subje
 		return spaces.PersonalThreadDecisionEvidence{}, false
 	}
 	return evidence, true
+}
+
+// refuseCanvasHistoryFloor answers the typed refusal of a canvas run action in a
+// since_join room whose member has a history floor: the code wiki-store answers for
+// the same case. It reports whether it wrote the response.
+func refuseCanvasHistoryFloor(c *gin.Context, err error) bool {
+	if !errors.Is(err, spaces.ErrCanvasHistoryFloorUnsupported) {
+		return false
+	}
+	abortTypedError(c, http.StatusForbidden, spaces.CanvasHistoryFloorCode, "this room's history window does not apply to the canvas", nil)
+	return true
 }
 
 // checkCurrentRunActionAuthority is the owner-plane freshness fence for a
@@ -220,7 +248,17 @@ func (s *Server) checkCurrentRunActionAuthority(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// WS19-S9: effect-time freshness reads a canvas decision's since_join floor again.
+	if _, canvas := spaces.CanvasRunActionWrite(decision.ActionID); canvas {
+		if err := s.spaceRepo.ApplyCanvasRunActionFloor(c.Request.Context(), &evidence); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "current Space authority is unavailable"})
+			return
+		}
+	}
 	if err := spaces.ValidateCurrentRunActionDecision(evidence, decision); err != nil {
+		if refuseCanvasHistoryFloor(c, err) {
+			return
+		}
 		c.JSON(http.StatusForbidden, gin.H{"error": "current Control authority does not authorize this action"})
 		return
 	}
