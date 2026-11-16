@@ -71,11 +71,20 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
     return current.kind === 'view' ? current.head.versionId : null
   }
 
+  // The room the text on screen belongs to. A page that moves to another room starts from loading, never from the
+  // previous room's text.
+  let shownRoom = ''
+
   // One read. A refresh (`quiet`) sends the head on screen, keeps it unless the head moved, and keeps it when
   // the read fails for a moment. A cold read, or a refused one, is what the person needs to see.
   const read = async (spaceRef: string, quiet: boolean) => {
     const id = ++callId
-    if (!quiet && state().kind !== 'view') setState({ kind: 'loading' })
+    if (spaceRef !== shownRoom) {
+      shownRoom = spaceRef
+      setState({ kind: 'loading' })
+    } else if (!quiet && state().kind !== 'view') {
+      setState({ kind: 'loading' })
+    }
     try {
       const answer = await getSpaceCanvas(spaceRef, quiet ? headVersionId() : null)
       if (id !== callId || answer.unchanged) return
