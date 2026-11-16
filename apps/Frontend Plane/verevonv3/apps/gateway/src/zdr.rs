@@ -375,9 +375,11 @@ pub(crate) const ZDR_WAIVER_ROUTE_MISMATCH: &str = "zdr_waiver_route_mismatch";
 /// Control or model call: the guard behind every `DurableWrite` row of the Space surface registry
 /// (`space-surface.v1.json`). `Some` is the response to send.
 ///
-/// A request-level flag (the header or a body `zdr`) counts as ZDR. The org posture comes from
-/// org-core and fails closed in its own words: an outage is the typed, retryable
-/// `zdr_decision_unavailable` (503), never a guess in either direction.
+/// A request-level flag (the header or a body `zdr`) counts as ZDR. The org posture is read live from
+/// org-core ([`org_posture_live`]), never through the 60-second cache, so an org that has just turned
+/// ZDR on is refused at once; each write that reaches that read costs one org-core call. It fails
+/// closed in its own words: an outage is the typed, retryable `zdr_decision_unavailable` (503), never
+/// a guess in either direction.
 pub(crate) async fn durable_write_refusal(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -395,13 +397,17 @@ pub(crate) async fn durable_write_refusal(
     if request_zdr(headers.unwrap_or(&no_headers), body) {
         return Some(forbidden());
     }
-    match org_zdr_lookup(state, user).await {
-        OrgZdrPosture::Enabled => Some(forbidden()),
-        OrgZdrPosture::Unknown => Some((
+    // Live, not cached: a cached `NotZdr` would let a write through for an org that turned ZDR on inside
+    // the cache window. The org is the session's authorized one, resolved as the cached reader resolves
+    // it; with no authorized org the read is `Unknown` without a call, which fails closed below.
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    match org_posture_live(state, user, &org_id).await {
+        OrgPosture::Zdr => Some(forbidden()),
+        OrgPosture::Unknown => Some((
             StatusCode::SERVICE_UNAVAILABLE,
             axum::Json(zdr_refusal_body(ZDR_DECISION_UNAVAILABLE)),
         )),
-        OrgZdrPosture::Disabled => None,
+        OrgPosture::NotZdr => None,
     }
 }
 
