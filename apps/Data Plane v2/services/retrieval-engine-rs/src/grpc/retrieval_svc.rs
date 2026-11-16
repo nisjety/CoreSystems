@@ -80,6 +80,40 @@ fn retrieval_metadata(
     }
 }
 
+/// WS17-S9 (W3-FIX-3): the verified Space of a Space-scoped retrieval, or `None` when the request is unscoped. It is
+/// the value the HTTP `/retrieve` path labels candidates with (`scope.authority.space_ref`). `apply_space_decision` is
+/// the only place this transport sets `space_scope`, and it sets it only from a decision that
+/// `verify_retrieval_space_decision` verified, so no client value reaches the label. Read it before the request moves
+/// into the pipeline.
+fn verified_space_ref(req: &PipelineReq) -> Option<String> {
+    req.space_scope
+        .as_ref()
+        .map(|scope| scope.authority.space_ref.clone())
+}
+
+/// WS17-S9 (W3-FIX-3): the `metadata` of a gRPC candidate. An unscoped answer keeps `existing` unchanged. A Space-scoped
+/// answer merges the verified `space_ref` into it as the string value model-gateway's `chunk_space_ref` reads, keeping
+/// the other entries and replacing only a same-named one. The pipeline candidate's own metadata is its raw Qdrant
+/// payload and is never sent on the wire, so the call sites pass `None` as `existing`.
+fn candidate_metadata(
+    existing: Option<prost_types::Struct>,
+    space_ref: Option<&str>,
+) -> Option<prost_types::Struct> {
+    let Some(space_ref) = space_ref else {
+        return existing;
+    };
+    let mut metadata = existing.unwrap_or_else(|| prost_types::Struct {
+        fields: Default::default(),
+    });
+    metadata.fields.insert(
+        "space_ref".to_string(),
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(space_ref.to_string())),
+        },
+    );
+    Some(metadata)
+}
+
 pub struct RetrievalSvc {
     pipeline: Arc<RetrievalPipeline>,
 }
@@ -199,6 +233,9 @@ impl RetrievalService for RetrievalSvc {
         self.apply_space_decision(&ctx, space_decision.as_deref(), &mut pipeline_req)
             .await?;
 
+        // WS17-S9 (W3-FIX-3): the verified Space each candidate is labelled with, read before the move.
+        let space_ref = verified_space_ref(&pipeline_req);
+
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<RetrievalChunk, Status>>(32);
         tokio::spawn(async move {
             let resp = match pipeline.retrieve(pipeline_req).await {
@@ -224,7 +261,7 @@ impl RetrievalService for RetrievalSvc {
                         sparse_score: c.sparse_score,
                         rerank_score: c.rerank_score,
                         final_score: c.final_score,
-                        metadata: None,
+                        metadata: candidate_metadata(None, space_ref.as_deref()),
                         chunk_index: c.chunk_index,
                         chunk_version: String::new(),
                     })),
@@ -280,6 +317,9 @@ impl RetrievalService for RetrievalSvc {
         self.apply_space_decision(&ctx, space_decision.as_deref(), &mut pipeline_req)
             .await?;
 
+        // WS17-S9 (W3-FIX-3): the verified Space each candidate is labelled with, read before the move.
+        let space_ref = verified_space_ref(&pipeline_req);
+
         let resp = self.pipeline.retrieve(pipeline_req).await.map_err(|e| {
             // The anyhow chain (e.g. "model-plane embedding failed: status:
             // Unauthenticated ...") is deliberately not echoed to the caller,
@@ -302,7 +342,7 @@ impl RetrievalService for RetrievalSvc {
                 sparse_score: c.sparse_score,
                 rerank_score: c.rerank_score,
                 final_score: c.final_score,
-                metadata: None,
+                metadata: candidate_metadata(None, space_ref.as_deref()),
                 chunk_index: c.chunk_index,
                 chunk_version: String::new(),
             })
