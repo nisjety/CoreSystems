@@ -209,9 +209,10 @@ const ACTION_TOOL_NAMES: &[&str] = &[
     "browser_agent",
     "shell",
     "tickets.create",
-    // The Space rows that act on the run's own thread (WS18-S4); card and pause rows join with their executors.
+    // The Space rows that act on the run's own thread (WS18-S4, card WS18-S7); pause rows join with their executors.
     "space.thread.rename",
     "space.thread.pin",
+    "space.thread.post_card",
 ];
 
 /// The connected-app read tool, offered only for a selected connection (WS23-S3). It names what

@@ -102,6 +102,17 @@ fn disabled() -> Response {
     )
 }
 
+/// The wire form of a thread's title or pin provenance (WS18-S3): `owner` or `agent`, or empty for any
+/// other word. A copy of `http_routes::provenance_token` (W3-FIX-15), kept here because that helper is
+/// private to the listing module. Presentation only, never a grant.
+fn provenance_token(source: &str) -> &'static str {
+    match source {
+        "owner" => "owner",
+        "agent" => "agent",
+        _ => "",
+    }
+}
+
 /// The same keys the thread listing uses, so one reader parses both. `session_key` is always empty
 /// here: the internal key never leaves Session Core on this path.
 fn summary_json(thread: &ThreadSummary) -> Value {
@@ -141,6 +152,16 @@ fn summary_json(thread: &ThreadSummary) -> Value {
     }
     if !thread.last_role.is_empty() {
         item["last_role"] = json!(thread.last_role);
+    }
+    // The provenance of the title and the pin (WS18-S3, W3-FIX-16): the same closed words and omitted
+    // keys the listing relays, so a windowed row shows the same chips as a listed row.
+    let title_source = provenance_token(&thread.title_source);
+    if !title_source.is_empty() {
+        item["title_source"] = json!(title_source);
+    }
+    let pinned_source = provenance_token(&thread.pinned_source);
+    if !pinned_source.is_empty() {
+        item["pinned_source"] = json!(pinned_source);
     }
     item
 }

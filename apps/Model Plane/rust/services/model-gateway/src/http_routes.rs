@@ -15174,6 +15174,27 @@ struct ThreadMessageEntry {
     /// Present only for the `link_previews` kind.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     link_previews: Vec<ThreadMessageLinkPreview>,
+    /// Present only for the `agent_card` kind (WS18-S7): the card's title, tone and labelled fields as
+    /// plain text. The body is the message content and is not repeated here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_card: Option<ThreadMessageAgentCard>,
+}
+
+/// An agent card as the transcript serialises it (WS18-S7). Text only, as Session Core stored it.
+#[derive(Debug, Serialize)]
+struct ThreadMessageAgentCard {
+    title: String,
+    /// One of `info`, `progress`, `done` or `blocked`; omitted for a tone this build does not name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    tone: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fields: Vec<ThreadMessageAgentCardField>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadMessageAgentCardField {
+    label: String,
+    value: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -15207,7 +15228,28 @@ fn thread_message_entry(
                 fetched_at: timestamp_to_rfc3339(preview.fetched_at),
             })
             .collect(),
+        agent_card: entry.agent_card.map(|card| ThreadMessageAgentCard {
+            title: card.title,
+            tone: agent_card_tone_token(&card.tone),
+            fields: card
+                .fields
+                .into_iter()
+                .map(|field| ThreadMessageAgentCardField {
+                    label: field.label,
+                    value: field.value,
+                })
+                .collect(),
+        }),
     })
+}
+
+/// The wire form of an agent card's tone (WS18-S7): one of the four closed tokens, or empty. A tone this
+/// build does not name reads as no tone, so the card draws without one.
+fn agent_card_tone_token(tone: &str) -> String {
+    match tone {
+        "info" | "progress" | "done" | "blocked" => tone.to_owned(),
+        _ => String::new(),
+    }
 }
 
 /// A turn's place in the message tree, as the version switcher reads it.

@@ -149,7 +149,7 @@ export type SpaceThread = {
   recent_author_subject_ids?: readonly string[]
   /**
    * WS18-S6: who last set the title. `'agent'` means a room agent renamed the post, and the timeline says so.
-   * Absent until the thread listing carries it (the model gateway's thread summary does not yet); absent is never an agent.
+   * Absent when the listing sends none (an older gateway); absent is never an agent.
    */
   title_source?: 'owner' | 'agent'
   /** WS18-S6: who last set the pin. `'agent'` means a room agent pinned the post. Absent until the listing carries it. */

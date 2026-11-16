@@ -58,6 +58,9 @@ struct TimelineRow {
     latest_run_status: Option<String>,
     latest_run_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     reply_count: Option<i64>,
+    // WS18-S3: the provenance words of the title and the pin, read as stored (W3-FIX-16).
+    title_source: String,
+    pinned_source: String,
 }
 
 fn summary_from_row(row: TimelineRow, space_id: &str) -> pb::ThreadSummary {
@@ -86,6 +89,8 @@ fn summary_from_row(row: TimelineRow, space_id: &str) -> pb::ThreadSummary {
         recent_author_subject_ids: row.recent_author_subject_ids,
         last_role: row.last_role.unwrap_or_default(),
         turn_count: u32::try_from(row.turn_count).unwrap_or_default(),
+        title_source: row.title_source,
+        pinned_source: row.pinned_source,
         ..Default::default()
     }
 }
@@ -106,7 +111,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
             SELECT t.id, t.created_at, t.presentation_title, t.presentation_preview, t.pinned_at,
                    t.last_activity_at, t.last_message_seq, t.turn_count, t.last_role,
                    t.last_author_subject_id, t.recent_author_subject_ids, t.user_id, t.origin,
-                   t.persona_enabled
+                   t.persona_enabled, t.title_source, t.pinned_source
             FROM threads t
             WHERE {eligible} {extra}
             ORDER BY {order}
@@ -118,6 +123,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
                 page.pinned_at, page.last_activity_at, page.last_message_seq, page.turn_count,
                 page.last_role, page.last_author_subject_id, page.recent_author_subject_ids,
                 page.user_id AS owner_subject_id, page.origin, page.persona_enabled,
+                page.title_source, page.pinned_source,
                 latest_run.id AS latest_run_id, latest_run.status AS latest_run_status,
                 latest_run.updated_at AS latest_run_updated_at, rc.reply_count
          FROM page
