@@ -65,6 +65,10 @@ const REVOKE_REASON: &str = "session_closed";
 /// The broker decides eligibility for the explicitly supported grant requests.
 const KIND_HUMAN_BROWSE: &str = "human_browse";
 const KIND_ASSISTANT_TASK: &str = "assistant_task";
+/// The lifetime an ordinary session grant may ask for, in seconds (W3-DEC-GRANT: a room run's parent). The broker
+/// clamps a request to its own maximum; these bounds match the key-grant bounds below.
+const MIN_SESSION_TTL_S: i64 = 30;
+const MAX_SESSION_TTL_S: i64 = 900;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -87,6 +91,9 @@ struct IssueBrowserGrantRequest {
     kind: Option<String>,
     #[serde(default)]
     zdr: bool,
+    /// The lifetime an ordinary session grant asks for, in seconds (W3-DEC-GRANT). `None` is the broker default.
+    #[serde(default)]
+    ttl_s: Option<i64>,
 }
 
 fn error(status: StatusCode, code: &str) -> ApiError {
@@ -112,6 +119,8 @@ fn require_user(claims: &Claims) -> Result<(), ApiError> {
 struct ValidatedIssue {
     mode: &'static str,
     grant_kind: &'static str,
+    /// The requested lifetime in seconds; `0` is the broker default.
+    ttl_seconds: i32,
 }
 
 fn validate_request(req: &IssueBrowserGrantRequest) -> Result<ValidatedIssue, ApiError> {
@@ -150,7 +159,20 @@ fn validate_request(req: &IssueBrowserGrantRequest) -> Result<ValidatedIssue, Ap
             "assistant_task_requires_one_cloud_host",
         ));
     }
-    Ok(ValidatedIssue { mode, grant_kind })
+    // Only an ordinary session grant takes a lifetime. The broker gives a human_browse grant its own and clamps an
+    // assistant task's, so another kind that names one is refused rather than quietly shortened.
+    let ttl_seconds = match req.ttl_s {
+        None => 0,
+        Some(ttl) if grant_kind.is_empty() && (MIN_SESSION_TTL_S..=MAX_SESSION_TTL_S).contains(&ttl) => {
+            i32::try_from(ttl).map_err(|_| error(StatusCode::BAD_REQUEST, "invalid_ttl"))?
+        }
+        Some(_) => return Err(error(StatusCode::BAD_REQUEST, "invalid_ttl")),
+    };
+    Ok(ValidatedIssue {
+        mode,
+        grant_kind,
+        ttl_seconds,
+    })
 }
 
 /// Map a broker status for a renewal. A grant that cannot be renewed (at its
@@ -209,7 +231,11 @@ async fn issue_grant(
     Json(req): Json<IssueBrowserGrantRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     require_user(&claims)?;
-    let ValidatedIssue { mode, grant_kind } = validate_request(&req)?;
+    let ValidatedIssue {
+        mode,
+        grant_kind,
+        ttl_seconds,
+    } = validate_request(&req)?;
     // A grant names no provider or connection, so the resolver reads the token's posture plus the
     // request's own ask. A waived turn is persistent and therefore not ZDR here.
     let zdr = crate::zdr_posture::decide_for(&claims, &crate::zdr_posture::Route::plain(req.zdr))
@@ -223,6 +249,7 @@ async fn issue_grant(
         allowed_domains: req.allowed_domains,
         zdr,
         grant_kind: grant_kind.to_owned(),
+        ttl_seconds,
         ..Default::default()
     };
     let mut broker = state.browser_client.clone();

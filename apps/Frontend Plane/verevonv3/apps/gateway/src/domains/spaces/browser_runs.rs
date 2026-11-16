@@ -987,7 +987,7 @@ pub(crate) async fn submit_start(
             Ok(decisions) => decisions,
             Err(refusal) => return refusal,
         };
-        let Some(grant) = issue_parent_grant(state, user, headers).await else {
+        let Some(grant) = issue_parent_grant(state, user, headers, &start.hosts).await else {
             return start_refusal(
                 StatusCode::BAD_GATEWAY,
                 "browser_grant_unavailable",
@@ -1020,6 +1020,7 @@ pub(crate) async fn submit_start(
             // A keyed retry: the run this key names already holds its own grant, so this one is not needed.
             revoke_session_grant(state, user, headers, &grant).await;
         }
+        // The run is live: Model Plane revokes the parent grant when the run ends (W3-DEC-GRANT).
         return started(&response);
     }
     start_refusal(
@@ -1207,14 +1208,23 @@ async fn mint_control_decision(
     })
 }
 
-/// The starter's parent grant for one attempt: a session grant of the starter's own, from which Model Plane derives the
-/// room's narrowed run grant. `None` when this gateway issues none, so the start refuses before any model call.
-async fn issue_parent_grant(state: &AppState, user: &AuthenticatedUser, headers: &HeaderMap) -> Option<String> {
+/// The starter's parent grant for one attempt: a session grant of the starter's own, narrowed to the run's hosts and
+/// given the run's lifetime (W3-DEC-GRANT). Model Plane derives the room's run grant from it and revokes it when the
+/// run ends. `None` when this gateway issues none, so the start refuses before any model call.
+async fn issue_parent_grant(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    hosts: &[String],
+) -> Option<String> {
     match crate::domains::browser::issue_session_grant(
         state,
         user,
         headers,
-        crate::domains::browser::SessionGrantScope::HumanBrowse,
+        crate::domains::browser::SessionGrantScope::RoomRunParent {
+            hosts,
+            ttl_s: i64::from(RUNTIME_MAX_S),
+        },
         false,
     )
     .await

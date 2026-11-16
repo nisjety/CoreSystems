@@ -1185,6 +1185,9 @@ struct ResolvedBrowserGrant {
     /// own values), because a presented grant is never re-minted and a member
     /// can derive one with no claim at all.
     budget: Option<BudgetClaim>,
+    /// True for a room run (W3-DEC-GRANT): `parent_grant_id` is the starter's session grant, narrowed to this run's
+    /// hosts, and ending the run revokes it as well. The broker cascades that revoke to the run grant derived from it.
+    room_parent: bool,
 }
 
 /// A budget claim: an upper bound on a run's spend. Zero is "no bound" on that
@@ -1667,6 +1670,7 @@ async fn resolve_browser_grant(
         grant_id: grant_id.to_owned(),
         allowed_domains,
         parent_grant_id: None,
+        room_parent: false,
         // A run grant the caller presented keeps the claim it was issued with and
         // is not re-minted, but the run is still bounded by the organization's
         // ceiling: a member can derive a run grant at the broker with no claim,
@@ -1927,6 +1931,7 @@ async fn derive_run_grant(
         grant_id: grant_id.to_owned(),
         allowed_domains,
         parent_grant_id: Some(parent_grant_id.to_owned()),
+        room_parent: false,
         // The run is bounded by this attempt's claim as well as the grant's own.
         // A grant found by the lookup keeps the claim it was issued with, which
         // can be none (the first attempt ran with the flag off) or looser than
@@ -2002,6 +2007,7 @@ async fn room_browser_grant(
         grant_id: derived.grant_id.trim().to_owned(),
         allowed_domains,
         parent_grant_id: Some(parent.to_owned()),
+        room_parent: true,
         budget: BudgetClaim::from_wire(
             derived.budget_micro_usd,
             derived.budget_max_steps,
@@ -2018,7 +2024,7 @@ const REVOKE_REASON_RUN_ENDED: &str = "run_ended";
 /// Best-effort revoke of a run grant this route derived. A run grant the
 /// caller presented (`parent_grant_id` is `None`) is never touched: it is not
 /// ours to end. A failed revoke is only logged; the broker still bounds the
-/// grant by its parent's lifetime and its per-parent cap.
+/// grant by its parent's lifetime and its per-parent cap. A room run's parent is revoked with it (W3-DEC-GRANT).
 async fn revoke_derived_run_grant(
     state: &AppState,
     browser_bearer: &VerifiedBrowserBearer,
@@ -2042,10 +2048,46 @@ async fn revoke_derived_run_grant(
         return false;
     };
     let mut broker = state.browser_client.clone();
-    match broker.revoke_grant(request).await {
+    let revoked = match broker.revoke_grant(request).await {
         Ok(_) => true,
         Err(status) => {
             warn!(reason, code = ?status.code(), "derived browser run grant revoke failed");
+            false
+        }
+    };
+    if grant.room_parent {
+        if let Some(parent) = grant.parent_grant_id.as_deref() {
+            revoke_room_parent_grant(state, browser_bearer, parent, reason).await;
+        }
+    }
+    revoked
+}
+
+/// Best-effort revoke of a room run's starter parent grant (W3-DEC-GRANT). It is called with the run's derived grant:
+/// the run ended (completed, cancelled or refused at dispatch) or its start failed. The broker cascades the revoke to
+/// any run grant still derived from the parent. A failed revoke is a content-free log line; the parent then ends on
+/// its own lifetime, ten minutes at most.
+async fn revoke_room_parent_grant(
+    state: &AppState,
+    browser_bearer: &VerifiedBrowserBearer,
+    parent_grant_id: &str,
+    reason: &'static str,
+) -> bool {
+    let Ok(request) = authenticated_browser_request(
+        RevokeGrantRequest {
+            grant_id: parent_grant_id.to_owned(),
+            reason: reason.to_owned(),
+        },
+        browser_bearer,
+    ) else {
+        warn!(reason, "room run parent grant revoke could not be authenticated");
+        return false;
+    };
+    let mut broker = state.browser_client.clone();
+    match broker.revoke_grant(request).await {
+        Ok(_) => true,
+        Err(status) => {
+            warn!(reason, code = ?status.code(), "room run parent grant revoke failed");
             false
         }
     }
@@ -2620,7 +2662,8 @@ async fn browser_run_start_inner(
                 // The derived grant stays. This request may be a retry of a
                 // start whose run is live, and a same-key retry needs the
                 // grant back; the broker bounds it by its parent's lifetime
-                // and its per-parent cap.
+                // and its per-parent cap. A room run's starter parent is revoked by the gateway on this answer
+                // (W3-DEC-GRANT), which takes this grant with it.
                 let reused = error
                     .downcast_ref::<tonic::Status>()
                     .is_some_and(|status| status.code() == tonic::Code::AlreadyExists);

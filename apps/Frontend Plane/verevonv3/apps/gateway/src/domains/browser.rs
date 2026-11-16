@@ -6279,6 +6279,9 @@ pub(crate) enum SessionGrantScope<'a> {
     AssistantTask(Option<&'a str>),
     /// A person's own open-web browsing. A `human_browse` grant names no hosts.
     HumanBrowse,
+    /// A room run's parent (W3-DEC-GRANT): an ordinary session grant that names exactly the run's hosts and lives
+    /// `ttl_s` seconds. Model Plane derives the run's grant from it and revokes it when the run ends.
+    RoomRunParent { hosts: &'a [String], ttl_s: i64 },
 }
 
 fn session_grant_scope(
@@ -6308,6 +6311,10 @@ fn session_grant_request_body(scope: SessionGrantScope<'_>, zdr: bool) -> Option
         })),
         SessionGrantScope::StartHost(None) | SessionGrantScope::AssistantTask(None) => None,
         SessionGrantScope::HumanBrowse => Some(json!({ "kind": "human_browse", "zdr": zdr })),
+        SessionGrantScope::RoomRunParent { hosts, ttl_s } if !hosts.is_empty() => Some(json!({
+            "allowed_domains": hosts, "zdr": zdr, "ttl_s": ttl_s,
+        })),
+        SessionGrantScope::RoomRunParent { .. } => None,
     }
 }
 
