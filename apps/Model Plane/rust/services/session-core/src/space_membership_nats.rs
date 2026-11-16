@@ -20,14 +20,27 @@
 //! [`crate::nats_connection::connect_shared`]) — a fresh, independent
 //! connection, so a bug or outage in the (currently non-functional)
 //! JetStream GDPR consumer cannot affect this one or vice versa.
+//!
+//! Ordering (W3-DEC-ORDER). Each fact states the Space's authority revision it was produced at (`space_seq`). A fact is
+//! applied only when that revision is newer than the last one applied for the same (Space, subject), kept in
+//! `space_membership_fact_order` (migration 0132). A stale fact, or a repeat, changes nothing, so a late `active=true`
+//! cannot reopen a room that a later removal closed. The retraction consumer (`space_membership_retract_nats.rs`) reads
+//! the same value under the same per-subject lock.
 
 use futures::StreamExt;
 use serde::Deserialize;
-use tracing::{info, warn};
+use sqlx::{Postgres, Transaction};
+use tracing::{debug, info, warn};
 
 use crate::store::Pool;
 
 const SUBJECT: &str = "controlplane.space.membership_changed";
+
+/// W3-DEC-ORDER: the (org, Space, subject) lock both consumers take before they read or advance the stored ordering (see
+/// [`lock_fact_order`]). It is a different key from the declassify and retraction lock (`LOCK_MEMBER_SQL` in
+/// `space/memory_declassify.rs`).
+const LOCK_FACT_ORDER_SQL: &str =
+    "SELECT pg_advisory_xact_lock(hashtextextended('space_membership_fact|' || $1::text || '|' || $2::text || '|' || $3::text, 0))";
 
 /// `active` states the CURRENT fact (member or not), not an increment: a
 /// redundant or reordered delivery of the same fact is a no-op, which two
@@ -39,6 +52,10 @@ struct MembershipChangedEvent {
     org_id: String,
     subject_id: String,
     active: bool,
+    /// The Space authority revision the fact was produced at (W3-DEC-ORDER). Absent only from an older producer, whose
+    /// facts are applied without ordering, as before.
+    #[serde(default)]
+    space_seq: Option<i64>,
 }
 
 /// Parse one event payload. Exposed separately from [`run`] so the decode
@@ -47,22 +64,99 @@ fn parse_event(payload: &[u8]) -> Result<MembershipChangedEvent, serde_json::Err
     serde_json::from_slice(payload)
 }
 
+/// W3-DEC-ORDER: take the (org, Space, subject) ordering lock for the rest of the transaction. Both consumers take it
+/// before they read or advance the stored ordering, so one subject's facts apply one at a time. It is distinct from the
+/// declassify and retraction lock, so a transaction holding this one may run `retract_removed_subject` on another
+/// connection without waiting on itself.
+pub(crate) async fn lock_fact_order(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    space_ref: &str,
+    subject_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(LOCK_FACT_ORDER_SQL)
+        .bind(org_id)
+        .bind(space_ref)
+        .bind(subject_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// The Space authority revision of the last fact applied for this subject, or `None` when none has been applied.
+pub(crate) async fn stored_fact_seq(
+    tx: &mut Transaction<'_, Postgres>,
+    space_ref: &str,
+    subject_id: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT space_seq FROM space_membership_fact_order WHERE space_ref = $1 AND subject_id = $2",
+    )
+    .bind(space_ref)
+    .bind(subject_id)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
+/// Record `space_seq` as the last applied revision for this subject, if it is newer than the stored one. Returns false,
+/// and writes nothing, for a fact no newer than the stored one.
+pub(crate) async fn advance_fact_order(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    space_ref: &str,
+    subject_id: &str,
+    space_seq: i64,
+) -> Result<bool, sqlx::Error> {
+    let advanced: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO space_membership_fact_order (space_ref, subject_id, org_id, space_seq) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (space_ref, subject_id) DO UPDATE \
+         SET org_id = EXCLUDED.org_id, space_seq = EXCLUDED.space_seq, applied_at = NOW() \
+         WHERE space_membership_fact_order.space_seq < EXCLUDED.space_seq \
+         RETURNING space_seq",
+    )
+    .bind(space_ref)
+    .bind(subject_id)
+    .bind(org_id)
+    .bind(space_seq)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(advanced.is_some())
+}
+
 /// `active=false` upserts a revocation row (deny resource-scoped run/thread/
 /// memory access to this Space until further notice). `active=true` deletes
 /// any existing revocation for this exact (space_ref, subject_id) — a
 /// legitimately rejoined member must not stay permanently denied merely
 /// because Control Plane once revoked them.
+///
+/// W3-DEC-ORDER: a fact no newer than the stored ordering for its subject is ignored, clearing and setting alike. The
+/// stored ordering and the change commit together, under the subject's lock.
 async fn apply_membership_change(
     pool: &Pool,
     event: &MembershipChangedEvent,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    lock_fact_order(&mut tx, &event.org_id, &event.space_ref, &event.subject_id).await?;
+    if let Some(space_seq) = event.space_seq {
+        if !advance_fact_order(&mut tx, &event.org_id, &event.space_ref, &event.subject_id, space_seq).await? {
+            debug!(
+                space_ref = %event.space_ref,
+                subject_id = %event.subject_id,
+                space_seq,
+                "stale Space membership fact ignored"
+            );
+            tx.rollback().await?;
+            return Ok(());
+        }
+    }
     if event.active {
         sqlx::query(
             "DELETE FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2",
         )
         .bind(&event.space_ref)
         .bind(&event.subject_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     } else {
         sqlx::query(
@@ -73,10 +167,10 @@ async fn apply_membership_change(
         .bind(&event.space_ref)
         .bind(&event.org_id)
         .bind(&event.subject_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
-    Ok(())
+    tx.commit().await
 }
 
 /// Run the Space-membership-change consumer until the connection is lost.
@@ -218,6 +312,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: false,
+                space_seq: Some(1),
             },
         )
         .await
@@ -240,6 +335,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: true,
+                space_seq: Some(2),
             },
         )
         .await

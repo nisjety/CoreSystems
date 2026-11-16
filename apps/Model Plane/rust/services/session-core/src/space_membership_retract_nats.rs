@@ -17,14 +17,20 @@
 //!
 //! Retraction is idempotent: a repeated fact or sweep finds no live row and changes nothing. A failed retraction is
 //! retried here with backoff; the next re-announce or sweep retries it after that. Logs carry ids and counts only.
+//!
+//! Ordering (W3-DEC-ORDER). A fact older than the last one the membership consumer applied for its subject is superseded,
+//! and is not retracted: the newer fact's own retraction governs. Each attempt runs under the subject's ordering lock
+//! (`space_membership_nats.rs`), so a newer fact cannot be applied between the check and the retraction. A removal
+//! records the revision it applied, so the membership consumer treats the same fact as already applied.
 
 use std::time::Duration;
 
 use futures::StreamExt;
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::space::memory_declassify::{retract_removed_subject, retraction_required, revoked_live_shares};
+use crate::space_membership_nats::{advance_fact_order, lock_fact_order, stored_fact_seq};
 use crate::store::Pool;
 
 const SUBJECT: &str = "controlplane.space.membership_changed";
@@ -48,6 +54,10 @@ struct MembershipFact {
     active: bool,
     #[serde(default)]
     role: String,
+    /// The Space authority revision the fact was produced at (W3-DEC-ORDER). Absent only from an older producer, whose
+    /// facts are retracted without the ordering check, as before.
+    #[serde(default)]
+    space_seq: Option<i64>,
 }
 
 /// Parse one event payload. Exposed separately from [`run`] so the decode contract stays testable without a broker.
@@ -95,9 +105,18 @@ async fn retract_with_retry(pool: &Pool, fact: &MembershipFact) {
     let reason = if revoke { "removed" } else { "below_editor" };
     let mut delay = Duration::from_secs(1);
     for attempt in 1..=RETRACT_ATTEMPTS {
-        match retract_removed_subject(pool, &fact.org_id, &fact.space_ref, &fact.subject_id, revoke).await {
-            Ok(deleted) => {
+        match retract_if_current(pool, fact, revoke).await {
+            Ok(Some(deleted)) => {
                 record_retraction(deleted, reason, &fact.org_id, &fact.space_ref, &fact.subject_id);
+                return;
+            }
+            Ok(None) => {
+                debug!(
+                    org_id = %fact.org_id,
+                    space_id = %fact.space_ref,
+                    subject_id = %fact.subject_id,
+                    "stale Space membership fact not retracted"
+                );
                 return;
             }
             Err(error) => {
@@ -125,7 +144,36 @@ async fn retract_with_retry(pool: &Pool, fact: &MembershipFact) {
     );
 }
 
-/// Retract the live shares whose subject already holds a revocation in their Space. Each one is idempotent.
+/// One attempt at a fact's retraction, under the subject's ordering lock (W3-DEC-ORDER). A fact older than the stored
+/// one is superseded, and the newer fact's own retraction governs, so nothing is done (`None`). Otherwise the retraction
+/// runs and, for a removal, the revision it applied is recorded before the lock is released. A demotion records nothing,
+/// since it changes no revocation. Equal is not stale here, unlike in the membership consumer: that consumer may have
+/// applied this same fact first, and the retraction must still run.
+async fn retract_if_current(pool: &Pool, fact: &MembershipFact, revoke: bool) -> Result<Option<u64>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    lock_fact_order(&mut tx, &fact.org_id, &fact.space_ref, &fact.subject_id).await?;
+    if let Some(space_seq) = fact.space_seq {
+        let stored = stored_fact_seq(&mut tx, &fact.space_ref, &fact.subject_id).await?;
+        if stored.is_some_and(|stored| stored > space_seq) {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+    }
+    // The retraction takes its own connection and the (org, Space, subject) lock that declassify shares. This lock
+    // stays held across it, so the membership consumer cannot apply a newer fact in between.
+    let deleted = retract_removed_subject(pool, &fact.org_id, &fact.space_ref, &fact.subject_id, revoke).await?;
+    if revoke {
+        if let Some(space_seq) = fact.space_seq {
+            advance_fact_order(&mut tx, &fact.org_id, &fact.space_ref, &fact.subject_id, space_seq).await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(Some(deleted))
+}
+
+/// Retract the live shares whose subject already holds a revocation in their Space. Each one is idempotent, and each is
+/// checked under the subject's ordering lock (W3-DEC-ORDER), so a fact that clears the revocation cannot land between the
+/// check and the retraction.
 async fn sweep_revoked_shares(pool: &Pool) {
     let shares = match revoked_live_shares(pool, SWEEP_LIMIT).await {
         Ok(shares) => shares,
@@ -135,8 +183,9 @@ async fn sweep_revoked_shares(pool: &Pool) {
         }
     };
     for (org_id, space_id, subject_id) in shares {
-        match retract_removed_subject(pool, &org_id, &space_id, &subject_id, false).await {
-            Ok(deleted) => record_retraction(deleted, "sweep", &org_id, &space_id, &subject_id),
+        match retract_while_revoked(pool, &org_id, &space_id, &subject_id).await {
+            Ok(Some(deleted)) => record_retraction(deleted, "sweep", &org_id, &space_id, &subject_id),
+            Ok(None) => {}
             Err(error) => warn!(
                 ?error,
                 org_id = %org_id,
@@ -146,6 +195,32 @@ async fn sweep_revoked_shares(pool: &Pool) {
             ),
         }
     }
+}
+
+/// The sweep's attempt (W3-DEC-ORDER): retract only while the subject's revocation still stands, checked under the
+/// subject's ordering lock. `None` when the revocation has since been cleared by a newer fact.
+async fn retract_while_revoked(
+    pool: &Pool,
+    org_id: &str,
+    space_id: &str,
+    subject_id: &str,
+) -> Result<Option<u64>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    lock_fact_order(&mut tx, org_id, space_id, subject_id).await?;
+    let revoked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2)",
+    )
+    .bind(space_id)
+    .bind(subject_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !revoked {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let deleted = retract_removed_subject(pool, org_id, space_id, subject_id, false).await?;
+    tx.commit().await?;
+    Ok(Some(deleted))
 }
 
 /// Count and log one retraction that deleted rows. A repeat that deletes nothing records nothing.
