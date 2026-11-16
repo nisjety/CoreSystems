@@ -637,6 +637,19 @@ export const removeOrganizationMemberProjection = internalMutation({
       await ctx.db.delete(session._id);
     }
 
+    // WS17-S6: the removed member's private-panel pointers in this organization (ids only), deleted with their other
+    // per-organization rows. The panel threads stay in the person's own chat history; a pointer names nothing without
+    // the membership. Runs only after the stale-event and tombstone checks above, so a stale removal purges nothing.
+    const panelPointers = await ctx.db
+      .query("spacePrivatePanels")
+      .withIndex("by_user_and_space", (q) =>
+        q.eq("externalOrgId", args.orgId).eq("externalAuthId", args.userId)
+      )
+      .collect();
+    for (const pointer of panelPointers) {
+      await ctx.db.delete(pointer._id);
+    }
+
     if (organization) {
       await ctx.db.insert("auditLog", {
         orgId: organization._id,
