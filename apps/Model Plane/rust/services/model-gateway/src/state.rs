@@ -236,6 +236,11 @@ pub struct AppState {
     /// matches `mail_task.rs`'s existing `MailTaskPipeline: None` default on
     /// the gateway BFF side of this same, still-not-fully-wired pipeline.
     pub(crate) mail_task_bridge_tokens: Option<Arc<crate::mail_task_bridge_auth::MailTaskBridgeTokenProvider>>,
+    /// W3-DEC-REVOKE (owner decision D16): model-gateway's own browser-broker principal
+    /// (`model-gateway-browser-admin`, `browser:write`), which the run-end revoke presents so a revoke still lands
+    /// after the ingress bearer has expired (see `browser_admin_auth`). `None` when
+    /// `MODEL_GATEWAY_BROWSER_ADMIN_SERVICE_API_KEY` is unset: the revoke then uses the ingress bearer, as before.
+    pub(crate) browser_admin_tokens: Option<Arc<crate::browser_admin_auth::BrowserAdminTokenProvider>>,
     /// The minting client for the completion judge (EP-7 S3), from the goal-judge principal: a token
     /// for `session:goal-judge:read` per judged read and `session:goal-verdict:write` per verdict.
     /// `None` when `MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY` is unset: the judge then does not run
@@ -594,6 +599,7 @@ impl AppState {
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
             mail_task_bridge_tokens: None,
+            browser_admin_tokens: None,
             goal_verdict_tokens: None,
             managed_start_keys: ManagedStartKeyDeriver::test_only(),
             run_start_guard: Arc::default(),
@@ -1036,6 +1042,23 @@ impl AppState {
                 }
             };
 
+        // W3-DEC-REVOKE (owner decision D16) — the run-end browser revoke's own browser-broker credential, from the
+        // dedicated `model-gateway-browser-admin` principal (see `browser_admin_auth`). Optional like the mail-task
+        // bridge: without it the revoke presents the ingress bearer, as before, and the boot does not fail.
+        let browser_admin_tokens = match crate::browser_admin_auth::BrowserAdminTokenProvider::from_env() {
+            Ok(provider) => {
+                tracing::info!("browser-broker revoke credential configured");
+                Some(Arc::new(provider))
+            }
+            Err(error) => {
+                tracing::info!(
+                    %error,
+                    "browser-broker revoke credential not configured; run revokes use the ingress bearer"
+                );
+                None
+            }
+        };
+
         // EP-7 S3 — the completion judge's credential, from the dedicated persistent goal-judge
         // principal (OD-58), never the gateway's zero-retention key. Optional like the mail-task
         // bridge: without it the judge records no verdict and the goal stays as it is, and the boot
@@ -1121,6 +1144,7 @@ impl AppState {
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
+            state.browser_admin_tokens = browser_admin_tokens.clone();
             state.goal_verdict_tokens = goal_verdict_tokens.clone();
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
@@ -1205,6 +1229,7 @@ impl AppState {
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;
+            state.browser_admin_tokens = browser_admin_tokens;
             state.goal_verdict_tokens = goal_verdict_tokens;
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;

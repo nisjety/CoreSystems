@@ -2047,6 +2047,7 @@ const REVOKE_REASON_RUN_ENDED: &str = "run_ended";
 async fn revoke_derived_run_grant(
     state: &AppState,
     browser_bearer: &VerifiedBrowserBearer,
+    org_id: &str,
     grant: &ResolvedBrowserGrant,
     reason: &'static str,
 ) -> bool {
@@ -2056,13 +2057,8 @@ async fn revoke_derived_run_grant(
         state.run_start_guard.release_grant(&grant.grant_id);
         return false;
     }
-    let Ok(request) = authenticated_browser_request(
-        RevokeGrantRequest {
-            grant_id: grant.grant_id.clone(),
-            reason: reason.to_owned(),
-        },
-        browser_bearer,
-    ) else {
+    let bearer = browser_revoke_bearer(state, browser_bearer, org_id, reason).await;
+    let Some(request) = revoke_grant_request(&grant.grant_id, reason, &bearer) else {
         warn!(reason, "derived browser run grant revoke could not be authenticated");
         return false;
     };
@@ -2076,10 +2072,58 @@ async fn revoke_derived_run_grant(
     };
     if grant.room_parent {
         if let Some(parent) = grant.parent_grant_id.as_deref() {
-            revoke_room_parent_grant(state, browser_bearer, parent, reason).await;
+            revoke_room_parent_grant(state, &bearer, parent, reason).await;
         }
     }
     revoked
+}
+
+/// The bearer a run-end or start-failure revoke presents (W3-DEC-REVOKE, owner decision D16). The organization's
+/// browser-broker service credential goes first: the ingress user bearer lives about 300 seconds, so a run that
+/// outlives it could not revoke and its grants would end only at their TTL. The ingress bearer is the fallback when
+/// that credential is not configured or Auth Core will not mint it. Only the chosen path is logged: never the
+/// organization, a grant id, a host or a token.
+async fn browser_revoke_bearer(
+    state: &AppState,
+    browser_bearer: &VerifiedBrowserBearer,
+    org_id: &str,
+    reason: &'static str,
+) -> String {
+    let service = match state.browser_admin_tokens.as_ref() {
+        Some(tokens) => match tokens.token(org_id).await {
+            Ok(token) => Some(token),
+            Err(error) => {
+                warn!(reason, %error, "browser-broker revoke credential unavailable for a run revoke");
+                None
+            }
+        },
+        None => None,
+    };
+    match service {
+        Some(token) => {
+            info!(reason, path = "service_credential", "browser run revoke bearer chosen");
+            token
+        }
+        None => {
+            info!(reason, path = "ingress_bearer", "browser run revoke bearer chosen");
+            browser_bearer.as_str().to_owned()
+        }
+    }
+}
+
+/// A `RevokeGrant` for `grant_id` that presents `bearer`, the one [`browser_revoke_bearer`] chose.
+fn revoke_grant_request(
+    grant_id: &str,
+    reason: &'static str,
+    bearer: &str,
+) -> Option<tonic::Request<RevokeGrantRequest>> {
+    let authorization = format!("Bearer {bearer}").parse().ok()?;
+    let mut request = tonic::Request::new(RevokeGrantRequest {
+        grant_id: grant_id.to_owned(),
+        reason: reason.to_owned(),
+    });
+    request.metadata_mut().insert("authorization", authorization);
+    Some(request)
 }
 
 /// Best-effort revoke of a room run's starter parent grant (W3-DEC-GRANT). It is called with the run's derived grant:
@@ -2088,17 +2132,11 @@ async fn revoke_derived_run_grant(
 /// its own lifetime, ten minutes at most.
 async fn revoke_room_parent_grant(
     state: &AppState,
-    browser_bearer: &VerifiedBrowserBearer,
+    bearer: &str,
     parent_grant_id: &str,
     reason: &'static str,
 ) -> bool {
-    let Ok(request) = authenticated_browser_request(
-        RevokeGrantRequest {
-            grant_id: parent_grant_id.to_owned(),
-            reason: reason.to_owned(),
-        },
-        browser_bearer,
-    ) else {
+    let Some(request) = revoke_grant_request(parent_grant_id, reason, bearer) else {
         warn!(reason, "room run parent grant revoke could not be authenticated");
         return false;
     };
@@ -2688,6 +2726,7 @@ async fn browser_run_start_inner(
                 revoke_derived_run_grant(
                     &state,
                     &browser_bearer,
+                    &org_id,
                     &browser_grant,
                     REVOKE_REASON_START_FAILED,
                 )
@@ -2718,6 +2757,7 @@ async fn browser_run_start_inner(
                 revoke_derived_run_grant(
                     &state,
                     &browser_bearer,
+                    &org_id,
                     &browser_grant,
                     REVOKE_REASON_START_FAILED,
                 )
@@ -2742,6 +2782,7 @@ async fn browser_run_start_inner(
         revoke_derived_run_grant(
             &state,
             &browser_bearer,
+            &org_id,
             &browser_grant,
             REVOKE_REASON_START_FAILED,
         )
@@ -2785,6 +2826,7 @@ async fn browser_run_start_inner(
         revoke_derived_run_grant(
             &state,
             &browser_bearer,
+            &org_id,
             &browser_grant,
             REVOKE_REASON_START_FAILED,
         )
@@ -2861,6 +2903,7 @@ async fn browser_run_start_inner(
     let room_run = room.is_some();
     let dispatch_run_id = run_id.clone();
     let revoke_bearer = browser_bearer.clone();
+    let revoke_org = org_id.clone();
     let revoke_grant = browser_grant.clone();
     state.run_start_guard.begin_dispatch(&dispatch_run_id);
     tokio::spawn(async move {
@@ -2938,7 +2981,7 @@ async fn browser_run_start_inner(
                         Ok(true) => {}
                         Ok(false) => {
                             warn!(run_id = %dispatch_run_id, "browser managed run became terminal while execution was still pending; refusing to accept a late outcome");
-                            revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
+                            revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_org, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                             return;
                         }
                         Err(error) => {
@@ -2957,7 +3000,7 @@ async fn browser_run_start_inner(
                     BrowserRunFinalization::Complete(terminal) => {
                         terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
                         // The loop has finished: its run grant has no further use.
-                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
+                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_org, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                         // A room run's one durable result turn, written before the run is terminal (WS20-S3).
                         // If it cannot be written the run stays non-terminal and retriable, never a silent
                         // loss of the result.
@@ -2995,7 +3038,7 @@ async fn browser_run_start_inner(
                     }
                     BrowserRunFinalization::Cancel(reason) => {
                         terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
-                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
+                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_org, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                         if let Err(error) =
                             crate::session_flow::cancel_browser_agent_run_authenticated(
                                 &terminal_state,
@@ -3024,7 +3067,7 @@ async fn browser_run_start_inner(
                                 ).await {
                                     Ok(_) => {
                                         terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
-                                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
+                                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_org, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                                     }
                                     Err(error) => {
                                         terminal_state.run_start_guard.restore_parked(&dispatch_run_id);
@@ -3053,7 +3096,7 @@ async fn browser_run_start_inner(
                 if restricted_dispatch && error.code() == tonic::Code::Unimplemented {
                     // The selected execution instance does not implement the
                     // versioned RPC; it definitively did not run this step.
-                    revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
+                    revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_org, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                     if let Err(terminal_error) = crate::session_flow::terminalize_browser_agent_run_authenticated(
                         &terminal_state, &terminal_run,
                         crate::session_flow::BrowserAgentTerminal::Failed("browser_attach_policy_unavailable"),

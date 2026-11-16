@@ -382,6 +382,25 @@
       "quarry": "tenant"
     }
   },
+  "model-gateway-browser-admin": {
+    "tenancy": "directory",
+    "audiences": [
+      "browser-broker"
+    ],
+    "consumerEnv": "MODEL_GATEWAY_BROWSER_ADMIN_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "browser-broker": "zdr"
+    },
+    "scopes": [
+      "browser:write"
+    ],
+    "scopesByAudience": {
+      "browser-broker": [
+        "browser:write"
+      ]
+    }
+  },
   "model-gateway-goal-judge": {
     "tenancy": "directory",
     "audiences": [
