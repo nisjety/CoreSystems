@@ -6,14 +6,20 @@
 //! Both reads are read-only and carry the caller's verified user credential, forwarded by model-gateway
 //! after it verified the Control browser-run decision. Both refuse a zero-retention credential first
 //! (typed `browser_run`), check the org, and answer nothing about content: a count, or a Space id.
+//!
+//! The start path's own cap check, [`ensure_room_browser_capacity`] (W3-FIX-6), re-runs the same count
+//! inside the run's start transaction under a per-Space advisory lock, so two starts cannot both pass.
 
 use mp_contracts::model_plane::v1 as pb;
 use mp_contracts::model_plane::v1::space_browser_read_server::SpaceBrowserRead;
+use mp_contracts::space_browser::capacity_admits;
 use mp_contracts::zdr_refusal::Refusal;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
+use tonic::metadata::MetadataValue;
 use tonic::{Request, Response, Status};
 
 use crate::auth::{authorize_operation, identity, VerifiedIdentity};
+use crate::run_phase::ERROR_CODE_TRAILER;
 
 /// The scope a service caller holds for these reads. A user credential needs no scope
 /// (`authorize_operation`); its org and, for [`resolve_run_space`], its ownership are checked instead.
@@ -22,7 +28,7 @@ const SPACE_BROWSER_READ_SCOPE: &str = "session:read";
 /// Browser runs of one Space in flight. Only runs the gateway's browser source started count
 /// (`configured_source`), and a run in a terminal state (`completed`, `failed`, `cancelled`) does not.
 /// `$3` is the start key to leave out (empty leaves none out).
-const COUNT_ACTIVE_ROOM_BROWSER_RUNS_SQL: &str = "SELECT COUNT(*)::BIGINT \
+pub(crate) const COUNT_ACTIVE_ROOM_BROWSER_RUNS_SQL: &str = "SELECT COUNT(*)::BIGINT \
     FROM runs r \
     JOIN managed_run_terminalization_outbox o ON o.run_id = r.id \
     WHERE r.org_id = $1 \
@@ -54,6 +60,77 @@ fn refuse_zero_retention(caller: &VerifiedIdentity) -> Result<(), Status> {
             .grpc_status(tonic::Code::FailedPrecondition));
     }
     Ok(())
+}
+
+/// The typed refusal code of a room browser start over its Space's cap (W3-FIX-6). It is the gRPC
+/// message and the `x-mp-error-code` trailer; model-gateway answers 429 with it.
+pub(crate) const BROWSER_CAPACITY_CODE: &str = "browser_capacity";
+
+/// The refusal of a room browser start while its Space already has its runs in flight:
+/// `resource_exhausted`, with the `browser_capacity` message and trailer.
+pub(crate) fn browser_capacity_status() -> Status {
+    let mut status = Status::resource_exhausted(BROWSER_CAPACITY_CODE);
+    status.metadata_mut().insert(
+        ERROR_CODE_TRAILER,
+        MetadataValue::from_static(BROWSER_CAPACITY_CODE),
+    );
+    status
+}
+
+/// Admits a `gateway_browser` run on a Space thread into its Space, or refuses it at the cap
+/// (SD-23: `ROOM_RUNS_PER_SPACE` runs in flight per Space). Call inside the start transaction, before
+/// the run row is written. A thread outside any Space passes untouched, and so does a thread that is
+/// not `user_id`'s: the start's own insert refuses that one.
+///
+/// The per-Space advisory lock is taken before the count and held until the start commits, so a
+/// second start in the same Space waits and then counts the first run. The count is the same SQL the
+/// model-gateway pre-check reads. A count that cannot be read admits nothing.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn ensure_room_browser_capacity(
+    transaction: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+) -> Result<(), Status> {
+    let space_id = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT space_id FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| {
+        tracing::warn!(error = %error, "room browser capacity thread read failed");
+        Status::unavailable("browser run capacity is unavailable")
+    })?
+    .flatten();
+    let Some(space_id) = space_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(());
+    };
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("space-browser-run-cap\u{1f}{org_id}\u{1f}{space_id}"))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "room browser capacity lock failed");
+            Status::unavailable("browser run capacity is unavailable")
+        })?;
+    let active = sqlx::query_scalar::<_, i64>(COUNT_ACTIVE_ROOM_BROWSER_RUNS_SQL)
+        .bind(org_id)
+        .bind(&space_id)
+        .bind("")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "room browser capacity count failed");
+            Status::unavailable("browser run capacity is unavailable")
+        })?;
+    if capacity_admits(u32::try_from(active).unwrap_or(u32::MAX)) {
+        Ok(())
+    } else {
+        Err(browser_capacity_status())
+    }
 }
 
 #[tonic::async_trait]

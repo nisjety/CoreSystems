@@ -927,6 +927,17 @@ pub(crate) async fn start_managed_run_with_wake_inner(
     if persisted.parent_run_id.is_empty() && !persisted.create_metadata_thread {
         crate::run_phase::ensure_thread_idle(&mut transaction, &request.org_id, &thread_id).await?;
     }
+    // W3-FIX-6: a room browser start on a Space thread is admitted under the Space's cap. The count
+    // runs under the Space's advisory lock in this transaction, so two starts cannot both pass it.
+    if source == pb::ManagedRunSource::GatewayBrowser {
+        crate::space::browser_read::ensure_room_browser_capacity(
+            &mut transaction,
+            &request.org_id,
+            &request.user_id,
+            &thread_id,
+        )
+        .await?;
+    }
     let run_id = new_ulid();
     insert_managed_run_started(
         &mut transaction,
