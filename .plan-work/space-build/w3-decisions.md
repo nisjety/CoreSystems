@@ -18,3 +18,13 @@
 | D14 | Older routes missing ZDR (POST /api/v1/spaces/{ref}/agents, PUT /api/v1/agents/{id}/draft) | Fix now | gateway ZDR guards + registry rows |
 | D15 | Registry scope | Extend registry to Control internal decision routes and Data-plane (wiki-store) routes, with lints | contract JSON + lint |
 | Next | | Code decisions on space-w3, then compile pass (cargo check / go build / tsc) and fix compile errors. Still no tests. | |
+
+## Round 2 (2026-11-16, post-compile-pass)
+
+| # | Topic | Decision | Work |
+|---|---|---|---|
+| D16 | Browser grant revoke (was D5 open item) | Revoke immediately: give model-gateway a broker service account with `browser:write` | Service-account change (principal train) + model-gateway revoke call at run end |
+| D17 | D9 old-notes Space-kind lookup | Option (a): Control signs the answer, gateway relays it to session-core | Control issuer for "is this space the caller's personal space"; gateway relay route; session-core RestoreMemory uses it instead of refusing unknown-kind threads |
+| D18 | D8 room history for new members | Confirmed as described: default sees past conversation; invite option hides it; admin can later reveal, optionally from a date; canvas follows the same rule | New feature: Control per-member history visibility (all / since-join / since-date), invite option, admin control; session-core + canvas honour it; SPA invite + admin UI |
+| D19 | Ownerless org agent admin | Yes: org admins get a management screen (edit/suspend/retire) | Control admin routes for org-visible ownerless agents; gateway + SPA admin UI |
+| D20 | ZDR deletes (skills/plugins/schedules) | Registry wins: allow deletes under ZDR (deletion removes content, does not persist it) | Revert the W3-DEC-ZDR2 refusal guards on the DELETE routes for skills/plugins/schedules; keep guards on create/update/publish/restore/import; fix registry rows to match (delete rows stay/become allowed, non-delete rows stay refuse) |
