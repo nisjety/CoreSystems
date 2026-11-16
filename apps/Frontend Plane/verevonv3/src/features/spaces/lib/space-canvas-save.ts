@@ -1,8 +1,9 @@
 /**
- * The room canvas's save path as the SPA runs it (WS19-S6): the draft rules wiki-store also enforces, the one
- * action a save goes through, the save attempt a retry keeps, and which refusals mean the head moved (reload and
- * decide, never a plain failure). Sequencing only: Control and Data Plane decide every write, and the codes are the
- * gateway's (apps/gateway/src/domains/spaces/canvas.rs).
+ * The room canvas's write path as the SPA runs it (WS19-S6, restore in WS19-S7): the draft rules wiki-store also
+ * enforces, the one action a save goes through, the save attempt a retry keeps, and which refusals mean the head moved
+ * (reload and decide, never a plain failure). A restore is a write of the same kind through its own action. Sequencing
+ * only: Control and Data Plane decide every write, and the codes are the gateway's
+ * (apps/gateway/src/domains/spaces/canvas.rs).
  */
 import { executeAction } from '@/shared/actions/action-client'
 import type { ActionActor } from '@/shared/actions/types'
@@ -123,6 +124,58 @@ export async function saveSpaceCanvasVersion(
       spaceRef,
       expectedVersionId: input.expectedVersionId,
       content: input.content,
+      clientSaveId: input.clientSaveId,
+    },
+    { idempotencyKey: input.clientSaveId },
+  )
+  return spaceCanvasWriteResultFrom(execution.result)
+}
+
+/**
+ * The prefix of a restore's client id. The gateway derives every write's idempotency key as `canvas-save-` plus the
+ * client id, for a save and for a restore alike (`save_idempotency_key`, canvas.rs), so a restore's id carries this
+ * prefix and can never equal a save's id, which is a bare UUID.
+ */
+export const CANVAS_RESTORE_ID_PREFIX = 'canvas-restore-'
+
+/** One restore attempt: the version it copies, the head it is written over, and the id it is sent under. */
+export type PendingRestore = {
+  readonly clientSaveId: string
+  readonly versionId: string
+  readonly expectedVersionId: string | null
+}
+
+/**
+ * The attempt a restore is sent under. A retry of the same version over the same head keeps its id, so the write is
+ * replayed; another version or another head gets a new id.
+ */
+export function pendingRestoreFor(
+  previous: PendingRestore | null,
+  versionId: string,
+  expectedVersionId: string | null,
+): PendingRestore {
+  if (previous && previous.versionId === versionId && previous.expectedVersionId === expectedVersionId) return previous
+  return { clientSaveId: `${CANVAS_RESTORE_ID_PREFIX}${crypto.randomUUID()}`, versionId, expectedVersionId }
+}
+
+/**
+ * Makes an earlier version of the room canvas the new head through the action registry
+ * (`spaces.restore_canvas_version`). The answer is the restore's own: a stored version, which is a new head with
+ * change_kind `restore`, or the unchanged head when that head already holds the text. A refusal arrives as the
+ * ApiError the gateway sent, and is read by the same isStaleSaveRefusal and isAmbiguousSaveFailure as a save.
+ */
+export async function restoreSpaceCanvasVersion(
+  spaceRef: string,
+  actor: ActionActor,
+  input: { readonly versionId: string; readonly expectedVersionId: string | null; readonly clientSaveId: string },
+): Promise<SpaceCanvasWriteResult> {
+  const execution = await executeAction(
+    'spaces.restore_canvas_version',
+    actor,
+    {
+      spaceRef,
+      versionId: input.versionId,
+      expectedVersionId: input.expectedVersionId,
       clientSaveId: input.clientSaveId,
     },
     { idempotencyKey: input.clientSaveId },

@@ -162,6 +162,43 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
 }
 
 /**
+ * {@link requestJson} for an answer whose `meta` the caller needs beside `data`, such as the `next_cursor` of a page.
+ * The headers, the dev bypass and the typed error are requestJson's; the envelope is returned whole, with `meta` null
+ * when the answer carries none.
+ */
+export async function requestJsonPage<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<{ readonly data: T; readonly meta: Readonly<Record<string, unknown>> | null }> {
+  const headers = new Headers(init?.headers)
+  headers.set('Accept', 'application/json')
+  if (init?.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  applyDevAuth(headers)
+
+  const response = await fetch(`${gatewayBaseUrl()}${path}`, {
+    ...init,
+    credentials: 'include',
+    headers,
+  })
+
+  const body = (await response.json().catch(() => null)) as Envelope<T> | Record<string, unknown> | null
+
+  if (!response.ok) {
+    const failure = apiErrorFromResponse(body, response)
+    signalSessionExpiry(failure, path)
+    throw failure
+  }
+
+  const meta = body && typeof body === 'object' && 'meta' in body ? (body as { meta?: unknown }).meta : null
+  return {
+    data: unwrap(body as Envelope<T>),
+    meta: meta !== null && typeof meta === 'object' && !Array.isArray(meta) ? (meta as Record<string, unknown>) : null,
+  }
+}
+
+/**
  * Multipart variant of {@link requestJson}. The browser sets the
  * `multipart/form-data` boundary itself, so we must NOT set a Content-Type
  * header (doing so would corrupt the boundary). Used for file uploads.

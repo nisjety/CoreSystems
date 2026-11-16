@@ -1,10 +1,12 @@
-import { createEffect, createMemo, createSignal, onCleanup, Show } from 'solid-js'
+import { useBeforeLeave } from '@solidjs/router'
+import { createEffect, createMemo, createSignal, onCleanup, Show, type JSX } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ActionActor } from '@/shared/actions/types'
 import { ApiError, clientError } from '@/shared/api/http'
 import {
   getSpaceCanvas,
+  getSpaceCanvasVersion,
   type SpaceCanvas,
   type SpaceCanvasRead,
   type SpaceCanvasVersion,
@@ -14,7 +16,7 @@ import {
 import { useI18n } from '@/shared/i18n'
 import { canvasErrorMessage } from '@/shared/i18n/errors'
 
-import { CANVAS_REFRESH_MS, CANVAS_TAB_ID, canvasVersionMeta } from '../lib/space-canvas'
+import { CANVAS_REFRESH_MS, CANVAS_TAB_ID, canvasLeavesRoom, canvasVersionMeta, sameCanvasText } from '../lib/space-canvas'
 import {
   CANVAS_MAX_BYTES,
   canvasDraftProblem,
@@ -22,12 +24,17 @@ import {
   headAfterSave,
   isAmbiguousSaveFailure,
   isStaleSaveRefusal,
+  pendingRestoreFor,
   pendingSaveFor,
+  restoreSpaceCanvasVersion,
   saveSpaceCanvasVersion,
+  type PendingRestore,
   type PendingSave,
 } from '../lib/space-canvas-save'
 import { formatWhenWithTime } from '../lib/space-thread-presentation'
 import { useActiveSpaceTab } from './SpaceCockpit'
+import { SpaceCanvasDiff } from './SpaceCanvasDiff'
+import { SpaceCanvasHistory } from './SpaceCanvasHistory'
 import './space-canvas.css'
 
 /**
@@ -54,6 +61,14 @@ import './space-canvas.css'
  * latest. A create that landed before its retry is recognised by its text and is never shown as a failure. A
  * refresh during an edit never replaces the draft; it shows that a newer version exists.
  *
+ * # History, diff and restore (WS19-S7)
+ *
+ * The history (SpaceCanvasHistory) lists the versions, compares any two (SpaceCanvasDiff) and restores an earlier one
+ * as the new head through `spaces.restore_canvas_version`, under its own client id prefix. A restore that meets a newer
+ * head is read as a save is: the latest version is loaded and, unless it already holds the restored text, the conflict
+ * banner shows the difference. The conflict banner's "Review differences" compares the latest version with the text the
+ * write would store. Leaving the room with an edited draft asks first.
+ *
  * Presentation only: the gateway and the owning planes decide who may read or write.
  */
 export interface SpaceCanvasPanelProps {
@@ -75,6 +90,9 @@ type PanelState =
 /** The latest version a conflict loaded, with its text; null when the Space has no canvas yet. */
 type Latest = { readonly canvas: SpaceCanvas; readonly head: SpaceCanvasVersion } | null
 
+/** A restore that met a newer head: the latest version, and the version the person chose, with its text. */
+type RestoreConflict = { readonly latest: Latest; readonly target: SpaceCanvasVersion } | null
+
 /** An open edit: the text it started from, the head the draft is written over, and what the last save said. */
 type EditSession = {
   readonly startText: string
@@ -87,10 +105,72 @@ type EditSession = {
   readonly failure: { readonly error: unknown } | null
 }
 
-type Notice = { readonly kind: 'saved'; readonly versionNo: number } | { readonly kind: 'unchanged' }
+type Notice =
+  | { readonly kind: 'saved'; readonly versionNo: number }
+  | { readonly kind: 'restored'; readonly fromVersionNo: number; readonly versionNo: number }
+  | { readonly kind: 'unchanged' }
 
 function headVersionIdOf(current: PanelState): string | null {
   return current.kind === 'view' ? current.head.versionId : null
+}
+
+type ConflictBannerProps = {
+  readonly title: string
+  readonly hint: string
+  readonly latest: Latest
+  readonly roster: () => readonly SpaceRosterMember[]
+  /** The text the person wants the canvas to hold, compared with the latest version. */
+  readonly after: () => string
+  readonly actions: JSX.Element
+}
+
+/**
+ * The banner of a write that met a newer head (WS19-S6 for a save, WS19-S7 for a restore): who saved the latest
+ * version, and "Review differences" against the text the write would store, shown on demand.
+ */
+function CanvasConflictBanner(props: ConflictBannerProps) {
+  const i18n = useI18n()
+  const tr = i18n.tr
+  const [reviewing, setReviewing] = createSignal(false)
+  return (
+    <div class="verevon-space-canvas__banner" role="alert">
+      <p class="verevon-space-canvas__banner-title">{props.title}</p>
+      <p>{props.hint}</p>
+      <Show
+        when={props.latest}
+        fallback={
+          <p class="verevon-space-canvas__meta">{tr('Lerretet har ingen versjon ennå.', 'The canvas has no version yet.')}</p>
+        }
+      >
+        {(latest) => (
+          <>
+            <p class="verevon-space-canvas__meta">
+              {canvasVersionMeta(
+                latest().head,
+                props.roster(),
+                formatWhenWithTime(latest().head.createdAt, { locale: i18n.locale() }),
+                tr,
+              )}
+            </p>
+            <div class="verevon-space-canvas__toolbar">
+              <button
+                type="button"
+                class="verevon-space-secondary-action"
+                aria-expanded={reviewing()}
+                onClick={() => setReviewing((open) => !open)}
+              >
+                {reviewing() ? tr('Skjul endringene', 'Hide differences') : tr('Se over endringene', 'Review differences')}
+              </button>
+            </div>
+            <Show when={reviewing()}>
+              <SpaceCanvasDiff before={latest().head.content ?? ''} after={props.after()} />
+            </Show>
+          </>
+        )}
+      </Show>
+      <div class="verevon-space-canvas__toolbar">{props.actions}</div>
+    </div>
+  )
 }
 
 export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
@@ -101,6 +181,10 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
   const [state, setState] = createSignal<PanelState>({ kind: 'loading' })
   const [editing, setEditing] = createSignal<EditSession | null>(null)
   const [notice, setNotice] = createSignal<Notice | null>(null)
+  const [historyOpen, setHistoryOpen] = createSignal(false)
+  const [restoring, setRestoring] = createSignal(false)
+  const [restoreFailure, setRestoreFailure] = createSignal<{ readonly error: unknown } | null>(null)
+  const [restoreConflict, setRestoreConflict] = createSignal<RestoreConflict>(null)
   const viewState = createMemo(() => {
     const current = state()
     return current.kind === 'view' ? current : undefined
@@ -168,6 +252,8 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
   let shownRoom = ''
   // The save attempt the open draft is sent under. A retry of the same draft over the same head keeps its id.
   let pendingSave: PendingSave | null = null
+  // The restore attempt in flight. A retry of the same version over the same head keeps its id.
+  let pendingRestore: PendingRestore | null = null
 
   onCleanup(() => {
     callId += 1
@@ -180,6 +266,19 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
   }
   window.addEventListener('beforeunload', guardUnload)
   onCleanup(() => window.removeEventListener('beforeunload', guardUnload))
+
+  // Leaving the room with an edited draft asks first: a move to another room, out of the Spaces, or back or forward.
+  // A move within this room keeps the panel and its draft mounted, so it is not asked about. Declining keeps the page.
+  useBeforeLeave((event) => {
+    if (event.defaultPrevented || !dirty() || !canvasLeavesRoom(event.to, props.spaceRef)) return
+    const leave = window.confirm(
+      tr(
+        'Teksten din i lerretet er ikke lagret. Forlate rommet og forkaste den?',
+        'Your canvas text is not saved. Leave the room and discard it?',
+      ),
+    )
+    if (!leave) event.preventDefault()
+  })
 
   const applyRead = (answer: SpaceCanvasRead) => {
     if (answer.unchanged) return
@@ -196,8 +295,12 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
     if (spaceRef !== shownRoom) {
       shownRoom = spaceRef
       pendingSave = null
+      pendingRestore = null
       setEditing(null)
       setNotice(null)
+      setRestoreConflict(null)
+      setRestoreFailure(null)
+      setHistoryOpen(false)
       setState({ kind: 'loading' })
     } else if (!quiet && state().kind !== 'view') {
       setState({ kind: 'loading' })
@@ -271,10 +374,15 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
   const noticeText = (current: Notice): string =>
     current.kind === 'saved'
       ? tr(`Lagret som versjon ${current.versionNo}.`, `Saved as version ${current.versionNo}.`)
-      : tr(
-          'Lerretet har allerede denne teksten, så ingen ny versjon ble lagret.',
-          'The canvas already has this text, so no new version was stored.',
-        )
+      : current.kind === 'restored'
+        ? tr(
+            `Versjon ${current.fromVersionNo} er gjenopprettet som versjon ${current.versionNo}.`,
+            `Restored version ${current.fromVersionNo} as version ${current.versionNo}.`,
+          )
+        : tr(
+            'Lerretet har allerede denne teksten, så ingen ny versjon ble lagret.',
+            'The canvas already has this text, so no new version was stored.',
+          )
 
   // A save landed: the draft closes, the view shows the version it made, and the head is read again.
   const settleSaved = (spaceRef: string, result: SpaceCanvasWriteResult, content: string) => {
@@ -361,6 +469,72 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
     void loadLatest(props.spaceRef, session.draft)
   }
 
+  // A restore that landed: the notice names both versions, and the head is read again so the view carries its text.
+  const settleRestored = (spaceRef: string, result: SpaceCanvasWriteResult, target: SpaceCanvasVersion) => {
+    setRestoreConflict(null)
+    setNotice(
+      result.unchanged
+        ? { kind: 'unchanged' }
+        : { kind: 'restored', fromVersionNo: target.versionNo, versionNo: result.version.versionNo },
+    )
+    void refreshAfterSave(spaceRef)
+  }
+
+  // The latest version after a restore met a newer head. A latest version that already holds the restored text
+  // settles the restore as unchanged; any other goes to the banner, with the text the person chose for the difference.
+  const loadLatestForRestore = async (spaceRef: string, target: SpaceCanvasVersion) => {
+    const id = ++callId
+    try {
+      const answer = await getSpaceCanvas(spaceRef)
+      if (answer.unchanged) return
+      if (id === callId) applyRead(answer)
+      if (spaceRef !== props.spaceRef) return
+      const latest: Latest =
+        answer.canvas !== null && answer.head !== null ? { canvas: answer.canvas, head: answer.head } : null
+      if (latest !== null && sameCanvasText(latest.head, target)) {
+        setNotice({ kind: 'unchanged' })
+        return
+      }
+      const chosen = await getSpaceCanvasVersion(spaceRef, target.versionId)
+      if (spaceRef === props.spaceRef) setRestoreConflict({ latest, target: chosen })
+    } catch (error) {
+      if (spaceRef === props.spaceRef) setRestoreFailure({ error })
+    }
+  }
+
+  // Makes an earlier version the new head through `spaces.restore_canvas_version`, under a client id of its own. A
+  // refusal that means the head moved is read as a save's is: the latest version is loaded, and the restore is decided
+  // there. A restore is never sent through the save action.
+  const restoreVersion = async (target: SpaceCanvasVersion, expectedVersionId: string | null) => {
+    const who = actor()
+    if (!who || !writeAllowed() || restoring()) return
+    const spaceRef = props.spaceRef
+    const attempt = pendingRestoreFor(pendingRestore, target.versionId, expectedVersionId)
+    pendingRestore = attempt
+    setRestoring(true)
+    setRestoreFailure(null)
+    setRestoreConflict(null)
+    try {
+      const result = await restoreSpaceCanvasVersion(spaceRef, who, {
+        versionId: target.versionId,
+        expectedVersionId,
+        clientSaveId: attempt.clientSaveId,
+      })
+      pendingRestore = null
+      if (spaceRef === props.spaceRef) settleRestored(spaceRef, result, target)
+    } catch (error) {
+      if (isStaleSaveRefusal(error)) {
+        pendingRestore = null
+        await loadLatestForRestore(spaceRef, target)
+      } else {
+        if (!isAmbiguousSaveFailure(error)) pendingRestore = null
+        if (spaceRef === props.spaceRef) setRestoreFailure({ error })
+      }
+    } finally {
+      setRestoring(false)
+    }
+  }
+
   return (
     <section class="verevon-space-view verevon-space-canvas" aria-labelledby="space-canvas-title">
       <div class="verevon-space-view__heading">
@@ -405,8 +579,8 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
         <Show when={viewState()}>
           {(view) => (
             <>
-              <Show when={view().canWrite && view().head.content !== undefined && actor() !== null}>
-                <div class="verevon-space-canvas__toolbar">
+              <div class="verevon-space-canvas__toolbar">
+                <Show when={view().canWrite && view().head.content !== undefined && actor() !== null}>
                   <button
                     type="button"
                     class="verevon-space-secondary-action"
@@ -414,8 +588,16 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
                   >
                     {tr('Rediger', 'Edit')}
                   </button>
-                </div>
-              </Show>
+                </Show>
+                <button
+                  type="button"
+                  class="verevon-space-secondary-action"
+                  aria-expanded={historyOpen()}
+                  onClick={() => setHistoryOpen((open) => !open)}
+                >
+                  {historyOpen() ? tr('Skjul historikken', 'Hide history') : tr('Historikk', 'History')}
+                </button>
+              </div>
               <p class="verevon-space-canvas__meta">
                 {canvasVersionMeta(
                   view().head,
@@ -427,6 +609,70 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
               <div class="verevon-space-canvas__body">
                 <ChatMarkdown content={view().head.content ?? ''} />
               </div>
+              <Show when={restoreConflict()}>
+                {(conflict) => (
+                  <CanvasConflictBanner
+                    title={tr(
+                      'Noen andre har lagret en nyere versjon. Gjenopprettingen ble ikke lagret.',
+                      'Someone else saved a newer version. The restore was not saved.',
+                    )}
+                    hint={tr(
+                      'Se over endringene under. Gjenopprett versjonen over den nyeste, eller lukk meldingen.',
+                      'Review the differences below. Restore the version over the latest, or dismiss this message.',
+                    )}
+                    latest={conflict().latest}
+                    roster={() => props.roster?.() ?? []}
+                    after={() => conflict().target.content ?? ''}
+                    actions={
+                      <>
+                        <button
+                          type="button"
+                          class="verevon-space-primary-action"
+                          disabled={restoring() || conflict().latest === null}
+                          onClick={() =>
+                            void restoreVersion(conflict().target, conflict().latest?.head.versionId ?? null)
+                          }
+                        >
+                          {tr(
+                            `Gjenopprett versjon ${conflict().target.versionNo} over den nyeste`,
+                            `Restore version ${conflict().target.versionNo} over the latest`,
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          class="verevon-space-secondary-action"
+                          onClick={() => setRestoreConflict(null)}
+                        >
+                          {tr('Lukk', 'Dismiss')}
+                        </button>
+                      </>
+                    }
+                  />
+                )}
+              </Show>
+              <Show when={restoreFailure()}>
+                {(failure) => (
+                  <p class="verevon-space-canvas__error" role="alert">
+                    {canvasErrorMessage(failure().error, tr)}
+                  </p>
+                )}
+              </Show>
+              <Show when={restoring()}>
+                <p class="verevon-space-canvas__meta" role="status">
+                  {tr('Gjenoppretter ...', 'Restoring ...')}
+                </p>
+              </Show>
+              <Show when={historyOpen()}>
+                <SpaceCanvasHistory
+                  spaceRef={props.spaceRef}
+                  roster={props.roster}
+                  headVersionId={view().head.versionId}
+                  canRestore={view().canWrite && actor() !== null}
+                  restoring={restoring()}
+                  onRestore={(version) => void restoreVersion(version, view().head.versionId)}
+                  onClose={() => setHistoryOpen(false)}
+                />
+              </Show>
             </>
           )}
         </Show>
@@ -444,60 +690,39 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
           >
             <Show when={session().conflict}>
               {(conflict) => (
-                <div class="verevon-space-canvas__banner" role="alert">
-                  <p class="verevon-space-canvas__banner-title">
-                    {tr(
-                      'Noen andre har lagret en nyere versjon. Teksten din er fortsatt her.',
-                      'Someone else saved a newer version. Your text is still here.',
-                    )}
-                  </p>
-                  <p>
-                    {tr(
-                      'Les den nyeste versjonen under. Lagre teksten din som en ny versjon over den, eller forkast teksten din.',
-                      'Read the latest version below. Save your text as a new version over it, or discard your text.',
-                    )}
-                  </p>
-                  <Show
-                    when={conflict().latest}
-                    fallback={
-                      <p class="verevon-space-canvas__meta">
-                        {tr('Lerretet har ingen versjon ennå.', 'The canvas has no version yet.')}
-                      </p>
-                    }
-                  >
-                    {(latest) => (
-                      <>
-                        <p class="verevon-space-canvas__meta">
-                          {canvasVersionMeta(
-                            latest().head,
-                            props.roster?.() ?? [],
-                            formatWhenWithTime(latest().head.createdAt, { locale: i18n.locale() }),
-                            tr,
-                          )}
-                        </p>
-                        <pre class="verevon-space-canvas__latest">{latest().head.content ?? ''}</pre>
-                      </>
-                    )}
-                  </Show>
-                  <div class="verevon-space-canvas__toolbar">
-                    <button
-                      type="button"
-                      class="verevon-space-primary-action"
-                      disabled={!canSave()}
-                      onClick={() => void saveDraft()}
-                    >
-                      {tr('Lagre min tekst som ny versjon', 'Save my text as the new version')}
-                    </button>
-                    <button
-                      type="button"
-                      class="verevon-space-secondary-action"
-                      disabled={session().busy}
-                      onClick={discardDraft}
-                    >
-                      {tr('Last nyeste og forkast min tekst', 'Load latest and discard my text')}
-                    </button>
-                  </div>
-                </div>
+                <CanvasConflictBanner
+                  title={tr(
+                    'Noen andre har lagret en nyere versjon. Teksten din er fortsatt her.',
+                    'Someone else saved a newer version. Your text is still here.',
+                  )}
+                  hint={tr(
+                    'Se over endringene under. Lagre teksten din som en ny versjon over den, eller forkast teksten din.',
+                    'Review the differences below. Save your text as a new version over it, or discard your text.',
+                  )}
+                  latest={conflict().latest}
+                  roster={() => props.roster?.() ?? []}
+                  after={() => session().draft}
+                  actions={
+                    <>
+                      <button
+                        type="button"
+                        class="verevon-space-primary-action"
+                        disabled={!canSave()}
+                        onClick={() => void saveDraft()}
+                      >
+                        {tr('Lagre min tekst som ny versjon', 'Save my text as the new version')}
+                      </button>
+                      <button
+                        type="button"
+                        class="verevon-space-secondary-action"
+                        disabled={session().busy}
+                        onClick={discardDraft}
+                      >
+                        {tr('Last nyeste og forkast min tekst', 'Load latest and discard my text')}
+                      </button>
+                    </>
+                  }
+                />
               )}
             </Show>
 

@@ -9,8 +9,7 @@
 // `spaces.restore_canvas_version`, see features/spaces/lib/space-canvas-save.ts), and their answer is read by
 // `spaceCanvasWriteResultFrom`. A Space with no canvas yet answers canvas and head null: an empty room is a state,
 // not an error.
-import { apiErrorFromResponse, clientError, requestJson, signalSessionExpiry } from '../http'
-import { gatewayBaseUrl } from '../config'
+import { clientError, requestJson, requestJsonPage } from '../http'
 
 /** Who wrote a version: a member, or an agent run acting for the member who asked for it. */
 export type SpaceCanvasAuthorKind = 'user' | 'agent'
@@ -170,8 +169,9 @@ export function spaceCanvasWriteResultFrom(body: unknown): SpaceCanvasWriteResul
 }
 
 /**
- * One page of the canvas history, newest first, without text. The envelope carries `meta.next_cursor`, which
- * `requestJson` drops, so this reads the response whole (the same shape as the audit client's page reader).
+ * One page of the canvas history, newest first, without text. `requestJsonPage` keeps the envelope's `meta`, which
+ * names the next older page (`meta.next_cursor`, a number on the wire and a digit string here). A row that is not a
+ * version fails the whole page: a history that cannot be read in full is an outage, never a shorter list.
  */
 export async function listSpaceCanvasVersions(
   spaceRef: string,
@@ -180,22 +180,15 @@ export async function listSpaceCanvasVersions(
   const search = new URLSearchParams()
   if (options.limit !== undefined) search.set('limit', String(options.limit))
   if (options.cursor) search.set('cursor', options.cursor)
-  const path = `${spaceCanvasPath(spaceRef)}/versions${search.toString() ? `?${search.toString()}` : ''}`
-  const response = await fetch(`${gatewayBaseUrl()}${path}`, {
-    credentials: 'include',
-    headers: { Accept: 'application/json' },
-  })
-  const envelope = wireRecord(await response.json().catch(() => null))
-  if (!response.ok) {
-    const failure = apiErrorFromResponse(envelope, response)
-    signalSessionExpiry(failure, path)
-    throw failure
+  const query = search.toString()
+  const { data, meta } = await requestJsonPage<unknown>(`${spaceCanvasPath(spaceRef)}/versions${query ? `?${query}` : ''}`)
+  const rows: readonly unknown[] = Array.isArray(data) ? data : []
+  const versions: SpaceCanvasVersion[] = []
+  for (const row of rows) {
+    const version = versionFrom(wireRecord(row))
+    if (!version) throw clientError(503, 'canvas_unavailable')
+    versions.push(version)
   }
-  const rows: readonly unknown[] = Array.isArray(envelope?.data) ? (envelope?.data as readonly unknown[]) : []
-  const versions = rows
-    .map((row) => versionFrom(wireRecord(row)))
-    .filter((version): version is SpaceCanvasVersion => version !== null)
-  const meta = wireRecord(envelope?.meta)
   const next = meta?.next_cursor
   const nextCursor = typeof next === 'number' && Number.isFinite(next) ? String(next) : text(next)
   return { versions, nextCursor }

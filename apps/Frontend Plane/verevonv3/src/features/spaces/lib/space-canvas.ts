@@ -54,3 +54,72 @@ export function canvasVersionMeta(
   const author = canvasMemberName(roster, version.authorId) ?? tr('et medlem', 'a member')
   return tr(`Versjon ${number}, lagret av ${author}${timeSuffix}`, `Version ${number}, saved by ${author}${timeSuffix}`)
 }
+
+/** One page of the history: the most versions the gateway lists at once (wiki-store's page limit). */
+export const CANVAS_HISTORY_PAGE = 50
+
+function decodedSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return segment
+  }
+}
+
+/**
+ * Whether a navigation leaves the room the panel shows, so that an open draft may be lost. A path under another
+ * Space, a path outside the Spaces, and back or forward (a number, whose target this cannot name) all leave it. A
+ * hash, a tab or a message link in this same Space does not: the panel and its draft stay mounted.
+ */
+export function canvasLeavesRoom(to: string | number, spaceRef: string): boolean {
+  if (typeof to !== 'string') return true
+  const match = /^\/spaces\/([^/?#]+)/.exec(to)
+  if (!match) return true
+  return decodedSegment(match[1] ?? '') !== spaceRef
+}
+
+/**
+ * Whether two versions hold the same text, by the hash of their bytes the gateway sends with each. Two empty hashes
+ * say nothing, so they never match.
+ */
+export function sameCanvasText(
+  a: Pick<SpaceCanvasVersion, 'contentSha256'>,
+  b: Pick<SpaceCanvasVersion, 'contentSha256'>,
+): boolean {
+  return a.contentSha256 !== '' && a.contentSha256 === b.contentSha256
+}
+
+/**
+ * The compare selection after a version is picked: at most two, the older pick dropped when a third is picked, and a
+ * version picked again is taken back out.
+ */
+export function toggleCompareSelection<T extends { readonly versionId: string }>(
+  selected: readonly T[],
+  version: T,
+): readonly T[] {
+  if (selected.some((item) => item.versionId === version.versionId)) {
+    return selected.filter((item) => item.versionId !== version.versionId)
+  }
+  return [...selected, version].slice(-2)
+}
+
+/** Two versions in the order a comparison reads them: the older (lower number) first. */
+export function canvasCompareOrder<T extends { readonly versionNo: number }>(a: T, b: T): readonly [T, T] {
+  return a.versionNo <= b.versionNo ? [a, b] : [b, a]
+}
+
+/**
+ * What a history line says about a restore: the number of the version it copied when that version is in the list
+ * on screen, and a generic line when it is not. Null for an edit or a create.
+ */
+export function canvasChangeNote(
+  version: SpaceCanvasVersion,
+  versionNoOf: (versionId: string) => number | undefined,
+  tr: Translate,
+): string | null {
+  if (version.changeKind !== 'restore') return null
+  const from = version.restoredFromVersionId ? versionNoOf(version.restoredFromVersionId) : undefined
+  return from === undefined
+    ? tr('Gjenopprettet fra en tidligere versjon', 'Restored from an earlier version')
+    : tr(`Gjenopprettet fra versjon ${from}`, `Restored from version ${from}`)
+}
