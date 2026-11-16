@@ -572,3 +572,18 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 | Convex tsc --noEmit | clean after ebdc4f545 |
 - Real bugs caught: core.ts entry shadowing crashed normalizeSpaceThreadTurns at runtime; 3 components used onMount which solid-js 2.0 rc lacks (never mounted).
 - Not checked: test targets (--tests/--all-targets), clippy, lint.
+
+## Round 2 decisions (D16-D20)
+| id | decision | status | commit |
+|---|---|---|---|
+| W3-DEC-ZDRDEL | D20 | partial (not effective, see follow-up) | 1a717d6c7 |
+| W3-DEC-ZDRDEL2 | D20 follow-up | running | |
+| W3-DEC-ORGAGENT | D19 | running | |
+| W3-DEC-REVOKE | D16 | running | |
+| W3-DEC-KIND | D17 | running | |
+
+### W3-DEC-ZDRDEL (1a717d6c7) PARTIAL
+- Premise wrong: W3-DEC-ZDR2 never guarded gateway DELETE routes for skills/plugins/cron; only 2 registry rows (skill-draft delete, plugin-kill-list delete) needed changing to n/a.
+- P1 NOT EFFECTIVE -> W3-DEC-ZDRDEL2 running: model-gateway proxy_to_capability_core refuses every non-GET under ZDR regardless, so these deletes still 412.
+- P2: DURABLE_MUTATIONS comment in zdr_posture.rs already says deletes are allowed; code doesn't implement it for this proxy.
+- Pin churns with every registry commit; digest for zdr-contract-sync.test.sh:235 not final until the last registry commit of the wave.
