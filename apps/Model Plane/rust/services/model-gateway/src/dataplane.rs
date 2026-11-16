@@ -9,7 +9,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Extension, Json,
 };
 use mp_contracts::dataplane::{
@@ -582,6 +582,30 @@ pub async fn get_document_index_status(
 // Retrieval endpoints — /v1/retrieval/*
 // ============================================================================
 
+/// The header that carries a Control-signed Space decision on a retrieval read (W3-FIX-4).
+const SPACE_DECISION_HEADER: &str = "x-space-decision";
+
+/// Whether a retrieval read is in a Space context. Presence alone counts: a caller that sends the header asked for
+/// a Space, so an empty or unreadable decision is refused too and never falls back to an organisation-wide read.
+fn in_space_context(headers: &HeaderMap) -> bool {
+    headers.contains_key(SPACE_DECISION_HEADER)
+}
+
+/// The typed refusal of an organisation-wide retrieval read made from a Space context (W3-FIX-4). These routes
+/// take no Space decision and return organisation-visible, unlabelled content, so they fail closed (SD-22).
+fn space_scope_unsupported(route: &str) -> HttpJsonError {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": {
+                "code": "space_scope_unsupported",
+                "message": "This retrieval read has no Space scope and is refused for a Space-scoped request.",
+                "details": { "route": route },
+            }
+        })),
+    )
+}
+
 #[derive(Deserialize)]
 pub struct RetrieveBody {
     pub query: String,
@@ -642,8 +666,12 @@ pub async fn retrieve(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedBearer,
+    headers: HeaderMap,
     Json(body): Json<RetrieveBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    if in_space_context(&headers) {
+        return Err(space_scope_unsupported("/v1/retrieval"));
+    }
     let posture = crate::zdr_posture::decide_for(&claims, &crate::zdr_posture::Route::plain(false))
         .map_err(|refusal| crate::zdr_posture::http(&refusal))?;
     let effective_zdr_mode = effective_retrieval_zdr_mode(&posture, body.zdr_mode.as_deref())
@@ -861,8 +889,12 @@ pub async fn get_sources(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedBearer,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    if in_space_context(&headers) {
+        return Err(space_scope_unsupported("/v1/retrieval/sources"));
+    }
     let document_ids: Vec<String> = body["document_ids"]
         .as_array()
         .map(|a| {
@@ -899,8 +931,12 @@ pub async fn get_chunks(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedBearer,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    if in_space_context(&headers) {
+        return Err(space_scope_unsupported("/v1/retrieval/chunks"));
+    }
     let knowledge_ids: Vec<String> = body["knowledge_ids"]
         .as_array()
         .map(|a| {
@@ -955,8 +991,12 @@ pub async fn pack_context(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedBearer,
+    headers: HeaderMap,
     Json(body): Json<PackContextBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    if in_space_context(&headers) {
+        return Err(space_scope_unsupported("/v1/retrieval/pack"));
+    }
     let request = user_data_request(
         ret_pb::PackContextRequest {
             org_id: claims.org_id,
@@ -1913,6 +1953,7 @@ mod zdr_contract_tests {
             State(state),
             Extension(claims),
             VerifiedBearer::for_test("signed-user-jwt"),
+            axum::http::HeaderMap::new(),
             Json(body),
         )
         .await;
