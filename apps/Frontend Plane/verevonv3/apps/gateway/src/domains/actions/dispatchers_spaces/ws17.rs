@@ -7,6 +7,8 @@
 //!
 //! WS17-S7: `memory.declassify_to_space` rides the core of `domains/spaces/memory_declassify.rs` the same way. Its
 //! input carries the route's three body fields (`memoryId`, `reviewedContent`, `clientRequestId`) and `spaceRef`.
+//!
+//! WS17-S7b: `memory.retract_from_space` rides `retract_memory_core` the same way (`memoryId`, `clientRequestId`, `spaceRef`).
 
 use axum::{http::HeaderMap, response::Response, Json};
 use serde_json::{json, Value};
@@ -15,7 +17,7 @@ use crate::config::AppState;
 use crate::domains::spaces::personal_agents::{
     create_personal_agent_core, put_agent_access_core, set_primary_agent_core, withdraw_agent_core,
 };
-use crate::domains::spaces::memory_declassify::declassify_memory_core;
+use crate::domains::spaces::memory_declassify::{declassify_memory_core, retract_memory_core};
 use crate::domains::spaces::private_panel::open_private_panel_core;
 use crate::middleware::AuthenticatedUser;
 
@@ -136,4 +138,22 @@ pub(in crate::domains::actions) async fn dispatch_memory_declassify_to_space(
     });
     let (status, Json(payload)) = declassify_memory_core(state, user, headers, space_ref, body).await;
     owner_json_response_to_envelope("memory.declassify_to_space", user, status, payload)
+}
+
+/// `memory.retract_from_space` (WS17-S7b): take back a room copy the caller shared (SD-22). Human-only. Input keys are
+/// camelCase (`spaceRef`, `memoryId`, `clientRequestId`); the core keeps the route's snake_case body. Zero Data Retention
+/// does not refuse a removal, so the core does not check it.
+pub(in crate::domains::actions) async fn dispatch_memory_retract_from_space(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let space_ref = input.get("spaceRef").and_then(Value::as_str).unwrap_or_default();
+    let body = json!({
+        "memory_id": input.get("memoryId").cloned().unwrap_or(Value::Null),
+        "client_request_id": input.get("clientRequestId").cloned().unwrap_or(Value::Null),
+    });
+    let (status, Json(payload)) = retract_memory_core(state, user, headers, space_ref, body).await;
+    owner_json_response_to_envelope("memory.retract_from_space", user, status, payload)
 }

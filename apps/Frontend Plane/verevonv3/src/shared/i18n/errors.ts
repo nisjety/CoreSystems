@@ -1376,6 +1376,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_memory_not_authorized: { no: 'Du har ikke tilgang til å administrere minnet i dette rommet.', en: 'You do not have access to manage the memory in this room.' },
   space_memory_unavailable: { no: 'Minnet i rommet er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'The memory in this room is temporarily unavailable. Try again shortly.' },
   memory_declassify_not_authorized: { no: 'Du har ikke tilgang til å dele dette minnet i rommet. Ingenting er delt.', en: 'You do not have access to share this memory to the room. Nothing was shared.' },
+  memory_retract_not_authorized: { no: 'Du har ikke tilgang til å ta dette minnet tilbake fra rommet. Ingenting er endret.', en: 'You do not have access to take this memory back from the room. Nothing was changed.' },
 
   // WS14 document sharing (documents-api share routes)
   shares_disabled: { no: 'Deling er ikke slått på ennå.', en: 'Sharing is not turned on yet.' },
@@ -1650,6 +1651,22 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_decision_mismatch: { no: 'Tilgangen til lerretet kunne ikke bekreftes. Last siden på nytt og prøv igjen.', en: 'Access to the canvas could not be confirmed. Reload the page and try again.' },
   space_decision_digest_mismatch: { no: 'Lerretet ble endret mens du lagret. Last det inn på nytt og prøv igjen.', en: 'The canvas changed while you were saving. Reload it and try again.' },
   zdr_persistence_forbidden: CANVAS_ZDR_COPY,
+
+  // WS18-S6 agent self-API switch (gateway domains/spaces/self_api.rs). feature_disabled, active_membership_required,
+  // agent_binding_not_found and invalid_input keep their copy above. space_role_cannot_manage_agent is worded for the
+  // wake policy above, so the self-API switch words it itself (selfApiErrorMessage in features/spaces/lib/space-self-api.ts).
+  invalid_self_api_request: {
+    no: 'Innstillingen for agentens egne handlinger er ikke gyldig. Ingenting er endret.',
+    en: "The setting for the agent's own actions is not valid. Nothing was changed.",
+  },
+  agent_binding_not_active: {
+    no: 'Agenten er ikke aktiv i rommet akkurat nå, så innstillingen kan ikke endres. Ingenting er endret.',
+    en: 'The agent is not active in this room right now, so this setting cannot be changed. Nothing was changed.',
+  },
+  space_registry_unavailable: {
+    no: 'Innstillingen kunne ikke endres. Ingenting er endret. Prøv igjen om litt.',
+    en: 'The setting could not be changed. Nothing was changed. Try again shortly.',
+  },
 }
 
 /**

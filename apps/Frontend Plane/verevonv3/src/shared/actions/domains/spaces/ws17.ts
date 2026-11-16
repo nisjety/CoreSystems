@@ -111,6 +111,22 @@ const memoryDeclassifyToSpaceOutput = z.object({
   deduplicated: z.boolean(),
 })
 
+// WS17-S7b: a person takes back a room copy they shared (SD-22: the declassifying person retracts; a room manager
+// cannot). `POST /api/v1/spaces/{ref}/memory/retract`, 200 `{data:{memory_id, space_ref, deleted}}`. The browser sends
+// the room copy's id and a retry key and nothing else. Allowed under Zero Data Retention: a removal stores nothing.
+// Human only: an agent never takes back a person's share.
+const memoryRetractFromSpaceInput = z.object({
+  memoryId: z.string().min(1),
+  spaceRef: z.string().min(1),
+  clientRequestId: z.string().trim().min(1).max(128),
+})
+
+const memoryRetractFromSpaceOutput = z.object({
+  memory_id: z.string(),
+  space_ref: z.string(),
+  deleted: z.boolean(),
+})
+
 export const ws17SpaceActions = [
   {
     id: 'agents.create_personal',
@@ -183,5 +199,17 @@ export const ws17SpaceActions = [
     reversible: false,
     inputSchema: memoryDeclassifyToSpaceInput,
     outputSchema: memoryDeclassifyToSpaceOutput,
+  },
+  {
+    id: 'memory.retract_from_space',
+    label: 'Take memory back from room',
+    description:
+      'Take back a memory you shared with a room. It is removed from the room for everyone. Your own memory is not changed. Allowed under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: memoryRetractFromSpaceInput,
+    outputSchema: memoryRetractFromSpaceOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]

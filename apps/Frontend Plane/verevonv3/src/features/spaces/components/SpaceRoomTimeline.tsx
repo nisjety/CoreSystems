@@ -33,6 +33,7 @@ import { SpaceHistoryNotice } from './SpaceHistoryNotice'
 import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
 import type { SpaceJournalEntry } from '../lib/space-send-journal'
 import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
+import { threadPinnedByAgent, threadRenamedByAgent } from '../lib/space-self-api'
 import { postPosition } from '../lib/timeline-anchor'
 import { startAnchoring } from '../lib/timeline-anchor-dom'
 import type { SpaceTimelineStore } from '../lib/space-timeline-store'
@@ -948,7 +949,7 @@ function SpaceRoomPost(props: {
           a reader scanning the room sees them first. "New" is drawn once for the whole room as the
           divider line above the first new post; each new post keeps this label for assistive tech
           only (the stylesheet hides it visually), so the fact is still stated per post. */}
-      <Show when={props.thread.pinned === true || props.roomPin?.() !== undefined || props.unread?.()}>
+      <Show when={props.thread.pinned === true || props.roomPin?.() !== undefined || props.unread?.() || threadRenamedByAgent(props.thread)}>
         <div class="verevon-room-post__flags">
           <Show when={props.roomPin?.()}>
             {(pin) => (
@@ -961,11 +962,21 @@ function SpaceRoomPost(props: {
               </span>
             )}
           </Show>
-          <Show when={props.thread.pinned === true}>
+          <Show when={props.thread.pinned === true && !threadPinnedByAgent(props.thread)}>
             <span class="verevon-room-post__flag verevon-room-post__flag--pinned">
               <Pin size={12} aria-hidden="true" />
               {i18n.tr('Festet', 'Pinned')}
             </span>
+          </Show>
+          {/* WS18-S6: who acted, stated as a fact: a room agent pinned or renamed this post (plain text, no action). */}
+          <Show when={threadPinnedByAgent(props.thread)}>
+            <span class="verevon-room-post__flag verevon-room-post__flag--pinned">
+              <Pin size={12} aria-hidden="true" />
+              {i18n.tr('Festet av en agent', 'Pinned by an agent')}
+            </span>
+          </Show>
+          <Show when={threadRenamedByAgent(props.thread)}>
+            <span class="verevon-room-post__flag">{i18n.tr('Omdøpt av en agent', 'Renamed by an agent')}</span>
           </Show>
           <Show when={props.unread?.()}>
             <span class="verevon-room-post__flag verevon-room-post__flag--new">

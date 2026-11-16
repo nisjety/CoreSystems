@@ -487,3 +487,45 @@ export async function declassifySpaceMemory(
     deduplicated: response.deduplicated === true,
   }
 }
+
+/**
+ * What taking one shared copy back answers (WS17-S7b). `deleted` is true when the room no longer holds the copy.
+ */
+export interface RetractSpaceMemoryResult {
+  memoryId: string
+  spaceRef: string
+  deleted: boolean
+}
+
+interface RetractSpaceMemoryResponse {
+  memory_id?: string
+  space_ref?: string
+  deleted?: boolean
+}
+
+/**
+ * Takes back a copy this person shared into a room (WS17-S7b). Only the person who shared it can: anyone else, or a copy
+ * already taken back, is refused with `memory_not_found` (404), and a room they may not act in with
+ * `memory_retract_not_authorized` (403). The body carries the copy's id and a retry key and nothing else. Allowed under
+ * Zero Data Retention, since a removal stores nothing.
+ */
+export async function retractSpaceMemory(
+  spaceRef: string,
+  input: { memoryId: string; clientRequestId: string },
+): Promise<RetractSpaceMemoryResult> {
+  const response = await requestJson<RetractSpaceMemoryResponse>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/memory/retract`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        memory_id: input.memoryId,
+        client_request_id: input.clientRequestId,
+      }),
+    },
+  )
+  return {
+    memoryId: response.memory_id ?? input.memoryId,
+    spaceRef: response.space_ref ?? spaceRef,
+    deleted: response.deleted === true,
+  }
+}

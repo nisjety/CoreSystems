@@ -60,6 +60,7 @@ import {
   respondToSubjectsOf,
   whyNoAnswerHint,
 } from '../lib/wake-policy'
+import { SpaceAgentSelfApiToggle } from './SpaceAgentSelfApiToggle'
 import { SpaceAgentWakePolicyEditor } from './SpaceAgentWakePolicyEditor'
 import { SpaceAgentMemoryPanel, spaceAgentMemoryEnabled } from './SpaceAgentMemoryPanel'
 import {
@@ -911,6 +912,8 @@ export default function SpacePage() {
                           roster={() => (roster.error ? [] : roster() ?? [])}
                           spaceRef={current().space.space_ref}
                           canGovern={canCreateAgent(current().membership.role)}
+                          orgId={current().membership.org_id}
+                          actorId={current().membership.subject_id}
                           personalAgentsOn={() => personalAgentsFlag() === true}
                           onChanged={() => {
                             void refetchAgents()
@@ -1469,6 +1472,9 @@ function SpaceAgentPanel(props: {
   /** `features.personal_agents` (WS17-S5): gates the access entry and the withdraw action on each card. */
   readonly personalAgentsOn?: () => boolean
   readonly onChanged?: () => void
+  /** The viewer's organization and subject (WS18-S6): the actor of the self-API switch on each card. */
+  readonly orgId?: string
+  readonly actorId?: string
 }) {
   const i18n = useI18n()
   const agents = props.agents
@@ -1546,6 +1552,8 @@ function SpaceAgentPanel(props: {
                   canGovern={props.canGovern}
                   personalAgentsOn={props.personalAgentsOn}
                   onChanged={props.onChanged}
+                  orgId={props.orgId}
+                  actorId={props.actorId}
                 />
               )}
             </For>
@@ -1566,6 +1574,9 @@ function SpaceAgentCard(props: {
   readonly canGovern: boolean
   readonly personalAgentsOn?: () => boolean
   readonly onChanged?: () => void
+  /** WS18-S6: the viewer's organization and subject, the actor of the self-API switch. */
+  readonly orgId?: string
+  readonly actorId?: string
 }) {
   const i18n = useI18n()
   const agent = () => props.agent
@@ -1736,6 +1747,28 @@ function SpaceAgentCard(props: {
               onSaved={props.onChanged}
             />
           </Show>
+        </Show>
+
+        {/* WS18-S6: the owner's and managers' switch for the agent's own-thread tools (rename, pin). Behind
+            `features.agent_self_api`; only an active binding takes it, and the gateway checks the live role on a write. */}
+        <Show
+          when={
+            spaceRoomFeature('agent_self_api') &&
+            props.canGovern &&
+            agent().status === 'active' &&
+            bindingRef() &&
+            props.orgId &&
+            props.actorId
+          }
+        >
+          <SpaceAgentSelfApiToggle
+            spaceRef={props.spaceRef}
+            bindingRef={bindingRef() ?? ''}
+            enabled={agent().self_api_enabled === true}
+            orgId={props.orgId ?? ''}
+            actorId={props.actorId ?? ''}
+            onChanged={props.onChanged}
+          />
         </Show>
 
         {/* WS10-S5b: the per-tool rules for this agent. Behind `features.tool_policy_editor`; the

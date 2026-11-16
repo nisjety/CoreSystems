@@ -1,0 +1,188 @@
+{
+  "contract": "space-self-api-registry",
+  "version": 1,
+  "rows": [
+    {
+      "action_id": "tickets.create",
+      "capability_id": "cap.tool.ticket.create",
+      "owner_plane": "application",
+      "owner_service": "conversation-core",
+      "service_audience": "application-plane-conversation-core",
+      "decision_type": "run_action",
+      "permission": "owner-action:execute",
+      "min_role": "editor",
+      "risk": "medium",
+      "default_level": "ask",
+      "approval": "owner_approval",
+      "autonomy_rung": "existing",
+      "reversible": false,
+      "max_per_run": 0,
+      "reservation": true,
+      "argument_order": [
+        "conversation_id",
+        "work_type",
+        "priority",
+        "severity",
+        "category",
+        "intent"
+      ],
+      "parameters_json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"conversation_id\":{\"type\":\"string\",\"maxLength\":200},\"work_type\":{\"type\":\"string\",\"enum\":[\"\",\"customer_case\",\"internal_work\",\"incident\"]},\"priority\":{\"type\":\"string\",\"enum\":[\"\",\"low\",\"normal\",\"high\",\"urgent\"]},\"severity\":{\"type\":\"string\",\"enum\":[\"\",\"low\",\"medium\",\"high\",\"critical\"]},\"category\":{\"type\":\"string\",\"maxLength\":80},\"intent\":{\"type\":\"string\",\"maxLength\":240}},\"required\":[\"conversation_id\"]}",
+      "schema_sha256": "sha256:c3aa12ec85c2d79f08e5e8cc726fd75af10ddab0b29f2a6e0dddb0bd42bb56df",
+      "hash_basis": "owner_contract",
+      "zdr": "refuse",
+      "ui_action_id": null,
+      "phase": 0
+    },
+    {
+      "action_id": "space.thread.rename",
+      "capability_id": "cap.tool.space.thread.rename",
+      "owner_plane": "model",
+      "owner_service": "session-core",
+      "service_audience": "model-plane-session-core",
+      "decision_type": "run_action",
+      "permission": "space-action:execute",
+      "min_role": "editor",
+      "risk": "low",
+      "default_level": "allow",
+      "approval": "none",
+      "autonomy_rung": "workspace_write",
+      "reversible": true,
+      "max_per_run": 2,
+      "reservation": false,
+      "argument_order": [
+        "title"
+      ],
+      "parameters_json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":96}},\"required\":[\"title\"]}",
+      "schema_sha256": "sha256:817e5676063235350559652663e961ba67ac2e2c260b43b544446a3b73c98543",
+      "hash_basis": "parameters_json",
+      "zdr": "refuse",
+      "ui_action_id": null,
+      "phase": 1
+    },
+    {
+      "action_id": "space.thread.pin",
+      "capability_id": "cap.tool.space.thread.pin",
+      "owner_plane": "model",
+      "owner_service": "session-core",
+      "service_audience": "model-plane-session-core",
+      "decision_type": "run_action",
+      "permission": "space-action:execute",
+      "min_role": "editor",
+      "risk": "low",
+      "default_level": "allow",
+      "approval": "none",
+      "autonomy_rung": "workspace_write",
+      "reversible": true,
+      "max_per_run": 2,
+      "reservation": false,
+      "argument_order": [
+        "pinned"
+      ],
+      "parameters_json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"pinned\":{\"type\":\"boolean\"}},\"required\":[\"pinned\"]}",
+      "schema_sha256": "sha256:bbd2580ffd5c0ba20dcf692314d797a89897603052202b8d00a98c1a94638294",
+      "hash_basis": "parameters_json",
+      "zdr": "refuse",
+      "ui_action_id": null,
+      "phase": 1
+    },
+    {
+      "action_id": "space.thread.post_card",
+      "capability_id": "cap.tool.space.thread.post_card",
+      "owner_plane": "model",
+      "owner_service": "session-core",
+      "service_audience": "model-plane-session-core",
+      "decision_type": "run_action",
+      "permission": "space-action:execute",
+      "min_role": "editor",
+      "risk": "low",
+      "default_level": "allow",
+      "approval": "none",
+      "autonomy_rung": "workspace_write",
+      "reversible": false,
+      "max_per_run": 3,
+      "reservation": false,
+      "argument_order": [
+        "title",
+        "body",
+        "tone",
+        "fields"
+      ],
+      "parameters_json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":120},\"body\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2000},\"tone\":{\"type\":\"string\",\"enum\":[\"info\",\"progress\",\"done\",\"blocked\"]},\"fields\":{\"type\":\"array\",\"maxItems\":8,\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"label\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":40},\"value\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":200}},\"required\":[\"label\",\"value\"]}}},\"required\":[\"title\",\"body\",\"tone\"]}",
+      "schema_sha256": "sha256:0c1cd8f2e7cb368e7ea5a7369ca19fa2723754c1ea38ad173ef98c8ba72f42e3",
+      "hash_basis": "parameters_json",
+      "zdr": "refuse",
+      "ui_action_id": null,
+      "phase": 1
+    },
+    {
+      "action_id": "space.agent.pause_self",
+      "capability_id": "cap.tool.space.agent.pause_self",
+      "owner_plane": "application",
+      "owner_service": "convex-core",
+      "service_audience": "application-plane-convex-core",
+      "decision_type": "run_action",
+      "permission": "space-action:execute",
+      "min_role": "editor",
+      "risk": "medium",
+      "default_level": "allow",
+      "approval": "none",
+      "autonomy_rung": "workspace_write",
+      "reversible": true,
+      "max_per_run": 1,
+      "reservation": false,
+      "argument_order": [
+        "reason"
+      ],
+      "parameters_json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"reason\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":200}},\"required\":[\"reason\"]}",
+      "schema_sha256": "sha256:8c2d8043ec52d70a1bc7c90615f64d8a501f1635d6a445417a3a8b672a42ce39",
+      "hash_basis": "parameters_json",
+      "zdr": "refuse",
+      "ui_action_id": null,
+      "phase": 2
+    },
+    {
+      "action_id": "space.schedule.follow_up",
+      "capability_id": "cap.tool.space.schedule.follow_up",
+      "owner_plane": "model",
+      "owner_service": "capability-core",
+      "service_audience": "model-plane-capability-core",
+      "decision_type": "schedule_create",
+      "permission": "space-action:execute",
+      "min_role": "owner",
+      "risk": "high",
+      "default_level": "ask",
+      "approval": "owner_approval",
+      "autonomy_rung": "danger_full_access",
+      "reversible": false,
+      "max_per_run": 3,
+      "reservation": false,
+      "argument_order": [
+        "delay_minutes",
+        "instruction"
+      ],
+      "parameters_json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"delay_minutes\":{\"type\":\"integer\",\"minimum\":15,\"maximum\":10080},\"instruction\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":500}},\"required\":[\"delay_minutes\",\"instruction\"]}",
+      "schema_sha256": "sha256:5e33241382f8fd3a93fcc22bb8d47f87beb794e65a4a2bf0d3d9f46ab967b3c2",
+      "hash_basis": "parameters_json",
+      "zdr": "refuse",
+      "ui_action_id": null,
+      "phase": 3
+    }
+  ],
+  "digest_vectors": [
+    {
+      "name": "space_thread_rename_basic",
+      "action_id": "space.thread.rename",
+      "run_id": "run-1",
+      "org_id": "org-1",
+      "step_id": "step-1",
+      "idempotency_key": "space.thread.rename:6149a31b1dbbfa7d20cb60a67b1fd0737dbfa3e950df71deecb05fc87b667413",
+      "argument_pairs": [
+        [
+          "title",
+          "Weekly plan"
+        ]
+      ],
+      "payload_digest": "sha256:e6f7427e2537cd12545d85544abc316fab6348259047c14349b5976a791aa6ea"
+    }
+  ]
+}

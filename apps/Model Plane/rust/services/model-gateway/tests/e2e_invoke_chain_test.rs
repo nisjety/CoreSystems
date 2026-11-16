@@ -12551,6 +12551,13 @@ impl mpv1::memory_service_server::MemoryService for MockMemory {
         Err(Status::unimplemented("delete_memory not needed in test"))
     }
 
+    async fn declassify_memory(
+        &self,
+        _: TReq<mpv1::DeclassifyMemoryRequest>,
+    ) -> Result<Response<mpv1::DeclassifyMemoryResponse>, Status> {
+        Err(Status::unimplemented("declassify_memory not needed in test"))
+    }
+
     async fn health(
         &self,
         _: TReq<mpv1::MemoryHealthRequest>,

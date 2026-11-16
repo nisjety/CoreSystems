@@ -423,6 +423,9 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
             get(get_user_profile).put(set_user_profile),
         )
         .route("/v1/memories/profile/rebuild", post(rebuild_user_profile))
+        // WS17-S7: share one of the caller's personal memories into a Space room under a Control
+        // `model.memory.declassify` decision in the body. Static, so it wins over `:memory_id` (DELETE only).
+        .route("/v1/memories/declassify", post(declassify_memory_entry))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
         // Space memory for the Space's owner or admin (EP-8 S7). POST so the Control
         // `model.space.memory.manage` decision rides in the body, never a URL; Session Core
@@ -17457,6 +17460,164 @@ async fn delete_space_memory_entry(
     }))
 }
 
+/// The `POST /v1/memories/declassify` body (WS17-S7): exactly the fields the gateway's declassify route sends. The org
+/// and the user are the verified claims' own, and a body that names another is refused. Session Core verifies the
+/// decision and its ref again and recomputes the digest of `reviewed_content` from the exact bytes it receives.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclassifyMemoryBody {
+    #[serde(default)]
+    org_id: String,
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
+    source_memory_id: String,
+    #[serde(default)]
+    space_id: String,
+    #[serde(default)]
+    reviewed_content: String,
+    #[serde(default)]
+    space_decision_token: String,
+    #[serde(default)]
+    space_decision_ref: String,
+    #[serde(default)]
+    idempotency_key: String,
+}
+
+/// Upper bounds of the declassify body (WS17-S7), the Space memory routes' own where they exist.
+const DECLASSIFY_MAX_ID_BYTES: usize = 200;
+const DECLASSIFY_MAX_DECISION_REF_BYTES: usize = 512;
+const DECLASSIFY_MAX_DECISION_TOKEN_BYTES: usize = 8 * 1024;
+const DECLASSIFY_MAX_IDEMPOTENCY_KEY_CHARS: usize = 128;
+const DECLASSIFY_MAX_REVIEWED_CHARS: usize = 1000;
+
+/// `POST /v1/memories/declassify` (WS17-S7): share one of the caller's personal memory rows into a shared Space room,
+/// under Control's `model.memory.declassify` decision for the reviewed text. Zero Data Retention is refused first, as
+/// the typed catalogue refusal, before the body is read. Session Core verifies the decision and writes the room copy
+/// and its ledger row in one transaction; the source row is never changed.
+async fn declassify_memory_entry(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DeclassifyMemoryRequest;
+    require_non_zdr_durable_mutation(&claims)?;
+    let body: DeclassifyMemoryBody = serde_json::from_slice(&body)
+        .map_err(|_| declassify_invalid("The declassify request is not valid."))?;
+    if body.org_id != claims.org_id || body.user_id != claims.user_id {
+        return Err(declassify_denied());
+    }
+    let source_ok = !body.source_memory_id.is_empty()
+        && body.source_memory_id.len() <= DECLASSIFY_MAX_ID_BYTES
+        && body.source_memory_id.trim() == body.source_memory_id;
+    if !source_ok {
+        return Err(declassify_invalid("A valid memory id is required."));
+    }
+    if body.space_id.trim().is_empty() || body.space_id.len() > DECLASSIFY_MAX_ID_BYTES {
+        return Err(declassify_invalid("A valid Space reference is required."));
+    }
+    if body.reviewed_content.trim().is_empty()
+        || body.reviewed_content.chars().count() > DECLASSIFY_MAX_REVIEWED_CHARS
+    {
+        return Err(declassify_invalid(
+            "The reviewed text is required and may be at most 1000 characters.",
+        ));
+    }
+    let decision_ok = !body.space_decision_token.trim().is_empty()
+        && body.space_decision_token.len() <= DECLASSIFY_MAX_DECISION_TOKEN_BYTES
+        && !body.space_decision_ref.trim().is_empty()
+        && body.space_decision_ref.len() <= DECLASSIFY_MAX_DECISION_REF_BYTES
+        && !body.idempotency_key.trim().is_empty()
+        && body.idempotency_key.chars().count() <= DECLASSIFY_MAX_IDEMPOTENCY_KEY_CHARS;
+    if !decision_ok {
+        return Err(declassify_invalid(
+            "The Space decision and the retry key are required.",
+        ));
+    }
+
+    let response = state
+        .memory_client
+        .clone()
+        .declassify_memory(authenticated_session_request(
+            DeclassifyMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                source_memory_id: body.source_memory_id,
+                space_id: body.space_id,
+                reviewed_content: body.reviewed_content,
+                space_decision_token: body.space_decision_token,
+                space_decision_ref: body.space_decision_ref,
+                idempotency_key: body.idempotency_key,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| declassify_error(&status))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "memory_id": response.memory_id,
+        "deduplicated": response.deduplicated,
+    })))
+}
+
+/// A declassify that names an org or a user other than the verified claims': typed, and the same refusal as any other
+/// authority failure, so nothing about the claims or the Space leaks.
+fn declassify_denied() -> HttpJsonError {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error": {
+            "code": "memory_declassify_not_authorized",
+            "message": "Declassifying this memory to the Space is not authorized.",
+            "details": {},
+        }})),
+    )
+}
+
+/// A declassify whose body fails a shape rule: the closed `invalid_request` code with the rule in words.
+fn declassify_invalid(message: &'static str) -> HttpJsonError {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": {"code": "invalid_request", "message": message, "details": {}}})),
+    )
+}
+
+/// Session Core's refusal of a declassify. A typed ZDR refusal keeps its catalogue body (412). A permission refusal is
+/// one code whatever its cause (no decision, another role, a revoked member), a missing source row is `memory_not_found`,
+/// and any other failure is unavailable. Nothing from the upstream message crosses.
+fn declassify_error(status: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(status) {
+        return crate::zdr_posture::http(&refusal);
+    }
+    let (http, code, message) = match status.code() {
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
+            StatusCode::FORBIDDEN,
+            "memory_declassify_not_authorized",
+            "Declassifying this memory to the Space is not authorized.",
+        ),
+        tonic::Code::NotFound => (
+            StatusCode::NOT_FOUND,
+            "memory_not_found",
+            "The memory is not available.",
+        ),
+        tonic::Code::InvalidArgument => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The declassify request is not valid.",
+        ),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "memory_declassify_unavailable",
+            "Declassifying memory is temporarily unavailable.",
+        ),
+    };
+    (
+        http,
+        Json(json!({"error": {"code": code, "message": message, "details": {}}})),
+    )
+}
+
 /// Erases one named agent's memory in a Space, under a Control Space memory decision issued for
 /// that agent (EP-6 P3). Session Core verifies the decision and is the authority; the erase is not
 /// gated by the agent switch, so rows written while it was on go too. Allowed under every posture,
@@ -23038,6 +23199,13 @@ mod user_profile_route_tests {
             &self,
             _: TonicRequest<pb::DeleteMemoryRequest>,
         ) -> Result<TonicResponse<pb::DeleteMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn declassify_memory(
+            &self,
+            _: TonicRequest<pb::DeclassifyMemoryRequest>,
+        ) -> Result<TonicResponse<pb::DeclassifyMemoryResponse>, Status> {
             unused()
         }
 

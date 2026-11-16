@@ -147,6 +147,13 @@ export type SpaceThread = {
   last_message_seq?: number
   /** Up to five newest distinct authors of the post (WS15-S5). Ids only. */
   recent_author_subject_ids?: readonly string[]
+  /**
+   * WS18-S6: who last set the title. `'agent'` means a room agent renamed the post, and the timeline says so.
+   * Absent until the thread listing carries it (the model gateway's thread summary does not yet); absent is never an agent.
+   */
+  title_source?: 'owner' | 'agent'
+  /** WS18-S6: who last set the pin. `'agent'` means a room agent pinned the post. Absent until the listing carries it. */
+  pinned_source?: 'owner' | 'agent'
 }
 
 /**
@@ -1106,6 +1113,8 @@ export type SpaceAgent = {
   respond_to?: 'members' | 'managers' | 'allowlist'
   /** Control subject ids, set only with `respond_to: 'allowlist'`. */
   respond_to_subjects?: readonly string[]
+  /** WS18-S5: the binding's own-thread switch (rename and pin by the agent). Absent means off. */
+  self_api_enabled?: boolean
   allowed_tools?: readonly string[]
   approval_mode?: 'auto' | 'require_confirmation' | 'blocked'
   /** WS10-S5b: Application's projection of Control's tool policy for this agent (display only). */

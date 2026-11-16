@@ -4209,6 +4209,13 @@ mod tests {
             Err(Status::unimplemented("delete_memory not needed in test"))
         }
 
+        async fn declassify_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::DeclassifyMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::DeclassifyMemoryResponse>, Status> {
+            Err(Status::unimplemented("declassify_memory not needed in test"))
+        }
+
         async fn health(
             &self,
             _: Request<mp_contracts::model_plane::v1::MemoryHealthRequest>,
