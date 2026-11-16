@@ -24,5 +24,8 @@ export const spacePrivatePanelTables = {
     agentSubjectId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_user_and_space", ["externalOrgId", "externalAuthId", "spaceRef"]),
+  })
+    .index("by_user_and_space", ["externalOrgId", "externalAuthId", "spaceRef"])
+    // WS17-S6: the Space-deletion purge (`spaceDeletionData.ts`) finds one Space's pointers without a scan.
+    .index("by_space_ref", ["spaceRef"]),
 };

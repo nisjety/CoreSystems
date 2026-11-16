@@ -605,6 +605,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SPACE_CANVAS_UI` (WS19-S4): the room canvas surface, reported as `features.canvas` together with the API
     /// flag. A rollout control, never an authorization input.
     pub(crate) canvas_ui: bool,
+    /// `SPACE_PRIVATE_PANEL_UI` (WS17-S6): the owner's private panel routes (`GET`/`POST /api/v1/spaces/{space_ref}/private-panel`),
+    /// the `spaces.open_private_panel` action, and `features.private_panel` on the room context. Off answers 404
+    /// `feature_disabled`. A rollout control, never an authorization input: Control's membership decides every access.
+    /// On in development, off in production (`space_flag`).
+    pub(crate) private_panel_ui: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -723,6 +728,7 @@ impl SpaceFeatureFlags {
             personal_agents_ui: space_flag("SPACE_PERSONAL_AGENTS_UI"),
             canvas_api: space_flag("SPACE_CANVAS_API"),
             canvas_ui: space_flag("SPACE_CANVAS_UI"),
+            private_panel_ui: space_flag("SPACE_PRIVATE_PANEL_UI"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }

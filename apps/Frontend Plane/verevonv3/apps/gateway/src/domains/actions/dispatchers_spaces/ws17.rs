@@ -2,14 +2,17 @@
 //! route in `domains/spaces/personal_agents.rs`, so the rollout flag, the membership check, Control's
 //! decisions and the typed errors exist once. None is model-executable (`model-access.ts` closes them):
 //! a model creating, re-scoping or moving a person's agent would be an authority inversion.
+//!
+//! WS17-S6: `spaces.open_private_panel` rides the open core of `domains/spaces/private_panel.rs` the same way.
 
-use axum::{response::Response, Json};
+use axum::{http::HeaderMap, response::Response, Json};
 use serde_json::{json, Value};
 
 use crate::config::AppState;
 use crate::domains::spaces::personal_agents::{
     create_personal_agent_core, put_agent_access_core, set_primary_agent_core, withdraw_agent_core,
 };
+use crate::domains::spaces::private_panel::open_private_panel_core;
 use crate::middleware::AuthenticatedUser;
 
 use super::super::dispatchers::{
@@ -92,4 +95,20 @@ pub(in crate::domains::actions) async fn dispatch_spaces_withdraw_agent(
     }
     let (status, Json(payload)) = withdraw_agent_core(state, user, agent_ref, space_ref).await;
     owner_json_response_to_envelope("spaces.withdraw_agent", user, status, payload)
+}
+
+/// `spaces.open_private_panel` (WS17-S6): get or create the caller's private panel pointer for one room. Human-only;
+/// the ZDR refusal and the flag are checked by the core, which reads the request headers for the ZDR check.
+pub(in crate::domains::actions) async fn dispatch_spaces_open_private_panel(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    if space_ref.is_empty() {
+        return ticket_bad_request("spaces.open_private_panel requires a non-empty 'spaceRef'");
+    }
+    let (status, Json(payload)) = open_private_panel_core(state, user, headers, space_ref).await;
+    owner_json_response_to_envelope("spaces.open_private_panel", user, status, payload)
 }

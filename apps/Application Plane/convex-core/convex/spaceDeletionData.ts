@@ -1,8 +1,9 @@
-/** Data Plane deletion adapter: binding revocation, then the room canvas purge (WS19-S8). It carries only the Control-minted
+/** Data Plane deletion adapter: binding revocation, then the room canvas purge (WS19-S8), then the Application's private-panel
+ * pointer purge (WS17-S6). It carries only the Control-minted
  * `aud=data-plane` deletion credential; a failed delivery remains retriable
  * and no response can update a different owner/request receipt. */
 import { v } from "convex/values";
-import { internalAction } from "./_generated/server";
+import { internalAction, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 
 const DATA_SPACE_DELETION_URL = process.env.DATA_SPACE_DELETION_URL || "";
@@ -47,6 +48,24 @@ function configurationError(): string | null {
   return null;
 }
 function nextWorker(eventId: string): string { return `space-deletion-data:${eventId}:${crypto.randomUUID()}`; }
+
+// WS17-S6: the owner's private-panel pointers for a Space being deleted (Application's own rows, ids only). One batch
+// per call, so a large room stays inside one mutation; the adapter repeats until `more` is false. The panel's thread is
+// Session Core's and is not touched here: only the pointer that names it goes.
+const PANEL_POINTER_PURGE_BATCH = 200;
+const PANEL_POINTER_PURGE_MAX_PASSES = 25;
+
+export const purgeSpacePrivatePanelPointers = internalMutation({
+  args: { spaceRef: v.string() },
+  handler: async (ctx, args) => {
+    const rows = await ctx.db
+      .query("spacePrivatePanels")
+      .withIndex("by_space_ref", (q: any) => q.eq("spaceRef", args.spaceRef))
+      .take(PANEL_POINTER_PURGE_BATCH);
+    for (const row of rows) await ctx.db.delete(row._id);
+    return { deleted: rows.length, more: rows.length === PANEL_POINTER_PURGE_BATCH };
+  },
+});
 
 export const deliverOne = internalAction({
   args: { workerId: v.string() },
@@ -97,6 +116,15 @@ export const deliverOne = internalAction({
     try { canvasReceipt = await canvasResponse.json(); } catch { return release("Data canvas purge returned an invalid receipt"); }
     const canvasOutcome = dataCanvasPurgeReceipt(canvasReceipt, claimed.request.requestId, claimed.request.spaceRef);
     if (!canvasOutcome) return release("Data canvas purge receipt did not match the claimed request");
+    // Third leg (WS17-S6): the private-panel pointers for this Space, so no pointer names a deleted room. Idempotent: a
+    // failure releases the claim like the Data legs do, and the next attempt purges again. The Data receipts are unchanged.
+    let purged = { deleted: 0, more: true };
+    try {
+      for (let pass = 0; pass < PANEL_POINTER_PURGE_MAX_PASSES && purged.more; pass += 1) {
+        purged = await ctx.runMutation(internal.spaceDeletionData.purgeSpacePrivatePanelPointers, { spaceRef: claimed.request.spaceRef });
+      }
+    } catch { return release("Private panel pointer purge failed"); }
+    if (purged.more) return release("Private panel pointer purge is incomplete");
     const combined = combineDataOutcomes(outcome, canvasOutcome);
     await ctx.runMutation(internal.spaces.acknowledgeDataDeletionOwnerDelivery, { eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), ...combined });
     return { eventId: claimed.eventId, status: combined.status };

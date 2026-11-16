@@ -43,6 +43,7 @@ pub(crate) mod room_admin;
 pub(crate) mod files;
 pub(crate) mod personal_agents;
 pub(crate) mod canvas;
+pub(crate) mod private_panel;
 mod message_search;
 pub(crate) mod mentions;
 mod timeline;
@@ -1154,6 +1155,7 @@ fn module_routes() -> Router<AppState> {
         .merge(memory::routes())
         .merge(personal_agents::routes())
         .merge(canvas::routes())
+        .merge(private_panel::routes())
 }
 
 #[derive(Debug, Deserialize)]
@@ -5959,6 +5961,8 @@ async fn space_context(
                     // WS19-S4: the room canvas (API and UI flags together).
                     "canvas": state.space_features.canvas_api
                         && state.space_features.canvas_ui,
+                    // WS17-S6: the owner's private panel (one flag; the routes and the action follow it).
+                    "private_panel": state.space_features.private_panel_ui,
                     "status": state.space_features.status_api,
                     "reminders": state.space_features.reminders_api,
                     // WS08-S4: mentions and addressed wake. The picker follows the record flag;
