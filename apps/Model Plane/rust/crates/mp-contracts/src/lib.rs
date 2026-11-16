@@ -51,6 +51,7 @@ pub mod space_human_posts;
 pub mod space_memory;
 pub mod space_message_lifecycle;
 pub mod space_mentions;
+pub mod space_self_api;
 pub mod space_timeline;
 pub mod telemetry_labels;
 pub mod tool_arguments;

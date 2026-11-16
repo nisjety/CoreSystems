@@ -92,8 +92,13 @@ func (r RunActionDecisionRequest) Validate() error {
 		len(strings.TrimSpace(r.DecisionRef)) > 200 || len(strings.TrimSpace(r.Nonce)) > 200 {
 		return fmt.Errorf("run action decision binding is oversized")
 	}
-	if _, found := runActionTarget(strings.TrimSpace(r.ActionID)); !found {
+	spec, found := runActionSpec(strings.TrimSpace(r.ActionID))
+	if !found {
 		return fmt.Errorf("run action is not owner-approved")
+	}
+	// The issued hash must be the golden hash for this row, not merely well formed.
+	if strings.TrimSpace(r.ActionSchemaHash) != spec.SchemaSHA256 {
+		return fmt.Errorf("run action schema hash does not match the registry")
 	}
 	return nil
 }
@@ -154,11 +159,11 @@ func (d RunActionDecision) Validate() error {
 	if !validSHA256Commitment(d.ActionSchemaHash) || !validSHA256Commitment(d.PayloadDigest) {
 		return fmt.Errorf("run action decision commitments are invalid")
 	}
-	target, found := runActionTargetFor(d.ActionID)
-	if !found || d.ServiceAudience != target.ServiceAudience {
+	spec, found := runActionSpec(d.ActionID)
+	if !found || spec.DecisionType != runActionDecisionKind || d.ServiceAudience != spec.ServiceAudience || d.ActionSchemaHash != spec.SchemaSHA256 {
 		return fmt.Errorf("run action decision target is invalid")
 	}
-	if d.RecipientAudienceRevision <= 0 || d.AuthorityRevision <= 0 || len(d.Permissions) != 1 || d.Permissions[0] != target.Permission {
+	if d.RecipientAudienceRevision <= 0 || d.AuthorityRevision <= 0 || len(d.Permissions) != 1 || d.Permissions[0] != spec.Permission {
 		return fmt.Errorf("run action decision authority is invalid")
 	}
 	if d.ZeroDataRetention || d.IssuedAt.IsZero() || d.ExpiresAt.IsZero() || !d.ExpiresAt.After(d.IssuedAt) {
@@ -181,6 +186,16 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 	if err := request.Validate(); err != nil || now.IsZero() {
 		return RunActionDecision{}, fmt.Errorf("run action decision request is invalid")
 	}
+	// The golden row is the only source of target, permission and hash. Issuance
+	// needs a run-action row that the operator allowlist names, and the caller's
+	// role must meet the row's floor.
+	spec, found := runActionSpec(request.ActionID)
+	if !found || spec.DecisionType != runActionDecisionKind || !runActionSelfAPIIssuable(spec.ActionID) {
+		return RunActionDecision{}, fmt.Errorf("run action is not enabled for this decision")
+	}
+	if RoleRank(evidence.Membership.Role) < RoleRank(spec.MinRole) {
+		return RunActionDecision{}, fmt.Errorf("run action requires a higher space role")
+	}
 	// The run is bound to the thread's original creation authorization. This is
 	// proof of the run's source context only; the agent-action entitlement above
 	// is current Control policy and neither reference authorizes a target owner
@@ -195,7 +210,6 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 	) || evidence.ResourceAuthorizationRef != expectedSourceRef {
 		return RunActionDecision{}, fmt.Errorf("run action authority does not match current Control authority")
 	}
-	target, _ := runActionTargetFor(request.ActionID)
 	return RunActionDecision{
 		DecisionRef:                strings.TrimSpace(request.DecisionRef),
 		RunID:                      strings.TrimSpace(authority.RunID),
@@ -203,7 +217,7 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 		OrgID:                      evidence.Membership.OrgID,
 		SpaceRef:                   evidence.Membership.SpaceRef,
 		SubjectID:                  evidence.Membership.SubjectID,
-		ServiceAudience:            target.ServiceAudience,
+		ServiceAudience:            spec.ServiceAudience,
 		ActionID:                   strings.TrimSpace(request.ActionID),
 		ActionSchemaHash:           strings.TrimSpace(request.ActionSchemaHash),
 		PayloadDigest:              strings.TrimSpace(request.PayloadDigest),
@@ -214,7 +228,7 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 		PrivacyPolicyRef:           evidence.Privacy.PolicyRef,
 		RunContextAuthorizationRef: expectedSourceRef,
 		AuthorityRevision:          evidence.Membership.Revisions.Authority,
-		Permissions:                []string{target.Permission},
+		Permissions:                []string{spec.Permission},
 		Purpose:                    evidence.Privacy.Purpose,
 		LawfulBasis:                evidence.Privacy.LawfulBasis,
 		PrivacyClass:               evidence.Privacy.PrivacyClass,
@@ -241,6 +255,13 @@ func ValidateCurrentRunActionDecision(evidence PersonalThreadDecisionEvidence, d
 	}
 	if err := decision.Validate(); err != nil {
 		return fmt.Errorf("run action decision is invalid: %w", err)
+	}
+	// Effect-time freshness repeats the registry, allowlist and role checks, so a
+	// removed allowlist entry or a lowered role also stops an in-flight decision.
+	spec, found := runActionSpec(decision.ActionID)
+	if !found || spec.DecisionType != runActionDecisionKind || !runActionSelfAPIIssuable(spec.ActionID) ||
+		RoleRank(evidence.Membership.Role) < RoleRank(spec.MinRole) {
+		return fmt.Errorf("run action decision is no longer authorized by the registry")
 	}
 	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if !runClaimsMatchEvidence(
