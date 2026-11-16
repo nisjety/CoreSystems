@@ -1,7 +1,10 @@
 //! Typed entries of a human post (build plan WS15-S9).
 //!
 //! A post can carry one [`pb::MessageEntry`]: a closed `kind`, a `version` and the kind's payload.
-//! Today's only kind is `link_previews` (text-only previews snapshotted when the post was sent).
+//! Today's kinds are `link_previews` (text-only previews snapshotted when the post was sent) and
+//! `agent_card` (WS18-S7: the plain-text title, tone and fields a room agent wrote with
+//! `space.thread.post_card`; its body is the row's content). Only the card path writes `agent_card`:
+//! the human write rule refuses it, so a person's post can never carry a card.
 //!
 //! - [`validate_entry`] is the write rule. `append_message_in_tx_as` calls it for a human post
 //!   (`post_kind = 'post'`) only and refuses an entry on every other append. It returns the JSON
@@ -22,9 +25,19 @@ use serde_json::{json, Value};
 
 /// The metadata key the entry is stored under. Reserved: stripped from client metadata on write.
 pub(crate) const ENTRY_METADATA_KEY: &str = "entry";
-/// The only typed kind today.
+/// The link preview kind (WS15-S9).
 pub(crate) const KIND_LINK_PREVIEWS: &str = "link_previews";
+/// The agent card kind (WS18-S7). Written only by `space::self_api`, never by a human post.
+pub(crate) const KIND_AGENT_CARD: &str = "agent_card";
 const ENTRY_VERSION: u32 = 1;
+const AGENT_CARD_VERSION: u32 = 1;
+/// The card's tones, as the golden `space.thread.post_card` schema names them.
+pub(crate) const CARD_TONES: [&str; 4] = ["info", "progress", "done", "blocked"];
+pub(crate) const CARD_TITLE_MAX_CHARS: usize = 120;
+pub(crate) const CARD_BODY_MAX_CHARS: usize = 2000;
+pub(crate) const CARD_FIELDS_MAX: usize = 8;
+pub(crate) const CARD_FIELD_LABEL_MAX_CHARS: usize = 40;
+pub(crate) const CARD_FIELD_VALUE_MAX_CHARS: usize = 200;
 const MAX_LINK_PREVIEWS: usize = 3;
 const MAX_URL_BYTES: usize = 2048;
 const MAX_TITLE_CHARS: usize = 200;
@@ -154,6 +167,68 @@ pub(crate) fn validate_entry(entry: &pb::MessageEntry, now: DateTime<Utc>) -> Re
     check_entry(entry, Some(now))
 }
 
+/// Whether a card's text is plain (WS18-S7): non-blank, within `min` to `max` characters, with no
+/// control character (a line break only when `multiline`) and no link (`://` or `www.`, in any case).
+/// The SPA draws card text as text, so a card never carries a link or a markup it would have to render.
+pub(crate) fn plain_card_text(text: &str, min: usize, max: usize, multiline: bool) -> bool {
+    let count = text.chars().count();
+    if count < min || count > max || text.trim().is_empty() {
+        return false;
+    }
+    if text.chars().any(|c| c.is_control() && !(multiline && c == '\n')) {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    !(lower.contains("://") || lower.contains("www."))
+}
+
+/// The JSON stored under `messages.metadata.entry` for an agent card (WS18-S7). The caller has already
+/// checked the arguments against the golden schema; the body is not repeated here (it is the content).
+pub(crate) fn agent_card_json(title: &str, tone: &str, fields: &[(String, String)]) -> Value {
+    json!({
+        "kind": KIND_AGENT_CARD,
+        "version": AGENT_CARD_VERSION,
+        "title": title,
+        "tone": tone,
+        "fields": fields
+            .iter()
+            .map(|(label, value)| json!({ "label": label, "value": value }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// The card payload read back from the stored JSON. `None` when it does not pass the write rules; the
+/// reader then keeps the kind and version only, so the body still draws as plain text.
+fn agent_card_from_stored(stored: &Value) -> Option<pb::AgentCard> {
+    let title = stored.get("title")?.as_str()?;
+    let tone = stored.get("tone")?.as_str()?;
+    if !plain_card_text(title, 1, CARD_TITLE_MAX_CHARS, false) || !CARD_TONES.contains(&tone) {
+        return None;
+    }
+    let fields = stored.get("fields")?.as_array()?;
+    if fields.len() > CARD_FIELDS_MAX {
+        return None;
+    }
+    let fields = fields
+        .iter()
+        .map(|field| {
+            let label = field.get("label")?.as_str()?;
+            let value = field.get("value")?.as_str()?;
+            (plain_card_text(label, 1, CARD_FIELD_LABEL_MAX_CHARS, false)
+                && plain_card_text(value, 1, CARD_FIELD_VALUE_MAX_CHARS, false))
+            .then(|| pb::AgentCardField {
+                label: label.to_owned(),
+                value: value.to_owned(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(pb::AgentCard {
+        title: title.to_owned(),
+        tone: tone.to_owned(),
+        fields,
+    })
+}
+
 fn string_of(value: &Value, key: &str) -> String {
     value.get(key).and_then(Value::as_str).unwrap_or_default().to_owned()
 }
@@ -187,12 +262,28 @@ fn is_unknown_kind_word(kind: &str) -> bool {
 pub(crate) fn entry_from_stored(stored: &Value) -> Option<pb::MessageEntry> {
     let kind = stored.get("kind")?.as_str()?;
     let version = u32::try_from(stored.get("version")?.as_u64()?).ok()?;
+    if kind == KIND_AGENT_CARD {
+        // A card keeps its kind and version even when its payload fails the rules, so the reader draws
+        // the body as plain text. Only version 1 carries a payload; a newer version is kind and version only.
+        let agent_card = if version == AGENT_CARD_VERSION {
+            agent_card_from_stored(stored)
+        } else {
+            None
+        };
+        return Some(pb::MessageEntry {
+            kind: kind.to_owned(),
+            version,
+            link_previews: Vec::new(),
+            agent_card,
+        });
+    }
     if kind != KIND_LINK_PREVIEWS || version != ENTRY_VERSION {
         // A kind or version this build does not know: `{kind, version}` and no payload.
         return is_unknown_kind_word(kind).then(|| pb::MessageEntry {
             kind: kind.to_owned(),
             version,
             link_previews: Vec::new(),
+            agent_card: None,
         });
     }
     let link_previews = stored
@@ -205,6 +296,7 @@ pub(crate) fn entry_from_stored(stored: &Value) -> Option<pb::MessageEntry> {
         kind: kind.to_owned(),
         version,
         link_previews,
+        agent_card: None,
     };
     // The same rules as the write, without the clock rule.
     check_entry(&entry, None).ok()?;

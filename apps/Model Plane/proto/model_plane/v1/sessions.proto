@@ -1432,14 +1432,34 @@ message ListConversationResponse {
 }
 
 // A typed room entry carried by a human post (WS15). `kind` is a closed word; a reader that
-// does not know a kind shows `{kind, version}` neutrally. Today's only kind is "link_previews".
+// does not know a kind shows `{kind, version}` neutrally. Today's kinds are "link_previews"
+// (WS15-S9) and "agent_card" (WS18-S7, the card a room agent wrote with space.thread.post_card).
 message MessageEntry {
-  // Closed word naming the entry, such as link_previews.
+  // Closed word naming the entry, such as link_previews or agent_card.
   string kind = 1;
   // Version of the entry kind.
   uint32 version = 2;
   // The link previews captured when the post was sent.
   repeated LinkPreview link_previews = 3;
+  // The card an agent wrote (kind agent_card): its title, tone and labelled fields as plain text.
+  // The body is the message content and is not repeated here. Unset for every other kind.
+  AgentCard agent_card = 4;
+}
+
+// The plain-text card a room agent posts (WS18-S7). Text only: no links, no markup, no image.
+message AgentCard {
+  // The title, 1 to 120 characters.
+  string title = 1;
+  // One of info, progress, done or blocked.
+  string tone = 2;
+  // At most eight labelled fields.
+  repeated AgentCardField fields = 3;
+}
+
+// One labelled value of an agent card (WS18-S7): the label is 1 to 40 characters, the value 1 to 200.
+message AgentCardField {
+  string label = 1;
+  string value = 2;
 }
 
 // One captured link preview, text only (no image), snapshotted when the post was sent.

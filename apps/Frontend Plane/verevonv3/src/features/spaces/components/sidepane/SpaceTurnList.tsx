@@ -1,7 +1,13 @@
 import { Bot } from '@/shared/icons'
 import { createSignal, For, Show } from 'solid-js'
+import { Dynamic } from '@solidjs/web'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
+// The room's typed-entry cards register on import (WS15-S9, WS18-S7); the neutral fallback is one of them.
+import '../entries/AgentCardEntry'
+import '../entries/UnknownEntryCard'
+import { turnEntryCard, turnEntryFromWire, turnEntryReplacesBody } from '../../lib/entry-registry'
+import type { TurnEntry } from '../../lib/entry-registry'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { SpaceArtifactChip } from '../SpaceArtifactChip'
 import { spaceReactionsFrom, spaceRunWorkFrom } from '@/shared/api/spaces-client'
@@ -77,6 +83,8 @@ export type TranscriptTurn = {
   readonly agentFollowedUp?: boolean
   /** WS12-S8: emoji reactions on this message, as the server merged them. */
   readonly reactions?: readonly SpaceReactionChip[]
+  /** The message's typed entry as the server sent it; the entry registry reads it (WS15-S9, WS18-S7). */
+  readonly entry?: unknown
 }
 
 export const MAX_TURNS_PER_POST = 30
@@ -129,6 +137,10 @@ export function normalizeTranscriptTurns(
       : undefined
     const work = role === 'assistant' ? spaceRunWorkFrom(record.work) : undefined
     const reactions = revisionState === 'deleted' ? [] : spaceReactionsFrom(record.reactions)
+    // The typed entry is kept as the server sent it; the entry registry decides what it draws (WS15-S9).
+    const entry = revisionState !== 'deleted' && record.entry && typeof record.entry === 'object' && !Array.isArray(record.entry)
+      ? record.entry
+      : undefined
     normalized.push({
       role,
       content,
@@ -144,6 +156,7 @@ export function normalizeTranscriptTurns(
       ...(revisionState && revisedBySubjectId ? { revisedBySubjectId } : {}),
       ...(revisionState === 'deleted' && record.agentFollowedUp === true ? { agentFollowedUp: true } : {}),
       ...(reactions.length > 0 ? { reactions } : {}),
+      ...(entry ? { entry } : {}),
     })
   }
   // Over the cap, keep the first turn (the post's opening message) and the NEWEST turns, never the
@@ -281,6 +294,13 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
   // 'Verevon') covers turns persisted before attribution existed. A human turn is named by the
   // subject the server recorded, never by who happens to be reading.
   const nameOf = (turn: TranscriptTurn) => (turn.role === 'assistant' ? turn.agentName ?? props.agentName : authorOf(turn))
+  // WS15-S9 / WS18-S7: the typed entry of a turn, read by the room's registry. A kind that draws the message
+  // text itself (an agent card) replaces the markdown body, so the text is never rendered as markdown.
+  const typedEntry = (turn: TranscriptTurn): TurnEntry | undefined => turnEntryFromWire(turn.entry)
+  const entryReplacesBody = (turn: TranscriptTurn): boolean => {
+    const entry = typedEntry(turn)
+    return entry !== undefined && turnEntryReplacesBody(entry)
+  }
   return (
     <For each={visibleTurns()}>
       {(turn, index) => {
@@ -472,11 +492,16 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                   </>
                 }
               >
-                <Show when={turn.content}>
+                <Show when={turn.content && !entryReplacesBody(turn)}>
                   <div class="verevon-room-turn__markdown">
                     <ChatMarkdown content={turn.content} />
                   </div>
                 </Show>
+              </Show>
+              {/* WS15-S9 / WS18-S7: the typed entry of the turn, drawn by its registry card. A kind with no card
+                  of its own draws the neutral fallback; an agent card draws the text as plain text. */}
+              <Show when={typedEntry(turn)}>
+                {(entry) => <Dynamic component={turnEntryCard(entry())} entry={entry()} body={turn.content} />}
               </Show>
               <Show when={turn.revisionState === 'edited'}>
                 <span

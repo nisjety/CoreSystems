@@ -1811,7 +1811,8 @@ pub(crate) async fn complete_direct_run_with_message_inner(
     let (message_sequence, memory) = if request.content.trim().is_empty() {
         (0, None)
     } else {
-        let appended = crate::grpc::append_message_in_tx(
+        // The run's own final answer: its run id opens the reply slot after a card this run wrote (WS18-S7).
+        let appended = crate::grpc::append_reply_in_tx(
             &mut transaction,
             &pb::AppendMessageRequest {
                 thread_id: request.thread_id.clone(),
@@ -1821,7 +1822,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
                 agent_name: request.agent_name,
                 ..Default::default()
             },
-            "",
+            &request.run_id,
         )
         .await?;
         (appended.sequence, appended.memory)

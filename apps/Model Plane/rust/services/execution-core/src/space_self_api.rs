@@ -14,8 +14,8 @@
 //! * Only a run whose tool profile is `space_self_api` is offered these rows (`offered_tools`).
 //! * A row whose effective level is `ask` is not offered unless `EXECUTION_CORE_SPACE_SELF_API_RESUMABLE`
 //!   is on, because approval resume for this kind is WS10-S9.
-//! * A row this build cannot execute is dropped, never offered and never executed:
-//!   `space.thread.post_card` until WS18-S7, and the phase 2 and 3 rows.
+//! * A row this build cannot execute is dropped, never offered and never executed: every row not in
+//!   `BUILT_ACTIONS`, which is the phase 2 and 3 rows today. A row is offered only at golden phase 1.
 //!
 //! Zero-retention and waived runs get the typed `zdr_durable_mutation_forbidden` refusal before any
 //! Control call. `EXECUTION_CORE_SPACE_SELF_API` is a rollout switch and never an authorization input:
@@ -61,10 +61,12 @@ const PIN_ACTION: &str = "space.thread.pin";
 const POST_CARD_ACTION: &str = "space.thread.post_card";
 /// The card tones Session Core accepts (`CARD_TONES` in `space/self_api.rs`).
 const CARD_TONES: [&str; 4] = ["info", "progress", "done", "blocked"];
-/// The rows this build executes and attests. `space.thread.post_card` joins with WS18-S7 (its card write
-/// and slot rule); the phase 2 (`space.agent.pause_self`) and phase 3 (`space.schedule.follow_up`) rows have
-/// no executor here.
-const BUILT_ACTIONS: [&str; 2] = [RENAME_ACTION, PIN_ACTION];
+/// The rows this build executes and attests: the three phase 1 thread rows (`space.thread.post_card` since
+/// WS18-S7, with its card write and reply slot rule in Session Core). The phase 2 (`space.agent.pause_self`)
+/// and phase 3 (`space.schedule.follow_up`) rows have no executor here.
+const BUILT_ACTIONS: [&str; 3] = [RENAME_ACTION, PIN_ACTION, POST_CARD_ACTION];
+/// The golden phase a row must be at to be offered (`phase` in the registry). Phase 2 and 3 rows are not built.
+const OFFERED_PHASE: u8 = 1;
 const MAX_VIEW_ACTIONS: usize = 8;
 const MAX_VIEW_BYTES: usize = 32 << 10;
 const MAX_TOKEN_BYTES: usize = 16_384;
@@ -282,10 +284,10 @@ pub(crate) fn admit_view(
             if !view_v2 {
                 continue;
             }
-            if !built_action(&row.action_id) {
+            if !built_action(&row.action_id) || row.phase != OFFERED_PHASE {
                 tracing::info!(
                     action = %row.action_id,
-                    "space action is registered but not executed by this build; not offered"
+                    "space action is registered but not executed by this build, or not at phase 1; not offered"
                 );
                 continue;
             }
@@ -611,7 +613,7 @@ enum Arguments {
     Pin {
         pinned: bool,
     },
-    // Built for WS18-S7: the row is not in BUILT_ACTIONS, so no call reaches this arm in this build.
+    // WS18-S7: a card the room agent posts; Session Core writes it as one plain-text assistant row.
     PostCard {
         title: String,
         body: String,
@@ -674,13 +676,21 @@ fn parse_arguments(action_id: &str, input: &str) -> Result<Arguments, String> {
         POST_CARD_ACTION => {
             let parsed: PostCardInput =
                 serde_json::from_str(input).map_err(|_| CODE_INVALID_ARGUMENTS.to_owned())?;
-            // The same bounds Session Core applies to the untrimmed values it digests.
-            let within = |value: &str, min: usize, max: usize| {
+            // The plain-text rules Session Core applies (`plain_card_text`), on the untrimmed values it digests:
+            // the bounds, no blank value, no control character (a line break only in the body), no link.
+            let plain = |value: &str, min: usize, max: usize, multiline: bool| {
                 let count = value.chars().count();
+                let has_control = value
+                    .chars()
+                    .any(|c| c.is_control() && !(multiline && c == '\n'));
+                let lower = value.to_ascii_lowercase();
                 (min..=max).contains(&count)
+                    && !value.trim().is_empty()
+                    && !has_control
+                    && !(lower.contains("://") || lower.contains("www."))
             };
-            if !within(parsed.title.as_str(), 1, 120)
-                || !within(parsed.body.as_str(), 1, 2000)
+            if !plain(parsed.title.as_str(), 1, 120, false)
+                || !plain(parsed.body.as_str(), 1, 2000, true)
                 || !CARD_TONES.contains(&parsed.tone.as_str())
                 || parsed.fields.len() > 8
             {
@@ -688,7 +698,9 @@ fn parse_arguments(action_id: &str, input: &str) -> Result<Arguments, String> {
             }
             let mut fields = Vec::with_capacity(parsed.fields.len());
             for field in parsed.fields {
-                if !within(field.label.as_str(), 1, 40) || !within(field.value.as_str(), 1, 200) {
+                if !plain(field.label.as_str(), 1, 40, false)
+                    || !plain(field.value.as_str(), 1, 200, false)
+                {
                     return Err(CODE_INVALID_ARGUMENTS.to_owned());
                 }
                 fields.push((field.label, field.value));
@@ -902,7 +914,9 @@ async fn execute(
     let run_id = bounded_identifier(run_id)?;
     let org_id = bounded_identifier(org_id)?;
     let step_id = bounded_identifier(step_id)?;
-    let row = registry_row(tool_name).ok_or_else(|| CODE_NOT_OFFERED.to_owned())?;
+    let row = registry_row(tool_name)
+        .filter(|row| row.phase == OFFERED_PHASE)
+        .ok_or_else(|| CODE_NOT_OFFERED.to_owned())?;
     // Refuse before asking Control anything when the effect could not be applied anyway.
     let channel = session_channel.ok_or_else(|| CODE_NOT_OFFERED.to_owned())?;
     let bearer = session_bearer.ok_or_else(|| CODE_NOT_AUTHORIZED.to_owned())?;

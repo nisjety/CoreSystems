@@ -871,6 +871,12 @@ export type SpaceThreadTurn = {
   readonly agentFollowedUp?: boolean
   /** WS12-S8: the message's emoji reactions, merged by the gateway; absent means none (or unavailable). */
   readonly reactions?: readonly SpaceReactionChip[]
+  /**
+   * The message's typed entry as the server sent it (`kind`, `version` and the kind's payload, WS15-S9 and
+   * WS18-S7). Read by the room's entry registry, which owns its shape; this client only carries it. Absent
+   * when the message has none.
+   */
+  readonly entry?: unknown
 }
 
 export type SpaceThreadTranscript = {
@@ -947,6 +953,8 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
         : undefined
     const work = role === 'assistant' ? spaceRunWorkFrom(record.work) : undefined
     const reactions = spaceReactionsFrom(record.reactions)
+    // The typed entry is the server's; the room's registry reads it (WS15-S9, WS18-S7).
+    const entry = record.entry && typeof record.entry === 'object' && !Array.isArray(record.entry) ? record.entry : undefined
     turns.push({
       role,
       content,
@@ -962,6 +970,7 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
       ...(revisionState && revisedBySubjectId ? { revisedBySubjectId } : {}),
       ...(revisionState === 'deleted' && record.agent_followed_up === true ? { agentFollowedUp: true } : {}),
       ...(revisionState !== 'deleted' && reactions.length > 0 ? { reactions } : {}),
+      ...(revisionState !== 'deleted' && entry ? { entry } : {}),
     })
   }
   return turns

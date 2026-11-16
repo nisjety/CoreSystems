@@ -18,7 +18,7 @@ export type SpaceSelfApiRow = {
   readonly phase: number
   /** The most times this action runs in one agent run (the golden's `max_per_run`). */
   readonly maxPerRun: number
-  /** Whether this build offers the action to a room agent. post_card waits for WS18-S7 (the card slot rule). */
+  /** Whether this build offers the action to a room agent (phase 1 rows only; post_card since WS18-S7). */
   readonly offered: boolean
   readonly label: { readonly no: string; readonly en: string }
   readonly consequence: { readonly no: string; readonly en: string }
@@ -62,7 +62,8 @@ export const SPACE_SELF_API_ROWS: readonly SpaceSelfApiRow[] = [
     defaultLevel: 'allow',
     phase: 1,
     maxPerRun: 3,
-    offered: false,
+    // WS18-S7: built (the card write and its reply slot rule in Session Core, the card in the room).
+    offered: true,
     label: { no: 'Legg inn et kort i tråden', en: 'Post a card in the thread' },
     consequence: {
       no: 'Legger inn et kort med tittel og tekst i tråden den kjører i.',

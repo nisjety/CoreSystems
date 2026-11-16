@@ -25,7 +25,9 @@
 //!    registry row's `max_per_run`.
 //! 9. The effect, the receipt and the events commit together. Rename and pin write the presentation
 //!    columns and set their `*_source` to `agent`. An agent never overwrites a value a person set.
-//!    `space.thread.post_card` is refused as not built here; WS18-S7 writes cards.
+//!    `space.thread.post_card` (WS18-S7) inserts one plain-text assistant row that carries the run id in
+//!    `card_run_id`, so the run's final answer still finds its reply slot open (`grpc.rs`). The row's
+//!    typed card goes under `metadata.entry`, its body is the content, and nothing is extracted from it.
 //!
 //! `ProbeRunThreadActions` answers execution-core only (`service:execution-core` with the scope
 //! `session:run-thread-action:probe`). It returns three booleans and no content.
@@ -56,6 +58,7 @@ use crate::grpc::{
     configured_control_space_decision_keys, normalize_thread_presentation_text, record_metrics,
     THREAD_PRESENTATION_UPDATED_TYPE_URL, THREAD_TITLE_MAX_CHARS,
 };
+use crate::space::entry::{self as card_entry, CARD_TONES, ENTRY_METADATA_KEY};
 use crate::space::mentions::coded_status;
 
 /// The scope a user principal's call carries for this operation (`authorize_operation`).
@@ -87,7 +90,6 @@ pub(crate) const POST_CARD_ACTION: &str = "space.thread.post_card";
 const RENAME_ARGUMENTS: &[&str] = &["title"];
 const PIN_ARGUMENTS: &[&str] = &["pinned"];
 const POST_CARD_ARGUMENTS: &[&str] = &["title", "body", "tone", "fields"];
-const CARD_TONES: [&str; 4] = ["info", "progress", "done", "blocked"];
 
 /// The `*_source` word an agent action writes. A human write writes `owner`.
 const AGENT_SOURCE: &str = "agent";
@@ -328,25 +330,29 @@ fn expected_arguments(action_id: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// Validates a card against the golden `space.thread.post_card` schema.
+/// Validates a card against the golden `space.thread.post_card` schema, and its text as plain text
+/// (WS18-S7): no line break in a title, label or value, no control character, no link. The SPA draws
+/// the text as text, so a card cannot carry a link it would have to render.
 fn parse_post_card(card: pb::PostCardArgs) -> Result<Arguments, Status> {
     let invalid = |detail: &'static str| coded(Status::invalid_argument(detail), INVALID_ARGUMENTS);
-    if !within_chars(&card.title, 1, 120) {
-        return Err(invalid("title must be 1 to 120 characters"));
+    if !card_entry::plain_card_text(&card.title, 1, card_entry::CARD_TITLE_MAX_CHARS, false) {
+        return Err(invalid("title must be 1 to 120 plain characters: no line break, link or control character"));
     }
-    if !within_chars(&card.body, 1, 2000) {
-        return Err(invalid("body must be 1 to 2000 characters"));
+    if !card_entry::plain_card_text(&card.body, 1, card_entry::CARD_BODY_MAX_CHARS, true) {
+        return Err(invalid("body must be 1 to 2000 plain characters: no link or control character"));
     }
     if !CARD_TONES.contains(&card.tone.as_str()) {
         return Err(invalid("tone must be one of info, progress, done, blocked"));
     }
-    if card.fields.len() > 8 {
+    if card.fields.len() > card_entry::CARD_FIELDS_MAX {
         return Err(invalid("at most 8 fields"));
     }
     let mut fields = Vec::with_capacity(card.fields.len());
     for field in card.fields {
-        if !within_chars(&field.label, 1, 40) || !within_chars(&field.value, 1, 200) {
-            return Err(invalid("a field label is 1 to 40 characters and its value 1 to 200"));
+        if !card_entry::plain_card_text(&field.label, 1, card_entry::CARD_FIELD_LABEL_MAX_CHARS, false)
+            || !card_entry::plain_card_text(&field.value, 1, card_entry::CARD_FIELD_VALUE_MAX_CHARS, false)
+        {
+            return Err(invalid("a field label is 1 to 40 plain characters and its value 1 to 200"));
         }
         fields.push((field.label, field.value));
     }
@@ -678,6 +684,76 @@ async fn apply_pin(
     Ok(Outcome::Applied)
 }
 
+/// `space.thread.post_card` (WS18-S7): one plain-text assistant row in the run's own thread, written
+/// under the thread lock. The row takes the thread's own audience and authority stamps, `post_kind`
+/// `turn`, and `card_run_id` = the run, which is what keeps the run's final answer's reply slot open
+/// (`grpc.rs`). The typed card goes under `metadata.entry`; the body is the content. The card is not
+/// appended through `append_message_in_tx_as`: it takes no human authority, extracts no memory and
+/// writes no Letta mirror. Returns the new message id.
+async fn apply_post_card(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread: &ThreadRow,
+    org_id: &str,
+    run_id: &str,
+    now: DateTime<Utc>,
+    arguments: &Arguments,
+) -> Result<String, Status> {
+    let Arguments::PostCard {
+        title,
+        body,
+        tone,
+        fields,
+    } = arguments
+    else {
+        return Err(Status::internal("the card write takes a card"));
+    };
+    let message_id = new_ulid();
+    let metadata = serde_json::json!({
+        ENTRY_METADATA_KEY: card_entry::agent_card_json(title, tone, fields),
+    });
+    sqlx::query(
+        "INSERT INTO messages
+            (id, thread_id, role, content, created_at, metadata, space_id, recipient_audience_ref,
+             recipient_audience_revision, recipient_audience_hash, authority_revision,
+             resource_authorization_ref, post_kind, card_run_id)
+         SELECT $1, t.id, 'assistant', $2, $3, $4, t.space_id, t.recipient_audience_ref,
+                t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision,
+                t.resource_authorization_ref, 'turn', $5
+         FROM threads t WHERE t.id = $6 AND t.org_id = $7",
+    )
+    .bind(&message_id)
+    .bind(body)
+    .bind(now)
+    .bind(&metadata)
+    .bind(run_id)
+    .bind(&thread.thread_id)
+    .bind(org_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_error)
+    .and_then(|done| {
+        if done.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(Status::internal("the card row was not written"))
+        }
+    })?;
+    // The thread's activity clock moves with any agent reply (as `append_message_in_tx_as` stamps it),
+    // so the room shows the card as new.
+    sqlx::query(
+        "UPDATE threads
+         SET last_activity_at = GREATEST(last_activity_at, $2),
+             last_assistant_at = clock_timestamp()
+         WHERE id = $1",
+    )
+    .bind(&thread.thread_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_error)?;
+    Ok(message_id)
+}
+
 /// Applies one registry action to the run's own thread under a verified Control decision.
 pub(crate) async fn apply_run_thread_action(
     pool: &PgPool,
@@ -832,24 +908,31 @@ pub(crate) async fn apply_run_thread_action(
         ));
     }
 
-    // Step 9: the effect, the receipt and the events in one transaction.
+    // Step 9: the effect, the receipt and the events in one transaction. A card's message id is the
+    // only id the effect returns; rename and pin return none.
     let receipt_id = new_ulid();
-    let outcome = match &arguments {
-        Arguments::Rename { title } => apply_rename(&mut tx, &thread, &org_id, title).await?,
-        Arguments::Pin { pinned } => apply_pin(&mut tx, &thread, &org_id, *pinned, now).await?,
-        Arguments::PostCard { .. } => {
-            return Err(coded(
-                Status::unimplemented("space.thread.post_card is not built in this service yet"),
-                NOT_OFFERED,
-            ));
-        }
+    let (outcome, message_id) = match &arguments {
+        Arguments::Rename { title } => (
+            apply_rename(&mut tx, &thread, &org_id, title).await?,
+            String::new(),
+        ),
+        Arguments::Pin { pinned } => (
+            apply_pin(&mut tx, &thread, &org_id, *pinned, now).await?,
+            String::new(),
+        ),
+        Arguments::PostCard { .. } => (
+            Outcome::Applied,
+            apply_post_card(&mut tx, &thread, &org_id, &run_id, now, &arguments).await?,
+        ),
     };
-    if outcome == Outcome::Applied {
-        let (title_overridden, pinned) = match &arguments {
-            Arguments::Rename { .. } => (true, None),
-            Arguments::Pin { pinned } => (false, Some(*pinned)),
-            Arguments::PostCard { .. } => (false, None),
-        };
+    // Rename and pin change the thread's presentation, so the human path's presentation event follows
+    // them. A card changes no presentation column and emits no presentation event.
+    let presentation = match &arguments {
+        Arguments::Rename { .. } if outcome == Outcome::Applied => Some((true, None)),
+        Arguments::Pin { pinned } if outcome == Outcome::Applied => Some((false, Some(*pinned))),
+        _ => None,
+    };
+    if let Some((title_overridden, pinned)) = presentation {
         insert_event(
             &mut tx,
             now,
@@ -868,11 +951,12 @@ pub(crate) async fn apply_run_thread_action(
     }
 
     let receipt_word = outcome.receipt_word();
+    let receipt_message: Option<String> = (!message_id.is_empty()).then(|| message_id.clone());
     sqlx::query(
         "INSERT INTO run_thread_action_receipts
             (org_id, run_id, idempotency_key, receipt_id, action_id, payload_digest,
              decision_ref, subject_id, thread_id, outcome, message_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(&org_id)
     .bind(&run_id)
@@ -884,6 +968,7 @@ pub(crate) async fn apply_run_thread_action(
     .bind(&owner)
     .bind(&thread.thread_id)
     .bind(receipt_word)
+    .bind(&receipt_message)
     .execute(&mut *tx)
     .await
     .map_err(db_error)?;
@@ -904,6 +989,7 @@ pub(crate) async fn apply_run_thread_action(
                 "run_id": run_id,
                 "action_id": action_id,
                 "receipt_id": receipt_id,
+                "message_id": receipt_message,
                 "outcome": receipt_word,
             }),
         },
@@ -915,7 +1001,7 @@ pub(crate) async fn apply_run_thread_action(
         receipt_id,
         outcome: outcome.wire(),
         thread_id: thread.thread_id,
-        message_id: String::new(),
+        message_id,
     })
 }
 

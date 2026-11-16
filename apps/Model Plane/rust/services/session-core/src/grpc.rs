@@ -5644,6 +5644,24 @@ fn assistant_reply_slot_is_open(last_role: Option<&str>) -> bool {
     last_role.is_some_and(|role| role.trim() == "user")
 }
 
+/// Whether a run's final answer may land after a card the same run wrote (WS18-S7): the last row is an
+/// assistant row whose `card_run_id` is that run. Both ids are required, so an append that names no run,
+/// or a card of another run, never opens the slot. The column is written only by the card path, never
+/// read from a client's metadata.
+fn card_reply_slot_is_open(
+    last_role: Option<&str>,
+    last_card_run_id: Option<&str>,
+    reply_run_id: Option<&str>,
+) -> bool {
+    last_role.is_some_and(|role| role.trim() == "assistant")
+        && match (last_card_run_id, reply_run_id) {
+            (Some(card_run), Some(reply_run)) => {
+                !reply_run.trim().is_empty() && card_run == reply_run
+            }
+            _ => false,
+        }
+}
+
 /// Core of `SessionCore::create_thread`, factored out to keep the trait method
 /// small. Inserts the thread row and its `THREAD_CREATED` event in one tx.
 async fn create_thread_inner(
@@ -6008,7 +6026,8 @@ async fn append_message_inner_as(
         .begin()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
-    let appended = append_message_in_tx_as(&mut tx, &req, author_subject_id, append_as).await?;
+    let appended =
+        append_message_in_tx_as(&mut tx, &req, author_subject_id, append_as, None).await?;
     tx.commit()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -6072,7 +6091,32 @@ pub(crate) async fn append_message_in_tx(
     req: &pb::AppendMessageRequest,
     author_subject_id: &str,
 ) -> Result<AppendedMessage, Status> {
-    append_message_in_tx_as(tx, req, author_subject_id, crate::space::authz::AppendAs::Owner).await
+    append_message_in_tx_as(
+        tx,
+        req,
+        author_subject_id,
+        crate::space::authz::AppendAs::Owner,
+        None,
+    )
+    .await
+}
+
+/// The final answer of a run, saved in the run's own thread by `CompleteDirectRunWithMessage`
+/// (WS18-S7). The run id is the one thing it adds to [`append_message_in_tx`]: it lets the reply slot
+/// open after a card this same run wrote (`card_reply_slot_is_open`). Nothing else differs.
+pub(crate) async fn append_reply_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    req: &pb::AppendMessageRequest,
+    run_id: &str,
+) -> Result<AppendedMessage, Status> {
+    append_message_in_tx_as(
+        tx,
+        req,
+        "",
+        crate::space::authz::AppendAs::Owner,
+        Some(run_id),
+    )
+    .await
 }
 
 /// The whole durable half of an append -- thread lock, Space authority,
@@ -6093,6 +6137,7 @@ pub(crate) async fn append_message_in_tx_as(
     req: &pb::AppendMessageRequest,
     author_subject_id: &str,
     append_as: crate::space::authz::AppendAs,
+    reply_run_id: Option<&str>,
 ) -> Result<AppendedMessage, Status> {
     let member = append_as == crate::space::authz::AppendAs::Member;
     let author_subject_id = if req.role.trim() == "user" {
@@ -6211,17 +6256,19 @@ pub(crate) async fn append_message_in_tx_as(
                 // message — where it inherits the thread's stored,
                 // Control-verified authority refs. Every other unscoped
                 // append into a Space thread stays denied.
-                let last_role: Option<(String,)> = sqlx::query_as(
-                    "SELECT role FROM messages WHERE thread_id = $1 AND on_active_path ORDER BY sequence DESC LIMIT 1",
+                let last_row: Option<(String, Option<String>)> = sqlx::query_as(
+                    "SELECT role, card_run_id FROM messages WHERE thread_id = $1 AND on_active_path ORDER BY sequence DESC LIMIT 1",
                 )
                 .bind(&req.thread_id)
                 .fetch_optional(&mut **tx)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
-                let last_role_str = last_role.as_ref().map(|(role,)| role.as_str());
+                let last_role_str = last_row.as_ref().map(|(role, _)| role.as_str());
+                let last_card_run_id = last_row.as_ref().and_then(|(_, card_run)| card_run.as_deref());
                 // WS08-S2: after one addressed agent answered, the next expected agent of the same
                 // human post may answer too (off with SPACE_WAKE_CORE).
                 if !assistant_reply_slot_is_open(last_role_str)
+                    && !card_reply_slot_is_open(last_role_str, last_card_run_id, reply_run_id)
                     && !crate::space::mentions::extended_reply_slot_is_open(
                         tx,
                         &req.thread_id,

@@ -113,3 +113,71 @@
 .verevon-room-system-more:focus-visible {
   text-decoration: underline;
 }
+
+/* The agent card (WS18-S7): plain text only, so the body keeps its line breaks and nothing renders as markup. */
+.verevon-room-entry--card {
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle, currentColor);
+  border-left-width: 3px;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-room-entry--card[data-tone='blocked'] {
+  border-left-color: var(--text-danger, currentColor);
+}
+
+.verevon-room-entry--card[data-tone='done'] {
+  border-left-color: var(--text-success, currentColor);
+}
+
+.verevon-room-entry--card__title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.verevon-room-entry--card__tone {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-muted, inherit);
+  font-size: 0.75rem;
+}
+
+.verevon-room-entry--card__icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.verevon-room-entry--card__body {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.verevon-room-entry--card__fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.verevon-room-entry--card__field {
+  display: contents;
+}
+
+.verevon-room-entry--card__field dt {
+  color: var(--text-muted, inherit);
+}
+
+.verevon-room-entry--card__field dd {
+  margin: 0;
+}
+
+.verevon-room-entry--card__note {
+  margin: 0;
+  color: var(--text-muted, inherit);
+  font-size: 0.75rem;
+}

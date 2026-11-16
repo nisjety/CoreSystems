@@ -139,6 +139,8 @@ fn session_entry(entry: Option<&EntryBody>) -> Result<Option<mp_contracts::model
         kind: entry.kind.clone(),
         version: entry.version,
         link_previews,
+        // A human post never carries a card (WS18-S7): only the Session Core card path writes one.
+        agent_card: None,
     }))
 }
 

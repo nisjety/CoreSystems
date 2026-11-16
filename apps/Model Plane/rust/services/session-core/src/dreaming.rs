@@ -1400,6 +1400,7 @@ async fn load_pending_messages(
          WHERE m.role IN ('user', 'assistant') \
            AND m.on_active_path \
            AND m.copied_from_message_id IS NULL \
+           AND m.card_run_id IS NULL \
            AND NOT (t.origin = 'agent_run' OR (t.origin = 'space' AND t.space_id IS NULL)) \
            AND m.post_kind <> 'post' \
            AND {not_deleted} \
