@@ -44,6 +44,7 @@ pub(crate) mod files;
 pub(crate) mod personal_agents;
 pub(crate) mod canvas;
 pub(crate) mod self_api;
+pub(crate) mod agent_canvas_tools;
 pub(crate) mod private_panel;
 pub(crate) mod memory_declassify;
 mod message_search;
@@ -84,6 +85,8 @@ const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
     // WS18-S5: the self-API tool profile and feature are the gateway's to set, never a browser's.
     "tool_profile",
     "space_self_api",
+    // W3-DEC-CANVAS: the canvas-tools feature is the gateway's to set, never a browser's.
+    "space_canvas_tools",
 ];
 
 /// WS08-S4: the wake fields of a chat body. A browser never supplies `wake_context` (the BFF
@@ -189,6 +192,8 @@ pub(crate) async fn inject_personal_thread_context(
     // WS18-S5: this entry runs no mention decision, so a client-named self-API feature is removed here.
     if let Some(object) = body.as_object_mut() {
         self_api::strip_self_api_feature(object);
+        // W3-DEC-CANVAS: and a client-named canvas-tools feature.
+        agent_canvas_tools::strip_canvas_tools_feature(object);
     }
     inject_personal_thread_context_for_wake(state, user, org_id, body, None).await
 }
@@ -1184,6 +1189,7 @@ fn module_routes() -> Router<AppState> {
         .merge(personal_agents::routes())
         .merge(canvas::routes())
         .merge(self_api::routes())
+        .merge(agent_canvas_tools::routes())
         .merge(private_panel::routes())
         .merge(memory_declassify::routes())
 }
@@ -4758,6 +4764,8 @@ async fn compose_space_agents_from_members(
                         ("pinnedVersion", "pinned_version"),
                         // WS18-S5: the binding switch for agent self-API (absent is off).
                         ("selfApiEnabled", "self_api_enabled"),
+                        // W3-DEC-CANVAS: the canvas-tools switch (absent is off; projection only).
+                        ("canvasToolsEnabled", "canvas_tools_enabled"),
                     ] {
                         if let Some(value) = binding.get(from) {
                             if !value.is_null() {
@@ -5332,6 +5340,8 @@ pub(crate) async fn inject_mentioned_space_agent(
     }
     // WS18-S5: a browser never names the self-API feature. The binding policy below is its only grant.
     self_api::strip_self_api_feature(object);
+    // W3-DEC-CANVAS: a browser never names the canvas-tools feature either.
+    agent_canvas_tools::strip_canvas_tools_feature(object);
     // The wake request is consumed here whatever happens next; the other wake fields are never the
     // browser's (see FORGED_WAKE_FIELDS).
     let wake_request = object.remove("wake").filter(|value| !value.is_null());
@@ -5460,7 +5470,9 @@ pub(crate) async fn inject_mentioned_space_agent(
     // field is a human decision and binds.
     enforce_wake_policy(state, user, org_id, &space_ref, &agent).await?;
     let self_api_allowed = self_api::self_api_allowed(state, user, &agent).await;
-    apply_mention_binding_policy(object, &agent, self_api_allowed)?;
+    // W3-DEC-CANVAS: the canvas-tools switch, with its own flag and posture check (ZDR adds nothing).
+    let canvas_tools_allowed = agent_canvas_tools::canvas_tools_allowed(state, user, &agent).await;
+    apply_mention_binding_policy(object, &agent, self_api_allowed, canvas_tools_allowed)?;
 
     let name = agent
         .get("name")
@@ -5644,6 +5656,9 @@ async fn enforce_wake_policy(
 /// * `self_api_allowed` (WS18-S5: the binding's `self_api_enabled`, the flag, and an org that is not
 ///   zero-retention) — adds `agentic` and `space_self_api` and sets `plan_mode` false. Otherwise any
 ///   client-named `space_self_api` is removed.
+/// * `canvas_tools_allowed` (W3-DEC-CANVAS: the binding's `canvas_tools_enabled`, the flag, and an org that is not
+///   zero-retention): adds `agentic` and `space_canvas_tools` and sets `plan_mode` false. Otherwise any client-named
+///   `space_canvas_tools` is removed.
 /// * `allowed_tools: []` — strips the `tools` feature and any tool specs, so
 ///   the agent answers from its instructions and the conversation alone.
 /// * `allowed_tools: [...]` (non-empty) — narrows `tools` to the specs whose
@@ -5658,6 +5673,7 @@ fn apply_mention_binding_policy(
     object: &mut Map<String, Value>,
     agent: &Value,
     self_api_allowed: bool,
+    canvas_tools_allowed: bool,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     // WS08-S4: the refusals (`trigger_modes` without "mention", `blocked`) are decided by the pure
     // evaluator the mention planner also uses; no role is passed, so `respond_to` (which needs the
@@ -5690,6 +5706,12 @@ fn apply_mention_binding_policy(
         self_api::grant_self_api_feature(object);
     } else {
         self_api::strip_self_api_feature(object);
+    }
+    // W3-DEC-CANVAS: the canvas-tools grant follows the approval rule, as the self-API grant does.
+    if canvas_tools_allowed {
+        agent_canvas_tools::grant_canvas_tools_feature(object);
+    } else {
+        agent_canvas_tools::strip_canvas_tools_feature(object);
     }
 
     if let Some(allowed_tools) = agent.get("allowed_tools").and_then(Value::as_array) {
@@ -6036,6 +6058,8 @@ async fn space_context(
                     "personal_memory_turn": state.space_features.space_personal_memory_turn_api,
                     // WS18-S5: the room agent's self-API switch (the toggle and its chips follow it).
                     "agent_self_api": state.space_features.agent_self_api_api,
+                    // W3-DEC-CANVAS: the canvas-tools switch (the toggle follows it).
+                    "agent_canvas_tools": state.space_features.agent_canvas_tools_api,
                     "status": state.space_features.status_api,
                     "reminders": state.space_features.reminders_api,
                     // WS08-S4: mentions and addressed wake. The picker follows the record flag;

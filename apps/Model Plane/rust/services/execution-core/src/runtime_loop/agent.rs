@@ -2118,6 +2118,10 @@ async fn space_profile_defs(
         Ok(resolved) => {
             let mut defs = Vec::new();
             append_server_resolved_tool_defs(&mut defs, &resolved);
+            // W3-DEC-CANVAS: each row set is offered only under its own marker in the run's tool profile.
+            defs.retain(|def| {
+                crate::space_self_api::offered_under_profile(&req.tool_profile, &def.name)
+            });
             defs
         }
         Err(error) => {

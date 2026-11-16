@@ -1,8 +1,7 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
 
-// WS18-S5: the binding switch for agent self-API, the room agent's own thread tools (rename, pin, and later
-// post a card). Application (convex-core `spaceAgents`) stores `selfApiEnabled` on the binding; the gateway
+// WS18-S5: the binding switch for agent self-API, the room agent's own thread tools (rename, pin and post a card). Application (convex-core `spaceAgents`) stores `selfApiEnabled` on the binding; the gateway
 // gates owner or manager from Control's live role (apps/gateway/src/domains/spaces/self_api.rs and
 // dispatchers_spaces/ws18.rs). The switch grants nothing: Control's run-action decision still decides each
 // tool. The id is not model-executable (model-access.ts closes it): a room agent may not turn its own tools on.
@@ -21,17 +20,45 @@ const spaceSetAgentSelfApiOutput = z.object({
   changed: z.boolean(),
 })
 
+// W3-DEC-CANVAS (D2): the binding switch for the room canvas tools (`space.canvas.read` and `space.canvas.write`). A
+// switch of its own, separate from the self-API switch above, so turning rename, pin and card on never offers canvas tools.
+const spaceSetAgentCanvasToolsInput = z.object({
+  spaceRef: z.string().min(1),
+  bindingRef: z.string().min(1),
+  // Whether this bound agent may read the room canvas and save changes to it. Off is the default for every binding.
+  enabled: z.boolean(),
+})
+
+const spaceSetAgentCanvasToolsOutput = z.object({
+  binding_ref: z.string(),
+  canvas_tools_enabled: z.boolean(),
+  projection_version: z.number().nullable(),
+  changed: z.boolean(),
+})
+
 export const ws18SpaceActions = [
   {
     id: 'spaces.set_agent_self_api',
     label: 'Let a Space agent act on its own thread',
     description:
-      'Choose whether one bound agent in this room may rename and pin the thread it runs in, and later post cards. Only the room\'s owner or a manager may change it. It grants nothing on its own: each action still needs Control\'s decision for that run.',
+      'Choose whether one bound agent in this room may rename and pin the thread it runs in, and post cards. Only the room\'s owner or a manager may change it. It grants nothing on its own: each action still needs Control\'s decision for that run.',
     ownerPlane: 'application',
     risk: 'medium',
     requiresApproval: false,
     reversible: true,
     inputSchema: spaceSetAgentSelfApiInput,
     outputSchema: spaceSetAgentSelfApiOutput,
+  },
+  {
+    id: 'spaces.set_agent_canvas_tools',
+    label: 'Let a Space agent use the room canvas',
+    description:
+      'Choose whether one bound agent in this room may read the room canvas and save changes to it. Only the room\'s owner or a manager may change it. It grants nothing on its own: each canvas action still needs Control\'s decision for that run.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceSetAgentCanvasToolsInput,
+    outputSchema: spaceSetAgentCanvasToolsOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]

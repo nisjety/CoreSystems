@@ -634,6 +634,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// Control's run-action decision, the room's entitlement and the owner-or-manager gate decide every use.
     /// On in development, off in production (`space_flag`).
     pub(crate) agent_self_api_api: bool,
+    /// `SPACE_AGENT_CANVAS_TOOLS_API` (W3-DEC-CANVAS, D2): the binding switch for the room canvas tools
+    /// (`PUT /api/v1/spaces/{space_ref}/agents/{binding_ref}/canvas-tools`, the `spaces.set_agent_canvas_tools`
+    /// action, the `space_canvas_tools` feature a mention turn is granted, and `features.agent_canvas_tools` in the
+    /// Space context). Separate from the self-API switch. Off answers 404 `feature_disabled`. A rollout control,
+    /// never an authorization input: Control's run-action decision, the room's entitlement and the owner-or-manager
+    /// gate decide every use. On in development, off in production (`space_flag`).
+    pub(crate) agent_canvas_tools_api: bool,
     /// `SPACE_PERSONAL_MEMORY_TURN_API` (WS17-S8): the per-turn opt-in to use the user's own personal memory for one
     /// shared-room answer (the `use_personal_memory` body flag, the Control `memory-personal-context-decision` mint and
     /// the `features.personal_memory_turn` flag). Off answers the flag as absent: the turn runs without personal memory.
@@ -763,6 +770,7 @@ impl SpaceFeatureFlags {
             private_panel_ui: space_flag("SPACE_PRIVATE_PANEL_UI"),
             space_memory_declassify_api: space_flag("SPACE_MEMORY_DECLASSIFY_API"),
             agent_self_api_api: space_flag("SPACE_AGENT_SELF_API_API"),
+            agent_canvas_tools_api: space_flag("SPACE_AGENT_CANVAS_TOOLS_API"),
             space_personal_memory_turn_api: space_flag("SPACE_PERSONAL_MEMORY_TURN_API"),
             scim_edge: ScimEdgeConfig::from_env(),
         }

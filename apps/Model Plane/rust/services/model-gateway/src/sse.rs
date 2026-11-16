@@ -15812,10 +15812,12 @@ fn agentic_run_stream(
             ),
             resume.is_some(),
         );
-        // The Space self-API tool profile (WS18-S5): `space_self_api` only for a Space-scoped agentic turn the gateway
-        // granted the feature, never for a zero-retention or waived run. Empty otherwise, so no other run changes.
+        // The Space tool profile (WS18-S5, W3-DEC-CANVAS): the `space_self_api` and `space_canvas_tools` markers, each only
+        // for a Space-scoped agentic turn the gateway granted its feature, never for a zero-retention or waived run. Empty
+        // otherwise, so no other run changes.
         let tool_profile = crate::space_routes::self_api::tool_profile_for_run(
             crate::space_routes::self_api::space_self_api_enabled(),
+            crate::space_routes::self_api::space_canvas_tools_enabled(),
             &features,
             &space_id,
             zdr,

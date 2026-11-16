@@ -125,10 +125,60 @@ pub(crate) fn is_space_action(name: &str) -> bool {
     name != LEGACY_ACTION_ID && registry_row(name).is_some()
 }
 
-/// Whether a `tool_profile` value is the Space profile.
+/// The `tool_profile` marker for the room canvas rows (W3-DEC-CANVAS). Offered only under this marker, never under
+/// `TOOL_PROFILE` alone. Model Gateway writes the same value (`space_routes::self_api`).
+pub(crate) const CANVAS_TOOL_PROFILE: &str = "space_canvas_tools";
+/// Joins the markers of one profile (`space_self_api+space_canvas_tools`).
+const PROFILE_JOIN: char = '+';
+
+/// The Space row sets a `tool_profile` names: each known marker at most once, joined by `+`. Any other value, an empty
+/// one included, names no Space set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProfileMarkers {
+    pub(crate) self_api: bool,
+    pub(crate) canvas: bool,
+}
+
+#[must_use]
+pub(crate) fn profile_markers(profile: &str) -> Option<ProfileMarkers> {
+    let mut markers = ProfileMarkers {
+        self_api: false,
+        canvas: false,
+    };
+    for token in profile.split(PROFILE_JOIN) {
+        let seen = match token {
+            TOOL_PROFILE => &mut markers.self_api,
+            CANVAS_TOOL_PROFILE => &mut markers.canvas,
+            _ => return None,
+        };
+        if *seen {
+            return None;
+        }
+        *seen = true;
+    }
+    Some(markers)
+}
+
+/// Whether a `tool_profile` value is a Space profile (one or both markers).
 #[must_use]
 pub(crate) fn is_profile(profile: &str) -> bool {
-    profile == TOOL_PROFILE
+    profile_markers(profile).is_some()
+}
+
+/// Whether a Space row is offered to a run with this `tool_profile`. A canvas row needs the canvas marker, and the thread
+/// rows (rename, pin, post card) need the self-API marker. Any other Space row is offered under neither (default deny).
+#[must_use]
+pub(crate) fn offered_under_profile(profile: &str, name: &str) -> bool {
+    let Some(markers) = profile_markers(profile) else {
+        return false;
+    };
+    if crate::space_canvas_tools::is_canvas_action(name) {
+        markers.canvas
+    } else if BUILT_ACTIONS.contains(&name) {
+        markers.self_api
+    } else {
+        false
+    }
 }
 
 /// The capability row that governs a Space row, for the policy gate.

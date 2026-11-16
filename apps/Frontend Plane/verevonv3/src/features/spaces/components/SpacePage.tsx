@@ -61,6 +61,7 @@ import {
   whyNoAnswerHint,
 } from '../lib/wake-policy'
 import { SpaceAgentSelfApiToggle } from './SpaceAgentSelfApiToggle'
+import { SpaceAgentCanvasToolsToggle } from './SpaceAgentCanvasToolsToggle'
 import { SpaceAgentWakePolicyEditor } from './SpaceAgentWakePolicyEditor'
 import { SpaceAgentMemoryPanel, spaceAgentMemoryEnabled } from './SpaceAgentMemoryPanel'
 import {
@@ -1803,7 +1804,7 @@ function SpaceAgentCard(props: {
           </Show>
         </Show>
 
-        {/* WS18-S6: the owner's and managers' switch for the agent's own-thread tools (rename, pin). Behind
+        {/* WS18-S6: the owner's and managers' switch for the agent's own-thread tools (rename, pin and post cards). Behind
             `features.agent_self_api`; only an active binding takes it, and the gateway checks the live role on a write. */}
         <Show
           when={
@@ -1819,6 +1820,28 @@ function SpaceAgentCard(props: {
             spaceRef={props.spaceRef}
             bindingRef={bindingRef() ?? ''}
             enabled={agent().self_api_enabled === true}
+            orgId={props.orgId ?? ''}
+            actorId={props.actorId ?? ''}
+            onChanged={props.onChanged}
+          />
+        </Show>
+
+        {/* W3-DEC-CANVAS: the owner's and managers' switch for the agent's room canvas tools (read and save). Behind
+            `features.agent_canvas_tools`; only an active binding takes it, and the gateway checks the live role on a write. */}
+        <Show
+          when={
+            spaceRoomFeature('agent_canvas_tools') &&
+            props.canGovern &&
+            agent().status === 'active' &&
+            bindingRef() &&
+            props.orgId &&
+            props.actorId
+          }
+        >
+          <SpaceAgentCanvasToolsToggle
+            spaceRef={props.spaceRef}
+            bindingRef={bindingRef() ?? ''}
+            enabled={agent().canvas_tools_enabled === true}
             orgId={props.orgId ?? ''}
             actorId={props.actorId ?? ''}
             onChanged={props.onChanged}

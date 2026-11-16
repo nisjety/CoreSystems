@@ -207,6 +207,11 @@ export const spaceTables = {
     // gateway's owner-or-manager gate. It grants nothing: Control's run-action decision still decides
     // every action, and the flag and the organization's posture are checked at the gateway.
     selfApiEnabled: v.optional(v.boolean()),
+    // W3-DEC-CANVAS (D2): the binding switch for the room canvas tools (`space.canvas.read`, `space.canvas.write`).
+    // ABSENT means off. Written only by `spaceAgents:setSpaceAgentCanvasToolsForGateway`, behind the gateway's
+    // owner-or-manager gate. It is its own switch, so turning rename, pin and card on never offers canvas tools.
+    // It grants nothing: Control's run-action decision still decides every canvas action.
+    canvasToolsEnabled: v.optional(v.boolean()),
     projectionVersion: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),

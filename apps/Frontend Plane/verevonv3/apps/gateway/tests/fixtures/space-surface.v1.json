@@ -2140,6 +2140,24 @@
       "reason": "Turns one bound agent self-API switch on or off (ids and a boolean only) for an owner or manager; configuration, allowed under every posture."
     },
     {
+      "id": "bff:PUT:/api/v1/spaces/{space_ref}/agents/{binding_ref}/canvas-tools",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "PUT",
+      "path": "/api/v1/spaces/{space_ref}/agents/{binding_ref}/canvas-tools",
+      "handler": "domains/spaces/agent_canvas_tools.rs::set_space_agent_canvas_tools_route",
+      "route_class": "Config",
+      "decision_type": "membership",
+      "min_role": "manager",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
+      "idempotency": "last_write_wins",
+      "flag": "agent_canvas_tools_api",
+      "payload_allow_list": [],
+      "reason": "Turns one bound agent's room canvas tools switch on or off (ids and a boolean only) for an owner or manager; configuration, allowed under every posture."
+    },
+    {
       "id": "bff:PUT:/api/v1/spaces/{space_ref}/agents/{binding_ref}/tool-policy",
       "kind": "route",
       "plane": "frontend",

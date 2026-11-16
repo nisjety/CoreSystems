@@ -1704,6 +1704,18 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Innstillingen kunne ikke endres. Ingenting er endret. Prøv igjen om litt.',
     en: 'The setting could not be changed. Nothing was changed. Try again shortly.',
   },
+  // W3-DEC-CANVAS agent canvas-tools switch (gateway domains/spaces/agent_canvas_tools.rs). feature_disabled,
+  // active_membership_required, agent_binding_not_found and agent_binding_not_active keep their copy above.
+  // space_role_cannot_manage_agent is worded for the wake policy above, so the canvas switch words it itself
+  // (canvasToolsErrorMessage in features/spaces/lib/space-canvas-tools.ts).
+  invalid_canvas_tools_request: {
+    no: 'Innstillingen for lerretet for agenten er ikke gyldig. Ingenting er endret.',
+    en: "The setting for the agent's room canvas is not valid. Nothing was changed.",
+  },
+  agent_canvas_tools_unavailable: {
+    no: 'Innstillingen for lerretet kunne ikke endres. Ingenting er endret. Prøv igjen om litt.',
+    en: 'The canvas setting could not be changed. Nothing was changed. Try again shortly.',
+  },
 }
 
 /**
