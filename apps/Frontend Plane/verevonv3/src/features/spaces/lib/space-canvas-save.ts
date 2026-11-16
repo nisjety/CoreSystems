@@ -132,9 +132,9 @@ export async function saveSpaceCanvasVersion(
 }
 
 /**
- * The prefix of a restore's client id. The gateway derives every write's idempotency key as `canvas-save-` plus the
- * client id, for a save and for a restore alike (`save_idempotency_key`, canvas.rs), so a restore's id carries this
- * prefix and can never equal a save's id, which is a bare UUID.
+ * The prefix of a restore's client id. The gateway names a save's decision key `canvas-save-` plus the client id, and
+ * a restore's `canvas-restore-` plus the client id (`restore_idempotency_key`, canvas.rs). The id carries this prefix,
+ * so a restore never shares a key with a save, whose id is a bare UUID. The stored restore key repeats the prefix.
  */
 export const CANVAS_RESTORE_ID_PREFIX = 'canvas-restore-'
 

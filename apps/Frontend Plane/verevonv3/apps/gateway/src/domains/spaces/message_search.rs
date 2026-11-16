@@ -620,6 +620,7 @@ async fn space_features(State(state): State<AppState>) -> Response {
             "attention": flags.attention_api && flags.attention_ui,
             // WS17-S5: the personal-agent surfaces (API and UI flags together).
             "personal_agents": flags.personal_agents_api && flags.personal_agents_ui,
+            "memory_declassify": flags.space_memory_declassify_api,
         }}}),
     )
 }

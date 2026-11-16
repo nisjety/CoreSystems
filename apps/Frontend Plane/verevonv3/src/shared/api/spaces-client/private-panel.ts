@@ -23,10 +23,53 @@ type PrivatePanelWire = {
   agent_subject_id?: unknown
 }
 
+/**
+ * The owner's private-panel thread ids this tab has been given. Session Core locks each one to conversation scope
+ * (SD-22 v1), so the chat controller sends every turn on one with conversation scope. It is a hint only: the gateway
+ * and Session Core decide every call, and a missing id fails closed (the send is refused), never open. The ids are kept
+ * in sessionStorage so a reload of this tab keeps them; where storage is blocked they last for this page only.
+ */
+const PRIVATE_PANEL_THREADS_KEY = 'verevon.spaces.privatePanelThreads.v1'
+let privatePanelThreadIds: Set<string> | null = null
+
+function privatePanelThreads(): Set<string> {
+  if (privatePanelThreadIds) return privatePanelThreadIds
+  const ids = new Set<string>()
+  try {
+    const stored: unknown = JSON.parse(window.sessionStorage.getItem(PRIVATE_PANEL_THREADS_KEY) ?? '[]')
+    if (Array.isArray(stored)) {
+      for (const id of stored) {
+        if (typeof id === 'string' && id) ids.add(id)
+      }
+    }
+  } catch {
+    // Storage is blocked or holds something else: this page starts with no ids.
+  }
+  privatePanelThreadIds = ids
+  return ids
+}
+
+function rememberPrivatePanelThread(threadId: string): void {
+  const ids = privatePanelThreads()
+  if (ids.has(threadId)) return
+  ids.add(threadId)
+  try {
+    window.sessionStorage.setItem(PRIVATE_PANEL_THREADS_KEY, JSON.stringify(Array.from(ids)))
+  } catch {
+    // Storage is full or blocked: the id stays in memory for this page.
+  }
+}
+
+/** Whether a thread is this owner's private panel for a room, as a pointer read named it (see the note above). */
+export function isPrivatePanelThread(threadId: string | null | undefined): boolean {
+  return typeof threadId === 'string' && privatePanelThreads().has(threadId)
+}
+
 function panelFrom(wire: PrivatePanelWire | null | undefined, spaceRef: string): SpacePrivatePanelPointer {
   const threadId = typeof wire?.thread_id === 'string' && wire.thread_id.trim() ? wire.thread_id.trim() : null
   const agentSubjectId =
     typeof wire?.agent_subject_id === 'string' && wire.agent_subject_id.trim() ? wire.agent_subject_id.trim() : null
+  if (threadId) rememberPrivatePanelThread(threadId)
   return { spaceRef, threadId, agentSubjectId }
 }
 

@@ -49,6 +49,7 @@ import {
 } from '@/features/chat/lib/chat-projects'
 import { projectTurnsFromTranscript, requestedProjectRef } from './use-chat-project'
 import { getSpaceThreadTranscript, type SpaceThreadTranscript } from '@/shared/api/spaces-client'
+import { isPrivatePanelThread } from '@/shared/api/spaces-client/private-panel'
 import { hydratablePlan } from '@/features/chat/lib/chat-plan-hydration'
 import { registerReloadGuard } from '@/app/chunk-recovery'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
@@ -535,7 +536,11 @@ export function useChatController() {
   }
   const [browseWeb, setBrowseWeb] = createSignal(readBrowseWebPreference())
   const [selectedSourceScope, setSourceScope] = createSignal<import('@/shared/actions/chat-source-scope').ChatSourceScope>('workspace')
-  const sourceScope = () => state.turns.find(turn => turn.role === 'user')?.sourceScope ?? (state.turns.length ? 'workspace' : selectedSourceScope())
+  // A private-panel thread (SD-22 v1) is conversation-only from its first send: Session Core locks it, so every turn on it
+  // reads conversation here, whatever the composer picked.
+  const sourceScope = () => isPrivatePanelThread(state.threadId)
+    ? 'conversation'
+    : (state.turns.find(turn => turn.role === 'user')?.sourceScope ?? (state.turns.length ? 'workspace' : selectedSourceScope()))
   // Per-turn retrieval-source filter (chat-wave2 scope spec), orthogonal to
   // `sourceScope` above. Deliberately NOT read off the first user turn — this
   // axis is "for a chat turn" (Perplexity-Focus style) and must be freely
@@ -3950,6 +3955,10 @@ export function useChatController() {
     const content = rawContent.trim()
     if (!content) return
     const turnPlanMode = () => options.planModeOverride ?? planMode()
+    // A private-panel thread takes conversation scope on every send, whatever the caller or the composer passed.
+    const turnSourceScope: import('@/shared/actions/chat-source-scope').ChatSourceScope = isPrivatePanelThread(state.threadId)
+      ? 'conversation'
+      : (options.sourceScope ?? sourceScope())
     // A deep-linked transcript from Spaces, Support, or another agent surface
     // can be displayed here for continuity, but Chat must never append a turn
     // to it or queue input into its run. The banner/composer guard is UX; this
@@ -3994,7 +4003,7 @@ export function useChatController() {
         !grant
         || Boolean(options.zdr)
         || options.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
-        || (options.sourceScope ?? sourceScope()) === 'conversation'
+        || turnSourceScope === 'conversation'
         || (options.retrievalScope ?? retrievalScope()) !== 'auto'
         || turnPlanMode()
       if (grant && !blocked && grantHasLapsed(grant)) {
@@ -4075,7 +4084,7 @@ export function useChatController() {
       ? {
           id: createId('user'),
           role: 'user',
-          sourceScope: options.sourceScope ?? sourceScope(),
+          sourceScope: turnSourceScope,
           retrievalScope: options.retrievalScope ?? retrievalScope(),
           contextRefs: options.contextRefs,
           content,
@@ -4338,7 +4347,7 @@ export function useChatController() {
           sessionKey: activeThreadId,
           spaceRef: requestedSpaceRef,
           browseWeb: options.browseWeb,
-          sourceScope: options.sourceScope ?? sourceScope(),
+          sourceScope: turnSourceScope,
           retrievalScope: options.retrievalScope ?? retrievalScope(),
           connectorScope: options.connectorScope,
           // Wide research (EP-2 S8/S9): set only by `startWideResearch` and `retryWideResearchItem`; the wire builder

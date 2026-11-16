@@ -1319,14 +1319,14 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // the catalogue modules above.
 
   // WS01 human posts and threads
-  idempotency_key_conflict: { no: 'Denne meldingen er allerede sendt med et annet innhold. Skriv den på nytt og send igjen.', en: 'This message was already sent with different text. Write it again and send.' },
+  idempotency_key_conflict: { no: 'Dette er allerede sendt med et annet innhold. Skriv det på nytt og send igjen.', en: 'This was already sent with different content. Write it again and send.' },
   invalid_client_send_id: { no: 'Meldingen kunne ikke sendes på en trygg måte. Last inn på nytt og prøv igjen.', en: 'The message could not be sent safely. Reload and try again.' },
   invalid_post: { no: 'Meldingen er tom eller for lang. Ingenting ble sendt.', en: 'The message is empty or too long. Nothing was sent.' },
   managed_run_already_started: { no: 'Meldingen var allerede mottatt. Svaret vises i rommet.', en: 'This message was already received. The reply shows in the room.' },
   post_not_stored: { no: 'Samtalen ble opprettet, men meldingen ble ikke lagret. Prøv igjen; den sendes bare én gang.', en: 'The conversation was created but the message was not saved. Try again; it will only be sent once.' },
   session_unavailable: { no: 'Samtaletjenesten er utilgjengelig akkurat nå. Meldingen din er beholdt; prøv igjen om litt.', en: 'The conversation service is unavailable right now. Your message is kept; try again shortly.' },
   space_authority_stale: { no: 'Tilgangen din i rommet ble endret mens du skrev. Prøv igjen; hvis det fortsetter, last inn rommet på nytt.', en: 'Your access to the room changed while you were writing. Try again; if it keeps happening, reload the room.' },
-  space_decision_unavailable: { no: 'Kunne ikke bekrefte at du kan skrive her akkurat nå. Meldingen din er beholdt; prøv igjen om litt.', en: 'We could not confirm that you may post here right now. Your message is kept; try again shortly.' },
+  space_decision_unavailable: { no: 'Kunne ikke bekrefte tilgangen din akkurat nå. Prøv igjen om litt.', en: 'We could not confirm your access right now. Try again shortly.' },
   space_human_posts_disabled: { no: 'Å skrive til rommet uten agent er ikke slått på ennå. Bruk Spør Verevon.', en: 'Posting to the room without the agent is not turned on yet. Use Ask Verevon.' },
   space_post_not_authorized: { no: 'Rollen din i dette rommet tillater ikke å skrive her. Be en eier eller leder om redigeringstilgang.', en: 'Your role in this room does not allow posting here. Ask an owner or manager for edit access.' },
   thread_state_conflict: { no: 'Samtalen kan ikke ta imot nye meldinger akkurat nå. Prøv igjen om litt.', en: 'The conversation cannot take new messages right now. Try again shortly.' },
@@ -1660,9 +1660,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   room_role_insufficient: { no: 'Rollen din i rommet er ikke høy nok til å legge til agenter.', en: 'Your role in this room is not high enough to add agents.' },
   space_not_active: { no: 'Rommet er ikke aktivt akkurat nå, så agenten kan ikke legges til.', en: 'This room is not active right now, so the agent cannot be added.' },
 
-  // WS17-S6b private panel (gateway domains/spaces/private_panel.rs): a room that cannot open one yet, and an outage.
-  private_panel_creation_unavailable: { no: 'Et privat panel kan ikke åpnes her ennå.', en: "A private panel can't be opened here yet." },
-  private_panel_unavailable: { no: 'Det private panelet er midlertidig utilgjengelig. Ingenting er endret. Prøv igjen om litt.', en: 'The private panel is temporarily unavailable. Nothing was changed. Try again shortly.' },
+  // WS17-S6b private panel (gateway domains/spaces/private_panel.rs): the outage a panel call can answer.
+  private_panel_unavailable: { no: 'Det private panelet er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'The private panel is temporarily unavailable. Try again shortly.' },
 
   // WS19-S5 room canvas (gateway domains/spaces/canvas.rs). The canvas routes word their refusals through
   // canvasErrorMessage below, so a code that also means something elsewhere (space_decision_unavailable,
