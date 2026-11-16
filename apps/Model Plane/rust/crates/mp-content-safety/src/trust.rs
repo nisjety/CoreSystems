@@ -22,6 +22,9 @@ pub enum TrustClass {
     PriorConversation,
     /// Text written by another member of a shared room. No tool maps to it yet.
     RoomMember,
+    /// The shared room canvas, read back by `space.canvas.read` (WS19-S9). People and agents in the room write it, so the
+    /// model reads it as untrusted content: framed and screened, never an instruction, and never added to a prompt implicitly.
+    RoomCanvas,
 }
 
 pub const MCP_TOOL_PREFIX: &str = "mcp__";
@@ -68,6 +71,8 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("thread_outline", TrustClass::PriorConversation),
     ("thread_search", TrustClass::PriorConversation),
     ("thread_read", TrustClass::PriorConversation),
+    // WS19-S9: the room canvas read returns the shared document, which people and agents in the room write.
+    ("space.canvas.read", TrustClass::RoomCanvas),
 ];
 
 impl TrustClass {
@@ -94,6 +99,7 @@ impl TrustClass {
             Self::ConnectorContent => "connector-content",
             Self::PriorConversation => "prior-conversation",
             Self::RoomMember => "room-member",
+            Self::RoomCanvas => "room-canvas",
         }
     }
 
@@ -108,7 +114,8 @@ impl TrustClass {
     /// assistant rows written inside such a run). It is narrower than [`Self::is_external`]:
     /// `ConnectorContent` (the user's own connected account) is excluded by the plan default,
     /// because connector reads already have their own screening taint, and `PriorConversation`
-    /// and `RoomMember` have no tool that maps to them.
+    /// and `RoomMember` have no tool that maps to them. `RoomCanvas` is excluded too: WS17 owns the
+    /// containment of canvas text in memory, so this guard does not change for it.
     #[must_use]
     pub const fn is_external_content(self) -> bool {
         matches!(

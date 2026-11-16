@@ -1877,6 +1877,21 @@ async fn execute_step_inner(
         // verifier. Missing/partial deployment authority is a tool failure,
         // not a fallback to a generic HTTP executor.
         crate::ticket_tools::execute_if_configured(tool_input, run_id, org_id, step_id).await
+    } else if crate::space_canvas_tools::is_canvas_action(tool_name) {
+        // WS19-S9: a room canvas row reads or saves the run's Space through a Control run-action decision and wiki-store, which
+        // recomputes the digest and stamps the author from that decision. It is tested before the Space registry arm below, which
+        // would otherwise claim the same names.
+        crate::space_canvas_tools::execute_if_configured(
+            tool_name,
+            tool_input,
+            run_id,
+            org_id,
+            step_id,
+            request_space_id,
+            zdr || waived,
+            data_plane_bearer,
+        )
+        .await
     } else if crate::space_self_api::is_space_action(tool_name) {
         // WS18-S4: a Space registry row acts on the run's own thread. The adapter asks Control for a
         // run-bound decision and sends it with the run owner's delegated bearer to Session Core, which

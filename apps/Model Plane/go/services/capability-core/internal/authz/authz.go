@@ -19,6 +19,9 @@ const (
 	ExecutionCoreServiceID    = "service:execution-core"
 	ConversationCoreServiceID = "service:conversation-core"
 	BrowserBrokerServiceID    = "service:browser-broker"
+	// WikiStoreServiceID owns the room canvas capabilities (WS19-S9). No principal carries it yet, so the owner lane
+	// refuses every attester for those ids until a wiki-store health probe is registered.
+	WikiStoreServiceID = "service:wiki-store"
 
 	ReadScope  = "capability:read"
 	WriteScope = "capability:write"

@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -92,12 +91,12 @@ func (h *CanvasHandler) GetCanvas(w http.ResponseWriter, r *http.Request) {
 		}
 		known = &raw
 	}
-	claims, refused := h.authorize(r, bearer, spaceRef, false)
+	caller, refused := h.authorizeCaller(r, bearer, spaceRef, false, true)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
-	if digestRefusal := checkCanvasDigest(claims, readOp(claims)); digestRefusal != nil {
+	if digestRefusal := caller.checkRead(); digestRefusal != nil {
 		digestRefusal.write(w)
 		return
 	}
@@ -222,7 +221,7 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		writeCanvasStoreError(w, err)
 		return
 	}
-	claims, refused := h.authorize(r, bearer, spaceRef, true)
+	caller, refused := h.authorizeCaller(r, bearer, spaceRef, true, true)
 	if refused != nil {
 		refused.write(w)
 		return
@@ -250,7 +249,7 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		op.CanvasID = activeID
 		op.ExpectedVersionID = derefString(body.ExpectedVersionID)
 	}
-	if digestRefusal := checkCanvasDigest(claims, op); digestRefusal != nil {
+	if digestRefusal := caller.checkWrite(op, runWriteArgs(body), body.IdempotencyKey); digestRefusal != nil {
 		digestRefusal.write(w)
 		return
 	}
@@ -262,8 +261,8 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		Content:           body.Content,
 		Summary:           summary,
 		IdempotencyKey:    body.IdempotencyKey,
-		Author:            canvasUserAuthor(claims),
-		Provenance:        canvasProvenance(claims),
+		Author:            caller.author(),
+		Provenance:        caller.provenance(),
 	})
 	if err != nil {
 		writeCanvasStoreError(w, err)
@@ -348,23 +347,8 @@ type restoreBody struct {
 // authorize verifies the Control decision a canvas request carries and binds it to the route. It checks the header, the
 // signature and the life of the decision, then the claims against the caller and the path. It runs before any repository call.
 func (h *CanvasHandler) authorize(r *http.Request, bearer *authctx.Claims, spaceRef string, write bool) (spacedecision.Claims, *canvasRefusal) {
-	token := strings.TrimSpace(r.Header.Get(canvasDecisionHeader))
-	if token == "" || len(token) > spacedecision.MaxEnvelopeBytes {
-		return spacedecision.Claims{}, refusalOf(http.StatusBadRequest, "space_decision_required",
-			"a Control Space decision of at most 16 KiB is required")
-	}
-	if bearer.IsService() || bearer.UserID == "" {
-		return spacedecision.Claims{}, refusalOf(http.StatusForbidden, spacedecision.CodeDecisionMismatch,
-			"the Space decision is not issued to this principal")
-	}
-	claims, err := spacedecision.Verify(token, h.keys, time.Now().UTC())
-	if err != nil {
-		return spacedecision.Claims{}, refusalFromErr(err)
-	}
-	if err := claims.CheckCanvas(bearer.OrgID, bearer.UserID, spaceRef, write); err != nil {
-		return spacedecision.Claims{}, refusalFromErr(err)
-	}
-	return claims, nil
+	caller, refused := h.authorizeCaller(r, bearer, spaceRef, write, false)
+	return caller.user, refused
 }
 
 // canvasRefusal is one typed refusal of a canvas request: the HTTP status, the wire code and the message.

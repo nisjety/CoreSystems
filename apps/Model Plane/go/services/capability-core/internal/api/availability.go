@@ -55,6 +55,14 @@ const (
 	spaceScheduleFollowUpCapabilityID = "cap.tool.space.schedule.follow_up"
 )
 
+// Room canvas capability ids (WS19-S9). The owner is wiki-store, so these rows name wiki-store as their only attester.
+// No principal carries that identity yet, which makes both rows unattestable: the owner lane refuses every caller and
+// the generic and tenant lanes refuse the ids because they are owner-action ids.
+const (
+	spaceCanvasReadCapabilityID  = "cap.tool.space.canvas.read"
+	spaceCanvasWriteCapabilityID = "cap.tool.space.canvas.write"
+)
+
 // ownerActionHealthAttesters is the owner-action lane's attester table. Each owner-action
 // capability names the one service identity allowed to attest its health on that lane. The
 // owner lane refuses every id it does not list, and the generic and tenant lanes refuse
@@ -65,6 +73,8 @@ var ownerActionHealthAttesters = map[string]string{
 	spaceThreadPinCapabilityID:        authz.ExecutionCoreServiceID,
 	spaceThreadPostCardCapabilityID:   authz.ExecutionCoreServiceID,
 	spaceScheduleFollowUpCapabilityID: authz.ExecutionCoreServiceID,
+	spaceCanvasReadCapabilityID:       authz.WikiStoreServiceID,
+	spaceCanvasWriteCapabilityID:      authz.WikiStoreServiceID,
 }
 
 // isOwnerActionCapability reports whether an id belongs to the owner-action lane.

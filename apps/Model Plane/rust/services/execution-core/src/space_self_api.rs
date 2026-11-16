@@ -173,12 +173,19 @@ pub(crate) fn attested_capability_ids() -> Vec<String> {
         .collect()
 }
 
+/// Whether a row is executed by this build: the run-thread rows, and the room canvas rows while their own switch and configuration
+/// are complete (`space_canvas_tools`, WS19-S9). Only the thread rows feed `attested_capability_ids`.
+#[must_use]
+fn built_action(name: &str) -> bool {
+    BUILT_ACTIONS.contains(&name) || crate::space_canvas_tools::is_built_action(name)
+}
+
 /// Whether a resolved definition may join the offered set: a built Space row whose description is
 /// non-empty and whose parameters are the golden bytes. Exact name, no trimming.
 #[must_use]
 pub(crate) fn admits(tool: &ToolDefinition) -> bool {
     is_space_action(&tool.name)
-        && BUILT_ACTIONS.contains(&tool.name.as_str())
+        && built_action(&tool.name)
         && !tool.description.trim().is_empty()
         && registry_row(&tool.name).is_some_and(|row| tool.parameters_json == row.parameters_json)
 }
@@ -275,7 +282,7 @@ pub(crate) fn admit_view(
             if !view_v2 {
                 continue;
             }
-            if !BUILT_ACTIONS.contains(&row.action_id.as_str()) {
+            if !built_action(&row.action_id) {
                 tracing::info!(
                     action = %row.action_id,
                     "space action is registered but not executed by this build; not offered"
@@ -765,7 +772,7 @@ fn proto_args(arguments: &Arguments) -> ActionArgs {
     }
 }
 
-fn bounded_identifier(value: &str) -> Result<String, String> {
+pub(crate) fn bounded_identifier(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
         return Err(CODE_NOT_OFFERED.to_owned());
