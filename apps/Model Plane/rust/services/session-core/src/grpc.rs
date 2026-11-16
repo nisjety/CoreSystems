@@ -4769,6 +4769,244 @@ pub(crate) fn verify_space_memory_decision(
     )
 }
 
+/// WS17-S7: the Control action, schema and sole permission of a memory declassify decision. Both
+/// operations (`declassify`, `retract`) share them and differ only in the bound operation, so a
+/// declassify token never retracts and a retract token never shares.
+pub(crate) const CONTROL_MEMORY_DECLASSIFY_ACTION: &str = "model.memory.declassify";
+pub(crate) const CONTROL_MEMORY_DECLASSIFY_SCHEMA: &str = "sha256:memory-declassify-v1";
+pub(crate) const MEMORY_DECLASSIFY_PERMISSION: &str = "memory:declassify";
+/// The operations a memory declassify decision binds.
+pub(crate) const MEMORY_DECLASSIFY_OPERATION_DECLASSIFY: &str = "declassify";
+pub(crate) const MEMORY_DECLASSIFY_OPERATION_RETRACT: &str = "retract";
+
+/// What a verified memory declassify decision tells the writer: the audience the room row is stamped
+/// with (hash and revision) and the zero-retention claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedMemoryDeclassify {
+    pub(crate) recipient_audience_hash: String,
+    pub(crate) recipient_audience_revision: i64,
+    pub(crate) zero_data_retention: bool,
+}
+
+/// The `sha256:<hex>` digest of reviewed text, over its exact bytes. Control binds this value; Session
+/// Core recomputes it from the text it received, so a text changed after review fails the check.
+pub(crate) fn memory_declassify_content_digest(reviewed_content: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(reviewed_content.as_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+/// Recompute Control's `model.memory.declassify` payload digest from the claims plus the request's own
+/// operation, memory id and content digest. Byte for byte the Go `memoryDeclassifyPayloadDigest`.
+fn memory_declassify_payload_digest(
+    claims: &ControlSpaceDecisionClaims,
+    operation: &str,
+    memory_id: &str,
+    content_digest: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.memory.declassify\0v1\0");
+    for (name, value) in [
+        ("org_id", claims.org_id.as_str()),
+        ("user_id", claims.subject_id.as_str()),
+        ("space_id", claims.space_ref.as_str()),
+        ("space_decision_ref", claims.decision_ref.as_str()),
+        (
+            "recipient_audience_ref",
+            claims.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            claims.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", claims.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            claims.resource_authorization_ref.as_str(),
+        ),
+        ("operation", operation),
+        ("memory_id", memory_id),
+        ("content_digest", content_digest),
+        ("action_schema_hash", CONTROL_MEMORY_DECLASSIFY_SCHEMA),
+        ("idempotency_key", claims.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(claims.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(claims.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+/// The action id a Control space decision token names, read from its unverified payload. It only chooses
+/// which verifier runs (the verifier checks the signature and the action again): a routing hint, never
+/// authority.
+pub(crate) fn control_space_decision_action(token: &str) -> Option<String> {
+    let payload = token
+        .split('.')
+        .nth(2)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    claims.get("action_id")?.as_str().map(str::to_owned)
+}
+
+/// Verify one Control `model.memory.declassify` decision for one operation. The digest binds the
+/// operation, the memory id (the source row for a declassify, the room row for a retract) and, for a
+/// declassify, the content digest of the reviewed text. `expected_idempotency_key` is `Some` for a
+/// declassify (the request's key must equal the signed one) and `None` for a retract, whose request
+/// carries no key: the signed key is then bound only through the digest.
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+fn verify_memory_declassify_decision_with_key(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    operation: &str,
+    memory_id: &str,
+    content_digest: &str,
+    expected_idempotency_key: Option<&str>,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedMemoryDeclassify, Status> {
+    const DENIED: &str = "Control memory declassify decision does not authorize this request";
+    if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control memory declassify decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(DENIED));
+    }
+    URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty() && id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied(DENIED))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .ok()
+        .and_then(|raw| Signature::from_slice(&raw).ok())
+        .ok_or_else(|| Status::permission_denied(DENIED))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied(DENIED))?;
+    let claims: ControlSpaceDecisionClaims =
+        serde_json::from_slice(&payload).map_err(|_| Status::permission_denied(DENIED))?;
+
+    // Exactly the one permission. A read, append, run-control, wake, approval or Space memory token
+    // carries another action and fails here.
+    let matches_request = claims.decision_ref == decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == CONTROL_MEMORY_DECLASSIFY_ACTION
+        && claims.action_schema_hash == CONTROL_MEMORY_DECLASSIFY_SCHEMA
+        && expected_idempotency_key.map_or(true, |expected| claims.idempotency_key == expected)
+        && claims.payload_digest
+            == memory_declassify_payload_digest(&claims, operation, memory_id, content_digest)
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == MEMORY_DECLASSIFY_PERMISSION;
+    if !matches_request {
+        return Err(Status::permission_denied(DENIED));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.recipient_audience_ref.trim().is_empty()
+        || claims.recipient_audience_hash.trim().is_empty()
+        || claims.recipient_audience_revision == 0
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control memory declassify decision is expired or incomplete",
+        ));
+    }
+    let recipient_audience_revision = i64::try_from(claims.recipient_audience_revision)
+        .map_err(|_| Status::permission_denied(DENIED))?;
+    Ok(VerifiedMemoryDeclassify {
+        recipient_audience_hash: claims.recipient_audience_hash,
+        recipient_audience_revision,
+        zero_data_retention: claims.zero_data_retention,
+    })
+}
+
+/// Key lookup and verification of a Control `model.memory.declassify` decision (WS17-S7), bound to the
+/// caller, org, Space, operation, memory id and content digest. Session Core is the authority; the gateway
+/// and the BFF only carry the token.
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_memory_declassify_decision(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    operation: &str,
+    memory_id: &str,
+    content_digest: &str,
+    expected_idempotency_key: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<VerifiedMemoryDeclassify, Status> {
+    if token.trim().is_empty() || decision_ref.trim().is_empty() || space_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Memory declassify requires a Control memory declassify decision",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Memory declassify requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_memory_declassify_decision_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        operation,
+        memory_id,
+        content_digest,
+        expected_idempotency_key,
+        &key_id,
+        key,
+        now,
+    )
+}
+
 /// Resolve an optional shared-Space read authority for one request.
 ///
 /// `Ok(None)` means no decision was offered and the caller stays on the

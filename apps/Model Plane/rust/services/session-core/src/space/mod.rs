@@ -36,6 +36,8 @@
 //! - [`self_api`]: `SpaceRunActions`, the run-bound owner path of the agent self-API: rename and pin on the run's own
 //!   thread under a Control `run-action-v1` decision, receipts and the probe (WS18-S3; receipts are migration 0084,
 //!   the switch is `SPACE_SELF_API_SESSION_CORE`).
+//! - [`memory_declassify`]: the declassified memory ledger writes (WS17-S7): the share of a personal memory row into
+//!   a room and its retraction by the declassifying subject (migration 0083).
 //! - [`browser_read`]: `SpaceBrowserRead`, the room browser run's per-Space count and run Space lookup (WS20-S3;
 //!   read-only, no migration).
 
@@ -51,6 +53,7 @@ pub(crate) mod browser_read;
 pub(crate) mod entry;
 pub(crate) mod events;
 pub(crate) mod history;
+pub(crate) mod memory_declassify;
 pub(crate) mod memory_scope;
 pub(crate) mod mentions;
 pub(crate) mod quarantine;

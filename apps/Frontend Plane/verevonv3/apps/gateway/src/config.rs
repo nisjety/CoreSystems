@@ -610,6 +610,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// `feature_disabled`. A rollout control, never an authorization input: Control's membership decides every access.
     /// On in development, off in production (`space_flag`).
     pub(crate) private_panel_ui: bool,
+    /// `SPACE_MEMORY_DECLASSIFY_API` (WS17-S7): the reviewed declassify of one personal memory into a shared room
+    /// (`POST /api/v1/spaces/{space_ref}/memory/declassify`) and the `memory.declassify_to_space` action. Off answers
+    /// 404 `feature_disabled`. A rollout control, never an authorization input: Control's decision and model-gateway's
+    /// own checks decide every write. On in development, off in production (`space_flag`).
+    pub(crate) space_memory_declassify_api: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -729,6 +734,7 @@ impl SpaceFeatureFlags {
             canvas_api: space_flag("SPACE_CANVAS_API"),
             canvas_ui: space_flag("SPACE_CANVAS_UI"),
             private_panel_ui: space_flag("SPACE_PRIVATE_PANEL_UI"),
+            space_memory_declassify_api: space_flag("SPACE_MEMORY_DECLASSIFY_API"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }

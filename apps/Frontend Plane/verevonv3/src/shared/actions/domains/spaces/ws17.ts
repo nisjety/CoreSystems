@@ -87,6 +87,30 @@ const spacesOpenPrivatePanelOutput = z.object({
   agent_subject_id: z.string().nullable(),
 })
 
+// WS17-S7: a person shares one of their own personal memories into a room, after reading its exact text
+// (`POST /api/v1/spaces/{ref}/memory/declassify`, 201 `{data:{room_memory_id, space_ref, source_memory_id, deduplicated}}`).
+// The browser sends the memory id, the reviewed text and a retry key, and nothing else: the gateway and Control mint the
+// subject, the audience and the content digest, and refuse any other field. The room copy is a Session Core row, so the
+// owner plane is `model`. Human only: an agent never shares a person's memory.
+const memoryDeclassifyToSpaceInput = z.object({
+  memoryId: z.string().min(1),
+  spaceRef: z.string().min(1),
+  // Code points, as the server counts them: at most 1000 characters (session-core `DeclassifyMemory`).
+  reviewedContent: z
+    .string()
+    .trim()
+    .min(1)
+    .refine((text) => [...text].length <= 1000, 'reviewedContent must be at most 1000 characters'),
+  clientRequestId: z.string().trim().min(1).max(128),
+})
+
+const memoryDeclassifyToSpaceOutput = z.object({
+  room_memory_id: z.string(),
+  space_ref: z.string(),
+  source_memory_id: z.string(),
+  deduplicated: z.boolean(),
+})
+
 export const ws17SpaceActions = [
   {
     id: 'agents.create_personal',
@@ -147,5 +171,17 @@ export const ws17SpaceActions = [
     reversible: false,
     inputSchema: spacesOpenPrivatePanelInput,
     outputSchema: spacesOpenPrivatePanelOutput,
+  },
+  {
+    id: 'memory.declassify_to_space',
+    label: 'Share memory to room',
+    description:
+      'Share one of your own personal memories with a room, as you, exactly as you reviewed it. Everyone in the room can see it, and the agents in the room can use it. Your own memory is not changed. Refused under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: memoryDeclassifyToSpaceInput,
+    outputSchema: memoryDeclassifyToSpaceOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]

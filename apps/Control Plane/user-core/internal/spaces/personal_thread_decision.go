@@ -136,6 +136,9 @@ type PersonalThreadDecisionEvidence struct {
 	// BrowserEntitled (WS20-S1) is the room browser run bit, filled only by the
 	// browser run resolvers and resolvePersonalDecisionEvidence. Deny by default.
 	BrowserEntitled bool
+	// MemoryDeclassifyEntitled (WS17-S7) is the declassify bit, filled only by
+	// ResolveSharedMemoryDeclassifyDecisionEvidence. Deny by default.
+	MemoryDeclassifyEntitled bool
 }
 
 func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {

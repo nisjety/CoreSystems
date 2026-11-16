@@ -206,6 +206,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'spaces.save_canvas': exempt('human_identity_or_security', 'external_write'),
   'spaces.restore_canvas_version': exempt('human_identity_or_security', 'external_write'),
   'spaces.open_private_panel': exempt('human_identity_or_security', 'external_write'),
+  // WS17-S7: a person shares one of their own memories to a room after reading its text. Human only: an agent never does.
+  'memory.declassify_to_space': exempt('human_identity_or_security', 'external_write'),
   'spaces.open_dm': exempt('human_identity_or_security', 'external_write'),
   'spaces.hide_space': exempt('ui_state_only', 'external_write'),
   'spaces.edit_message': exempt('human_identity_or_security', 'external_write'),

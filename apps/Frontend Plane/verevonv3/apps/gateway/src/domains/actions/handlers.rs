@@ -121,6 +121,7 @@ use super::dispatchers_spaces::ws17::{
     dispatch_agents_create_personal, dispatch_agents_set_primary, dispatch_agents_update_access,
     dispatch_spaces_open_private_panel, dispatch_spaces_withdraw_agent,
 };
+use super::dispatchers_spaces::ws17::dispatch_memory_declassify_to_space;
 use super::dispatchers_spaces::ws19::{
     dispatch_spaces_restore_canvas_version, dispatch_spaces_save_canvas,
 };
@@ -1098,6 +1099,12 @@ pub(super) async fn execute_action(
         "spaces.open_private_panel" => {
             boxed_dispatch(|| dispatch_spaces_open_private_panel(&state, &user, &headers, &body.input))
                 .await
+        }
+        "memory.declassify_to_space" => {
+            boxed_dispatch(|| {
+                dispatch_memory_declassify_to_space(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "spaces.save_canvas" => {
             boxed_dispatch(|| dispatch_spaces_save_canvas(&state, &user, &headers, &body.input))

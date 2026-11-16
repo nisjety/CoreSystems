@@ -436,3 +436,54 @@ export async function rebuildProfile(force: boolean): Promise<UserProfileResult>
     }),
   )
 }
+
+/** The longest memory a person may share to a room, in characters (code points), as the server counts them. */
+export const MEMORY_DECLASSIFY_MAX_CHARS = 1000
+
+/**
+ * What a share of one personal memory into a room answers (WS17-S7). `deduplicated` is true when the room already
+ * held this request and returned the original, so a retry never makes a second copy.
+ */
+export interface DeclassifySpaceMemoryResult {
+  roomMemoryId: string
+  spaceRef: string
+  sourceMemoryId: string
+  deduplicated: boolean
+}
+
+interface DeclassifySpaceMemoryResponse {
+  room_memory_id?: string
+  space_ref?: string
+  source_memory_id?: string
+  deduplicated?: boolean
+}
+
+/**
+ * Shares one of the signed-in user's own memories to a room, as them, exactly as `reviewedContent` reads. The body
+ * carries the memory id, the reviewed text and a retry key, and nothing else: the gateway and Control mint the subject,
+ * the audience and the digest, and refuse any other field. `clientRequestId` names one share, so a retry of the same
+ * text is stored once. A Zero Data Retention caller is refused with `zdr_durable_mutation_forbidden` (412) before any
+ * Control call; a caller who may not share into that room is refused with `memory_declassify_not_authorized` (403).
+ */
+export async function declassifySpaceMemory(
+  spaceRef: string,
+  input: { memoryId: string; reviewedContent: string; clientRequestId: string },
+): Promise<DeclassifySpaceMemoryResult> {
+  const response = await requestJson<DeclassifySpaceMemoryResponse>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/memory/declassify`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        memory_id: input.memoryId,
+        reviewed_content: input.reviewedContent,
+        client_request_id: input.clientRequestId,
+      }),
+    },
+  )
+  return {
+    roomMemoryId: response.room_memory_id ?? '',
+    spaceRef: response.space_ref ?? spaceRef,
+    sourceMemoryId: response.source_memory_id ?? input.memoryId,
+    deduplicated: response.deduplicated === true,
+  }
+}

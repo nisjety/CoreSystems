@@ -1375,6 +1375,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   memory_not_found: { no: 'Fant ikke minnet, eller du har ikke tilgang til det. Ingenting ble endret.', en: 'The memory was not found, or you do not have access to it. Nothing was changed.' },
   space_memory_not_authorized: { no: 'Du har ikke tilgang til å administrere minnet i dette rommet.', en: 'You do not have access to manage the memory in this room.' },
   space_memory_unavailable: { no: 'Minnet i rommet er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'The memory in this room is temporarily unavailable. Try again shortly.' },
+  memory_declassify_not_authorized: { no: 'Du har ikke tilgang til å dele dette minnet i rommet. Ingenting er delt.', en: 'You do not have access to share this memory to the room. Nothing was shared.' },
 
   // WS14 document sharing (documents-api share routes)
   shares_disabled: { no: 'Deling er ikke slått på ennå.', en: 'Sharing is not turned on yet.' },

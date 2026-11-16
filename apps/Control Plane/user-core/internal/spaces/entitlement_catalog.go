@@ -140,11 +140,11 @@ var entitlementCatalog = []EntitlementSpec{
 		Set: func(p *EffectPolicy, v bool) { p.PersonalAgentAdmitEntitled = v },
 	},
 	{
-		// WS17-S4: declassifying a personal memory into a room. The decisions it
-		// gates ship with WS17-S7 (listed there); the bit persists memory content,
-		// so it is inert under Space ZDR.
+		// WS17-S4: declassifying a personal memory into a room. The bit gates the
+		// model.memory.declassify decision (WS17-S7; retraction needs no bit); the
+		// bit persists memory content, so it is inert under Space ZDR.
 		Key: "memory_declassify", Column: "memory_declassify_entitled",
-		Decisions: nil, ZDR: ZDRInert,
+		Decisions: []string{"model.memory.declassify"}, ZDR: ZDRInert,
 		Get: func(p EffectPolicy) bool { return p.MemoryDeclassifyEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.MemoryDeclassifyEntitled = v },
 	},

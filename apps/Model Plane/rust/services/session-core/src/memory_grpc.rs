@@ -13,7 +13,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
-    CheckMemoryWriteRequest, CheckMemoryWriteResponse, DeleteMemoryRequest, DeleteMemoryResponse,
+    CheckMemoryWriteRequest, CheckMemoryWriteResponse, DeclassifyMemoryRequest,
+    DeclassifyMemoryResponse, DeleteMemoryRequest, DeleteMemoryResponse,
     EraseAgentMemoryRequest, EraseAgentMemoryResponse, GetMemoryControlsRequest,
     GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse,
     ListMemoryRequest, ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest,
@@ -378,6 +379,13 @@ impl MemoryGrpc {
         caller: &VerifiedIdentity,
         req: &DeleteMemoryRequest,
     ) -> Result<Response<DeleteMemoryResponse>, Status> {
+        // WS17-S7: a token that names the memory declassify action is the declassifying subject's retraction
+        // (SD-22). The action is read only to choose the verifier; the verifier checks the signature again.
+        if crate::grpc::control_space_decision_action(req.space_control_decision_token.trim()).as_deref()
+            == Some(crate::grpc::CONTROL_MEMORY_DECLASSIFY_ACTION)
+        {
+            return self.retract_declassified_space_memory(caller, req).await;
+        }
         let (org_id, user_id, space_id, memory_id) = (
             req.org_id.trim(),
             req.user_id.trim(),
@@ -404,6 +412,183 @@ impl MemoryGrpc {
         // Ids only, never content: who removed which row of which Space.
         tracing::info!(org_id, space_id, memory_id, actor = user_id, "space memory row deleted by its manager");
         metrics::counter!("mp_session_space_memory_erased_total", "op" => "manager_delete").increment(1);
+        Ok(Response::new(delete_response(true, None)))
+    }
+
+    /// `DeclassifyMemory` (WS17-S7): share one of the caller's personal memory rows into a shared Space under
+    /// a Control `model.memory.declassify` decision for the exact reviewed text. A person, for themselves
+    /// only; a ZDR caller is refused before any Control check (durable mutation). The source row is not
+    /// changed; the room row and its ledger row are written in one transaction.
+    async fn declassify_space_memory(
+        &self,
+        caller: &VerifiedIdentity,
+        req: &DeclassifyMemoryRequest,
+    ) -> Result<Response<DeclassifyMemoryResponse>, Status> {
+        const REVIEWED_MAX_CHARS: usize = 1000;
+        let (org_id, user_id, space_id, source_memory_id, decision_ref, decision_token, idempotency_key) = (
+            req.org_id.trim(),
+            req.user_id.trim(),
+            req.space_id.trim(),
+            req.source_memory_id.trim(),
+            req.space_decision_ref.trim(),
+            req.space_decision_token.trim(),
+            req.idempotency_key.trim(),
+        );
+        caller.authorize_org(org_id)?;
+        if caller.is_service() {
+            return Err(Status::permission_denied(
+                "Space memory is declassified by a person",
+            ));
+        }
+        caller.authorize_user(user_id)?;
+        if caller.zdr() {
+            return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition));
+        }
+        if source_memory_id.is_empty()
+            || space_id.is_empty()
+            || decision_ref.is_empty()
+            || decision_token.is_empty()
+            || idempotency_key.is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "source_memory_id, space_id, the Space decision and idempotency_key are required",
+            ));
+        }
+        if req.reviewed_content.trim().is_empty() {
+            return Err(Status::invalid_argument("reviewed_content is required"));
+        }
+        if req.reviewed_content.chars().count() > REVIEWED_MAX_CHARS {
+            return Err(Status::invalid_argument(
+                "reviewed_content is longer than 1000 characters",
+            ));
+        }
+        // The digest of the exact bytes received (never trimmed): Control bound the digest of this text.
+        let content_digest = crate::grpc::memory_declassify_content_digest(&req.reviewed_content);
+        let verified = crate::grpc::verify_memory_declassify_decision(
+            decision_token,
+            decision_ref,
+            org_id,
+            user_id,
+            space_id,
+            crate::grpc::MEMORY_DECLASSIFY_OPERATION_DECLASSIFY,
+            source_memory_id,
+            &content_digest,
+            Some(idempotency_key),
+            Utc::now(),
+        )?;
+        if verified.zero_data_retention {
+            return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition));
+        }
+        // A removed member is refused even while the decision they hold has not expired.
+        let revoked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM space_membership_revocations \
+             WHERE space_ref = $1 AND subject_id = $2)",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if revoked {
+            return Err(Status::permission_denied(
+                "Space membership required for this Space's memory",
+            ));
+        }
+        let outcome = crate::space::memory_declassify::declassify_into_room(
+            &self.pool,
+            crate::space::memory_declassify::DeclassifyInput {
+                org_id,
+                user_id,
+                space_id,
+                source_memory_id,
+                reviewed_content: &req.reviewed_content,
+                content_digest: &content_digest,
+                decision_ref,
+                idempotency_key,
+                audience_hash: &verified.recipient_audience_hash,
+                audience_revision: verified.recipient_audience_revision,
+            },
+        )
+        .await?;
+        // Ids only, never the text: who shared which row into which Space.
+        tracing::info!(
+            org_id,
+            space_id,
+            source_memory_id,
+            memory_id = %outcome.memory_id,
+            deduplicated = outcome.deduplicated,
+            actor = user_id,
+            "personal memory declassified into a Space"
+        );
+        if !outcome.deduplicated {
+            metrics::counter!("mp_session_space_memory_declassified_total", "op" => "declassify")
+                .increment(1);
+        }
+        Ok(Response::new(DeclassifyMemoryResponse {
+            memory_id: outcome.memory_id,
+            deduplicated: outcome.deduplicated,
+        }))
+    }
+
+    /// `DeleteMemory` with `space_id` under a memory declassify decision for the `retract` operation (WS17-S7,
+    /// SD-22): the subject who shared a room row removes it. The decision binds the row id; the ledger proves
+    /// the subject shared it. Removing is never storing, so no retention posture refuses it.
+    async fn retract_declassified_space_memory(
+        &self,
+        caller: &VerifiedIdentity,
+        req: &DeleteMemoryRequest,
+    ) -> Result<Response<DeleteMemoryResponse>, Status> {
+        let (org_id, user_id, space_id, memory_id) = (
+            req.org_id.trim(),
+            req.user_id.trim(),
+            req.space_id.trim(),
+            req.memory_id.trim(),
+        );
+        caller.authorize_org(org_id)?;
+        if caller.is_service() {
+            return Err(Status::permission_denied(
+                "Space memory is retracted by a person",
+            ));
+        }
+        caller.authorize_user(user_id)?;
+        crate::grpc::verify_memory_declassify_decision(
+            req.space_control_decision_token.trim(),
+            req.space_control_decision_ref.trim(),
+            org_id,
+            user_id,
+            space_id,
+            crate::grpc::MEMORY_DECLASSIFY_OPERATION_RETRACT,
+            memory_id,
+            "",
+            None,
+            Utc::now(),
+        )?;
+        let revoked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM space_membership_revocations \
+             WHERE space_ref = $1 AND subject_id = $2)",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if revoked {
+            return Err(Status::permission_denied(
+                "Space membership required for this Space's memory",
+            ));
+        }
+        let deleted = crate::space::memory_declassify::retract_declassified_row(
+            &self.pool, org_id, space_id, memory_id, user_id,
+        )
+        .await?;
+        if !deleted {
+            return Err(Status::not_found("memory not found"));
+        }
+        // Ids only: who retracted which room row of which Space.
+        tracing::info!(org_id, space_id, memory_id, actor = user_id, "declassified memory retracted by its subject");
+        metrics::counter!("mp_session_space_memory_declassified_total", "op" => "retract").increment(1);
         Ok(Response::new(delete_response(true, None)))
     }
 }
@@ -1246,6 +1431,15 @@ impl MemoryService for MemoryGrpc {
             true,
             degradation_reason.or(ancestor_degradation),
         )))
+    }
+
+    async fn declassify_memory(
+        &self,
+        request: Request<DeclassifyMemoryRequest>,
+    ) -> Result<Response<DeclassifyMemoryResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        self.declassify_space_memory(&caller, &req).await
     }
 
     async fn erase_agent_memory(

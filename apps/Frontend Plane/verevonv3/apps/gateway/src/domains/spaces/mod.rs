@@ -44,6 +44,7 @@ pub(crate) mod files;
 pub(crate) mod personal_agents;
 pub(crate) mod canvas;
 pub(crate) mod private_panel;
+pub(crate) mod memory_declassify;
 mod message_search;
 pub(crate) mod mentions;
 mod timeline;
@@ -1156,6 +1157,7 @@ fn module_routes() -> Router<AppState> {
         .merge(personal_agents::routes())
         .merge(canvas::routes())
         .merge(private_panel::routes())
+        .merge(memory_declassify::routes())
 }
 
 #[derive(Debug, Deserialize)]
@@ -5963,6 +5965,8 @@ async fn space_context(
                         && state.space_features.canvas_ui,
                     // WS17-S6: the owner's private panel (one flag; the routes and the action follow it).
                     "private_panel": state.space_features.private_panel_ui,
+                    // WS17-S7: the reviewed declassify of one personal memory into a shared room (one flag).
+                    "memory_declassify": state.space_features.space_memory_declassify_api,
                     "status": state.space_features.status_api,
                     "reminders": state.space_features.reminders_api,
                     // WS08-S4: mentions and addressed wake. The picker follows the record flag;

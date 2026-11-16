@@ -87,6 +87,12 @@ service MemoryService {
   // session:memory-controls:read scope for a service caller). An allow is also
   // the answer while the policy mode is off.
   rpc CheckMemoryWrite(CheckMemoryWriteRequest) returns (CheckMemoryWriteResponse);
+
+  // Share one of the caller's personal memory rows into a shared Space (WS17-S7), under a Control
+  // `model.memory.declassify` decision for the reviewed text. The source row is untouched; one
+  // transaction inserts the `declassified` room row and its ledger row. User callers only, for
+  // themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check.
+  rpc DeclassifyMemory(DeclassifyMemoryRequest) returns (DeclassifyMemoryResponse);
 }
 
 message SearchMemoryRequest {
@@ -611,4 +617,38 @@ message CheckMemoryWriteResponse {
   // "hidden_characters", "secret_like", "scope_not_permitted" or "too_long".
   // Empty when allowed. Names the rule only, never the content.
   string refusal_code = 2;
+}
+
+// WS17-S7: a declassify of one personal memory row into a shared Space. Ids and the reviewed text only;
+// the text is never logged, and the decision token is never logged.
+message DeclassifyMemoryRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The caller, who must be the owner of the source row. Checked against the verified identity.
+  string user_id = 2;
+
+  // The personal memory row (scope user, owned by the caller) being shared.
+  string source_memory_id = 3;
+
+  // The shared Space the row is shared into.
+  string space_id = 4;
+
+  // The exact reviewed text stored as the room row. At most 1000 characters. Never trimmed: the
+  // Control decision binds its SHA-256 digest, so Session Core hashes these exact bytes.
+  string reviewed_content = 5;
+
+  // The signed Control `model.memory.declassify` decision token and its reference, for this text.
+  string space_decision_token = 6;
+  string space_decision_ref = 7;
+
+  // Replay key of the share (one share per caller, Space and key). Empty is refused.
+  string idempotency_key = 8;
+}
+
+// The room row the share produced. `deduplicated` is true when the same decision or idempotency key
+// already produced it, so a retry returns the first row and writes nothing new.
+message DeclassifyMemoryResponse {
+  string memory_id = 1;
+  bool deduplicated = 2;
 }
