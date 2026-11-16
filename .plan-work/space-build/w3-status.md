@@ -606,3 +606,9 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - Scope: "edit" not built (would widen UpdateAgentAccess) -- LEAD DECISION: accept suspend/reactivate/retire as the delivered admin controls for this release; editing an org agent's instructions can reuse the existing UpdateAgentAccess path gated on org-admin in a later pass if wanted.
 - P1 gap: agent-action-admission.json rows for the 3 new action ids not added (schemaHash needs the generator) -> admission-contract test fails until added.
 - P1 PIN CHURN: registry touched by 6+ builders this round; final consolidated re-pin needed once all registry-touching builders are done (lead task, before test phase).
+
+### W3-DEC-KIND2 (a43bd8231) BUILT — D17 complete end to end
+- action-registry.ts memory.restore accepts optional spaceRef; memory-client.ts restoreMemoryInputFrom(entry); MemorySection.tsx sends it. List API already returns origin_space_ref (no gap there).
+- D17 (Control-signed proof -> gateway relay -> session-core verify -> SPA wiring) is now fully wired end to end.
+- P2 minor gap: room-level SpaceAgentMemoryPanel (withheld flag) has no origin_space_ref/restore control, separate from personal MemorySection. Logged, not built.
+- P2: spaceRef sent even for shared-room rows (harmless, one extra Control call, still refused as before).
