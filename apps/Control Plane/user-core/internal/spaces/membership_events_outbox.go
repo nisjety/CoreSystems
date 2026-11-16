@@ -19,8 +19,9 @@ import (
 // forget); this worker is the durable path:
 //
 //  1. claim: a pending user row (published_at IS NULL, subject_type 'user',
-//     an action that flips a user row active or inactive) is claimed with
-//     FOR UPDATE SKIP LOCKED in one statement that also leases it
+//     an action that flips a user row active or inactive, or a role_changed
+//     row, so a demotion below editor reaches Session Core: W3 D1) is claimed
+//     with FOR UPDATE SKIP LOCKED in one statement that also leases it
 //     (next_publish_at = now + lease, publish_attempts + 1), so two replicas
 //     never publish the same row and a crashed worker's row comes back after
 //     the lease;
@@ -192,7 +193,7 @@ func (r *Repository) PublishPendingMembershipEvents(ctx context.Context, publish
 			SELECT event_id FROM space_membership_events
 			WHERE published_at IS NULL
 			  AND subject_type = 'user'
-			  AND action IN ('member_added','member_joined','member_removed','member_left')
+			  AND action IN ('member_added','member_joined','role_changed','member_removed','member_left')
 			  AND (next_publish_at IS NULL OR next_publish_at <= NOW())
 			ORDER BY seq
 			LIMIT $1

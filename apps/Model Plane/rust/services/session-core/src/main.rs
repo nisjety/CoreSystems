@@ -63,6 +63,7 @@ mod space;
 mod space_memory;
 mod space_deletion_reconciler;
 mod space_membership_nats;
+mod space_membership_retract_nats;
 mod space_stream_grpc;
 mod store;
 mod terminalization;
@@ -215,6 +216,24 @@ async fn main() -> Result<()> {
             let pool = space_membership_pool.clone();
             let nats_url = space_membership_nats_url.clone();
             async move { space_membership_nats::run(pool, nats_url).await }
+        })
+        .await
+    });
+    // W3 D1: retract a removed or demoted member's shared room copies. The same shared broker, over its own plain
+    // subscription and connection; see space_membership_retract_nats.rs. Not behind a flag: it only removes copies.
+    let space_retract_pool = pool.clone();
+    let space_retract_nats_url = std::env::var("NATS_SHARED_URL").unwrap_or_default();
+    let space_retract_handle = tokio::spawn(async move {
+        if space_retract_nats_url.is_empty() {
+            warn!(
+                "NATS_SHARED_URL not set; session-core Space membership retraction consumer disabled"
+            );
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core Space membership retraction consumer", move || {
+            let pool = space_retract_pool.clone();
+            let nats_url = space_retract_nats_url.clone();
+            async move { space_membership_retract_nats::run(pool, nats_url).await }
         })
         .await
     });
@@ -392,6 +411,7 @@ async fn main() -> Result<()> {
         result = orchestration_nats_handle => result??,
         result = gdpr_erasure_handle => result??,
         result = space_membership_handle => result??,
+        result = space_retract_handle => result??,
         result = compaction_handle => result??,
         result = dreaming_handle => result??,
         result = org_policy_handle => result??,

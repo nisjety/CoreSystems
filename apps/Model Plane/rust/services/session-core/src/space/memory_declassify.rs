@@ -10,6 +10,11 @@
 //!
 //! The caller, the org, the replay of a decision and the revocation check happen in `memory_grpc.rs`
 //! before this module is called.
+//!
+//! W3 D1: a membership fact that removes a subject from a Space, or leaves them below editor, retracts that
+//! subject's live shares in the Space through [`retract_removed_subject`], from the membership consumer in
+//! `space_membership_retract_nats.rs`. A share and that retraction take the same per-subject lock, and a share
+//! re-checks the revocation under it, so a removal cannot be overtaken by a share it did not see.
 
 use chrono::{DateTime, Utc};
 use mp_ids::new_ulid;
@@ -45,6 +50,20 @@ fn internal(error: sqlx::Error) -> Status {
     Status::internal(error.to_string())
 }
 
+/// The advisory lock a share and a membership retraction both take on (org, Space, subject) first thing in their
+/// transaction (W3 D1). The two serialise per person per room, so a share that commits first is retracted by the
+/// removal, and a share that starts after the removal is refused by the revocation check under the same lock.
+const LOCK_MEMBER_SQL: &str =
+    "SELECT pg_advisory_xact_lock(hashtextextended($1::text || '|' || $2::text || '|' || $3::text, 0))";
+
+/// Whether a membership fact obliges the subject's shares in the Space to be retracted (W3 D1): a removal, or a
+/// role below editor, the lowest role that may declassify (Control `roles.go`: viewer < editor < manager < owner).
+/// The payload carries the current role of an active member. An empty or unknown role is treated as below editor,
+/// so the fail-closed side is the retraction.
+pub(crate) fn retraction_required(active: bool, role: &str) -> bool {
+    !active || !matches!(role.trim(), "editor" | "manager" | "owner")
+}
+
 /// Share one personal memory row into a shared Space. A replay of the same decision, or of the same
 /// (subject, Space, idempotency key), returns the first room row and writes nothing. A share of a row that
 /// was retracted is refused, so a replay cannot bring a removed copy back.
@@ -53,6 +72,30 @@ pub(crate) async fn declassify_into_room(
     input: DeclassifyInput<'_>,
 ) -> Result<DeclassifyOutcome, Status> {
     let mut tx = pool.begin().await.map_err(internal)?;
+
+    // W3 D1: serialise with a retraction of this subject in this Space, then refuse a share that a removal has
+    // already revoked. The handler's own revocation check runs before this transaction and can be stale by now.
+    sqlx::query(LOCK_MEMBER_SQL)
+        .bind(input.org_id)
+        .bind(input.space_id)
+        .bind(input.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+    let revoked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2)",
+    )
+    .bind(input.space_id)
+    .bind(input.user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal)?;
+    if revoked {
+        tx.rollback().await.map_err(internal)?;
+        return Err(Status::permission_denied(
+            "Space membership required for this Space's memory",
+        ));
+    }
 
     // Replay: the same decision, or the same subject, Space and idempotency key.
     let replay: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
@@ -257,4 +300,91 @@ pub(crate) async fn retract_declassified_row(
     .map_err(internal)?;
     tx.commit().await.map_err(internal)?;
     Ok(deleted.is_some())
+}
+
+/// W3 D1: retract every live declassified copy one subject holds in one Space, as their owner's retract would. Used
+/// when Control says the subject was removed (`revoke`, which also writes the revocation row in this transaction,
+/// as the membership consumer does) or demoted below editor (`revoke` false). The room row is deleted and every live
+/// ledger row of it is stamped, with the same statements as `retract_declassified_row`, in one transaction under the
+/// lock shared with `declassify_into_room`. Returns the room rows deleted. A repeat finds no live row and deletes
+/// nothing, so a replayed fact or a sweep is a no-op. The source rows are never changed.
+pub(crate) async fn retract_removed_subject(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    subject_id: &str,
+    revoke: bool,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(LOCK_MEMBER_SQL)
+        .bind(org_id)
+        .bind(space_id)
+        .bind(subject_id)
+        .execute(&mut *tx)
+        .await?;
+    if revoke {
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3) \
+             ON CONFLICT (space_ref, subject_id) DO UPDATE SET org_id = EXCLUDED.org_id, revoked_at = NOW()",
+        )
+        .bind(space_id)
+        .bind(org_id)
+        .bind(subject_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let room_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT room_memory_id FROM memory_declassifications \
+         WHERE org_id = $1 AND space_ref = $2 AND subject_id = $3 AND retracted_at IS NULL",
+    )
+    .bind(org_id)
+    .bind(space_id)
+    .bind(subject_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut deleted: u64 = 0;
+    for memory_id in &room_ids {
+        let removed: Option<String> = sqlx::query_scalar(
+            "DELETE FROM agent_memory \
+             WHERE id = $1 AND org_id = $2 AND scope = 'space' AND scope_id = $3 \
+               AND origin_kind = 'declassified' \
+             RETURNING id",
+        )
+        .bind(memory_id)
+        .bind(org_id)
+        .bind(space_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        deleted += u64::from(removed.is_some());
+        sqlx::query(
+            "UPDATE memory_declassifications SET retracted_at = now() \
+             WHERE org_id = $1 AND space_ref = $2 AND room_memory_id = $3 AND retracted_at IS NULL",
+        )
+        .bind(org_id)
+        .bind(space_id)
+        .bind(memory_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// W3 D1 backstop: the live declassified shares whose subject holds a revocation row in their Space, as
+/// `(org, Space, subject)`. The revocation projection is durable, so a sweep over it converges a copy even when the
+/// membership event itself was missed by the consumer that writes the projection.
+pub(crate) async fn revoked_live_shares(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<(String, String, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT DISTINCT m.org_id, m.space_ref, m.subject_id FROM memory_declassifications m \
+         WHERE m.retracted_at IS NULL \
+           AND EXISTS(SELECT 1 FROM space_membership_revocations r \
+                      WHERE r.space_ref = m.space_ref AND r.subject_id = m.subject_id) \
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
 }
