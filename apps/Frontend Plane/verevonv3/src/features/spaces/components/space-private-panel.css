@@ -1,0 +1,251 @@
+/*
+ * WS17-S6: the owner's private panel (the room's side pane body) and the reviewed share-to-room
+ * dialog. Its own sheet, like the other Space panels, so no shared stylesheet changes for it.
+ */
+
+.verevon-space-private-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.verevon-space-private-entry {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 16px 8px;
+}
+
+.verevon-space-private-panel__intro h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.verevon-space-private-panel__notice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border, #d9d6cf);
+  border-radius: 10px;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.verevon-space-private-panel__notice svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.verevon-space-private-panel__status {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.verevon-space-private-panel__error {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--verevon-danger, #b42318);
+}
+
+.verevon-space-private-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.verevon-space-private-panel__turns {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-private-panel__turn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border, #d9d6cf);
+  border-radius: 10px;
+}
+
+.verevon-space-private-panel__role {
+  font-size: 0.75rem;
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+.verevon-space-private-panel__text {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-space-private-panel__share {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--verevon-border, #d9d6cf);
+  border-radius: 999px;
+  background: transparent;
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.verevon-space-private-panel__share:focus-visible,
+.verevon-space-private-panel__actions button:focus-visible,
+.verevon-space-share button:focus-visible,
+.verevon-space-share textarea:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+/* The share dialog: a modal over the room, one reviewed text, one explicit button. */
+
+.verevon-space-share {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgb(20 18 16 / 40%);
+}
+
+.verevon-space-share__dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(560px, 100%);
+  max-height: calc(100vh - 32px);
+  padding: 16px;
+  overflow-y: auto;
+  border-radius: 14px;
+  background: var(--verevon-surface, #ffffff);
+  box-shadow: 0 16px 40px rgb(29 27 24 / 18%);
+}
+
+.verevon-space-share__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.verevon-space-share__header h3 {
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 600;
+}
+
+.verevon-space-share__header button {
+  display: inline-flex;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.verevon-space-share__notice {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.verevon-space-share__label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.verevon-space-share__text {
+  width: 100%;
+  min-height: 140px;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border, #d9d6cf);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.verevon-space-share__count {
+  margin: 0;
+  font-size: 0.8125rem;
+  opacity: 0.8;
+}
+
+.verevon-space-share__count[data-over='true'] {
+  color: var(--verevon-danger, #b42318);
+  opacity: 1;
+}
+
+.verevon-space-share__error {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--verevon-danger, #b42318);
+}
+
+.verevon-space-share__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.verevon-space-share__cancel,
+.verevon-space-share__submit {
+  padding: 8px 14px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.verevon-space-share__cancel {
+  border: 1px solid var(--verevon-border, #d9d6cf);
+  background: transparent;
+}
+
+.verevon-space-share__submit {
+  border: 1px solid transparent;
+  background: var(--verevon-accent, #1d1b18);
+  color: var(--verevon-on-accent, #ffffff);
+}
+
+.verevon-space-share__submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-space-share__dialog {
+    animation: verevon-space-share-in 140ms ease-out;
+  }
+}
+
+@keyframes verevon-space-share-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

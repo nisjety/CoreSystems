@@ -1,4 +1,5 @@
 import { readSpaceThreadParam, spaceThreadPaneEnabled } from './space-thread-deep-link'
+import { spaceRoomFeature } from './space-room-features'
 
 /**
  * The room's right-hand pane registry (P-SPA1). SpaceAuxPane is the host; this
@@ -11,7 +12,7 @@ import { readSpaceThreadParam, spaceThreadPaneEnabled } from './space-thread-dee
  * pane closed and is never an authorisation input.
  */
 
-export type SpacePaneId = 'thread'
+export type SpacePaneId = 'thread' | 'private_panel'
 
 export interface SpacePaneDefinition {
   readonly id: SpacePaneId
@@ -23,12 +24,25 @@ export interface SpacePaneDefinition {
   readonly enabled: () => boolean
 }
 
+/** `?panel=private` asks for the owner's private panel (WS17-S6). Any other value names nothing. */
+function readSpacePrivatePanelParam(value: string | readonly string[] | null | undefined): string | null {
+  return typeof value === 'string' && value === 'private' ? 'private' : null
+}
+
 export const SPACE_PANES: readonly SpacePaneDefinition[] = [
   {
     id: 'thread',
     searchParam: 'thread_id',
     readParam: readSpaceThreadParam,
     enabled: spaceThreadPaneEnabled,
+  },
+  {
+    // WS17-S6: the owner's private panel. The room's `features.private_panel` from the context read; the
+    // gateway decides what the panel may show. The thread pane and this pane never open together.
+    id: 'private_panel',
+    searchParam: 'panel',
+    readParam: readSpacePrivatePanelParam,
+    enabled: () => spaceRoomFeature('private_panel'),
   },
 ]
 

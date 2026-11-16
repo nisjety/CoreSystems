@@ -202,6 +202,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'agents.update_access': exempt('agent_cannot_self_govern', 'external_write'),
   'agents.set_primary': exempt('agent_cannot_self_govern', 'external_write'),
   'spaces.withdraw_agent': exempt('agent_cannot_self_govern', 'external_write'),
+  'spaces.open_private_panel': exempt('human_identity_or_security', 'external_write'),
   'spaces.open_dm': exempt('human_identity_or_security', 'external_write'),
   'spaces.hide_space': exempt('ui_state_only', 'external_write'),
   'spaces.edit_message': exempt('human_identity_or_security', 'external_write'),

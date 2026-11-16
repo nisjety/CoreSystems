@@ -73,6 +73,20 @@ const spacesWithdrawAgentOutput = z.object({
   changed: z.boolean(),
 })
 
+// WS17-S6: the owner's private panel. One human-only contract: the gateway get-or-creates the caller's
+// panel pointer for one room (`GET`/`POST /api/v1/spaces/{ref}/private-panel`). The panel is an owner
+// thread with `sourceScope:'conversation'` (SD-22 v1: no memory in or out). Sharing a reply to the room
+// is a human post through `spaces.create_post` (ws01.ts), not an action of this contract.
+const spacesOpenPrivatePanelInput = z.object({
+  spaceRef: z.string().min(1),
+})
+
+const spacesOpenPrivatePanelOutput = z.object({
+  space_ref: z.string(),
+  thread_id: z.string().nullable(),
+  agent_subject_id: z.string().nullable(),
+})
+
 export const ws17SpaceActions = [
   {
     id: 'agents.create_personal',
@@ -121,5 +135,17 @@ export const ws17SpaceActions = [
     reversible: false,
     inputSchema: spacesWithdrawAgentInput,
     outputSchema: spacesWithdrawAgentOutput,
+  },
+  {
+    id: 'spaces.open_private_panel',
+    label: 'Open private panel',
+    description:
+      'Open your private assistant for this room. Only you can see it. Nothing in it is posted to the room or remembered there.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: spacesOpenPrivatePanelInput,
+    outputSchema: spacesOpenPrivatePanelOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]

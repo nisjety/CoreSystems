@@ -7,6 +7,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'so
 
 import { createResource, type ResourceAccessor } from '@/shared/lib/create-resource-compat'
 import {
+  SPACE_POST_MAX_CHARS_DEFAULT,
   getPersonalSpaceDeletionReceipt,
   getPersonalAgentsFeature,
   getSpaceAgents,
@@ -80,6 +81,8 @@ import {
   readStoredAuxPaneWidth,
 } from './sidepane/SpaceAuxPane'
 import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
+import { SpacePrivatePanel } from './sidepane/SpacePrivatePanel'
+import { SpaceShareToRoomDialog } from './SpaceShareToRoomDialog'
 import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
 import { isDmKind, withSpaceKindTraits } from '../lib/space-kind'
 import { roomArtifactsEnabled } from '../lib/room-artifacts'
@@ -89,6 +92,7 @@ import {
   primeSpaceRoomFeatures,
   publishSpaceRoomFeatures,
   roomIsArchived,
+  spaceRoomFeature,
   type SpaceRoomFeatures,
 } from '../lib/space-room-features'
 import { createRoomLiveArtifacts, type RoomLiveArtifacts } from '../lib/room-live-artifacts'
@@ -186,8 +190,16 @@ export default function SpacePage() {
     selectedThreadId() && spaceEntryLinksEnabled() ? readSpaceMessageParam(searchParams.m) : null,
   )
   // A different thread never inherits the previous thread's message.
-  const openThread = (threadId: string) => setSearchParams({ thread_id: threadId, m: undefined })
+  const openThread = (threadId: string) => setSearchParams({ thread_id: threadId, m: undefined, panel: undefined })
   const closeThread = () => setSearchParams({ thread_id: undefined, m: undefined }, { replace: true })
+  // WS17-S6: `?panel=private` opens the owner's private panel beside the room. The thread pane and the
+  // panel never open together; opening one closes the other. The panel's own content is read through
+  // its gateway pointer and the owner's chat transcript, so the parameter only asks for the pane.
+  const privatePanelOpen = createMemo(() => resolveOpenSpacePane(searchParams)?.id === 'private_panel')
+  const openPrivatePanel = () => setSearchParams({ panel: 'private', thread_id: undefined, m: undefined })
+  const closePrivatePanel = () => setSearchParams({ panel: undefined }, { replace: true })
+  // The reviewed draft a panel turn starts: non-null while the share dialog is open.
+  const [shareDraft, setShareDraft] = createSignal<string | null>(null)
   // Click-through from the composer's activity strip (WS09-S6): the thread pane when it is on, else
   // the post in the timeline (WS01 AuxPane is the fallback's reason; `post-<thread id>` is the row id).
   const openRun = (threadId: string) => {
@@ -678,7 +690,7 @@ export default function SpacePage() {
           return (
             <div
               class="verevon-space-workroom"
-              data-aux-open={selectedThreadId() ? 'true' : undefined}
+              data-aux-open={selectedThreadId() || privatePanelOpen() ? 'true' : undefined}
               style={{ '--verevon-space-auxpane-width': `${auxPaneWidth()}px` }}
             >
               <main class="verevon-space-canvas">
@@ -773,6 +785,20 @@ export default function SpacePage() {
                       'Space conversation activity is temporarily unavailable. Your confirmed Space access remains unchanged.',
                     )}
                   </p>
+                </Show>
+
+                {/* WS17-S6: the owner's private panel beside the room. Behind `features.private_panel` from the context read. */}
+                <Show when={spaceRoomFeature('private_panel')}>
+                  <div class="verevon-space-private-entry">
+                    <button
+                      type="button"
+                      class="verevon-space-secondary-action"
+                      aria-expanded={privatePanelOpen()}
+                      onClick={() => (privatePanelOpen() ? closePrivatePanel() : openPrivatePanel())}
+                    >
+                      {i18n.tr('Privat assistent', 'Private assistant')}
+                    </button>
+                  </div>
                 </Show>
 
                 <SpaceCreateAgentDialog
@@ -991,6 +1017,37 @@ export default function SpacePage() {
                     </SpaceAuxPane>
                   )
                 }}
+              </Show>
+              <Show when={privatePanelOpen()}>
+                <SpaceAuxPane
+                  label={i18n.tr('Privat assistent', 'Private assistant')}
+                  width={auxPaneWidth()}
+                  onWidthChange={setAuxPaneWidth}
+                  onClose={closePrivatePanel}
+                >
+                  <SpacePrivatePanel
+                    spaceRef={current().space.space_ref}
+                    canShare={() =>
+                      current().features?.human_posts === true
+                      && current().membership.role !== 'viewer'
+                      && !roomIsArchived(current())
+                    }
+                    onShare={(text) => setShareDraft(text)}
+                  />
+                </SpaceAuxPane>
+              </Show>
+              <Show when={shareDraft()}>
+                {(draft) => (
+                  <SpaceShareToRoomDialog
+                    spaceRef={current().space.space_ref}
+                    initialText={draft()}
+                    maxChars={current().limits?.post_max_chars ?? SPACE_POST_MAX_CHARS_DEFAULT}
+                    onClose={() => setShareDraft(null)}
+                    onPosted={() => {
+                      void refetchThreadsFull()
+                    }}
+                  />
+                )}
               </Show>
             </div>
           )
