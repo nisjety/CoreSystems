@@ -1642,7 +1642,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // invalid_agent_instructions keep their copy above. An add refusal's reason is keyed by the reason itself.
   add_policy_nobody: { no: 'Eieren har stengt for at denne agenten legges til i rom.', en: 'The owner has closed this agent to being added to rooms.' },
   add_policy_owner_only: { no: 'Bare eieren kan legge til denne agenten i et rom.', en: 'Only the owner can add this agent to a room.' },
-  agent_access_forbidden: { no: 'Du kan ikke endre tilgangen til denne agenten. Ingenting er endret.', en: 'You cannot change who has access to this agent. Nothing was changed.' },
+  agent_access_forbidden: { no: 'Du har ikke lov til å gjøre dette med denne agenten. Ingenting er endret.', en: 'You are not allowed to do this with this agent. Nothing was changed.' },
   agent_delegation_required: { no: 'Tilgangen din må bekreftes på nytt før dette kan gjøres. Prøv igjen.', en: 'Your access must be confirmed again before this can be done. Try again.' },
   agent_not_addable: { no: 'Denne agenten kan ikke legges til i rommet akkurat nå.', en: 'This agent cannot be added to the room right now.' },
   agent_not_visible: { no: 'Denne agenten er ikke synlig for deg, så den kan ikke legges til.', en: 'This agent is not visible to you, so it cannot be added.' },
