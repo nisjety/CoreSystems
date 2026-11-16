@@ -117,6 +117,10 @@ use super::dispatchers_spaces::ws14::{
     dispatch_space_files_read_text,
 };
 use super::dispatchers_spaces::ws16::dispatch_spaces_update_sidebar;
+use super::dispatchers_spaces::ws17::{
+    dispatch_agents_create_personal, dispatch_agents_set_primary, dispatch_agents_update_access,
+    dispatch_spaces_withdraw_agent,
+};
 use super::dispatchers_browser_policy::{
     dispatch_browser_get_org_policy, dispatch_browser_set_org_policy,
 };
@@ -1075,6 +1079,18 @@ pub(super) async fn execute_action(
         }
         "spaces.create_space_agent" => {
             boxed_dispatch(|| dispatch_space_create_agent(&state, &user, &body.input)).await
+        }
+        "agents.create_personal" => {
+            boxed_dispatch(|| dispatch_agents_create_personal(&state, &user, &body.input)).await
+        }
+        "agents.update_access" => {
+            boxed_dispatch(|| dispatch_agents_update_access(&state, &user, &body.input)).await
+        }
+        "agents.set_primary" => {
+            boxed_dispatch(|| dispatch_agents_set_primary(&state, &user, &body.input)).await
+        }
+        "spaces.withdraw_agent" => {
+            boxed_dispatch(|| dispatch_spaces_withdraw_agent(&state, &user, &body.input)).await
         }
         "spaces.bind_space_agent" => {
             boxed_dispatch(|| dispatch_space_bind_agent(&state, &user, &body.input)).await

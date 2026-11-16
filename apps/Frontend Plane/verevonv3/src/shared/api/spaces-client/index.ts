@@ -4,6 +4,7 @@
 // `export * from './<feature>'` line below (keep the list sorted after core).
 export * from './core'
 export * from './agent-policy'
+export * from './agents'
 export * from './directory'
 export * from './dm'
 export * from './entries'

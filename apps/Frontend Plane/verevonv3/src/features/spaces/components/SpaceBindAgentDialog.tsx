@@ -2,8 +2,17 @@ import { createSignal, For, Show } from 'solid-js'
 
 import { Check, Puzzle, X } from '@/shared/icons'
 
-import { bindSpaceAgent, getInstallableSpaceAgents, type InstallableSpaceAgent } from '@/shared/api/spaces-client'
-import { useI18n } from '@/shared/i18n'
+import {
+  agentNotAddableReason,
+  bindSpaceAgent,
+  getInstallableSpaceAgents,
+  isAgentAddRefusalReason,
+  type InstallableSpaceAgent,
+  type SpaceAgentAddState,
+} from '@/shared/api/spaces-client'
+import { hasErrorCode } from '@/shared/api/api-error'
+import { ERROR_COPY } from '@/shared/i18n/errors'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 
 /**
@@ -23,6 +32,20 @@ export interface SpaceBindAgentDialogProps {
   readonly onBound?: () => void
 }
 
+/**
+ * The row's state from Control's admission answer (WS17-S5). An older gateway sends no `add_state`,
+ * and then `already_bound` alone decides.
+ */
+function rowState(agent: InstallableSpaceAgent): SpaceAgentAddState {
+  return agent.add_state ?? (agent.already_bound ? 'already_bound' : 'addable')
+}
+
+/** The sentence for a reason a row or a refused bind names, from errors.ts; an unknown reason gets the generic line. */
+function refusalCopy(reason: string | null | undefined, tr: (noText: string, enText: string) => string): string {
+  const copy = ERROR_COPY[isAgentAddRefusalReason(reason) ? reason : 'agent_not_addable']
+  return tr(copy.no, copy.en)
+}
+
 export function SpaceBindAgentDialog(props: SpaceBindAgentDialogProps) {
   const i18n = useI18n()
   const [installable, { refetch }] = createResource(
@@ -30,24 +53,30 @@ export function SpaceBindAgentDialog(props: SpaceBindAgentDialogProps) {
     getInstallableSpaceAgents,
   )
   const [pendingRef, setPendingRef] = createSignal<string | undefined>(undefined)
-  const [failedRef, setFailedRef] = createSignal<string | undefined>(undefined)
+  const [failed, setFailed] = createSignal<{ readonly ref: string; readonly message: string } | undefined>(undefined)
 
   function close(): void {
     props.onClose()
   }
 
   async function bind(agent: InstallableSpaceAgent): Promise<void> {
-    if (agent.already_bound || pendingRef()) return
-    setFailedRef(undefined)
+    if (rowState(agent) !== 'addable' || pendingRef()) return
+    setFailed(undefined)
     setPendingRef(agent.agent_ref)
     try {
       await bindSpaceAgent(props.spaceRef, agent.agent_ref)
       props.onBound?.()
       void refetch()
-    } catch {
-      // The gateway's own vocabulary for the honest partial state: the
-      // binding may exist as `pending` even when this request errors.
-      setFailedRef(agent.agent_ref)
+    } catch (error) {
+      // A refusal names its own reason (403 agent_not_addable). Anything else keeps the honest partial
+      // state: the binding may exist as `pending` even when this request errors.
+      const message = hasErrorCode(error, 'agent_not_addable')
+        ? refusalCopy(agentNotAddableReason(error), i18n.tr)
+        : translateApiError(error, i18n.tr, {
+            no: 'Kunne ikke bekreftes som medlem av rommet ennå. Sjekk Agent-fanen.',
+            en: 'Could not be confirmed as a room member yet. Check the Agent tab.',
+          })
+      setFailed({ ref: agent.agent_ref, message })
     } finally {
       setPendingRef(undefined)
     }
@@ -110,9 +139,17 @@ export function SpaceBindAgentDialog(props: SpaceBindAgentDialogProps) {
                           <Show when={agent.description?.trim()}>
                             {(description) => <small>{description()}</small>}
                           </Show>
+                          <Show when={agent.owner_label?.trim()}>
+                            {(owner) => <small>{i18n.tr(`Eier: ${owner()}`, `Owner: ${owner()}`)}</small>}
+                          </Show>
+                          <Show when={rowState(agent) === 'blocked'}>
+                            <small class="verevon-space-bind-agent__reason">
+                              {refusalCopy(agent.reason, i18n.tr)}
+                            </small>
+                          </Show>
                         </div>
                         <Show
-                          when={!agent.already_bound}
+                          when={rowState(agent) !== 'already_bound'}
                           fallback={
                             <span class="verevon-space-bind-agent__status">
                               <Check size={14} aria-hidden="true" />
@@ -123,7 +160,7 @@ export function SpaceBindAgentDialog(props: SpaceBindAgentDialogProps) {
                           <button
                             type="button"
                             class="verevon-space-secondary-action"
-                            disabled={pendingRef() === agent.agent_ref}
+                            disabled={rowState(agent) === 'blocked' || pendingRef() === agent.agent_ref}
                             onClick={() => void bind(agent)}
                           >
                             {pendingRef() === agent.agent_ref
@@ -131,12 +168,9 @@ export function SpaceBindAgentDialog(props: SpaceBindAgentDialogProps) {
                               : i18n.tr('Legg til', 'Add')}
                           </button>
                         </Show>
-                        <Show when={failedRef() === agent.agent_ref}>
+                        <Show when={failed()?.ref === agent.agent_ref}>
                           <p class="verevon-space-projection-error" role="alert">
-                            {i18n.tr(
-                              'Kunne ikke bekreftes som medlem av rommet ennå. Sjekk Agent-fanen.',
-                              'Could not be confirmed as a room member yet. Check the Agent tab.',
-                            )}
+                            {failed()?.message}
                           </p>
                         </Show>
                       </li>

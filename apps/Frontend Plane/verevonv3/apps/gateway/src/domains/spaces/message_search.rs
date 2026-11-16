@@ -618,6 +618,8 @@ async fn space_features(State(state): State<AppState>) -> Response {
             "room_pins": flags.room_pins,
             "thread_fork": flags.thread_fork_api,
             "attention": flags.attention_api && flags.attention_ui,
+            // WS17-S5: the personal-agent surfaces (API and UI flags together).
+            "personal_agents": flags.personal_agents_api && flags.personal_agents_ui,
         }}}),
     )
 }

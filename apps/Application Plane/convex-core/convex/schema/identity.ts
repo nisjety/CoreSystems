@@ -88,6 +88,9 @@ export const identityTables = {
     personaInstructions: v.optional(v.string()),
     personaEnabled: v.optional(v.boolean()),
     personaUpdatedAt: v.optional(v.number()),
+    // WS17-S5: the caller's primary personal agent (its Control subject id). A preference only;
+    // the gateway validates it at Control on set and on use.
+    primaryAgentSubjectId: v.optional(v.string()),
   })
     .index("by_external_auth_id", ["externalAuthId"])
     .index("by_org", ["orgId"])

@@ -41,6 +41,7 @@ pub(crate) mod human_posts;
 pub(crate) mod message_lifecycle;
 pub(crate) mod room_admin;
 pub(crate) mod files;
+pub(crate) mod personal_agents;
 mod message_search;
 pub(crate) mod mentions;
 mod timeline;
@@ -1150,6 +1151,7 @@ fn module_routes() -> Router<AppState> {
         .merge(sidebar::routes())
         .merge(stream::routes())
         .merge(memory::routes())
+        .merge(personal_agents::routes())
 }
 
 #[derive(Debug, Deserialize)]
@@ -3987,6 +3989,26 @@ pub(crate) async fn create_space_agent(
         );
     };
 
+    // WS17-S5: the room-created agent is registered (org-visible, anyone) and admitted to this room, so
+    // an enforced roster does not skip it. A refusal leaves it pending, like an unconfirmed roster.
+    let created_ref = created
+        .get("agentRef")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if personal_agents::admit_for_bind(&state, &user, &org_id, &space_ref, &created_ref)
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "agent_membership_unconfirmed",
+                "The agent was created, but Control has not confirmed its room membership yet. It stays pending in the Agent tab.",
+            )),
+        );
+    }
+
     if !confirm_space_agent_membership(&state, &org_id, &space_ref).await {
         // The definition and its pending binding exist and render truthfully
         // as not-yet-a-member; nothing may invoke the agent until Control
@@ -4464,39 +4486,13 @@ async fn list_installable_space_agents(
         return response;
     }
 
-    let Ok(definitions) = convex_gateway_call(
-        &state,
-        "query",
-        "spaceAgents:listInstallableSpaceAgentsForGateway",
-        json!({
-            "externalAuthId": user.user_id,
-            "externalOrgId": org_id,
-            "spaceRef": space_ref,
-        }),
-    )
-    .await
-    else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(error(
-                "installable_agents_unavailable",
-                "The organization's agent definitions could not be loaded.",
-            )),
-        );
+    // WS17-S5: Convex's definitions joined with Control's answer per subject (add state, reason, owner).
+    let agents = match personal_agents::installable_agent_rows(&state, &user, &org_id, &space_ref)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(response) => return response,
     };
-    let agents = definitions.as_array().cloned().unwrap_or_default();
-    let agents: Vec<Value> = agents
-        .into_iter()
-        .map(|definition| {
-            json!({
-                "agent_ref": definition.get("agentRef").cloned().unwrap_or(Value::Null),
-                "name": definition.get("name").cloned().unwrap_or(Value::Null),
-                "description": definition.get("description").cloned().unwrap_or(Value::Null),
-                "definition_status": definition.get("definitionStatus").cloned().unwrap_or(Value::Null),
-                "already_bound": definition.get("alreadyBound").and_then(Value::as_bool).unwrap_or(false),
-            })
-        })
-        .collect();
     (StatusCode::OK, Json(json!({"data": {"agents": agents}})))
 }
 
@@ -4541,6 +4537,14 @@ pub(crate) async fn bind_existing_space_agent(
         return response;
     }
     if let Some(refusal) = dm::agent_attach_refusal(&state, &user, &org_id, &space_ref).await {
+        return refusal;
+    }
+
+    // WS17-S5: Control admission first (the authority: a refusal is a typed 403 agent_not_addable with
+    // details.reason), then the Convex bind, then the roster confirm.
+    if let Err(refusal) =
+        personal_agents::admit_for_bind(&state, &user, &org_id, &space_ref, &agent_ref).await
+    {
         return refusal;
     }
 
@@ -5947,6 +5951,9 @@ async fn space_context(
                     "tool_policy_editor": state.space_features.tool_policy_editor,
                     "attention": state.space_features.attention_api
                         && state.space_features.attention_ui,
+                    // WS17-S5: the personal-agent surfaces (API and UI flags together).
+                    "personal_agents": state.space_features.personal_agents_api
+                        && state.space_features.personal_agents_ui,
                     "status": state.space_features.status_api,
                     "reminders": state.space_features.reminders_api,
                     // WS08-S4: mentions and addressed wake. The picker follows the record flag;

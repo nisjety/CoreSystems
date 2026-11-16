@@ -590,6 +590,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// authorization input: Control's feed route requires a live membership, and the rows hold ids
     /// and closed words only.
     pub(crate) system_entries_api: bool,
+    /// `SPACE_PERSONAL_AGENTS_API` (WS17-S5): the personal-agent routes (`/api/v1/me/agents`, `/api/v1/me/primary-agent`,
+    /// `/api/v1/agents/{agent_id}/access`, `/api/v1/agents/{agent_id}/rooms/{space_ref}`). Off answers 404 `feature_disabled`.
+    /// A rollout control, never an authorization input: Control's registry, roles and admission decide every access.
+    pub(crate) personal_agents_api: bool,
+    /// `SPACE_PERSONAL_AGENTS_UI` (WS17-S5): the personal-agent surfaces, reported as `features.personal_agents` together
+    /// with the API flag. A rollout control, never an authorization input.
+    pub(crate) personal_agents_ui: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -704,6 +711,8 @@ impl SpaceFeatureFlags {
             timeline_anchor_ui: space_flag("SPACE_TIMELINE_ANCHOR_UI"),
             timeline_api: space_flag("SPACE_TIMELINE_API"),
             system_entries_api: space_flag("SPACE_SYSTEM_ENTRIES_API"),
+            personal_agents_api: space_flag("SPACE_PERSONAL_AGENTS_API"),
+            personal_agents_ui: space_flag("SPACE_PERSONAL_AGENTS_UI"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }

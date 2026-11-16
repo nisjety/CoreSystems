@@ -8,6 +8,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'so
 import { createResource, type ResourceAccessor } from '@/shared/lib/create-resource-compat'
 import {
   getPersonalSpaceDeletionReceipt,
+  getPersonalAgentsFeature,
   getSpaceAgents,
   getSpaceContext,
   getSpaceInstructions,
@@ -19,6 +20,7 @@ import {
   revokeSpaceAgent,
   setSpaceAgentState,
   updateSpaceInstructions,
+  withdrawSpaceAgent,
   type SpaceAgent,
   type SpacePresence,
   type SpaceReadMarker,
@@ -45,6 +47,7 @@ import { SpaceIdentityHoverCard } from './SpaceIdentityHoverCard'
 import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
 import { agentCardModel } from '../lib/agent-activity'
 import { SpaceBindAgentDialog } from './SpaceBindAgentDialog'
+import { SpaceAgentAccessDialog } from './SpaceAgentAccessDialog'
 import { SpaceCockpit } from './SpaceCockpit'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
 import { SpaceAgentPolicyEditor } from './SpaceAgentPolicyEditor'
@@ -317,6 +320,8 @@ export default function SpacePage() {
     return view.members
   })
   const [agents, { refetch: refetchAgents }] = createResource(spaceRef, getSpaceAgents)
+  // `features.personal_agents` from GET /api/v1/spaces/features (WS17-S5): presentation only, false until it says true.
+  const [personalAgentsFlag] = createResource(() => getPersonalAgentsFeature())
   const [createAgentOpen, setCreateAgentOpen] = createSignal(false)
   const [bindAgentOpen, setBindAgentOpen] = createSignal(false)
   const [deletionError, setDeletionError] = createSignal('')
@@ -871,6 +876,7 @@ export default function SpacePage() {
                           roster={() => (roster.error ? [] : roster() ?? [])}
                           spaceRef={current().space.space_ref}
                           canGovern={canCreateAgent(current().membership.role)}
+                          personalAgentsOn={() => personalAgentsFlag() === true}
                           onChanged={() => {
                             void refetchAgents()
                           }}
@@ -1394,6 +1400,8 @@ function SpaceAgentPanel(props: {
   /** Present only for roles that may govern a binding here. Absent hides the
    * controls; the server refuses regardless, so this is presentation. */
   readonly canGovern: boolean
+  /** `features.personal_agents` (WS17-S5): gates the access entry and the withdraw action on each card. */
+  readonly personalAgentsOn?: () => boolean
   readonly onChanged?: () => void
 }) {
   const i18n = useI18n()
@@ -1470,6 +1478,7 @@ function SpaceAgentPanel(props: {
                   roster={props.roster}
                   spaceRef={props.spaceRef}
                   canGovern={props.canGovern}
+                  personalAgentsOn={props.personalAgentsOn}
                   onChanged={props.onChanged}
                 />
               )}
@@ -1489,6 +1498,7 @@ function SpaceAgentCard(props: {
   readonly roster?: () => readonly SpaceRosterMember[]
   readonly spaceRef: string
   readonly canGovern: boolean
+  readonly personalAgentsOn?: () => boolean
   readonly onChanged?: () => void
 }) {
   const i18n = useI18n()
@@ -1502,6 +1512,10 @@ function SpaceAgentCard(props: {
   // server is going to refuse.
   const governable = () => agent().status === 'active' || agent().status === 'paused'
   const bindingRef = () => agent().binding_ref?.trim()
+  // WS17-S5: the access entry and the withdraw action need the definition's `agent_ref` and the flag.
+  const definitionRef = () => agent().agent_ref?.trim() || undefined
+  const personalOn = () => props.personalAgentsOn?.() === true
+  const [accessOpen, setAccessOpen] = createSignal(false)
 
   async function run(change: () => Promise<unknown>, failure: { no: string; en: string }) {
     if (busy()) return
@@ -1544,6 +1558,18 @@ function SpaceAgentCard(props: {
       {
         no: 'Agenten kunne ikke fjernes. Den deltar fortsatt i rommet.',
         en: 'The agent could not be removed. It is still taking part in the room.',
+      },
+    )
+  }
+  // Withdrawing takes the agent out of this room only; its owner keeps it and can add it again.
+  const withdraw = () => {
+    const ref = definitionRef()
+    if (!ref) return
+    void run(
+      () => withdrawSpaceAgent(props.spaceRef, ref),
+      {
+        no: 'Agenten kunne ikke tas ut av rommet. Den deltar fortsatt i rommet.',
+        en: 'The agent could not be taken out of the room. It is still taking part in the room.',
       },
     )
   }
@@ -1704,6 +1730,31 @@ function SpaceAgentCard(props: {
                 {i18n.tr('Sett på pause', 'Pause')}
               </button>
             </Show>
+            {/* WS17-S5: the owner's access to this agent, and taking it out of this room (owner or manager). Behind `features.personal_agents`. */}
+            <Show when={personalOn() && definitionRef()}>
+              <button
+                type="button"
+                class="verevon-space-agent__control"
+                disabled={busy()}
+                onClick={() => setAccessOpen(true)}
+              >
+                {i18n.tr('Tilgang', 'Access')}
+              </button>
+              <SpaceConfirmButton
+                class="verevon-space-agent__control verevon-space-agent__control--remove"
+                label={i18n.tr('Ta ut av rommet', 'Withdraw from room')}
+                confirmLabel={i18n.tr(
+                  `Bekreft at ${agent().name?.trim() || 'agenten'} tas ut av rommet`,
+                  `Confirm withdrawing ${agent().name?.trim() || 'the agent'} from the room`,
+                )}
+                consequence={i18n.tr(
+                  'Eieren kan legge agenten til i rommet igjen senere.',
+                  'The owner can add the agent to the room again later.',
+                )}
+                disabled={busy()}
+                onConfirm={withdraw}
+              />
+            </Show>
             <SpaceConfirmButton
               class="verevon-space-agent__control verevon-space-agent__control--remove"
               label={i18n.tr('Fjern fra rommet', 'Remove from room')}
@@ -1719,6 +1770,18 @@ function SpaceAgentCard(props: {
               onConfirm={revoke}
             />
           </div>
+        </Show>
+
+        {/* WS17-S5: who may see this agent and who may add it to rooms. Opened from the Access entry above. */}
+        <Show when={personalOn() && props.canGovern && definitionRef()}>
+          {(ref) => (
+            <SpaceAgentAccessDialog
+              agentRef={ref()}
+              open={accessOpen}
+              onClose={() => setAccessOpen(false)}
+              onSaved={() => props.onChanged?.()}
+            />
+          )}
         </Show>
 
         <Show when={actionError()}>

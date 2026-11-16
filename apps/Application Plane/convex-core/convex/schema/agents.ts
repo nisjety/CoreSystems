@@ -102,11 +102,24 @@ export const agentTables = {
     publishedVersion: v.optional(v.number()),
     draft: v.optional(v.object(agentDefinitionBodyFields)),
     createdBy: v.optional(v.id("users")),
+    // WS17-S5 (personal agents). `visibility` is a PROJECTION of Control's agent_subjects
+    // visibility: Control decides, Convex only filters its own lists. Absent means org (legacy).
+    visibility: v.optional(v.union(v.literal("owner"), v.literal("org"))),
+    // Projection of the add policy and access list the gateway wrote after Control accepted them.
+    // Display only; Control enforces every decision.
+    addPolicy: v.optional(v.union(v.literal("owner_only"), v.literal("nobody"), v.literal("anyone"))),
+    accessEntries: v.optional(v.array(v.object({
+      principalId: v.string(),
+      role: v.union(v.literal("manager"), v.literal("collaborator")),
+    }))),
+    // The client request id of a personal create, so a retried create returns the same definition.
+    clientRequestId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_org", ["orgId"])
-    .index("by_org_and_status", ["orgId", "status"]),
+    .index("by_org_and_status", ["orgId", "status"])
+    .index("by_org_and_creator", ["orgId", "createdBy"]),
 
   // U3-3 (ui-ux-verevon-gap.md §10): agent run lifecycle mirror.
   //

@@ -14,6 +14,7 @@ export const workspaceSettingsSectionIds = [
   'skills',
   'org-instructions',
   'persona',
+  'personal-agents',
   'plugins',
   'cron',
   'quotas',
@@ -158,6 +159,14 @@ export const workspaceSettingsSections: SectionDetail[] = [
     description: 'Dine egne, alltid-på instrukser, lagt til i hver ny samtale sammen med organisasjonens og rommets instrukser.',
     saveLabel: 'Lagre persona',
     keywords: ['tone', 'tonefall', 'stil', 'style', 'instrukser', 'instructions', 'personlig', 'personal'],
+  },
+  {
+    id: 'personal-agents',
+    label: 'Personlige agenter',
+    title: 'Personlige agenter',
+    description: 'Agenter du eier: opprett dem, velg hvem som kan se og legge dem til i rom, og velg en primær agent.',
+    saveLabel: 'Lagre agent',
+    keywords: ['agent', 'agenter', 'personlig agent', 'personal agent', 'primær', 'primary', 'tilgang', 'access'],
   },
   {
     id: 'plugins',

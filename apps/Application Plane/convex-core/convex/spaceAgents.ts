@@ -266,7 +266,8 @@ export const agentInstallationsForOrgForGateway = query({
   },
   handler: async (ctx, args) => {
     assertServiceKey(args.serviceKey);
-    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const caller = await gatewayCallerUser(ctx, args.externalAuthId, organization._id);
 
     const bindings = await ctx.db
       .query("spaceAgentBindings")
@@ -280,7 +281,11 @@ export const agentInstallationsForOrgForGateway = query({
     for (const binding of bindings as any[]) {
       const key = binding.agentId.toString();
       if (definitionsById.has(key)) continue;
-      definitionsById.set(key, (await ctx.db.get(binding.agentId)) ?? undefined);
+      const definition: any = (await ctx.db.get(binding.agentId)) ?? undefined;
+      // WS17-S5: a personal agent is not shown to org members who did not create it. An undefined
+      // definition is skipped by the projection, exactly like a ghost binding.
+      const hidden = definition?.visibility === "owner" && definition.createdBy !== caller._id;
+      definitionsById.set(key, hidden ? undefined : definition);
     }
 
     const spacesByRef = new Map<string, any>();
@@ -551,10 +556,15 @@ export const listInstallableSpaceAgentsForGateway = query({
     externalOrgId: v.string(),
     spaceRef: v.string(),
     serviceKey: v.string(),
+    // WS17-S5: subject ids of personal agents the gateway has already cleared at Control as visible
+    // to this caller. An owner-visible definition is listed only to its creator or to these ids.
+    visibleOwnerAgentIds: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     assertServiceKey(args.serviceKey);
     const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const caller = await gatewayCallerUser(ctx, args.externalAuthId, organization._id);
+    const visibleOwnerIds = new Set(args.visibleOwnerAgentIds ?? []);
 
     const definitions = await ctx.db
       .query("agents")
@@ -570,13 +580,31 @@ export const listInstallableSpaceAgentsForGateway = query({
         .map((binding: any) => binding.agentId.toString()),
     );
 
-    return definitions.map((definition: any) => ({
-      agentRef: definition._id,
-      name: definition.name,
-      description: definition.description,
-      definitionStatus: definition.status,
-      alreadyBound: boundAgentIds.has(definition._id.toString()),
-    }));
+    const rows: any[] = [];
+    for (const definition of definitions as any[]) {
+      if (definition.visibility === "owner") {
+        // WS17-S5 defence in depth: a personal agent is listed only once active, and only to its
+        // creator or to a caller Control has already cleared. The gateway still intersects Control.
+        if (definition.status !== "active") continue;
+        const isCreator = definition.createdBy !== undefined && definition.createdBy === caller._id;
+        if (!isCreator && !visibleOwnerIds.has(`agent-${definition._id}`)) continue;
+      }
+      const owner =
+        definition.visibility === "owner" && definition.createdBy !== undefined
+          ? await ctx.db.get(definition.createdBy)
+          : null;
+      rows.push({
+        agentRef: definition._id,
+        name: definition.name,
+        description: definition.description,
+        definitionStatus: definition.status,
+        alreadyBound: boundAgentIds.has(definition._id.toString()),
+        visibility: definition.visibility ?? "org",
+        subjectId: `agent-${definition._id}`,
+        ownerLabel: ownerLabelOf(owner),
+      });
+    }
+    return rows;
   },
 });
 
@@ -606,6 +634,11 @@ export const bindExistingSpaceAgentForGateway = mutation({
     const definition = await ctx.db.get(args.agentId);
     if (!definition || (definition as any).orgId !== organization._id) {
       throw new Error("Agent definition not found");
+    }
+    // WS17-S5: a personal definition is bindable only once it is active (a draft has not been
+    // activated after its Control registration).
+    if ((definition as any).visibility === "owner" && (definition as any).status !== "active") {
+      throw new Error("Agent definition is not active");
     }
 
     const subjectId = `agent-${args.agentId}`;
@@ -1178,5 +1211,313 @@ export const confirmSpaceAgentMembershipForGateway = action({
       externalOrgId: args.externalOrgId,
     });
     return { status: "applied" };
+  },
+});
+
+// ---------------------------------------------------------------------------------------------
+// WS17-S5: personal agents. The gateway verifies the caller and Control decides every access
+// question; these functions own the definition rows, the owner's own list and the projections.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The caller's own user row in this org. The gateway verified the caller under a signed delegation;
+ * this only finds the row that personal-agent writes are stamped with.
+ */
+async function gatewayCallerUser(ctx: any, externalAuthId: string, orgId: any): Promise<any> {
+  const rows = await ctx.db
+    .query("users")
+    .withIndex("by_external_and_org", (q: any) =>
+      q.eq("externalAuthId", externalAuthId).eq("orgId", orgId),
+    )
+    .collect();
+  const user = rows.find((candidate: any) => candidate.syncStatus !== "deleted");
+  if (!user) throw new Error("Unauthorized");
+  return user;
+}
+
+/** An owner's display name for a personal agent: the name only, never an email. */
+function ownerLabelOf(owner: any): string | null {
+  const name = typeof owner?.name === "string" ? owner.name.trim() : "";
+  return name || null;
+}
+
+const MAX_CLIENT_REQUEST_ID_LENGTH = 128;
+
+/**
+ * Step 1 of a personal agent's create: the definition as `draft`, owned by the caller
+ * (`visibility: owner`, `addPolicy: owner_only`). The gateway then registers it at Control with the
+ * caller as owner, and `activateAgentForGateway` makes it active only after Control accepts. A retry
+ * with the same `clientRequestId` returns the definition it already made.
+ */
+export const createPersonalAgentForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    name: v.string(),
+    instructions: v.optional(v.string()),
+    avatarColor: v.optional(v.string()),
+    clientRequestId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const caller = await gatewayCallerUser(ctx, args.externalAuthId, organization._id);
+
+    const name = args.name.trim();
+    if (name.length < 2 || name.length > MAX_AGENT_NAME_LENGTH) {
+      throw new Error("Agent name must be between 2 and 60 characters");
+    }
+    const instructions = args.instructions?.trim() || undefined;
+    if ((instructions?.length ?? 0) > MAX_AGENT_INSTRUCTIONS_LENGTH) {
+      throw new Error("Agent instructions are too long");
+    }
+    const clientRequestId = args.clientRequestId.trim();
+    if (!clientRequestId || clientRequestId.length > MAX_CLIENT_REQUEST_ID_LENGTH) {
+      throw new Error("A client request id is required");
+    }
+
+    const mine = await ctx.db
+      .query("agents")
+      .withIndex("by_org_and_creator", (q: any) =>
+        q.eq("orgId", organization._id).eq("createdBy", caller._id),
+      )
+      .collect();
+    const replay = (mine as any[]).find((agent) => agent.clientRequestId === clientRequestId);
+    if (replay) {
+      return {
+        agentRef: replay._id,
+        subjectId: `agent-${replay._id}`,
+        status: replay.status as string,
+        replayed: true,
+      };
+    }
+
+    const now = Date.now();
+    const agentId = await ctx.db.insert("agents", {
+      orgId: organization._id,
+      name,
+      avatarColor: (() => {
+        const colour = args.avatarColor?.trim();
+        return colour && AVATAR_COLOR_PATTERN.test(colour) ? colour : undefined;
+      })(),
+      useCase: "other",
+      status: "draft",
+      model: "Verevon Balance",
+      systemPrompt: instructions,
+      visibility: "owner",
+      addPolicy: "owner_only",
+      accessEntries: [],
+      clientRequestId,
+      createdBy: caller._id,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return {
+      agentRef: agentId,
+      subjectId: `agent-${agentId}`,
+      status: "draft",
+      replayed: false,
+    };
+  },
+});
+
+/**
+ * Step 3 of a personal agent's create: the caller's draft becomes active once Control has registered
+ * it. An already-active definition is a no-op; any other state is refused.
+ */
+export const activateAgentForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    agentId: v.id("agents"),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const caller = await gatewayCallerUser(ctx, args.externalAuthId, organization._id);
+    const definition: any = await ctx.db.get(args.agentId);
+    if (
+      !definition ||
+      definition.orgId !== organization._id ||
+      definition.visibility !== "owner" ||
+      definition.createdBy !== caller._id
+    ) {
+      throw new Error("Agent definition not found");
+    }
+    if (definition.status === "active") {
+      return { agentRef: args.agentId, subjectId: `agent-${args.agentId}`, status: "active", changed: false };
+    }
+    if (definition.status !== "draft") {
+      throw new Error("Agent definition is not a draft");
+    }
+    await ctx.db.patch(args.agentId, { status: "active", updatedAt: Date.now() });
+    return { agentRef: args.agentId, subjectId: `agent-${args.agentId}`, status: "active", changed: true };
+  },
+});
+
+/**
+ * One agent definition for the gateway's access read and its room bind. Null when the definition is
+ * not in the caller's organization (the gateway answers 404). Owner and access decisions are Control's;
+ * the access projection is display data that the gateway wrote after Control accepted it.
+ */
+export const agentDefinitionForGateway = query({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    agentId: v.id("agents"),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const definition: any = await ctx.db.get(args.agentId);
+    if (!definition || definition.orgId !== organization._id) return null;
+    const owner = definition.createdBy !== undefined ? await ctx.db.get(definition.createdBy) : null;
+    return {
+      agentRef: definition._id,
+      subjectId: `agent-${definition._id}`,
+      name: definition.name as string,
+      status: definition.status as string,
+      visibility: (definition.visibility ?? "org") as string,
+      addPolicy: (definition.addPolicy ?? null) as string | null,
+      accessEntries: (definition.accessEntries ?? []) as { principalId: string; role: string }[],
+      ownerLabel: ownerLabelOf(owner),
+    };
+  },
+});
+
+/**
+ * The caller's own personal agents (created by them, not inactive), the rooms each is bound to, and
+ * the caller's primary agent. The gateway joins Control's role, visibility and revision.
+ */
+export const listMyAgentsForGateway = query({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const caller = await gatewayCallerUser(ctx, args.externalAuthId, organization._id);
+
+    const definitions = await ctx.db
+      .query("agents")
+      .withIndex("by_org_and_creator", (q: any) =>
+        q.eq("orgId", organization._id).eq("createdBy", caller._id),
+      )
+      .collect();
+    const owned = (definitions as any[]).filter(
+      (definition) => definition.visibility === "owner" && definition.status !== "inactive",
+    );
+    const bindings = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_external_org", (q: any) => q.eq("externalOrgId", args.externalOrgId))
+      .collect();
+    const roomsByAgent = new Map<string, { spaceRef: string; state: string }[]>();
+    for (const binding of bindings as any[]) {
+      if (binding.status === "revoked") continue;
+      const key = binding.agentId.toString();
+      const rooms = roomsByAgent.get(key) ?? [];
+      rooms.push({ spaceRef: binding.spaceRef as string, state: binding.status as string });
+      roomsByAgent.set(key, rooms);
+    }
+    return {
+      agents: owned.map((definition) => ({
+        agentRef: definition._id,
+        subjectId: `agent-${definition._id}`,
+        name: definition.name as string,
+        status: definition.status as string,
+        addPolicy: (definition.addPolicy ?? "owner_only") as string,
+        rooms: roomsByAgent.get(definition._id.toString()) ?? [],
+      })),
+      primarySubjectId: (caller.primaryAgentSubjectId ?? null) as string | null,
+    };
+  },
+});
+
+/**
+ * Write the visibility, add policy and access list the gateway has just had Control accept. A
+ * projection for display and Convex's own filters only; Control stays the authority.
+ */
+export const setAgentVisibilityProjectionForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    agentId: v.id("agents"),
+    visibility: v.union(v.literal("owner"), v.literal("org")),
+    addPolicy: v.union(v.literal("owner_only"), v.literal("nobody"), v.literal("anyone")),
+    accessEntries: v.array(
+      v.object({
+        principalId: v.string(),
+        role: v.union(v.literal("manager"), v.literal("collaborator")),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const definition: any = await ctx.db.get(args.agentId);
+    if (!definition || definition.orgId !== organization._id) {
+      throw new Error("Agent definition not found");
+    }
+    await ctx.db.patch(args.agentId, {
+      visibility: args.visibility,
+      addPolicy: args.addPolicy,
+      accessEntries: args.accessEntries,
+      updatedAt: Date.now(),
+    });
+    return { agentRef: args.agentId, visibility: args.visibility, addPolicy: args.addPolicy };
+  },
+});
+
+/**
+ * The room-side half of a withdrawal. Control has already withdrawn the admission and removed the seat
+ * in one transaction; this revokes the binding, so the next roster sync cannot seat the agent again.
+ * Unlike `setSpaceAgentBindingStateForGateway` it also revokes a pending or failed binding: a withdrawal
+ * is a removal, not a membership claim. A missing binding is a no-op (`changed: 0`).
+ */
+export const withdrawSpaceAgentBindingForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    subjectId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const spaceRef = args.spaceRef.trim();
+    if (!spaceRef) throw new Error("A Space reference is required");
+    const bindings = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_space_and_subject", (q: any) =>
+        q.eq("spaceRef", spaceRef).eq("subjectId", args.subjectId),
+      )
+      .collect();
+    const now = Date.now();
+    let changed = 0;
+    for (const binding of bindings as any[]) {
+      if (binding.externalOrgId !== args.externalOrgId || binding.status === "revoked") continue;
+      await ctx.db.patch(binding._id, {
+        status: "revoked",
+        projectionVersion: binding.projectionVersion + 1,
+        updatedAt: now,
+      });
+      // The room timeline's "agent removed" row, in the same transaction (as the revoke path).
+      await recordRoomNotice(ctx, {
+        spaceRef,
+        externalOrgId: args.externalOrgId,
+        kind: "agent_revoked",
+        actorExternalAuthId: args.externalAuthId,
+        subjectId: args.subjectId,
+      });
+      changed += 1;
+    }
+    return { changed };
   },
 });

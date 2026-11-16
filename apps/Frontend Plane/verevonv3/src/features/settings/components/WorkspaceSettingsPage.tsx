@@ -9,6 +9,7 @@ import { McpServersSection } from '@/features/settings/components/McpServersSect
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
 import { OrgInstructionsSection } from '@/features/settings/components/OrgInstructionsSection'
 import { PersonaSection } from '@/features/settings/components/PersonaSection'
+import { PersonalAgentsSection } from '@/features/settings/components/PersonalAgentsSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
@@ -253,6 +254,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   'org-instructions': [],
   // Persona renders its own live field + enabled toggle, so no shared status grid.
   persona: [],
+  // Personal agents render their own live list and create form (WS17-S5), so no shared status grid.
+  'personal-agents': [],
   // Plugins renders its own live list + form, so it carries no shared status grid.
   plugins: [],
   // Cron schedules render their own live list + form, so no shared status grid.
@@ -522,6 +525,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'persona'}>
         <PersonaSection />
+      </Match>
+      <Match when={props.section === 'personal-agents'}>
+        <PersonalAgentsSection />
       </Match>
       <Match when={props.section === 'plugins'}>
         <PluginsSection />

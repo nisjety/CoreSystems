@@ -1066,6 +1066,12 @@ export type SpaceAgentDeliveryTarget = {
 }
 
 /**
+ * WS17-S5: whether a Space can take one agent definition now. `addable` may be selected,
+ * `already_bound` is shown as added, `blocked` is disabled and its `reason` says why.
+ */
+export type SpaceAgentAddState = 'addable' | 'already_bound' | 'blocked'
+
+/**
  * One agent participating in a Space.
  *
  * Two planes fill this in, and the split is load-bearing
@@ -1111,6 +1117,10 @@ export type SpaceAgent = {
   updated_at?: number
   /** WS11-S10: availability chip. Absent means the gateway did not check; no chip is shown. */
   activity?: SpaceAgentActivity
+  /** WS17-S5: the same admission fields as {@link InstallableSpaceAgent}; absent on older payloads. */
+  add_state?: SpaceAgentAddState
+  reason?: string | null
+  owner_label?: string | null
 }
 
 /**
@@ -1172,6 +1182,14 @@ export type InstallableSpaceAgent = {
   description?: string
   definition_status?: 'active' | 'inactive' | 'draft'
   already_bound: boolean
+  /**
+   * WS17-S5: whether this Space can take the agent now (`blocked` rows carry a Control `reason`).
+   * Absent on an older gateway, where `already_bound` alone decides.
+   */
+  add_state?: SpaceAgentAddState
+  reason?: string | null
+  /** The owner's label when Control names one; presentation only. */
+  owner_label?: string | null
 }
 
 /**

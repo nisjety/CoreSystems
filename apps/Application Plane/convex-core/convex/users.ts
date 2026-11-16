@@ -8,7 +8,7 @@
 import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
-import { assertServiceKey } from "./authz";
+import { assertServiceKey, requireGatewayMember } from "./authz";
 import { normalizeProjectionRole, shouldApplyMembershipAdd } from "./membershipProjection";
 
 const MAX_PERSONA_INSTRUCTIONS_LENGTH = 1500;
@@ -334,6 +334,38 @@ export const setPersonaForGateway = mutation({
       instructions: args.instructions !== undefined ? (instructions ?? null) : (user.personaInstructions ?? null),
       enabled: args.enabled !== undefined ? args.enabled : (user.personaEnabled ?? true),
     };
+  },
+});
+
+/**
+ * WS17-S5: the caller's primary personal agent, a preference on the caller's own row in this org. The
+ * gateway validates the agent at Control before it calls this; `null` clears it.
+ */
+export const setPrimaryAgentForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    agentSubjectId: v.union(v.string(), v.null()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    if (args.agentSubjectId !== null && !args.agentSubjectId.startsWith("agent-")) {
+      throw new Error("agentSubjectId must be an agent id");
+    }
+    const rows = await ctx.db
+      .query("users")
+      .withIndex("by_external_and_org", (q) =>
+        q.eq("externalAuthId", args.externalAuthId).eq("orgId", organization._id),
+      )
+      .collect();
+    const user = rows.find((candidate) => candidate.syncStatus !== "deleted");
+    if (!user) throw new Error("Unauthorized");
+    await ctx.db.patch(user._id, {
+      primaryAgentSubjectId: args.agentSubjectId ?? undefined,
+    });
+    return { primarySubjectId: args.agentSubjectId };
   },
 });
 

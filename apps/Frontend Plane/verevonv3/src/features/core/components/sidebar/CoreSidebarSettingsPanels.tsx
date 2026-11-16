@@ -2,6 +2,7 @@ import { useLocation } from '@solidjs/router'
 import {
   Brain,
   BrainCircuit,
+  Bot,
   Building2,
   CalendarClock,
   CheckCircle2,
@@ -33,6 +34,7 @@ import { getSession } from '@/shared/session/session-store'
 import { hasPlatformAdminAccess, hasWorkspaceAdminAccess } from '@/shared/session/access'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { probeSpacePolicyAdminAvailable } from '@/shared/api/space-policy-client'
+import { getPersonalAgentsFeature } from '@/shared/api/spaces-client'
 
 type SettingsIcon = Component<LucideProps>
 type SettingsLinkSection = { id: string; label: string; icon: SettingsIcon; href: string }
@@ -64,6 +66,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
   { id: 'skills', label: 'Ferdigheter', icon: Sparkles, href: '/settings/skills' },
   { id: 'persona', label: 'Persona', icon: Fingerprint, href: '/settings/persona' },
+  { id: 'personal-agents', label: 'Personlige agenter', icon: Bot, href: '/settings/personal-agents' },
   { id: 'plugins', label: 'Plugin-pakker', icon: Package, href: '/settings/plugins' },
   { id: 'cron', label: 'Planlagte kjøringer', icon: CalendarClock, href: '/settings/cron' },
   { id: 'memory', label: 'Minne', icon: Brain, href: '/settings/memory' },
@@ -103,6 +106,9 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
     spacePolicyOrgId,
     async (orgId) => ({ orgId, available: await probeSpacePolicyAdminAvailable(orgId) }),
   )
+  // Personal agents are listed only while the gateway reports them on (WS17-S5), as room policy is above.
+  const [personalAgents] = createResource(() => getPersonalAgentsFeature())
+  const personalAgentsEnabled = () => personalAgents() === true
   const spacePolicyEnabled = createMemo(() => {
     const answer = spacePolicy()
     return !spacePolicy.error && answer !== undefined && answer.orgId === spacePolicyOrgId() && answer.available
@@ -124,7 +130,8 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
             (section.id !== 'model-access' || props.modelAccessEnabled) &&
             (section.id !== 'browser-sites' || import.meta.env.VITE_BROWSER_SITES === 'true') &&
             (section.id !== 'org-browser-policy' || (import.meta.env.VITE_BROWSER_SITES === 'true' && hasWorkspaceAdminAccess(getSession()))) &&
-            (section.id !== 'space-policy' || spacePolicyEnabled()),
+            (section.id !== 'space-policy' || spacePolicyEnabled()) &&
+            (section.id !== 'personal-agents' || personalAgentsEnabled()),
         )}
         activeSectionId={activeSectionId()}
       />
@@ -317,6 +324,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Ferdigheter', 'Skills')
     case 'persona':
       return i18n.tr('Persona', 'Persona')
+    case 'personal-agents':
+      return i18n.tr('Personlige agenter', 'Personal agents')
     case 'plugins':
       return i18n.tr('Plugin-pakker', 'Plugins')
     case 'cron':

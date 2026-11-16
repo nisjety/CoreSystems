@@ -1590,6 +1590,29 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_thread_not_visible: { no: 'Denne samtalen er ikke tilgjengelig for deg.', en: 'This conversation is not available to you.' },
   space_thread_scope_unavailable: { no: 'Rommet for denne samtalen kunne ikke fastslås. Prøv igjen om litt.', en: 'The room for this conversation could not be determined. Try again shortly.' },
   invalid_agent: { no: 'Agenten er ikke gyldig. Velg en agent i listen og prøv igjen.', en: 'The agent is not valid. Choose an agent from the list and try again.' },
+
+  // WS17-S5 personal agents (gateway domains/spaces/personal_agents.rs). feature_disabled, active_membership_required,
+  // agent_not_found, agent_membership_unconfirmed, agent_registry_unavailable, invalid_agent_name and
+  // invalid_agent_instructions keep their copy above. An add refusal's reason is keyed by the reason itself.
+  add_policy_nobody: { no: 'Eieren har stengt for at denne agenten legges til i rom.', en: 'The owner has closed this agent to being added to rooms.' },
+  add_policy_owner_only: { no: 'Bare eieren kan legge til denne agenten i et rom.', en: 'Only the owner can add this agent to a room.' },
+  agent_access_forbidden: { no: 'Du kan ikke endre tilgangen til denne agenten. Ingenting er endret.', en: 'You cannot change who has access to this agent. Nothing was changed.' },
+  agent_delegation_required: { no: 'Tilgangen din må bekreftes på nytt før dette kan gjøres. Prøv igjen.', en: 'Your access must be confirmed again before this can be done. Try again.' },
+  agent_not_addable: { no: 'Denne agenten kan ikke legges til i rommet akkurat nå.', en: 'This agent cannot be added to the room right now.' },
+  agent_not_visible: { no: 'Denne agenten er ikke synlig for deg, så den kan ikke legges til.', en: 'This agent is not visible to you, so it cannot be added.' },
+  agent_policy_invalid: { no: 'Valget for tilgang til agenten er ikke gyldig. Ingenting er endret.', en: 'That access choice is not valid for this agent. Nothing was changed.' },
+  agent_request_conflict: { no: 'Forespørselen er allerede brukt til noe annet. Start på nytt og prøv igjen.', en: 'This request was already used for something else. Start again and try again.' },
+  agent_state_changed: { no: 'Tilgangen til agenten er endret av noen andre. De nyeste innstillingene er lastet inn; se over og lagre på nytt.', en: 'Someone else changed this agent\'s access. The latest settings are loaded; review them and save again.' },
+  agent_subject_conflict: { no: 'Agenten er allerede knyttet til en annen identitet. Ingenting er endret.', en: 'The agent is already linked to a different identity. Nothing was changed.' },
+  agent_suspended: { no: 'Organisasjonen har satt agenten på pause, så den kan ikke legges til nå.', en: 'The organization has paused this agent, so it cannot be added now.' },
+  agent_withdraw_forbidden: { no: 'Bare eieren eller en leder i rommet kan ta agenten ut av rommet.', en: 'Only the owner or a manager of the room can take the agent out of it.' },
+  client_request_id_required: { no: 'Forespørselen mangler en nøkkel. Last inn siden på nytt og prøv igjen.', en: 'The request is missing its key. Reload the page and try again.' },
+  owner_not_in_room: { no: 'Eieren av agenten er ikke lenger med i rommet, så agenten kan ikke legges til.', en: 'The owner of the agent is no longer in the room, so the agent cannot be added.' },
+  personal_agents_not_entitled: { no: 'Organisasjonen din tillater ikke personlige agenter i rom ennå. Spør en administrator.', en: 'Your organization does not allow personal agents in rooms yet. Ask an administrator.' },
+  personal_space_not_supported: { no: 'Et personlig rom har ingen delte agenter, så agenten kan ikke legges til her.', en: 'A personal Space has no shared agents, so the agent cannot be added here.' },
+  principal_not_in_org: { no: 'En av personene du har valgt, er ikke med i organisasjonen. Fjern dem og prøv igjen.', en: 'One of the people you picked is not in the organization. Remove them and try again.' },
+  room_role_insufficient: { no: 'Rollen din i rommet er ikke høy nok til å legge til agenter.', en: 'Your role in this room is not high enough to add agents.' },
+  space_not_active: { no: 'Rommet er ikke aktivt akkurat nå, så agenten kan ikke legges til.', en: 'This room is not active right now, so the agent cannot be added.' },
 }
 
 /**
@@ -1741,7 +1764,13 @@ function describe(
   // message the SPA wrote itself (LocalizedError) still wins.
   // A memory refusal is Session Core's, not Control's: its `details.reason` (`space_scope`,
   // `agent_run_scope`) shares a token with the Space denial vocabulary, so it is read below.
-  if (isSpaceDenial(err) && !(err instanceof LocalizedError) && code !== 'memory_not_enabled') {
+  // WS17-S5: an add refusal (`agent_not_addable`) carries its own reason words, read below, not the Space denial sentence.
+  if (
+    isSpaceDenial(err) &&
+    !(err instanceof LocalizedError) &&
+    code !== 'memory_not_enabled' &&
+    code !== 'agent_not_addable'
+  ) {
     return {
       code,
       kind,
@@ -1759,6 +1788,8 @@ function describe(
   const details = like?.details
   const memoryScope = details && !Array.isArray(details) ? details.reason : undefined
   if (code === 'memory_not_enabled' && typeof memoryScope === 'string') copy ??= MEMORY_SCOPE_COPY.get(memoryScope)
+  // WS17-S5: an add refusal's sentence is keyed by its reason (`add_policy_nobody`, `owner_not_in_room`, ...).
+  if (code === 'agent_not_addable' && typeof memoryScope === 'string') copy ??= ERROR_COPY[memoryScope]
   copy ??= code ? ERROR_COPY[code] : undefined
   if (!copy) {
     if (kind === 'unauthenticated') copy = ERROR_COPY.unauthenticated
