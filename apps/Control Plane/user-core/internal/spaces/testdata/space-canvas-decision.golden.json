@@ -1,0 +1,66 @@
+{
+  "comment": "Shared Control and Data Plane vector for the room canvas payload digest (WS19-S2). Control's copy is canvasPayloadDigest in canvas_decision.go; wiki-store recomputes the same bytes in internal/spacedecision (WS19-S3) and must pin this file's digests. Change the digests only on an intended wire change, on both sides. content_digest is sha256 of the content bytes ('sha256:' plus 64 lowercase hex). Each length-prefixed field is name, NUL, 8-byte big-endian length, value; the two revisions are name, NUL, 8-byte big-endian value.",
+  "header": "data.space_canvas\\x00v1\\x00",
+  "input": {
+    "org_id": "org-1",
+    "user_id": "user-2",
+    "space_id": "space-room-1",
+    "space_decision_ref": "decision-1",
+    "recipient_audience_ref": "audience:space-room-1:4",
+    "recipient_audience_hash": "sha256:audience-hash",
+    "privacy_policy_ref": "privacy:org-1:5",
+    "resource_authorization_ref": "control:space-room-1:canvas:7",
+    "authority_revision": 7,
+    "recipient_audience_revision": 4
+  },
+  "vectors": [
+    {
+      "name": "read",
+      "op": "read",
+      "action_schema_hash": "sha256:space-canvas-read-v1",
+      "idempotency_key": "canvas-read-1",
+      "canvas_id": "",
+      "expected_version_id": "",
+      "restore_from_version_id": "",
+      "content": null,
+      "content_digest": "",
+      "payload_digest": "sha256:f02e86d4c2743ec4f2714b37d0d1719d861bee4b27620703beb6142aef689126"
+    },
+    {
+      "name": "create",
+      "op": "create",
+      "action_schema_hash": "sha256:space-canvas-write-v1",
+      "idempotency_key": "canvas-create-1",
+      "canvas_id": "",
+      "expected_version_id": "",
+      "restore_from_version_id": "",
+      "content": "hello room",
+      "content_digest": "sha256:7050f166dc608e9d7e435dfcd36e2fdda843e5fafe50f7aed9556fb93483e23c",
+      "payload_digest": "sha256:ce875595af0de5f44f47c016e9e6b5aa3a658762609c448405b04c77dcdb9b95"
+    },
+    {
+      "name": "save",
+      "op": "save",
+      "action_schema_hash": "sha256:space-canvas-write-v1",
+      "idempotency_key": "canvas-save-1",
+      "canvas_id": "canvas-1",
+      "expected_version_id": "version-2",
+      "restore_from_version_id": "",
+      "content": "hello room",
+      "content_digest": "sha256:7050f166dc608e9d7e435dfcd36e2fdda843e5fafe50f7aed9556fb93483e23c",
+      "payload_digest": "sha256:e2b4f2786674eeb576e4c6f3aa24babde97a386a6de7b296b149d4eff9cd33a9"
+    },
+    {
+      "name": "restore",
+      "op": "restore",
+      "action_schema_hash": "sha256:space-canvas-write-v1",
+      "idempotency_key": "canvas-restore-1",
+      "canvas_id": "canvas-1",
+      "expected_version_id": "version-2",
+      "restore_from_version_id": "version-1",
+      "content": null,
+      "content_digest": "",
+      "payload_digest": "sha256:d600e1b4bf02d7e0964dd22c8bbfdf58d462073df4300c497e1de1de713229c9"
+    }
+  ]
+}

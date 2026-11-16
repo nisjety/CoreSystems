@@ -148,6 +148,16 @@ var entitlementCatalog = []EntitlementSpec{
 		Get: func(p EffectPolicy) bool { return p.MemoryDeclassifyEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.MemoryDeclassifyEntitled = v },
 	},
+	{
+		// WS19-S2: the room canvas, a shared Markdown document in Data Plane. The
+		// data.canvas.* decisions it gates are issued by canvas_decision.go. Pilot-only
+		// until counsel rules (SD-08 and SD-19): off by default and in no preset, so a
+		// preset switch turns it off. Refused under Space ZDR (ZDRInert).
+		Key: "canvas", Column: "canvas_entitled",
+		Decisions: []string{"data.canvas.read", "data.canvas.write"}, ZDR: ZDRInert,
+		Get: func(p EffectPolicy) bool { return p.CanvasEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.CanvasEntitled = v },
+	},
 }
 
 // effectPolicyPrivacyColumns are the nine privacy/attestation columns, in the

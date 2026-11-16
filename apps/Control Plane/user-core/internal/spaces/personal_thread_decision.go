@@ -130,6 +130,9 @@ type PersonalThreadDecisionEvidence struct {
 	MessageReviseEntitled   bool
 	MessageModerateEntitled bool
 	OriginalRetention       string
+	// CanvasEntitled (WS19-S2) is the room canvas bit, filled only by the canvas
+	// resolvers and resolvePersonalDecisionEvidence. Deny by default.
+	CanvasEntitled bool
 }
 
 func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {

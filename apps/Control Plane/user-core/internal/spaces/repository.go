@@ -1309,6 +1309,75 @@ func (r *Repository) ResolveSharedThreadReadDecisionEvidence(ctx context.Context
 	return evidence, nil
 }
 
+// ResolvePersonalCanvasDecisionEvidence resolves a personal Space's canvas
+// authority (WS19-S2). It reads the same current-authority row as the personal
+// thread resolver, binds the canvas resource reference and validates the read or
+// write floor. The Space's one member is its only recipient.
+func (r *Repository) ResolvePersonalCanvasDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string, write bool) (PersonalThreadDecisionEvidence, error) {
+	evidence, err := r.resolvePersonalDecisionEvidence(ctx, spaceRef, orgID, subjectID)
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, err
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:canvas:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if err := evidence.ValidateForCanvas(write); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid personal Space canvas authority: %w", err)
+	}
+	return evidence, nil
+}
+
+// ResolveSharedCanvasDecisionEvidence resolves a shared Space's canvas authority
+// (WS19-S2). It reuses the current-membership and current-recipient-audience
+// joins of ResolveSharedThreadReadDecisionEvidence, so a removed participant stops
+// resolving, and binds the independent canvas_entitled bit with its own resource
+// reference. A read also resolves an archived room (WS04's read-class rule); a
+// write resolves only an active room, as every write-class resolver does.
+func (r *Repository) ResolveSharedCanvasDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string, write bool) (PersonalThreadDecisionEvidence, error) {
+	if r == nil || r.db == nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
+	}
+	states := []string{"active", "archived"}
+	if write {
+		states = []string{"active"}
+	}
+	var evidence PersonalThreadDecisionEvidence
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
+		       r.authority_revision, r.membership_revision, r.privacy_revision,
+		       r.recipient_audience_revision, r.entitlement_revision,
+		       a.audience_ref, a.audience_hash,
+		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
+		       p.third_party_processing_allowed, p.retention_class, p.residency,
+		       p.deletion_scope, p.zero_data_retention, p.canvas_entitled
+		FROM registered_spaces s
+		JOIN space_memberships m ON m.space_ref=s.space_ref
+		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		JOIN space_recipient_audiences a ON a.space_ref=s.space_ref AND a.revision=r.recipient_audience_revision
+		JOIN space_recipient_audience_members am ON am.space_ref=a.space_ref AND am.revision=a.revision AND am.subject_id=m.subject_id
+		JOIN space_effect_policies p ON p.org_id=s.org_id
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state = ANY($4::text[])
+		  AND s.space_kind <> 'personal'
+		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
+		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID), states,
+	).Scan(sharedDecisionEvidenceScanDestinations(&evidence, &evidence.CanvasEntitled)...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
+	}
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space canvas authority: %w", err)
+	}
+	if !write {
+		if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+			return PersonalThreadDecisionEvidence{}, err
+		}
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:canvas:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if err := evidence.ValidateForCanvas(write); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space canvas authority: %w", err)
+	}
+	return evidence, nil
+}
+
 // ResolveSharedRunControlDecisionEvidence resolves the authority to cancel a
 // live run in a shared Space (WS09-S7). It reuses the current-membership and
 // current-recipient-audience joins of ResolveSharedThreadReadDecisionEvidence
@@ -1513,7 +1582,7 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 		       p.third_party_processing_allowed, p.retention_class, p.residency,
 		       p.deletion_scope, p.zero_data_retention, p.thread_create_entitled,
 		       p.retrieval_read_entitled, p.import_write_entitled, p.agent_action_entitled, p.schedule_fire_entitled,
-		       p.sandbox_capability_entitled, p.process_registry_entitled
+		       p.sandbox_capability_entitled, p.process_registry_entitled, p.canvas_entitled
 		FROM registered_spaces s
 		JOIN space_memberships m ON m.space_ref=s.space_ref
 		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
@@ -1536,7 +1605,7 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
 		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadCreateEntitled,
 		&evidence.RetrievalReadEntitled, &evidence.ImportWriteEntitled, &evidence.AgentActionEntitled, &evidence.ScheduleFireEntitled,
-		&evidence.SandboxCapabilityEntitled, &evidence.ProcessRegistryEntitled,
+		&evidence.SandboxCapabilityEntitled, &evidence.ProcessRegistryEntitled, &evidence.CanvasEntitled,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership

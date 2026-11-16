@@ -291,6 +291,10 @@ type EffectPolicy struct {
 	// MemoryDeclassifyEntitled (WS17-S4) gates declassifying a personal memory
 	// into a room (WS17-S7). Deny by default; refused under Space ZDR.
 	MemoryDeclassifyEntitled bool `json:"memory_declassify_entitled"`
+	// CanvasEntitled (WS19-S2) lets a Space's canvas be read and written through
+	// the data.canvas.* decisions. Pilot-only: deny by default, in no preset, and
+	// refused under Space ZDR.
+	CanvasEntitled bool `json:"canvas_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {
