@@ -15373,6 +15373,16 @@ fn goal_status_token(status: &str) -> String {
     }
 }
 
+/// The wire form of a thread's title or pin provenance (WS18-S3): `owner` or `agent`, spelled as
+/// session-core's CHECK spells them, or empty. Any other word reads as no provenance, so the listing
+/// never relays a word this build does not name. Presentation only, never a grant.
+fn provenance_token(source: &str) -> String {
+    match source {
+        "owner" | "agent" => source.to_owned(),
+        _ => String::new(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ListAttentionQuery {
     /// Page size, 1 to 200. Absent or out of range reads as 200 in Session Core.
@@ -15494,6 +15504,15 @@ struct ThreadSummaryResponse {
     /// never the objective.
     #[serde(skip_serializing_if = "String::is_empty")]
     goal_status: String,
+    /// Who set the title: `owner` or `agent` (WS18-S3, session-core's `ThreadSummary.title_source`).
+    /// Omitted when Session Core names none, so a row without provenance keeps its shape; absent is
+    /// never an agent. Presentation only, never a grant.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    title_source: String,
+    /// Who set the pin: `owner` or `agent` (WS18-S3, `ThreadSummary.pinned_source`). Omitted when
+    /// none. Presentation only, never a grant.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pinned_source: String,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -15792,6 +15811,8 @@ async fn list_threads(
             last_role: thread.last_role,
             turn_count: thread.turn_count,
             goal_status: goal_status_token(&thread.goal_status),
+            title_source: provenance_token(&thread.title_source),
+            pinned_source: provenance_token(&thread.pinned_source),
         })
         .collect();
 
@@ -24519,6 +24540,8 @@ mod space_post_wire_tests {
             last_role: String::new(),
             turn_count: 0,
             goal_status: String::new(),
+            title_source: String::new(),
+            pinned_source: String::new(),
         }
     }
 
