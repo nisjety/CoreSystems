@@ -506,3 +506,18 @@ export function restoreMemoryResultFrom(raw: unknown): RestoreMemoryResult {
   if (!memoryId || row.restored !== true) throw new Error('invalid_memory_restore_response')
   return { memoryId, restored: true }
 }
+
+/** The longest Space reference the gateway reads as a restore hint, in characters (code points). Keep it in step with the gateway. */
+const RESTORE_SPACE_REF_MAX_CHARS = 200
+
+/**
+ * The `memory.restore` input for one withheld row. `originSpaceRef` is the Space the row was learned in; it goes as
+ * `spaceRef`, so the gateway can ask Control whether that Space is the owner's personal Space (W3-DEC-KIND2). A row with no
+ * usable Space ref sends nothing, and the restore is refused as before (fail closed).
+ */
+export function restoreMemoryInputFrom(entry: MemoryEntry): { memoryId: string; spaceRef?: string } {
+  const spaceRef = (entry.originSpaceRef ?? '').trim()
+  return spaceRef !== '' && [...spaceRef].length <= RESTORE_SPACE_REF_MAX_CHARS
+    ? { memoryId: entry.memoryId, spaceRef }
+    : { memoryId: entry.memoryId }
+}

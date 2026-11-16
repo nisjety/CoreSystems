@@ -10,6 +10,7 @@ import {
   PROFILE_NOT_ENABLED,
   rebuildProfile,
   resetMemory,
+  restoreMemoryInputFrom,
   restoreMemoryResultFrom,
   saveProfile,
   setMemoryState,
@@ -385,13 +386,14 @@ export function MemorySection() {
 
   // WS17-D9: a withheld row is restored by its owner through the action registry (`memory.restore`). Session Core refuses a
   // row whose room is a shared room, or whose room type is not recorded yet, and the refusal says which.
+  // W3-DEC-KIND2: the row's origin Space goes with the restore, so Control can attest it as the owner's personal Space.
   const handleRestore = async (entry: MemoryEntry) => {
     const who = currentActor()
     if (restoringId() !== null || !who) return
     setRestoringId(entry.memoryId)
     setActionError(null)
     try {
-      const execution = await executeAction('memory.restore', who, { memoryId: entry.memoryId })
+      const execution = await executeAction('memory.restore', who, restoreMemoryInputFrom(entry))
       restoreMemoryResultFrom(execution.result)
       await refetch()
     } catch (err) {

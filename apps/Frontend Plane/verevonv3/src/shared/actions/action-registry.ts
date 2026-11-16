@@ -701,8 +701,11 @@ const memoryDeleteInput = z.object({
 
 // WS17-D9: the owner restores one withheld memory (learned in a shared room before containment) to personal memory.
 // Whose memory it is comes from the session; the gateway and Session Core decide whether its room is a shared room.
+// W3-DEC-KIND2: `spaceRef` is the Space the row was learned in (its origin_space_ref). Omitted, the restore names no Space
+// and refuses an unrecorded room type as before. The gateway bounds it to the same 200 characters.
 const memoryRestoreInput = z.object({
   memoryId: z.string().min(1),
+  spaceRef: z.string().trim().min(1).max(200).optional(),
 })
 
 const memoryRestoreOutput = z.object({
