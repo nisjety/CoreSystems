@@ -121,6 +121,9 @@ use super::dispatchers_spaces::ws17::{
     dispatch_agents_create_personal, dispatch_agents_set_primary, dispatch_agents_update_access,
     dispatch_spaces_withdraw_agent,
 };
+use super::dispatchers_spaces::ws19::{
+    dispatch_spaces_restore_canvas_version, dispatch_spaces_save_canvas,
+};
 use super::dispatchers_browser_policy::{
     dispatch_browser_get_org_policy, dispatch_browser_set_org_policy,
 };
@@ -1091,6 +1094,16 @@ pub(super) async fn execute_action(
         }
         "spaces.withdraw_agent" => {
             boxed_dispatch(|| dispatch_spaces_withdraw_agent(&state, &user, &body.input)).await
+        }
+        "spaces.save_canvas" => {
+            boxed_dispatch(|| dispatch_spaces_save_canvas(&state, &user, &headers, &body.input))
+                .await
+        }
+        "spaces.restore_canvas_version" => {
+            boxed_dispatch(|| {
+                dispatch_spaces_restore_canvas_version(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "spaces.bind_space_agent" => {
             boxed_dispatch(|| dispatch_space_bind_agent(&state, &user, &body.input)).await

@@ -597,6 +597,14 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SPACE_PERSONAL_AGENTS_UI` (WS17-S5): the personal-agent surfaces, reported as `features.personal_agents` together
     /// with the API flag. A rollout control, never an authorization input.
     pub(crate) personal_agents_ui: bool,
+    /// `SPACE_CANVAS_API` (WS19-S4): the room canvas routes (`/api/v1/spaces/{space_ref}/canvas...`) and the
+    /// `spaces.save_canvas` and `spaces.restore_canvas_version` actions. Off answers 404 `space_canvas_disabled`.
+    /// A rollout control, never an authorization input: Control's decision and Data Plane's check decide every
+    /// access. Pilot-only until SD-08 and SD-19 are answered, so it is off in production.
+    pub(crate) canvas_api: bool,
+    /// `SPACE_CANVAS_UI` (WS19-S4): the room canvas surface, reported as `features.canvas` together with the API
+    /// flag. A rollout control, never an authorization input.
+    pub(crate) canvas_ui: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -713,6 +721,8 @@ impl SpaceFeatureFlags {
             system_entries_api: space_flag("SPACE_SYSTEM_ENTRIES_API"),
             personal_agents_api: space_flag("SPACE_PERSONAL_AGENTS_API"),
             personal_agents_ui: space_flag("SPACE_PERSONAL_AGENTS_UI"),
+            canvas_api: space_flag("SPACE_CANVAS_API"),
+            canvas_ui: space_flag("SPACE_CANVAS_UI"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }

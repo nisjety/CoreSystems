@@ -202,6 +202,9 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'agents.update_access': exempt('agent_cannot_self_govern', 'external_write'),
   'agents.set_primary': exempt('agent_cannot_self_govern', 'external_write'),
   'spaces.withdraw_agent': exempt('agent_cannot_self_govern', 'external_write'),
+  // WS19-S4: a person's canvas save or restore; an agent writes the canvas only through its own run-action tool (S9).
+  'spaces.save_canvas': exempt('human_identity_or_security', 'external_write'),
+  'spaces.restore_canvas_version': exempt('human_identity_or_security', 'external_write'),
   'spaces.open_private_panel': exempt('human_identity_or_security', 'external_write'),
   'spaces.open_dm': exempt('human_identity_or_security', 'external_write'),
   'spaces.hide_space': exempt('ui_state_only', 'external_write'),

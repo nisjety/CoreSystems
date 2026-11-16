@@ -42,6 +42,7 @@ pub(crate) mod message_lifecycle;
 pub(crate) mod room_admin;
 pub(crate) mod files;
 pub(crate) mod personal_agents;
+pub(crate) mod canvas;
 mod message_search;
 pub(crate) mod mentions;
 mod timeline;
@@ -1152,6 +1153,7 @@ fn module_routes() -> Router<AppState> {
         .merge(stream::routes())
         .merge(memory::routes())
         .merge(personal_agents::routes())
+        .merge(canvas::routes())
 }
 
 #[derive(Debug, Deserialize)]
@@ -5954,6 +5956,9 @@ async fn space_context(
                     // WS17-S5: the personal-agent surfaces (API and UI flags together).
                     "personal_agents": state.space_features.personal_agents_api
                         && state.space_features.personal_agents_ui,
+                    // WS19-S4: the room canvas (API and UI flags together).
+                    "canvas": state.space_features.canvas_api
+                        && state.space_features.canvas_ui,
                     "status": state.space_features.status_api,
                     "reminders": state.space_features.reminders_api,
                     // WS08-S4: mentions and addressed wake. The picker follows the record flag;
