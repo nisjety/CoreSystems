@@ -677,6 +677,7 @@ pub(crate) async fn grounding_candidate_pool(
         sqlx::query_as::<_, (String, String, String)>(
             "SELECT id, key, content FROM agent_memory \
              WHERE org_id = $1 AND session_id = $2 AND scope = $3 \
+               AND origin_kind = 'personal' AND space_ref IS NULL \
                AND is_latest = true AND review_state = 'accepted' \
                AND NOT EXISTS ( \
                  SELECT 1 FROM runs wr \
@@ -695,6 +696,7 @@ pub(crate) async fn grounding_candidate_pool(
         sqlx::query_as::<_, (String, String, String)>(
             "SELECT id, key, content FROM agent_memory \
              WHERE org_id = $1 AND session_id IS NULL AND scope = $2 AND owner = $3 \
+               AND origin_kind = 'personal' AND space_ref IS NULL \
                AND is_latest = true AND review_state = 'accepted' \
                AND NOT EXISTS ( \
                  SELECT 1 FROM runs wr \
@@ -1560,6 +1562,9 @@ pub(crate) async fn load_agent_memory_context_rows(
             .collect());
     }
     let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$7", "$2");
+    // WS17-S3: withhold `room_unverified` rows always; with the label switch on, a personal
+    // reader also needs `origin_kind = 'personal'`.
+    let label_read = crate::space::memory_scope::label_read_sql("$8", "$6");
 
     let user_id = user_id_hint
         .map(str::trim)
@@ -1579,6 +1584,7 @@ pub(crate) async fn load_agent_memory_context_rows(
                 OR ($5 AND session_id IS NULL AND scope = 'user' AND owner = $3 AND NOT $6) \
            ) \
            AND {legacy_exclusion} \
+           AND {label_read} \
          ORDER BY \
            CASE scope \
              WHEN 'user' THEN 0 \
@@ -1597,6 +1603,7 @@ pub(crate) async fn load_agent_memory_context_rows(
     .bind(access == MemoryAccess::Full)
     .bind(contained)
     .bind(crate::space::memory_scope::containment_on())
+    .bind(crate::space::memory_scope::audience_labels_on())
     .fetch_all(pool)
     .await?;
 
@@ -1670,6 +1677,8 @@ pub(crate) async fn search_agent_memory(
         crate::space::memory_scope::record_contained("read_search");
     }
     let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$9", "$2");
+    // WS17-S3: the same label predicate as the context read, with the label switch as `$10`.
+    let label_read = crate::space::memory_scope::label_read_sql("$10", "$8");
     // Space and agent rows have owner '' and no session, so the unowned branch below would hand
     // every room's memory to every thread of the org; only their own readers return them
     // (`recall_space_memory`, `space_memory::recall_agent_memory`, EP-8 S7/S10).
@@ -1699,6 +1708,7 @@ pub(crate) async fn search_agent_memory(
                 OR (session_id IS NULL AND scope NOT IN ('user', 'space', 'agent') AND NOT $8) \
                 OR ($7 AND session_id IS NULL AND scope = 'user' AND owner = $3 AND NOT $8)) \
            AND {legacy_exclusion} \
+           AND {label_read} \
            AND ($4::timestamptz IS NULL OR updated_at > $4) \
            AND (cardinality($5::text[]) = 0 \
                 OR CASE \
@@ -1720,6 +1730,7 @@ pub(crate) async fn search_agent_memory(
     .bind(request.access == MemoryAccess::Full)
     .bind(contained)
     .bind(crate::space::memory_scope::containment_on())
+    .bind(crate::space::memory_scope::audience_labels_on())
     .fetch_all(pool)
     .await?;
 
@@ -1795,26 +1806,46 @@ pub(crate) async fn index_agent_memory(
     content: &str,
 ) -> Result<String, sqlx::Error> {
     let topic = normalize_topic(topic);
-    let thread_row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-        "SELECT space_id, space_kind FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3",
+    let thread_row = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Option<i64>)>(
+        "SELECT space_id, space_kind, recipient_audience_hash, recipient_audience_revision \
+         FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3",
     )
     .bind(thread_id)
     .bind(org_id)
     .bind(owner_user_id)
     .fetch_optional(pool)
     .await?;
-    let Some((space_id, space_kind)) = thread_row else {
+    let Some((space_id, space_kind, audience_hash, audience_revision)) = thread_row else {
         return Ok(String::new());
     };
+    let contained =
+        crate::space::memory_scope::thread_is_contained(space_id.as_deref(), space_kind.as_deref());
     // WS17-S1 C4: a shared room writes only thread-scope rows. The handler refuses the wider
     // topics with a typed error first; this is the same rule for any other caller, answered as
     // "nothing written" (the empty id).
-    if crate::space::memory_scope::thread_is_contained(space_id.as_deref(), space_kind.as_deref())
-        && crate::space::memory_scope::topic_writes_beyond_thread(&topic)
-    {
+    if contained && crate::space::memory_scope::topic_writes_beyond_thread(&topic) {
         crate::space::memory_scope::record_contained("index_refused");
         return Ok(String::new());
     }
+    // WS17-S3: with the label switch on, a row a shared room writes is stamped with the room and
+    // the audience the thread stores (Control-verified server state, never the request). A thread
+    // without a usable audience cannot be labelled, so nothing is written.
+    let room_label = if contained && crate::space::memory_scope::audience_labels_on() {
+        let hash = audience_hash.as_deref().map(str::trim).filter(|hash| !hash.is_empty());
+        match (hash, audience_revision.filter(|revision| *revision > 0)) {
+            (Some(hash), Some(revision)) => Some((
+                space_id.clone().unwrap_or_default(),
+                hash.to_owned(),
+                revision,
+            )),
+            _ => {
+                crate::space::memory_scope::record_contained("index_no_audience");
+                return Ok(String::new());
+            }
+        }
+    } else {
+        None
+    };
 
     let scope = scope_for_topic(&topic);
     let (session_id, kind, owner) = match topic.as_str() {
@@ -1866,6 +1897,20 @@ pub(crate) async fn index_agent_memory(
         &[format!("thread:{thread_id}"), "tool:save_memory".to_owned()],
     )
     .await?;
+    if let Some((space_ref, hash, revision)) = &room_label {
+        // The row takes the room's label whether it was just inserted or refreshed under the same key.
+        sqlx::query(
+            "UPDATE agent_memory SET origin_kind = $2, space_ref = $3, audience_hash = $4, \
+             audience_revision = $5 WHERE id = $1",
+        )
+        .bind(&memory_id)
+        .bind(crate::space::memory_scope::ORIGIN_ROOM)
+        .bind(space_ref)
+        .bind(hash)
+        .bind(revision)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(memory_id)
 }
@@ -1973,7 +2018,9 @@ pub(crate) async fn list_user_memory(
     let limit = limit.clamp(1, 200);
     // WS17-S2: a row learned in a shared room before containment existed is still the
     // owner's to see (and keep or delete) but is never recalled; flag it with its Space.
-    let origin_space = crate::space::memory_scope::legacy_room_origin_space("$4");
+    // WS17-S3: the stored origin (`room_unverified`, migration 0081) withholds a row whatever the
+    // containment switch says; the source-link test still covers rows written by an older build.
+    let origin_space = crate::space::memory_scope::withheld_origin_space("$4");
     let sql = format!(
         "SELECT id, kind, content, confidence, updated_at, source_links, {origin_space} \
          FROM agent_memory \
@@ -2494,6 +2541,7 @@ const SPACE_RECALL_SQL: &str = "SELECT id, kind, key, content, confidence, updat
        AND review_state = 'accepted' \
        AND is_latest = true \
        AND (expires_at IS NULL OR expires_at > now()) \
+       AND origin_kind IN ('room', 'declassified') \
        AND $3 <> '' \
        AND audience_hash = $3 \
      ORDER BY confidence DESC, updated_at DESC \
@@ -2508,6 +2556,7 @@ const SPACE_WITHHELD_SQL: &str = "SELECT COUNT(*) \
        AND review_state = 'accepted' \
        AND is_latest = true \
        AND (expires_at IS NULL OR expires_at > now()) \
+       AND origin_kind IN ('room', 'declassified') \
        AND audience_hash IS DISTINCT FROM $3";
 
 /// Recall for a shared-room thread with Space memory on (EP-8 S7). A thread with a waived run

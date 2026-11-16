@@ -163,6 +163,11 @@ func (s *Server) degradation() (bool, string) {
 // SearchMemory returns hits from the in-memory store.
 func (s *Server) SearchMemory(ctx context.Context, req *mpv1.SearchMemoryRequest) (*mpv1.SearchMemoryResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "SearchMemory")))
+	// WS17-S3: a search must name the thread or the user it reads. One with neither would reach the
+	// whole tenant's index, so it is refused before the store is asked.
+	if req.GetThreadId() == "" && req.GetUserId() == "" {
+		return nil, mapErr(fmt.Errorf("%w: search needs thread_id or user_id", ErrInvalidArgument))
+	}
 	updatedAfter := time.Time{}
 	if req.UpdatedAfter != nil {
 		updatedAfter = req.UpdatedAfter.AsTime()

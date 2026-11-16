@@ -10,8 +10,10 @@ import (
 var errMemoryUnauthorized = errors.New("memory operation is not authorized")
 
 // MemoryAuthorizer binds every memory operation to the organization in the
-// verified JWT. User principals may read and write their tenant's memory;
-// workload identities require the corresponding signed scope.
+// verified JWT. Only workload identities reach the semantic mirror, each with
+// the corresponding signed scope; user principals are refused on every
+// operation (WS17-S3). The room-or-personal decision belongs to Session Core,
+// the one configured caller, so no person's token addresses tenant memory here.
 func MemoryAuthorizer(principal authctx.Principal, method string, request any) error {
 	if principal.OrganizationID == "" || principal.ActorID == "" {
 		return errMemoryUnauthorized
@@ -36,9 +38,6 @@ func MemoryAuthorizer(principal authctx.Principal, method string, request any) e
 	}
 	if !principal.RetentionPolicyPresent || principal.ZeroDataRetention {
 		return errMemoryUnauthorized
-	}
-	if principal.PrincipalType == "user" {
-		return nil
 	}
 	if principal.PrincipalType != "service" {
 		return errMemoryUnauthorized

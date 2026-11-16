@@ -23,6 +23,28 @@ pub fn containment_enabled() -> bool {
     containment_enabled_from(std::env::var(MEMORY_SPACE_CONTAINMENT_ENV).ok().as_deref())
 }
 
+/// Environment variable of the audience label switch (WS17-S3, `MEMORY_AUDIENCE_LABELS`).
+pub const MEMORY_AUDIENCE_LABELS_ENV: &str = "MEMORY_AUDIENCE_LABELS";
+
+/// Pure form of [`audience_labels_enabled`]: `value` is the raw variable, `None` when unset.
+///
+/// The opposite default to containment: OFF unless the variable is exactly `1`, `true` or `on`
+/// (case-insensitive, trimmed). It gates the label stamps and the label predicate only; it is a
+/// rollout control, never an authorization input.
+#[must_use]
+pub fn audience_labels_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on")
+    )
+}
+
+/// Whether memory audience labels are switched on for this process.
+#[must_use]
+pub fn audience_labels_enabled() -> bool {
+    audience_labels_enabled_from(std::env::var(MEMORY_AUDIENCE_LABELS_ENV).ok().as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -169,9 +169,11 @@ pub(crate) fn stamp_for(enabled: bool, facts: &TurnFacts) -> Result<SpaceStamp, 
     if present(facts.decision_ref.as_ref()).is_none() {
         return Err(Skip::NoDecision);
     }
-    let (Some(audience_hash), Some(audience_revision)) =
-        (present(facts.audience_hash.as_ref()), facts.audience_revision)
-    else {
+    // WS17-S3: a revision of zero or less is no audience; the label check would refuse the row.
+    let (Some(audience_hash), Some(audience_revision)) = (
+        present(facts.audience_hash.as_ref()),
+        facts.audience_revision.filter(|revision| *revision > 0),
+    ) else {
         return Err(Skip::NoAudience);
     };
     Ok(SpaceStamp {
@@ -322,11 +324,22 @@ async fn upsert_space_row(
     source_links: &[String],
     source_label: &str,
 ) -> Result<Option<String>, sqlx::Error> {
+    // WS17-S3: every room row is labelled `room` with the Space it belongs to: the scope id of a
+    // Space row, or the Space part of an agent note's `<space>:<agent>`. No audience, no row (the
+    // label check would refuse it).
+    if placement.audience_revision <= 0 {
+        return Ok(None);
+    }
+    let space_ref = if placement.scope == AGENT_SCOPE {
+        placement.scope_id.split(':').next().unwrap_or_default()
+    } else {
+        placement.scope_id
+    };
     sqlx::query_scalar(
         "INSERT INTO agent_memory \
          (id, org_id, session_id, scope, scope_id, key, content, kind, confidence, owner, source_links, \
-          review_state, audience_hash, audience_revision, source_label) \
-         VALUES ($1, $2, NULL, $12, $3, $4, $5, $6, $7, '', $8, 'accepted', $9, $10, $11) \
+          review_state, audience_hash, audience_revision, source_label, origin_kind, space_ref) \
+         VALUES ($1, $2, NULL, $12, $3, $4, $5, $6, $7, '', $8, 'accepted', $9, $10, $11, 'room', $13) \
          ON CONFLICT (org_id, scope, owner, key) WHERE session_id IS NULL \
          DO UPDATE SET \
            content = EXCLUDED.content, \
@@ -338,6 +351,8 @@ async fn upsert_space_row(
            audience_hash = EXCLUDED.audience_hash, \
            audience_revision = EXCLUDED.audience_revision, \
            source_label = EXCLUDED.source_label, \
+           origin_kind = EXCLUDED.origin_kind, \
+           space_ref = EXCLUDED.space_ref, \
            updated_at = now() \
          WHERE agent_memory.is_latest \
          RETURNING id",
@@ -354,6 +369,7 @@ async fn upsert_space_row(
     .bind(placement.audience_revision)
     .bind(source_label)
     .bind(placement.scope)
+    .bind(space_ref)
     .fetch_optional(&mut **tx)
     .await
 }
@@ -678,9 +694,11 @@ pub(crate) fn agent_stamp_for(enabled: bool, facts: &AgentTurnFacts) -> Result<A
     if present(facts.decision_ref.as_ref()).is_none() {
         return Err(Skip::NoDecision);
     }
-    let (Some(audience_hash), Some(audience_revision)) =
-        (present(facts.audience_hash.as_ref()), facts.audience_revision)
-    else {
+    // WS17-S3: a revision of zero or less is no audience; the label check would refuse the row.
+    let (Some(audience_hash), Some(audience_revision)) = (
+        present(facts.audience_hash.as_ref()),
+        facts.audience_revision.filter(|revision| *revision > 0),
+    ) else {
         return Err(Skip::NoAudience);
     };
     Ok(AgentStamp {

@@ -1,7 +1,8 @@
 //! Space memory containment: the one resolver (build plan WS17-S1).
 //!
 //! Rule W: nothing said in a shared room is learned into personal or tenant memory.
-//! Rule R: a room turn recalls only this thread's own rows (labels arrive in WS17-S3).
+//! Rule R: a room turn recalls only this thread's own rows and labelled room memory of its own Space
+//! (WS17-S3: the labels, [`label_read_sql`], [`memory_visible`] and [`withheld_origin_space`]).
 //!
 //! A thread is CONTAINED when it belongs to a Space and its Control-signed `space_kind`
 //! is anything but `personal`. A missing kind (every thread created before the claim
@@ -53,6 +54,100 @@ pub(crate) const WITHHELD_ROOM_ORIGIN: &str = "room_origin_unverified";
 pub(crate) fn legacy_room_origin_space(flag_param: &str) -> String {
     format!(
         "(SELECT ct.space_id FROM unnest(agent_memory.source_links) AS sl(link)            JOIN threads ct ON ct.id = substr(sl.link, 8)           WHERE {flag_param} AND sl.link LIKE 'thread:%'             AND ct.space_id IS NOT NULL AND ct.space_kind IS DISTINCT FROM 'personal'           ORDER BY ct.space_id LIMIT 1)"
+    )
+}
+
+/// `agent_memory.origin_kind` values (WS17-S3, migration 0081). `personal` is every row a person
+/// learned or owns; the other three are room labelled and are never personal memory.
+pub(crate) const ORIGIN_PERSONAL: &str = "personal";
+/// A row a shared room said, labelled with its Space and the audience it was said in front of.
+#[allow(dead_code)] // read by `memory_visible` (the owed table test); the SQL twin holds the literal
+pub(crate) const ORIGIN_ROOM: &str = "room";
+/// A room row an owner signed for the room (WS17-S7), labelled like `room`.
+#[allow(dead_code)] // read by `memory_visible` (the owed table test); the SQL twin holds the literal
+pub(crate) const ORIGIN_DECLASSIFIED: &str = "declassified";
+/// A legacy row learned in a shared room whose room and audience cannot be verified: withheld
+/// from every recall and listed to its owner with its origin (WS17-S2, S3).
+pub(crate) const ORIGIN_ROOM_UNVERIFIED: &str = "room_unverified";
+
+/// Whether the audience label stamps and the label predicate are on (WS17-S3, `MEMORY_AUDIENCE_LABELS`).
+/// Off, the reads keep the S1 rules and the writers keep the S1 stamps. The `room_unverified`
+/// withhold is on regardless of this switch.
+pub(crate) fn audience_labels_on() -> bool {
+    mp_contracts::space_memory::audience_labels_enabled()
+}
+
+/// The label predicate of every generic read over an unaliased `agent_memory` query, as SQL.
+///
+/// It always withholds `room_unverified` rows. That rule only narrows what a reader sees, so it is
+/// on whatever the label switch says. With the switch on, a personal reader (not contained) also
+/// needs `origin_kind = 'personal'`, so no room or declassified row reaches a personal thread. A
+/// contained reader's generic rows are its own thread's (session-bound), whatever their label, so
+/// they pass. `labels_param` and `contained_param` are the bound booleans of the query.
+pub(crate) fn label_read_sql(labels_param: &str, contained_param: &str) -> String {
+    format!(
+        "(origin_kind <> '{}' AND (NOT {labels_param} OR {contained_param} OR origin_kind = '{}'))",
+        ORIGIN_ROOM_UNVERIFIED, ORIGIN_PERSONAL
+    )
+}
+
+/// The label fields of one `agent_memory` row, as the resolver reads them.
+#[allow(dead_code)] // read by `memory_visible`, the spec of the SQL twins (owed table test)
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RowLabel<'a> {
+    pub(crate) scope: &'a str,
+    pub(crate) session_id: Option<&'a str>,
+    pub(crate) origin_kind: &'a str,
+    pub(crate) space_ref: Option<&'a str>,
+    pub(crate) audience_hash: Option<&'a str>,
+    pub(crate) audience_revision: Option<i64>,
+}
+
+/// The one resolver's rule, pure (WS17-S3): may a reader holding `reader` see `row`? `reader_thread`
+/// is the reader's thread id and `labels_on` the label switch. The SQL twins are [`label_read_sql`]
+/// (the generic reads) and the room branch of `dreaming::recall_space_memory`. Which scopes a query
+/// asks for, and the owner rules, stay in the query text; this covers the label alone.
+#[allow(dead_code)] // the spec of the SQL twins, exercised by the owed table test
+pub(crate) fn memory_visible(
+    row: RowLabel<'_>,
+    reader: &ReaderScope,
+    reader_thread: &str,
+    labels_on: bool,
+) -> bool {
+    if row.origin_kind == ORIGIN_ROOM_UNVERIFIED {
+        return false;
+    }
+    match reader {
+        ReaderScope::Personal => !labels_on || row.origin_kind == ORIGIN_PERSONAL,
+        ReaderScope::Contained {
+            space_ref,
+            audience_revision,
+            audience_hash,
+        } => {
+            if row.session_id == Some(reader_thread) {
+                return true;
+            }
+            row.scope == "space"
+                && row.space_ref == Some(space_ref.as_str())
+                && matches!(row.origin_kind, ORIGIN_ROOM | ORIGIN_DECLASSIFIED)
+                && !audience_hash.is_empty()
+                && row.audience_hash == Some(audience_hash.as_str())
+                && row
+                    .audience_revision
+                    .is_some_and(|revision| revision <= *audience_revision)
+        }
+    }
+}
+
+/// The Space a withheld row is listed under (WS17-S2, S3): `''` for a `room_unverified` row without a
+/// known Space, the stored Space for any other `room_unverified` row, and otherwise the source-link
+/// test of [`legacy_room_origin_space`] (containment on only). The column is read whatever the
+/// containment switch says, so a withheld row stays withheld with containment off.
+pub(crate) fn withheld_origin_space(flag_param: &str) -> String {
+    format!(
+        "COALESCE(CASE WHEN agent_memory.origin_kind = '{}' THEN COALESCE(agent_memory.space_ref, '') END, {})",
+        ORIGIN_ROOM_UNVERIFIED,
+        legacy_room_origin_space(flag_param)
     )
 }
 

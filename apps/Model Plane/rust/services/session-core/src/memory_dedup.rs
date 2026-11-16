@@ -267,15 +267,22 @@ struct MemoryRow {
     source_links: Vec<String>,
     updated_at: DateTime<Utc>,
     supersedes_id: Option<String>,
+    /// The label (WS17-S3, `agent_memory.origin_kind`): `personal`, `room`, `declassified` or
+    /// `room_unverified`.
+    origin_kind: String,
+    /// The Space of a room-labelled row (`agent_memory.space_ref`).
+    space_ref: Option<String>,
 }
 
 impl MemoryRow {
     fn partition(&self) -> Partition {
-        Partition::new(
+        Partition::labelled(
             &self.org_id,
             self.session_id.as_deref(),
             &self.scope,
             &self.owner,
+            &self.origin_kind,
+            self.space_ref.as_deref(),
         )
     }
 
@@ -298,23 +305,45 @@ struct Partition {
     session_id: Option<String>,
     /// Set for rows without a session.
     owner: Option<String>,
+    /// The label (WS17-S3): a room row never shares a partition with a personal row, and two rooms
+    /// never share one. Older serialised plans read as `personal`.
+    #[serde(default = "personal_origin")]
+    origin_kind: String,
+    /// The Space of a room-labelled row; `None` for a personal row.
+    #[serde(default)]
+    space_ref: Option<String>,
+}
+
+fn personal_origin() -> String {
+    "personal".to_owned()
 }
 
 impl Partition {
     fn new(org_id: &str, session_id: Option<&str>, scope: &str, owner: &str) -> Self {
-        match session_id {
-            Some(session_id) => Self {
-                org_id: org_id.to_owned(),
-                scope: scope.to_owned(),
-                session_id: Some(session_id.to_owned()),
-                owner: None,
-            },
-            None => Self {
-                org_id: org_id.to_owned(),
-                scope: scope.to_owned(),
-                session_id: None,
-                owner: Some(owner.to_owned()),
-            },
+        Self::labelled(org_id, session_id, scope, owner, "personal", None)
+    }
+
+    /// The partition of a labelled row (WS17-S3). Dedup never links rows of different labels or of
+    /// different Spaces, so a SUPERSEDE or EXTEND cannot cross a room boundary.
+    fn labelled(
+        org_id: &str,
+        session_id: Option<&str>,
+        scope: &str,
+        owner: &str,
+        origin_kind: &str,
+        space_ref: Option<&str>,
+    ) -> Self {
+        let (session_id, owner) = match session_id {
+            Some(session_id) => (Some(session_id.to_owned()), None),
+            None => (None, Some(owner.to_owned())),
+        };
+        Self {
+            org_id: org_id.to_owned(),
+            scope: scope.to_owned(),
+            session_id,
+            owner,
+            origin_kind: origin_kind.to_owned(),
+            space_ref: space_ref.map(str::to_owned),
         }
     }
 }
@@ -800,10 +829,12 @@ async fn load_current_rows(pool: &PgPool) -> anyhow::Result<Vec<MemoryRow>> {
             Vec<String>,
             DateTime<Utc>,
             Option<String>,
+            String,
+            Option<String>,
         ),
     >(
         "SELECT m.id, m.org_id, m.session_id, m.scope, m.owner, m.key, m.content, m.confidence, \
-                m.source_links, m.updated_at, m.supersedes_id \
+                m.source_links, m.updated_at, m.supersedes_id, m.origin_kind, m.space_ref \
          FROM agent_memory m \
          WHERE m.is_latest = true \
            AND m.review_state = 'accepted' \
@@ -837,6 +868,8 @@ async fn load_current_rows(pool: &PgPool) -> anyhow::Result<Vec<MemoryRow>> {
                 source_links,
                 updated_at,
                 supersedes_id,
+                origin_kind,
+                space_ref,
             )| {
                 MemoryRow {
                     id,
@@ -850,6 +883,8 @@ async fn load_current_rows(pool: &PgPool) -> anyhow::Result<Vec<MemoryRow>> {
                     source_links,
                     updated_at,
                     supersedes_id,
+                    origin_kind,
+                    space_ref,
                 }
             },
         )
@@ -1356,6 +1391,8 @@ async fn lock_rows(
             bool,
             bool,
             bool,
+            String,
+            Option<String>,
         ),
     >(
         "SELECT m.id, m.org_id, m.session_id, m.scope, m.owner, m.key, m.content, m.updated_at, \
@@ -1363,7 +1400,8 @@ async fn lock_rows(
                 m.review_state = 'accepted', \
                 (m.expires_at IS NOT NULL AND m.expires_at <= now()), \
                 EXISTS (SELECT 1 FROM forgotten_memory_ids f \
-                        WHERE f.org_id = m.org_id AND f.memory_id = m.id) \
+                        WHERE f.org_id = m.org_id AND f.memory_id = m.id), \
+                m.origin_kind, m.space_ref \
          FROM agent_memory m \
          WHERE m.id = ANY($1) \
          ORDER BY m.id \
@@ -1389,9 +1427,18 @@ async fn lock_rows(
                 accepted,
                 expired,
                 forgotten,
+                origin_kind,
+                space_ref,
             )| {
                 let row = LiveRow {
-                    partition: Partition::new(&org_id, session_id.as_deref(), &scope, &owner),
+                    partition: Partition::labelled(
+                        &org_id,
+                        session_id.as_deref(),
+                        &scope,
+                        &owner,
+                        &origin_kind,
+                        space_ref.as_deref(),
+                    ),
                     key,
                     content_sha256: content_sha256(&content),
                     updated_at,
@@ -1875,6 +1922,8 @@ mod tests {
             source_links: links.iter().map(|link| (*link).to_owned()).collect(),
             updated_at: at(minute),
             supersedes_id: None,
+            origin_kind: "personal".to_owned(),
+            space_ref: None,
         }
     }
 

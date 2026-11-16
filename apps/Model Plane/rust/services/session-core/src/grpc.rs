@@ -11677,11 +11677,14 @@ impl SessionCore for SessionService {
             // transaction. These rows are the Space's, not any thread's (owner ''), so the thread
             // loop above never reaches them; they have no Letta copy (EP-8 S6), so no receipt.
             // Compared by prefix, not LIKE, so a Space id holding '%' or '_' matches only itself.
+            // WS17-S3: the withheld copies of this Space's room memory (`room_unverified`, learned
+            // in its rooms before labels existed) go with it, so no room content outlives the Space.
             let erased_space_memory = sqlx::query(
                 "DELETE FROM agent_memory
                  WHERE org_id = $1
                    AND ((scope = 'space' AND scope_id = $2)
-                     OR (scope = 'agent' AND left(scope_id, length($2) + 1) = $2 || ':'))",
+                     OR (scope = 'agent' AND left(scope_id, length($2) + 1) = $2 || ':')
+                     OR (origin_kind = 'room_unverified' AND space_ref = $2))",
             )
             .bind(&req.org_id)
             .bind(&req.space_id)
