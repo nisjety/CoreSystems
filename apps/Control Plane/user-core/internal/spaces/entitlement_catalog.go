@@ -158,6 +158,16 @@ var entitlementCatalog = []EntitlementSpec{
 		Get: func(p EffectPolicy) bool { return p.CanvasEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.CanvasEntitled = v },
 	},
+	{
+		// WS20-S1: a room-scoped browser run (model.space.browser_run). The run starts
+		// a browser session for the Space and writes a result turn, so it is inert
+		// under Space ZDR (ZDRInert). Deny by default; the agent_computer preset is the
+		// only one that carries it (org_policy_presets.go).
+		Key: "browser", Column: "browser_entitled",
+		Decisions: []string{"model.space.browser_run"}, ZDR: ZDRInert,
+		Get: func(p EffectPolicy) bool { return p.BrowserEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.BrowserEntitled = v },
+	},
 }
 
 // effectPolicyPrivacyColumns are the nine privacy/attestation columns, in the

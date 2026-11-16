@@ -295,6 +295,10 @@ type EffectPolicy struct {
 	// the data.canvas.* decisions. Pilot-only: deny by default, in no preset, and
 	// refused under Space ZDR.
 	CanvasEntitled bool `json:"canvas_entitled"`
+	// BrowserEntitled (WS20-S1) lets a Space start a room-scoped browser run
+	// (model.space.browser_run). Deny by default; the agent_computer preset
+	// carries it; refused under Space ZDR. Column browser_entitled (DEC-19).
+	BrowserEntitled bool `json:"browser_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {

@@ -34,7 +34,7 @@
 #     [--thread-create-entitled] [--retrieval-read-entitled] \
 #     [--import-write-entitled] [--agent-action-entitled] [--schedule-fire-entitled] \
 #     [--thread-read-entitled] [--sandbox-capability-entitled] \
-#     [--process-registry-entitled]
+#     [--process-registry-entitled] [--browser-entitled]
 #
 # --thread-read-entitled is what lets a personal Space's owner read the result
 # thread of their own schedule (and a room's current recipients read the room's
@@ -86,6 +86,7 @@ approval_grant_entitled=""
 dm_create_entitled=""
 message_revise_entitled=""
 message_moderate_entitled=""
+browser_entitled=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -112,6 +113,7 @@ while [[ $# -gt 0 ]]; do
     --dm-create-entitled) dm_create_entitled=true; shift ;;
     --message-revise-entitled) message_revise_entitled=true; shift ;;
     --message-moderate-entitled) message_moderate_entitled=true; shift ;;
+    --browser-entitled) browser_entitled=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -125,7 +127,7 @@ done
 
 # Send an entitlement key only when its flag was passed.
 entitlement_json=""
-for key in thread_create retrieval_read import_write agent_action schedule_fire thread_read sandbox_capability process_registry run_control approval_grant dm_create message_revise message_moderate; do
+for key in thread_create retrieval_read import_write agent_action schedule_fire thread_read sandbox_capability process_registry run_control approval_grant dm_create message_revise message_moderate browser; do
   var="${key}_entitled"
   if [[ -n "${!var}" ]]; then
     entitlement_json+=$',\n  "'"${key}"'_entitled": '"${!var}"

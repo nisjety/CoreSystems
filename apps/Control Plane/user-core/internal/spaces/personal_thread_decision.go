@@ -133,6 +133,9 @@ type PersonalThreadDecisionEvidence struct {
 	// CanvasEntitled (WS19-S2) is the room canvas bit, filled only by the canvas
 	// resolvers and resolvePersonalDecisionEvidence. Deny by default.
 	CanvasEntitled bool
+	// BrowserEntitled (WS20-S1) is the room browser run bit, filled only by the
+	// browser run resolvers and resolvePersonalDecisionEvidence. Deny by default.
+	BrowserEntitled bool
 }
 
 func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {

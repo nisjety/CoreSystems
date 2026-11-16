@@ -32,7 +32,7 @@ var orgPolicyPresets = []OrgPolicyPreset{
 	}},
 	{ID: PresetAgentComputer, Keys: []string{
 		"thread_create", "thread_read", "retrieval_read", "import_write", "agent_action", "schedule_fire",
-		"sandbox_capability", "process_registry",
+		"sandbox_capability", "process_registry", "browser",
 	}},
 }
 

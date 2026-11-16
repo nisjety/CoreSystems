@@ -1378,6 +1378,67 @@ func (r *Repository) ResolveSharedCanvasDecisionEvidence(ctx context.Context, sp
 	return evidence, nil
 }
 
+// ResolvePersonalBrowserRunDecisionEvidence resolves a personal Space's room browser
+// run authority (WS20-S1). It reads the same current-authority row as the personal
+// thread resolver, binds the browser run resource reference and validates the
+// editor floor and browser_entitled. The Space's one member is its only recipient.
+func (r *Repository) ResolvePersonalBrowserRunDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
+	evidence, err := r.resolvePersonalDecisionEvidence(ctx, spaceRef, orgID, subjectID)
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, err
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:browser-run:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if err := evidence.ValidateForBrowserRun(); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid personal Space browser run authority: %w", err)
+	}
+	return evidence, nil
+}
+
+// ResolveSharedBrowserRunDecisionEvidence resolves a shared Space's room browser run
+// authority (WS20-S1). It reuses the current-membership and current-recipient-audience
+// joins of ResolveSharedThreadDecisionEvidence, so a removed participant stops
+// resolving, and binds the independent browser_entitled bit with its own resource
+// reference. It never falls back to the shared thread-create grant: a run is a
+// separate disclosure. A run writes a result turn, so only an active room resolves
+// (an archived room is refused by the write path, as every write-class resolver).
+func (r *Repository) ResolveSharedBrowserRunDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
+	if r == nil || r.db == nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
+	}
+	var evidence PersonalThreadDecisionEvidence
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
+		       r.authority_revision, r.membership_revision, r.privacy_revision,
+		       r.recipient_audience_revision, r.entitlement_revision,
+		       a.audience_ref, a.audience_hash,
+		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
+		       p.third_party_processing_allowed, p.retention_class, p.residency,
+		       p.deletion_scope, p.zero_data_retention, p.browser_entitled
+		FROM registered_spaces s
+		JOIN space_memberships m ON m.space_ref=s.space_ref
+		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		JOIN space_recipient_audiences a ON a.space_ref=s.space_ref AND a.revision=r.recipient_audience_revision
+		JOIN space_recipient_audience_members am ON am.space_ref=a.space_ref AND am.revision=a.revision AND am.subject_id=m.subject_id
+		JOIN space_effect_policies p ON p.org_id=s.org_id
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'
+		  AND s.space_kind <> 'personal'
+		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
+		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
+	).Scan(sharedDecisionEvidenceScanDestinations(&evidence, &evidence.BrowserEntitled)...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
+	}
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space browser run authority: %w", err)
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:browser-run:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if err := evidence.ValidateForBrowserRun(); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space browser run authority: %w", err)
+	}
+	return evidence, nil
+}
+
 // ResolveSharedRunControlDecisionEvidence resolves the authority to cancel a
 // live run in a shared Space (WS09-S7). It reuses the current-membership and
 // current-recipient-audience joins of ResolveSharedThreadReadDecisionEvidence
@@ -1582,7 +1643,8 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 		       p.third_party_processing_allowed, p.retention_class, p.residency,
 		       p.deletion_scope, p.zero_data_retention, p.thread_create_entitled,
 		       p.retrieval_read_entitled, p.import_write_entitled, p.agent_action_entitled, p.schedule_fire_entitled,
-		       p.sandbox_capability_entitled, p.process_registry_entitled, p.canvas_entitled
+		       p.sandbox_capability_entitled, p.process_registry_entitled, p.canvas_entitled,
+		       p.browser_entitled
 		FROM registered_spaces s
 		JOIN space_memberships m ON m.space_ref=s.space_ref
 		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
@@ -1606,6 +1668,7 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadCreateEntitled,
 		&evidence.RetrievalReadEntitled, &evidence.ImportWriteEntitled, &evidence.AgentActionEntitled, &evidence.ScheduleFireEntitled,
 		&evidence.SandboxCapabilityEntitled, &evidence.ProcessRegistryEntitled, &evidence.CanvasEntitled,
+		&evidence.BrowserEntitled,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership

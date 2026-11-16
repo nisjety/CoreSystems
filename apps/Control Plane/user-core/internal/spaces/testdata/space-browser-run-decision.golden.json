@@ -1,0 +1,96 @@
+{
+  "comment": "Shared Control and Model Plane vector for the room browser run decision payload digest (WS20-S1). Control's copy is browserRunPayloadDigest in space_browser_run_decision.go; the model-gateway verifier (WS20-S2) recomputes the same bytes and must pin these digests. Change them only on an intended wire change, on both sides. goal_digest is sha256 of the goal text ('sha256:' plus 64 lowercase hex); the goal text never reaches Control. Each length-prefixed field is name, NUL, 8-byte big-endian length, value; the five revisions are name, NUL, 8-byte big-endian value. allowed_domains is joined with LF in sorted order (canonical_allowed_domains), so room_owner_view and domains_listed_reversed must share one digest.",
+  "header": "model.space.browser_run\\x00v1\\x00",
+  "input": {
+    "org_id": "org-1",
+    "user_id": "user-2",
+    "space_id": "space-room-1",
+    "recipient_audience_ref": "audience:space-room-1:4",
+    "recipient_audience_hash": "sha256:audience-hash",
+    "privacy_policy_ref": "privacy:org-1:5",
+    "resource_authorization_ref": "control:space-room-1:browser-run:7",
+    "authority_revision": 7,
+    "membership_revision": 3,
+    "privacy_revision": 5,
+    "recipient_audience_revision": 4,
+    "entitlement_revision": 6
+  },
+  "vectors": [
+    {
+      "name": "room_owner_view",
+      "goal": "read the pricing page",
+      "goal_digest": "sha256:e3eb81231b5a76dd873dfa95da2a0a0f0c576567a5fed957006fc51b68c405dc",
+      "thread_id": "thread-room-1",
+      "allowed_domains": [
+        "fixture.test",
+        "docs.example.org"
+      ],
+      "view_scope": "owner",
+      "max_steps": 20,
+      "max_runtime_s": 300,
+      "idempotency_key": "space-browser-1",
+      "canonical_allowed_domains": [
+        "docs.example.org",
+        "fixture.test"
+      ],
+      "payload_digest": "sha256:2aacf7ba144a9f6c66913ff7008b93ef6f5100bcb0bd77efdfb1d6dc4de045c0"
+    },
+    {
+      "name": "room_shared_view",
+      "goal": "read the pricing page",
+      "goal_digest": "sha256:e3eb81231b5a76dd873dfa95da2a0a0f0c576567a5fed957006fc51b68c405dc",
+      "thread_id": "thread-room-1",
+      "allowed_domains": [
+        "fixture.test",
+        "docs.example.org"
+      ],
+      "view_scope": "room",
+      "max_steps": 20,
+      "max_runtime_s": 300,
+      "idempotency_key": "space-browser-2",
+      "canonical_allowed_domains": [
+        "docs.example.org",
+        "fixture.test"
+      ],
+      "payload_digest": "sha256:6ec29f34a4441b5d0b3bc5dc71ec0fc7f1adb9025ab29e22d9883dc5a49dbdef"
+    },
+    {
+      "name": "domains_listed_reversed",
+      "goal": "read the pricing page",
+      "goal_digest": "sha256:e3eb81231b5a76dd873dfa95da2a0a0f0c576567a5fed957006fc51b68c405dc",
+      "thread_id": "thread-room-1",
+      "allowed_domains": [
+        "docs.example.org",
+        "fixture.test"
+      ],
+      "view_scope": "owner",
+      "max_steps": 20,
+      "max_runtime_s": 300,
+      "idempotency_key": "space-browser-1",
+      "canonical_allowed_domains": [
+        "docs.example.org",
+        "fixture.test"
+      ],
+      "payload_digest": "sha256:2aacf7ba144a9f6c66913ff7008b93ef6f5100bcb0bd77efdfb1d6dc4de045c0"
+    },
+    {
+      "name": "new_thread",
+      "goal": "read the pricing page",
+      "goal_digest": "sha256:e3eb81231b5a76dd873dfa95da2a0a0f0c576567a5fed957006fc51b68c405dc",
+      "thread_id": "",
+      "allowed_domains": [
+        "fixture.test",
+        "docs.example.org"
+      ],
+      "view_scope": "owner",
+      "max_steps": 20,
+      "max_runtime_s": 300,
+      "idempotency_key": "space-browser-3",
+      "canonical_allowed_domains": [
+        "docs.example.org",
+        "fixture.test"
+      ],
+      "payload_digest": "sha256:e85f33a766bd05be5e5fb3c8ac92699639e94f01cbbf68ee46e878d474329d98"
+    }
+  ]
+}
