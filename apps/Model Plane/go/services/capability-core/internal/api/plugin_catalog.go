@@ -7,7 +7,8 @@
 // through the loader and clears the catalogue approval of the rows it covers, all in one transaction.
 //
 // Who may write: an org admin acting as a person, with the write scope and an explicit non-ZDR posture, for
-// the catalogue and for an org-scope kill. A global kill needs a platform service principal: the service
+// the catalogue and for an org-scope kill; a zero-retention org may still lift a kill (owner decision D20). A global
+// kill needs a platform service principal: the service
 // type, the global org and capability:global:write, the scope reserved for process-wide registries. Reads of
 // the catalogue are open to any member of the org, ZDR included. The kill list is read by an org admin. Off
 // (PLUGIN_LOADER_ENABLED is not the literal true), nothing here is mounted and the paths answer 404.
@@ -375,14 +376,30 @@ func killTarget(w http.ResponseWriter, r *http.Request, principal authctx.Princi
 // pluginWriter answers the refusals every catalogue and kill-list write needs, before anything is read or written: a
 // verified principal, an explicit non-ZDR posture (a ZDR or unstated posture writes nothing) and the write scope.
 func pluginWriter(w http.ResponseWriter, r *http.Request) (authctx.Principal, bool) {
+	return pluginWriteGate(w, r, false)
+}
+
+// pluginLiftWriter is pluginWriter for the kill-list lift alone. Owner decision D20 lets a zero-retention principal lift
+// a kill: the lift removes one entry and its audit row names only the digest and the scope, so it stores no content.
+// An unstated posture is still refused, and no other write gets this exemption.
+func pluginLiftWriter(w http.ResponseWriter, r *http.Request) (authctx.Principal, bool) {
+	return pluginWriteGate(w, r, true)
+}
+
+// pluginWriteGate is the body of pluginWriter and pluginLiftWriter. zdrLift is true only for the lift, the one write
+// that may proceed under zero data retention; every caller refuses an unstated posture.
+func pluginWriteGate(w http.ResponseWriter, r *http.Request, zdrLift bool) (authctx.Principal, bool) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok || principal.OrganizationID == "" || principal.ActorID == "" {
 		jsonErr(w, "authentication required", http.StatusUnauthorized)
 		return principal, false
 	}
-	if !principal.RetentionPolicyPresent || principal.ZeroDataRetention {
-		writeTypedError(w, http.StatusForbidden, pluginWriteZDRCode,
-			"the plugin catalogue and kill list are durable state; a zero-retention or unstated retention posture cannot change them")
+	if !principal.RetentionPolicyPresent || (principal.ZeroDataRetention && !zdrLift) {
+		message := "the plugin catalogue and kill list are durable state; a zero-retention or unstated retention posture cannot change them"
+		if zdrLift {
+			message = "a kill-list lift needs an explicit retention posture"
+		}
+		writeTypedError(w, http.StatusForbidden, pluginWriteZDRCode, message)
 		return principal, false
 	}
 	if !principal.HasScope(authz.WriteScope) {
@@ -563,9 +580,10 @@ const deleteKillSQL = `
 
 // deleteKill is DELETE /api/v1/plugin-kill-list?digest=&scope=. It removes the entry for the scope and appends the audit
 // row of the lift in the same statement, so a lift is audited exactly when it lands. What the kill removed stays
-// removed: a plugin must be installed, and approved for the catalogue, again.
+// removed: a plugin must be installed, and approved for the catalogue, again. It is the one kill-list write a
+// zero-retention principal may make (pluginLiftWriter).
 func (h *PluginCatalogHandler) deleteKill(w http.ResponseWriter, r *http.Request) {
-	principal, ok := pluginWriter(w, r)
+	principal, ok := pluginLiftWriter(w, r)
 	if !ok {
 		return
 	}

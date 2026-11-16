@@ -71,8 +71,10 @@ var errDenied = errors.New("capability-core authorization denied")
 // signed capability scope. Every non-read request is treated as a durable
 // mutation unless it is explicitly added to the read-only set below: a caller
 // must present an explicit, verified non-ZDR posture before any handler can
-// reach a database, publisher, or other durable side effect. Request headers,
-// query parameters, and bodies cannot weaken that signed posture.
+// reach a database, publisher, or other durable side effect. The one exception
+// is the six removals in isZDRRemoval, which a zero-retention principal may
+// still make (owner decision D20). Request headers, query parameters, and
+// bodies cannot weaken that signed posture.
 func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 	if principal.OrganizationID == "" || principal.ActorID == "" {
 		return errDenied
@@ -82,8 +84,14 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 		conflicts(query.Get("user_id"), principal.ActorID) {
 		return errDenied
 	}
-	if !isReadMethod(request.Method) && (!principal.RetentionPolicyPresent || principal.ZeroDataRetention) {
-		return errDenied
+	if !isReadMethod(request.Method) {
+		// An unstated posture is refused for every write, the removals included.
+		if !principal.RetentionPolicyPresent {
+			return errDenied
+		}
+		if principal.ZeroDataRetention && !isZDRRemoval(request.Method, request.URL.Path) {
+			return errDenied
+		}
 	}
 	if request.URL.Path == "/api/v1/capabilities/availability" {
 		if request.Method == http.MethodPost &&
@@ -274,6 +282,38 @@ func AuthorizeGRPCWith(bundleReadRule bool) authctx.GRPCAuthorizer {
 
 func isReadMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
+}
+
+// isZDRRemoval reports whether a request is one of the six removals a zero-retention principal may still make
+// (owner decision D20): DELETE cron/{id}, DELETE skills/{id}, DELETE skills/{id}/draft, DELETE plugins/{id},
+// POST plugins/{id}/uninstall and DELETE plugin-kill-list. It matches the decoded path one segment at a time, so
+// an id that carries an encoded slash, a trailing slash or a longer path never matches. Every other route stays
+// refused under zero retention, the org hook and permission-rule deletes included.
+func isZDRRemoval(method, urlPath string) bool {
+	rest, ok := strings.CutPrefix(urlPath, "/api/v1/")
+	if !ok {
+		return false
+	}
+	segments := strings.Split(rest, "/")
+	switch method {
+	case http.MethodDelete:
+		switch len(segments) {
+		case 1:
+			return segments[0] == "plugin-kill-list"
+		case 2:
+			return isPathID(segments[1]) && (segments[0] == "cron" || segments[0] == "skills" || segments[0] == "plugins")
+		case 3:
+			return isPathID(segments[1]) && segments[0] == "skills" && segments[2] == "draft"
+		}
+	case http.MethodPost:
+		return len(segments) == 3 && isPathID(segments[1]) && segments[0] == "plugins" && segments[2] == "uninstall"
+	}
+	return false
+}
+
+// isPathID reports whether one path segment can name an object: an empty segment or a dot segment names none.
+func isPathID(segment string) bool {
+	return segment != "" && segment != "." && segment != ".."
 }
 
 func conflicts(untrusted, verified string) bool {
