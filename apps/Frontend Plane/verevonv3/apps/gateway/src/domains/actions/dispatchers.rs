@@ -72,7 +72,7 @@ use crate::domains::learning::{
 };
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
 use crate::domains::memory::{
-    delete_memory, remember_memory, reset_memory, restore_memory, set_memory_controls, RememberBody,
+    delete_memory, remember_memory, reset_memory, restore_memory_core, set_memory_controls, RememberBody,
     ResetBody,
     SetControlsBody,
 };
@@ -3588,14 +3588,15 @@ pub(super) async fn dispatch_memory_restore(
     if memory_id.is_empty() {
         return ticket_bad_request("memory.restore requires a non-empty 'memoryId'");
     }
-    let response = restore_memory(
-        StateExtractor(state.clone()),
-        ExtensionExtractor(user.clone()),
-        headers.clone(),
-        PathExtractor(memory_id.to_owned()),
+    // W3-DEC-KIND: the optional Space the withheld row was learned in, as the browser names it (validated in memory.rs).
+    let response = restore_memory_core(
+        state,
+        user,
+        headers,
+        memory_id,
+        Some(ticket_string(input, "spaceRef")),
     )
-    .await
-    .into_response();
+    .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("memory.restore", user, status, payload)
 }

@@ -17689,15 +17689,35 @@ fn declassify_error(status: &tonic::Status) -> HttpJsonError {
 
 /// The upper bound of a restore's memory id, in bytes (WS17 D9).
 const RESTORE_MAX_ID_BYTES: usize = 200;
+/// The upper bound of a restore's Control Space-kind claim, in bytes (W3-DEC-KIND).
+const RESTORE_MAX_EVIDENCE_BYTES: usize = 16 * 1024;
+
+/// The optional Control Space-kind claim of a restore (W3-DEC-KIND): the `space_kind_evidence` field of the body. Model
+/// Plane only carries it, and Session Core verifies it. A body that is absent or not JSON, a missing or blank field, and
+/// an over-long value all carry no claim, which Session Core treats exactly as no claim.
+fn restore_space_kind_evidence(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("space_kind_evidence")
+                .and_then(Value::as_str)
+                .map(|token| token.trim().to_owned())
+        })
+        .filter(|token| token.len() <= RESTORE_MAX_EVIDENCE_BYTES)
+        .unwrap_or_default()
+}
 
 /// `POST /v1/memories/:memory_id/restore` (WS17 D9): the signed-in owner restores one withheld legacy row to personal
 /// memory. Zero Data Retention is refused first, as the typed catalogue refusal. Session Core re-checks the owner, the
-/// row and every thread it is linked to; the body names no org or user.
+/// row and every thread it is linked to; the body names no org or user. The optional body field `space_kind_evidence`
+/// (W3-DEC-KIND) is the Control claim that a Space is the owner's personal Space: it is forwarded, never checked here.
 async fn restore_memory_entry(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedModelBearer,
     Path(memory_id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::RestoreMemoryRequest;
     require_non_zdr_durable_mutation(&claims)?;
@@ -17708,6 +17728,7 @@ async fn restore_memory_entry(
             Json(json!({"error": {"code": "invalid_request", "message": "A valid memory id is required.", "details": {}}})),
         ));
     }
+    let space_kind_evidence = restore_space_kind_evidence(&body);
     let response = state
         .memory_client
         .clone()
@@ -17716,6 +17737,7 @@ async fn restore_memory_entry(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 memory_id: memory_id.to_owned(),
+                space_kind_evidence,
             },
             &bearer,
         )?)

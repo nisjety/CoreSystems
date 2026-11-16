@@ -34,15 +34,20 @@ use axum::{
     routing::{get, patch, post},
     Extension, Json, Router,
 };
+use bytes::Bytes;
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
+    contracts::ActionActor,
     domains::chat::shared::{model_token, proxy_model_json_with_session, session_token},
+    envelope::unwrap_data,
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
+    upstream::{authorized_org_id, proxy_json},
+    zdr::durable_write_refusal,
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -454,23 +459,106 @@ pub(crate) async fn remember_memory(
     .await
 }
 
-/// `POST /api/v1/memory/{id}/restore` (WS17-D9): the signed-in owner restores one withheld row to personal memory. Only
-/// the row id crosses; org and user come from the verified session on the far side, and Session Core decides.
+/// The longest Space reference a restore may name, in characters (the bound the declassify route uses).
+const RESTORE_MAX_SPACE_REF_CHARS: usize = 200;
+
+/// `POST /api/v1/memory/{id}/restore` (WS17-D9): the signed-in owner restores one withheld row to personal memory. The row
+/// id crosses in the path. The optional body `{ "space_ref": ... }` names the Space the row was learned in (its
+/// `origin_space_ref`), so Control can say whether that Space is the caller's personal Space (W3-DEC-KIND). Org and user
+/// come from the verified session on the far side, and Session Core decides.
 pub(crate) async fn restore_memory(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(memory_id): Path<String>,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let space_ref = restore_space_hint(&body);
+    restore_memory_core(&state, &user, &headers, &memory_id, space_ref.as_deref()).await
+}
+
+/// The Space a restore body names, as sent. A body that is absent or not JSON names none.
+fn restore_space_hint(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("space_ref").and_then(Value::as_str).map(str::to_owned))
+}
+
+/// A Space reference a restore may name: trimmed, non-empty, at most 200 characters, with no control character.
+fn restore_space_ref(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let plausible = !value.is_empty()
+        && value.chars().count() <= RESTORE_MAX_SPACE_REF_CHARS
+        && !value.chars().any(char::is_control);
+    plausible.then_some(value)
+}
+
+/// The restore's work, shared by the route and the `memory.restore` action so the refusal order and the claim exist once.
+/// When the caller names a Space, Zero Data Retention is refused first, before any Control call, and then Control is
+/// asked for its claim. The claim is forwarded only when Control gives one. Without a claim (no Space named, no
+/// organization, a Control refusal or an outage), the restore goes on without one, and Session Core refuses an
+/// unknown-kind thread as it always has.
+pub(crate) async fn restore_memory_core(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    memory_id: &str,
+    space_ref: Option<&str>,
+) -> axum::response::Response {
+    let mut body = None;
+    if let Some(space_ref) = space_ref.and_then(restore_space_ref) {
+        if let Some(refusal) = durable_write_refusal(state, user, Some(headers), None).await {
+            return refusal.into_response();
+        }
+        if let Some(token) = space_kind_evidence(state, user, space_ref).await {
+            body = Some(json!({ "space_kind_evidence": token }));
+        }
+    }
     forward_memory(
-        &state,
-        &user,
-        &headers,
+        state,
+        user,
+        headers,
         Method::POST,
-        &format!("/v1/memories/{}/restore", urlencoding::encode(&memory_id)),
-        None,
+        &format!("/v1/memories/{}/restore", urlencoding::encode(memory_id)),
+        body,
     )
     .await
+}
+
+/// Asks Control, under the caller's own delegation, for the signed claim that `space_ref` is the caller's personal Space
+/// (W3-DEC-KIND). Control answers only for a Space the caller can read. A refusal, an outage or an unusable answer yields
+/// no claim. Nothing here grants anything: Session Core verifies the claim.
+async fn space_kind_evidence(state: &AppState, user: &AuthenticatedUser, space_ref: &str) -> Option<String> {
+    let org_id = authorized_org_id(state, user).await;
+    if org_id.trim().is_empty() {
+        return None;
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let url = format!("{}/api/v1/internal/spaces/space-kind-evidence", state.user_core_url);
+    let (status, Json(response)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({ "space_ref": space_ref })),
+        Some(org_id.as_str()),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return None;
+    }
+    let data = unwrap_data(&response);
+    data.get("token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
 }
 
 pub(crate) async fn delete_memory(

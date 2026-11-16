@@ -668,6 +668,11 @@ message RestoreMemoryRequest {
 
   // The withheld row: a `user`-scope row owned by the caller whose origin is `room_unverified`.
   string memory_id = 3;
+
+  // W3-DEC-KIND: the signed Control Space-kind claim (`space-kind-v1`) that a Space is the caller's personal Space.
+  // Session Core verifies it against the caller, the organization and the thread's own Space, and accepts a linked
+  // thread that never recorded its kind only for that Space. Empty, or a claim that does not verify, means no claim.
+  string space_kind_evidence = 4;
 }
 
 // The restore's answer. `restored` is true when the row is ordinary personal memory again.

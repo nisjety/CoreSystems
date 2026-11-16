@@ -3,15 +3,18 @@
 use crate::{
     auth::{identity, VerifiedIdentity},
     grpc::{
-        MemoryRetention, WAIVED_MEMORY_INDEX_SUPPRESSED, ZDR_MEMORY_READ_SUPPRESSED,
-        ZDR_MEMORY_WRITE_SUPPRESSED,
+        configured_control_space_decision_keys, MemoryRetention,
+        MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES, WAIVED_MEMORY_INDEX_SUPPRESSED,
+        ZDR_MEMORY_READ_SUPPRESSED, ZDR_MEMORY_WRITE_SUPPRESSED,
     },
     letta_adapter::LettaMemoryAdapter,
     memory_control::{MemoryAccess, OrgMemoryPolicy},
     write_policy,
 };
 use crate::space::memory_scope::ORIGIN_ROOM_UNVERIFIED;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Verifier as _};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
     CheckMemoryWriteRequest, CheckMemoryWriteResponse, DeclassifyMemoryRequest,
@@ -616,7 +619,10 @@ impl MemoryGrpc {
         if memory_id.is_empty() {
             return Err(Status::invalid_argument("memory_id is required"));
         }
-        restore_withheld_row(&self.pool, org_id, user_id, memory_id).await?;
+        // W3-DEC-KIND: the Control claim is verified here, against this caller, organization and Space, and is never
+        // trusted as sent. A claim that does not verify counts as absent.
+        let attested_space = attested_personal_space(&req.space_kind_evidence, org_id, user_id, Utc::now());
+        restore_withheld_row(&self.pool, org_id, user_id, memory_id, attested_space.as_deref()).await?;
         // Ids only, never content: who restored which withheld row.
         tracing::info!(org_id, memory_id, actor = user_id, "withheld memory restored to personal memory by its owner");
         metrics::counter!("mp_session_withheld_memory_restored_total", "outcome" => "restored").increment(1);
@@ -677,44 +683,137 @@ fn restore_linked_threads(session_id: Option<&str>, source_links: &[String]) -> 
     linked
 }
 
+/// The envelope version Control signs a Space-kind claim under (W3-DEC-KIND; user-core `spaces.SpaceKindEvidence`). It is
+/// not the Space decision version: the tag is part of the signed bytes, so neither kind of token verifies as the other.
+const SPACE_KIND_EVIDENCE_VERSION: &str = "space-kind-v1";
+
+/// The claim as Control signs it. Every field is checked before the claim is used.
+#[derive(Debug, serde::Deserialize)]
+struct SpaceKindEvidenceClaims {
+    org_id: String,
+    space_ref: String,
+    subject_id: String,
+    kind: String,
+    issued_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+/// Verifies a Control Space-kind claim for one restore and returns the Space it attests as the caller's personal Space.
+/// The signature is checked against the configured Control Space decision keys, the claim must name this organization
+/// and this subject, and it must be unexpired. The refusal reason is a closed word, for the log only.
+fn verify_space_kind_evidence(
+    token: &str,
+    org_id: &str,
+    user_id: &str,
+    now: DateTime<Utc>,
+) -> Result<String, &'static str> {
+    if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err("malformed");
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 4 || parts[0] != SPACE_KIND_EVIDENCE_VERSION {
+        return Err("malformed");
+    }
+    let keys = configured_control_space_decision_keys().map_err(|_| "key_unavailable")?;
+    let key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or("untrusted_key")?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id).map_err(|_| "untrusted_key")?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .ok()
+        .and_then(|raw| Signature::from_slice(&raw).ok())
+        .ok_or("malformed")?;
+    key.verify(format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(), &signature)
+        .map_err(|_| "bad_signature")?;
+    let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| "malformed")?;
+    let claims: SpaceKindEvidenceClaims =
+        serde_json::from_slice(&payload).map_err(|_| "malformed")?;
+    if claims.org_id != org_id || claims.subject_id != user_id {
+        return Err("wrong_subject");
+    }
+    if claims.kind != "personal" {
+        return Err("not_personal");
+    }
+    let space_ref = claims.space_ref.trim();
+    if space_ref.is_empty() {
+        return Err("malformed");
+    }
+    if claims.issued_at > now + chrono::Duration::minutes(1) || claims.expires_at <= now {
+        return Err("expired");
+    }
+    Ok(space_ref.to_owned())
+}
+
+/// The Space a restore may stamp as the caller's personal Space, from the claim it was sent with. An absent claim is not
+/// an error here: Session Core refuses an unknown-kind thread as it always has. A claim that does not verify is treated
+/// as absent, and only its closed reason is logged, so a bad claim can never widen what a restore reaches.
+fn attested_personal_space(token: &str, org_id: &str, user_id: &str, now: DateTime<Utc>) -> Option<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    match verify_space_kind_evidence(token, org_id, user_id, now) {
+        Ok(space_ref) => Some(space_ref),
+        Err(reason) => {
+            tracing::info!(org_id, actor = user_id, reason, "space kind evidence refused");
+            None
+        }
+    }
+}
+
 /// The rule over the threads of a withheld row (WS17 D9), pure: every linked thread must be a `personal` thread or sit
 /// in no Space. Any other stored kind is a shared room, which is refused and wins over an unknown one. A missing
-/// thread, a Space whose kind was never recorded, or no linked thread at all is unknown, and is refused.
-fn restore_verdict(linked: &[String], threads: &[LinkedThread]) -> Result<(), RestoreRefusal> {
+/// thread, a Space whose kind was never recorded, or no linked thread at all is unknown, and is refused. A verified
+/// Control claim (W3-DEC-KIND) attests one Space as the caller's personal Space: a thread in that Space that never
+/// recorded its kind is accepted, and its id is returned for stamping. Any other unknown thread is still refused.
+fn restore_verdict(
+    linked: &[String],
+    threads: &[LinkedThread],
+    attested_space: Option<&str>,
+) -> Result<Vec<String>, RestoreRefusal> {
     if linked.is_empty() {
         return Err(RestoreRefusal::ThreadKindUnknown);
     }
     let mut unknown = false;
+    let mut to_stamp: Vec<String> = Vec::new();
     for id in linked {
         let Some(thread) = threads.iter().find(|thread| &thread.id == id) else {
             unknown = true;
             continue;
         };
         let kind = thread.space_kind.as_deref().map(str::trim).filter(|kind| !kind.is_empty());
-        let in_space = thread
-            .space_id
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|space| !space.is_empty());
-        match kind {
-            Some("personal") => {}
-            Some(_) => return Err(RestoreRefusal::ThreadIsSharedRoom),
-            None if in_space => unknown = true,
-            None => {}
+        let space = thread.space_id.as_deref().map(str::trim).filter(|space| !space.is_empty());
+        match (kind, space) {
+            (Some("personal"), _) => {}
+            (Some(_), _) => return Err(RestoreRefusal::ThreadIsSharedRoom),
+            (None, None) => {}
+            (None, Some(space)) if attested_space == Some(space) => to_stamp.push(thread.id.clone()),
+            (None, Some(_)) => unknown = true,
         }
     }
     if unknown {
         Err(RestoreRefusal::ThreadKindUnknown)
     } else {
-        Ok(())
+        Ok(to_stamp)
     }
 }
 
 /// `RestoreMemory`'s write (WS17 D9): one transaction moves a withheld row of the owner's to personal memory. The row
-/// is locked and read with the owner, scope and currency in its predicate, and each linked thread is read under a
-/// share lock, so a thread cannot be stamped with its kind between the verdict and the change. Only the origin and the
-/// Space reference change: the content, kind, links and every other column are untouched.
-async fn restore_withheld_row(pool: &PgPool, org_id: &str, owner: &str, memory_id: &str) -> Result<(), Status> {
+/// is locked and read with the owner, scope and currency in its predicate, and each linked thread is read under a row
+/// lock (`FOR UPDATE`, W3-DEC-KIND), so its kind cannot change between the verdict and the change. A verified Control
+/// claim may stamp a thread that never recorded its kind, in the same transaction. Only the origin and the Space
+/// reference of the row change: the content, kind, links and every other column are untouched.
+async fn restore_withheld_row(
+    pool: &PgPool,
+    org_id: &str,
+    owner: &str,
+    memory_id: &str,
+    attested_space: Option<&str>,
+) -> Result<(), Status> {
     let mut tx = pool.begin().await.map_err(|e| Status::internal(e.to_string()))?;
     let row: Option<(String, Option<String>, Vec<String>)> = sqlx::query_as(
         "SELECT origin_kind, session_id, source_links FROM agent_memory \
@@ -734,8 +833,9 @@ async fn restore_withheld_row(pool: &PgPool, org_id: &str, owner: &str, memory_i
     };
     let verdict = if origin_kind == ORIGIN_ROOM_UNVERIFIED {
         let linked = restore_linked_threads(session_id.as_deref(), &source_links);
+        // FOR UPDATE, not a share: a verdict that stamps a thread must hold that thread's row until the stamp commits.
         let threads: Vec<LinkedThread> = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-            "SELECT id, space_id, space_kind FROM threads WHERE org_id = $1 AND id = ANY($2) FOR SHARE",
+            "SELECT id, space_id, space_kind FROM threads WHERE org_id = $1 AND id = ANY($2) FOR UPDATE",
         )
         .bind(org_id)
         .bind(linked.as_slice())
@@ -749,16 +849,29 @@ async fn restore_withheld_row(pool: &PgPool, org_id: &str, owner: &str, memory_i
             space_kind,
         })
         .collect();
-        restore_verdict(&linked, &threads)
+        restore_verdict(&linked, &threads, attested_space)
     } else {
         Err(RestoreRefusal::NotWithheld)
     };
-    if let Err(refusal) = verdict {
-        tx.rollback().await.map_err(|e| Status::internal(e.to_string()))?;
-        // Ids and a closed reason only: which withheld row could not be restored, and why.
-        tracing::info!(org_id, memory_id, actor = owner, reason = refusal.reason(), "withheld memory restore refused");
-        metrics::counter!("mp_session_withheld_memory_restored_total", "outcome" => refusal.reason()).increment(1);
-        return Err(refusal.status());
+    let to_stamp = match verdict {
+        Ok(to_stamp) => to_stamp,
+        Err(refusal) => {
+            tx.rollback().await.map_err(|e| Status::internal(e.to_string()))?;
+            // Ids and a closed reason only: which withheld row could not be restored, and why.
+            tracing::info!(org_id, memory_id, actor = owner, reason = refusal.reason(), "withheld memory restore refused");
+            metrics::counter!("mp_session_withheld_memory_restored_total", "outcome" => refusal.reason()).increment(1);
+            return Err(refusal.status());
+        }
+    };
+    if !to_stamp.is_empty() {
+        // W3-DEC-KIND: the attested Space's threads that never recorded a kind learn it, under the locks taken above.
+        sqlx::query("UPDATE threads SET space_kind = 'personal' WHERE org_id = $1 AND id = ANY($2) AND space_kind IS NULL")
+            .bind(org_id)
+            .bind(to_stamp.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        tracing::info!(org_id, memory_id, actor = owner, stamped = to_stamp.len(), "thread kind stamped from a Control space kind claim");
     }
     let restored: Option<String> = sqlx::query_scalar(
         "UPDATE agent_memory SET origin_kind = 'personal', space_ref = NULL \
