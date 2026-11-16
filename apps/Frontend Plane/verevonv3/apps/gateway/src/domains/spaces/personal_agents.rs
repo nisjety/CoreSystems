@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState, contracts::ActionActor, envelope::error, middleware::AuthenticatedUser,
-    upstream::proxy_json,
+    upstream::proxy_json, zdr::durable_write_refusal,
 };
 
 use super::{convex_gateway_call, valid_avatar_color};
@@ -38,6 +38,8 @@ const MAX_INSTRUCTION_CHARS: usize = 4000;
 const MAX_CLIENT_REQUEST_ID_CHARS: usize = 128;
 /// Control's bound on one candidates call.
 const MAX_CANDIDATES_PER_CALL: usize = 200;
+/// The surface a ZDR refusal names (the catalogue code is feature-less).
+const PERSONAL_AGENTS_SURFACE: &str = "personal_agents";
 
 /// The WS17-S5 routes, merged by `module_routes()` in `spaces/mod.rs`.
 pub(super) fn routes() -> Router<AppState> {
@@ -156,6 +158,16 @@ fn ok_data(data: Value) -> (StatusCode, Json<Value>) {
     (StatusCode::OK, Json(json!({ "data": data })))
 }
 
+/// The typed ZDR refusal, labelled with this surface (the catalogue code is feature-less).
+fn label_zdr(status: StatusCode, mut body: Value) -> (StatusCode, Json<Value>) {
+    if status == StatusCode::PRECONDITION_FAILED {
+        if let Some(object) = body.get_mut("error").and_then(Value::as_object_mut) {
+            object.insert("details".to_owned(), json!({ "surface": PERSONAL_AGENTS_SURFACE }));
+        }
+    }
+    (status, Json(body))
+}
+
 /// The actor the gateway signs for at Control, exactly as the existing room agent routes do.
 fn actor_for(user: &AuthenticatedUser) -> ActionActor {
     ActionActor {
@@ -211,7 +223,9 @@ async fn register_subject(
 /// `POST /api/v1/me/agents`: the three-step create. Convex stores the definition as a draft owned by the
 /// caller; Control registers it with the caller as owner (owner-only); Convex activates it. A Control
 /// failure leaves an unlisted draft and a retryable 503. The same `client_request_id` replays the same
-/// definition (200), so the retry runs the remaining steps.
+/// definition (200), so the retry runs the remaining steps. The name and the instructions are stored
+/// content: a Zero Data Retention org is refused (typed 412) after the flag and membership, before any
+/// Control or Convex call.
 pub(crate) async fn create_personal_agent_core(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -223,6 +237,12 @@ pub(crate) async fn create_personal_agent_core(
     let org_id = crate::upstream::authorized_org_id(state, user).await;
     if org_id.is_empty() {
         return no_membership();
+    }
+    // Zero Data Retention, before any Control or Convex call. A failed org posture lookup is the typed 503.
+    if let Some((status, Json(refusal))) =
+        durable_write_refusal(state, user, None, Some(body)).await
+    {
+        return label_zdr(status, refusal);
     }
 
     let name = str_field(body, "name").trim().to_owned();
