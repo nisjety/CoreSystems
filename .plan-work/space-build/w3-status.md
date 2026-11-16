@@ -618,3 +618,9 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - P1 NOT YET LIVE -> W3-DEC-ZDRDEL3 running: capability-core (Go) authz.go still denies every non-GET for ZDR, and plugin_catalog.go deleteKill's pluginWriter independently refuses.
 - P2 OWNER: waived tokens still get a route mismatch on these removals -- does D20 cover waived tokens too, or ZDR-only? (holding as ZDR-only pending answer)
 - P2: org hook/permission-rule deletes correctly stay refused (they persist a revision/history row, not a pure removal).
+
+### W3-DEC-ZDRDEL3 (f1719b9bd) BUILT, with a real P0
+- capability-core authz.go + plugin_catalog.go exempt the 6 removals; pluginWriter split preserved for other callers.
+- P0 FOUND: skill delete + plugin uninstall trigger a Postgres rule (0064_skill_revisions.sql) that snapshots the deleted skill's TEXT into skill_revisions, even for a ZDR org -- D20's premise ("deletion persists nothing") is false for these two.
+- OWNER ANSWER: fix the snapshot, then allow all 6. W3-DEC-ZDRSKILL running: new session-core migration makes the trigger skip content under ZDR (session var set by capability-core at the DELETE call site; non-ZDR unchanged).
+- P1 carried: session-core migration 0108 says ZDR credentials cannot write agent_skills at all -- D20 reverses that for deletes; both claims should be settled together (handled by ZDRSKILL).
