@@ -31,6 +31,9 @@
 //     the entire Operating Map tree for that org.
 //   - wiki_event_outbox                   — its own org_id column, no FK to
 //     wiki_pages; purged explicitly.
+//   - space_canvases, space_canvas_versions — the room canvas (WS19). Each
+//     carries its own org_id; purged explicitly by canvas.PurgeOrgTx, versions
+//     first, inside this transaction.
 //
 // Does NOT purge documents, chunks, embeddings, graph data, or retrieval
 // traces for the org: those tables live in sibling Data Plane v2 services
@@ -45,6 +48,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/canvas"
 )
 
 // PurgeResult reports how many rows HardPurgeByOrg hard-deleted from each
@@ -61,6 +66,8 @@ type PurgeResult struct {
 	WikiMaintenanceLogsDeleted int64 `json:"wiki_maintenance_logs_deleted"`
 	OperatingMapsDeleted       int64 `json:"operating_maps_deleted"`
 	WikiEventOutboxDeleted     int64 `json:"wiki_event_outbox_deleted"`
+	SpaceCanvasesDeleted       int64 `json:"space_canvases_deleted"`
+	SpaceCanvasVersionsDeleted int64 `json:"space_canvas_versions_deleted"`
 }
 
 // Total sums every deleted-row count directly targeted above. It does NOT
@@ -71,7 +78,7 @@ type PurgeResult struct {
 // not counted here. Convenience for logging and tests.
 func (r PurgeResult) Total() int64 {
 	return r.WikiPagesDeleted + r.WikiProposalsDeleted + r.WikiSourceLogsDeleted + r.WikiMaintenanceLogsDeleted +
-		r.OperatingMapsDeleted + r.WikiEventOutboxDeleted
+		r.OperatingMapsDeleted + r.WikiEventOutboxDeleted + r.SpaceCanvasesDeleted + r.SpaceCanvasVersionsDeleted
 }
 
 // HardPurgeByOrg irrecoverably deletes every row this service owns for
@@ -172,6 +179,15 @@ func (r *WikiRepo) HardPurgeByOrg(ctx context.Context, orgID string) (PurgeResul
 	if result.OperatingMapsDeleted, derr = del(`DELETE FROM operating_maps WHERE org_id = $1`); derr != nil {
 		return PurgeResult{}, fmt.Errorf("purge operating_maps: %w", derr)
 	}
+
+	// Space canvases (WS19) carry their own org_id. canvas.PurgeOrgTx deletes the versions first, with explicit
+	// org_id statements, so this purge does not depend on the FK cascade. It runs in this transaction.
+	canvasPurge, err := canvas.PurgeOrgTx(ctx, tx, orgID)
+	if err != nil {
+		return PurgeResult{}, fmt.Errorf("purge space canvases: %w", err)
+	}
+	result.SpaceCanvasVersionsDeleted = canvasPurge.VersionsPurged
+	result.SpaceCanvasesDeleted = canvasPurge.CanvasesPurged
 
 	if err := tx.Commit(ctx); err != nil {
 		return PurgeResult{}, fmt.Errorf("commit wiki org purge: %w", err)
