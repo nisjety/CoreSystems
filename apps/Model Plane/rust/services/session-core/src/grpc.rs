@@ -5673,6 +5673,31 @@ async fn create_thread_inner_preverified(
     create_thread_inner_preverified_kind(pool, req, None, None).await
 }
 
+/// W3-FIX-2: the source scope a new thread is created with. `metadata.source_scope` may only narrow
+/// a thread to `conversation` (the private panel's owner thread, SD-22 v1). An absent key or
+/// `workspace` is the default and changes nothing. Any other value is refused before a write, so a
+/// misspelt scope can never fail open to workspace scope.
+fn requested_conversation_scope(req: &pb::CreateThreadRequest) -> Result<bool, Status> {
+    let Some(value) = req
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.fields.get("source_scope"))
+    else {
+        return Ok(false);
+    };
+    let scope = match value.kind.as_ref() {
+        Some(prost_types::value::Kind::StringValue(scope)) => scope.as_str(),
+        _ => "",
+    };
+    match scope {
+        "conversation" => Ok(true),
+        "workspace" => Ok(false),
+        _ => Err(Status::invalid_argument(
+            "metadata.source_scope must be \"conversation\" or \"workspace\"",
+        )),
+    }
+}
+
 /// WS17-S1: `space_kind` is the Space kind from the verified Control decision, already
 /// normalised; `None` leaves the column NULL (contained). Only the verified create path
 /// passes one. `receipt` is the thread's retention receipt (Z-17): written in the insert, once, and
@@ -5683,6 +5708,8 @@ async fn create_thread_inner_preverified_kind(
     space_kind: Option<String>,
     receipt: Option<&crate::retention_receipt::RunRetention>,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    // W3-FIX-2: validated before the transaction, so a refused scope writes nothing.
+    let conversation_scope = requested_conversation_scope(&req)?;
     let mut tx = pool
         .begin()
         .await
@@ -5712,8 +5739,8 @@ async fn create_thread_inner_preverified_kind(
             .execute(&mut *tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        let existing: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3 \
+        let existing: Option<(String, String)> = sqlx::query_as(
+            "SELECT id, source_scope FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3 \
              AND space_id IS NOT DISTINCT FROM NULLIF($4, '') \
              ORDER BY id LIMIT 1",
         )
@@ -5724,7 +5751,15 @@ async fn create_thread_inner_preverified_kind(
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
-        if let Some((thread_id,)) = existing {
+        if let Some((thread_id, stored_scope)) = existing {
+            // W3-FIX-2: a reused thread keeps the scope it was created with, so a conversation-only
+            // request never gets a workspace thread back. It is refused rather than locked here: the
+            // lock needs the append path's history check under the thread row lock.
+            if conversation_scope && stored_scope != "conversation" {
+                return Err(Status::failed_precondition(
+                    "Start a new conversation to restrict its source scope.",
+                ));
+            }
             if let Some(kind) = space_kind.as_deref() {
                 // A retried create of a legacy thread learns its kind from this verified decision.
                 sqlx::query(
@@ -5757,8 +5792,8 @@ async fn create_thread_inner_preverified_kind(
     let origin = resolve_thread_origin(&req)?;
 
     sqlx::query(
-        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin, space_kind, retention_class, waiver_ack_id, waiver_connection_id)
-         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14, $15, $16, $17, $18)",
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin, space_kind, retention_class, waiver_ack_id, waiver_connection_id, source_scope)
+         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14, $15, $16, $17, $18, $19)",
     )
     .bind(&thread_id)
     .bind(&req.session_key)
@@ -5782,6 +5817,7 @@ async fn create_thread_inner_preverified_kind(
     .bind(receipt.map(|receipt| receipt.class.as_str()))
     .bind(receipt.and_then(|receipt| receipt.ack_id()))
     .bind(receipt.and_then(|receipt| receipt.connection_id()))
+    .bind(if conversation_scope { "conversation" } else { "workspace" })
     .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
