@@ -21,6 +21,7 @@ import (
 
 	wikipb "github.com/triodelab/dataplane/gen/go/wiki/v1"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/authctx"
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/canvas"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/config"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/eventauth"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/events"
@@ -30,6 +31,7 @@ import (
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/metrics"
 	apmotel "github.com/triodelab/dataplane/services/wiki-store-go/internal/otel"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/repo"
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/spacedecision"
 )
 
 func main() {
@@ -39,6 +41,9 @@ func main() {
 	cfg := config.Load()
 	if err := cfg.ValidateEventSecurity(); err != nil {
 		log.Fatal().Err(err).Msg("wiki event security configuration invalid")
+	}
+	if err := cfg.ValidateSpaceCanvas(); err != nil {
+		log.Fatal().Err(err).Msg("room canvas configuration invalid")
 	}
 	verifier, err := authctx.NewVerifier(authctx.Config{
 		Audience:      cfg.JWTAudience,
@@ -145,6 +150,17 @@ func main() {
 
 	wikiHandler := handler.NewWikiHandler(wikiRepo, cfg.CreatePageProposalsEnabled)
 
+	// WS19-S3 room canvas. The Control decision key set is parsed only while the flag is on. A malformed key refuses startup.
+	var canvasKeys spacedecision.KeySet
+	if cfg.SpaceCanvasEnabled {
+		canvasKeys, err = spacedecision.ParseKeySet(cfg.ControlSpaceDecisionPublicKeysJSON, cfg.ControlSpaceDecisionKeyID, cfg.ControlSpaceDecisionPublicKeyBase64)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Control Space decision key set invalid")
+		}
+	}
+	log.Info().Bool("space_canvas", cfg.SpaceCanvasEnabled).Int("control_decision_keys", len(canvasKeys)).Msg("room canvas posture")
+	canvasHandler := handler.NewCanvasHandler(canvas.NewRepo(pool), cfg.SpaceCanvasEnabled, canvasKeys)
+
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
@@ -157,6 +173,7 @@ func main() {
 	r.Method("GET", "/metrics", metrics.Handler())
 
 	handler.MountRoutes(r, authMiddleware, wikiHandler)
+	handler.MountCanvasRoutes(r, authMiddleware, canvasHandler)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
 	srv := &http.Server{Addr: addr, Handler: r}

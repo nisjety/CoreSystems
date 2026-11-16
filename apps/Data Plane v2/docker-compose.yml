@@ -1501,6 +1501,13 @@ services:
       # literal "true" turns on agent create-page proposals and the pending
       # listing; off, both routes answer 404.
       WIKI_CREATE_PAGE_PROPOSALS_ENABLED: ${WIKI_CREATE_PAGE_PROPOSALS_ENABLED:-false}
+      # WS19-S3 room canvas. Dark by default: only the strict literal "true" turns on the canvas routes, and off they
+      # answer 404 space_canvas_disabled. The process refuses to start with "true" and no Control decision key. The
+      # keys are public material. The build script exports the key id and key pair for interpolation.
+      WIKISTORE_SPACE_CANVAS: ${WIKISTORE_SPACE_CANVAS:-false}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON: ${CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON:-}
     volumes:
       - ${WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/wiki-events.pem}:/run/event-keys/wiki-events.pem:ro
     networks:

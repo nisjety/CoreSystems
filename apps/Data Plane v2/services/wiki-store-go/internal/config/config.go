@@ -41,6 +41,16 @@ type Config struct {
 	// stay reviewable. The switch grants nothing: a human accept is still the
 	// only way a page is written.
 	CreatePageProposalsEnabled bool
+
+	// SpaceCanvasEnabled is the WIKISTORE_SPACE_CANVAS switch (strict literal "true", off by default). On, the room
+	// canvas routes serve. Off, they answer 404 space_canvas_disabled and the stored canvases are kept. The switch
+	// grants nothing: every canvas request still needs a verified Control decision.
+	SpaceCanvasEnabled bool
+	// ControlSpaceDecision{PublicKeysJSON,KeyID,PublicKeyBase64} name the Control public key set that verifies the
+	// canvas decision. They are public material. The JSON map wins over the single key pair, as in documents-api.
+	ControlSpaceDecisionPublicKeysJSON  string
+	ControlSpaceDecisionKeyID           string
+	ControlSpaceDecisionPublicKeyBase64 string
 }
 
 func Load() *Config {
@@ -67,6 +77,11 @@ func Load() *Config {
 		GDPRSharedNatsPassword: strings.TrimSpace(os.Getenv("WIKISTORE_GDPR_SHARED_NATS_PASSWORD")),
 
 		CreatePageProposalsEnabled: strings.TrimSpace(os.Getenv("WIKI_CREATE_PAGE_PROPOSALS_ENABLED")) == "true",
+
+		SpaceCanvasEnabled:                  strings.TrimSpace(os.Getenv("WIKISTORE_SPACE_CANVAS")) == "true",
+		ControlSpaceDecisionPublicKeysJSON:  strings.TrimSpace(os.Getenv("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON")),
+		ControlSpaceDecisionKeyID:           strings.TrimSpace(os.Getenv("CONTROL_SPACE_DECISION_KEY_ID")),
+		ControlSpaceDecisionPublicKeyBase64: strings.TrimSpace(os.Getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64")),
 	}
 }
 
@@ -82,6 +97,22 @@ func (c *Config) ValidateEventSecurity() error {
 	}
 	if strings.TrimSpace(c.EventSigningPrivateKeyPath) == "" {
 		return errors.New("WIKI_EVENT_PRIVATE_KEY_PATH is required when NATS is enabled")
+	}
+	return nil
+}
+
+// ValidateSpaceCanvas refuses WIKISTORE_SPACE_CANVAS=true unless a Control decision key is configured. The canvas routes
+// must never serve without a way to verify the decision they require. The key itself is parsed in the spacedecision
+// package, where a malformed key also refuses startup.
+func (c *Config) ValidateSpaceCanvas() error {
+	if !c.SpaceCanvasEnabled {
+		return nil
+	}
+	if strings.TrimSpace(c.ControlSpaceDecisionPublicKeysJSON) != "" {
+		return nil
+	}
+	if strings.TrimSpace(c.ControlSpaceDecisionKeyID) == "" || strings.TrimSpace(c.ControlSpaceDecisionPublicKeyBase64) == "" {
+		return errors.New("WIKISTORE_SPACE_CANVAS=true requires CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON, or CONTROL_SPACE_DECISION_KEY_ID with CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64")
 	}
 	return nil
 }

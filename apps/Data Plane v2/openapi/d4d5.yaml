@@ -863,6 +863,100 @@ paths:
         content: { application/json: { schema: { $ref: '#/components/schemas/MaintenanceSweepRequest' } } }
       responses: { '200': { description: OK } }
 
+  # ── Room canvas (WS19-S3, Go service :8011; flag WIKISTORE_SPACE_CANVAS, off by default) ──
+  # Each route needs a bearer with wiki.read (reads) or wiki.write (writes), a token without zdr=true, and an
+  # X-Space-Decision header holding a Control decision bound to the route. Answers are {data} or {error:{code,message,details}}.
+  /v1/space-canvas/spaces/{space_ref}:
+    get:
+      summary: Read the room canvas head (unchanged when known_version_id is already the head)
+      tags: [space-canvas]
+      parameters:
+        - { name: space_ref, in: path, required: true, schema: { type: string } }
+        - { name: known_version_id, in: query, required: false, schema: { type: string } }
+        - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
+      responses:
+        '200': { description: "Head with content, or unchanged" }
+        '403': { description: "zdr_persistence_forbidden, space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
+        '404': { description: canvas_not_found or space_canvas_disabled }
+
+  /v1/space-canvas/spaces/{space_ref}/versions:
+    get:
+      summary: List canvas versions, newest first, without content
+      tags: [space-canvas]
+      parameters:
+        - { name: space_ref, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, maximum: 50 } }
+        - { name: cursor, in: query, required: false, schema: { type: integer, minimum: 1 } }
+        - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
+      responses:
+        '200': { description: One page of versions }
+        '400': { description: invalid_canvas_request or invalid_cursor }
+    post:
+      summary: Save a canvas version (compare-and-swap on expected_version_id)
+      tags: [space-canvas]
+      parameters:
+        - { name: space_ref, in: path, required: true, schema: { type: string } }
+        - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [content, idempotency_key]
+              properties:
+                expected_version_id: { type: [string, 'null'], maxLength: 128 }
+                content: { type: string, maxLength: 65536 }
+                summary: { type: [string, 'null'], maxLength: 200 }
+                idempotency_key: { type: string, maxLength: 256 }
+      responses:
+        '200': { description: Unchanged (content equals the head) }
+        '201': { description: "Created, with deduplicated true on an idempotent replay" }
+        '400': { description: invalid_canvas_request }
+        '403': { description: Decision refusal or zdr_persistence_forbidden }
+        '409': { description: "canvas_head_moved (details.head, null when the Space has no canvas yet) or idempotency_key_conflict" }
+        '413': { description: canvas_too_large (details.max_bytes) }
+        '429': { description: canvas_rate_limited or canvas_run_write_limit }
+        '503': { description: canvas_unavailable }
+
+  /v1/space-canvas/spaces/{space_ref}/versions/{version_id}:
+    get:
+      summary: Read one canvas version with its content
+      tags: [space-canvas]
+      parameters:
+        - { name: space_ref, in: path, required: true, schema: { type: string } }
+        - { name: version_id, in: path, required: true, schema: { type: string, maxLength: 128 } }
+        - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
+      responses:
+        '200': { description: OK }
+        '404': { description: canvas_version_not_found or canvas_not_found }
+
+  /v1/space-canvas/spaces/{space_ref}/versions/{version_id}/restore:
+    post:
+      summary: Restore a canvas version as a new head (change_kind restore)
+      tags: [space-canvas]
+      parameters:
+        - { name: space_ref, in: path, required: true, schema: { type: string } }
+        - { name: version_id, in: path, required: true, schema: { type: string, maxLength: 128 } }
+        - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [idempotency_key]
+              properties:
+                expected_version_id: { type: [string, 'null'], maxLength: 128 }
+                idempotency_key: { type: string, maxLength: 256 }
+      responses:
+        '200': { description: Unchanged }
+        '201': { description: Created }
+        '404': { description: canvas_not_found or canvas_version_not_found }
+        '409': { description: canvas_head_moved or idempotency_key_conflict }
+
   # ── Graph (Rust service :9203 admin port) ─────────────────────────────
   /v1/graphs/{org_id}:
     get:
