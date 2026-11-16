@@ -28,22 +28,26 @@ export function dataDeletionReceipt(receipt: unknown, requestId: string): { stat
   return { status: body.owner_outcome, receiptRef: `data:${requestId}`, detail: remaining ? `Data owner receipt: ${remaining}` : "Data owner receipt accepted" };
 }
 
-// The canvas purge answers the same top-level receipt shape and must also name the Space it purged.
-export function dataCanvasPurgeReceipt(receipt: unknown, requestId: string, spaceRef: string): { status: DataOutcome; receiptRef: string; detail: string } | null {
+// The canvas purge answers the same top-level receipt shape. It names the organization its purge ran in (org_id, the verified
+// bearer's org, the org the token was minted for) and the Space it purged (space_ref). A missing or different field returns null,
+// so the delivery is released for retry and never acknowledged.
+export function dataCanvasPurgeReceipt(receipt: unknown, requestId: string, orgId: string, spaceRef: string): { status: DataOutcome; receiptRef: string; detail: string } | null {
   if (!receipt || typeof receipt !== "object") return null;
-  if ((receipt as { space_ref?: unknown }).space_ref !== spaceRef) return null;
+  const named = receipt as { org_id?: unknown; space_ref?: unknown };
+  if (named.org_id !== orgId || named.space_ref !== spaceRef) return null;
   const outcome = dataDeletionReceipt(receipt, requestId);
   if (!outcome) return null;
   return { status: outcome.status, receiptRef: outcome.receiptRef, detail: `Data canvas purge receipt: ${outcome.status}` };
 }
 
 // The retrieval leg names the organization its purge ran in: its org_id is the verified bearer's org, which is the org the token
-// was minted for, so its receipt must name the delivery's organization. The canvas purge response names no org, so that leg is
-// bound by its token alone and keeps dataCanvasPurgeReceipt.
-export function dataSpaceDeletionReceipt(receipt: unknown, requestId: string, orgId: string): { status: DataOutcome; receiptRef: string; detail: string } | null {
+// was minted for, so its receipt must name the delivery's organization. Its space_ref names the Space the binding revocation ran
+// against, so it must name the delivery's Space too (WS19-S8 P3). dataDeletionReceipt itself is unchanged and checks neither field.
+export function dataSpaceDeletionReceipt(receipt: unknown, requestId: string, orgId: string, spaceRef: string): { status: DataOutcome; receiptRef: string; detail: string } | null {
   if (!receipt || typeof receipt !== "object") return null;
   const outcome = dataDeletionReceipt(receipt, requestId);
-  if (!outcome || (receipt as { org_id?: unknown }).org_id !== orgId) return null;
+  const named = receipt as { org_id?: unknown; space_ref?: unknown };
+  if (!outcome || named.org_id !== orgId || named.space_ref !== spaceRef) return null;
   return outcome;
 }
 
@@ -182,8 +186,8 @@ export const deliverOne = internalAction({
     if (response.status !== 200) return release(`Data Space deletion returned HTTP ${response.status}`);
     let receipt: unknown;
     try { receipt = await response.json(); } catch { return release("Data Space deletion returned an invalid receipt"); }
-    const outcome = dataSpaceDeletionReceipt(receipt, claimed.request.requestId, orgId);
-    if (!outcome) return release("Data Space deletion receipt did not match the claimed request or organization");
+    const outcome = dataSpaceDeletionReceipt(receipt, claimed.request.requestId, orgId, claimed.request.spaceRef);
+    if (!outcome) return release("Data Space deletion receipt did not match the claimed request, organization or Space");
     // Second leg (WS19-S8): purge the room canvas. Both receipts are needed before the owner receipt is acknowledged. A retry
     // repeats both legs, which is safe because the binding revocation and the canvas purge are idempotent.
     let canvasResponse: Response;
@@ -201,8 +205,8 @@ export const deliverOne = internalAction({
     if (canvasResponse.status !== 200) return release(`Data canvas purge returned HTTP ${canvasResponse.status}`);
     let canvasReceipt: unknown;
     try { canvasReceipt = await canvasResponse.json(); } catch { return release("Data canvas purge returned an invalid receipt"); }
-    const canvasOutcome = dataCanvasPurgeReceipt(canvasReceipt, claimed.request.requestId, claimed.request.spaceRef);
-    if (!canvasOutcome) return release("Data canvas purge receipt did not match the claimed request");
+    const canvasOutcome = dataCanvasPurgeReceipt(canvasReceipt, claimed.request.requestId, orgId, claimed.request.spaceRef);
+    if (!canvasOutcome) return release("Data canvas purge receipt did not match the claimed request, organization or Space");
     // Third leg (WS17-S6): the private-panel pointers for this Space, so no pointer names a deleted room. Idempotent: a
     // failure releases the claim like the Data legs do, and the next attempt purges again. The Data receipts are unchanged.
     let purged = { deleted: 0, more: true };

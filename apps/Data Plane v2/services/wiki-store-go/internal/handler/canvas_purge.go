@@ -47,7 +47,8 @@ type purgeBody struct {
 // Purge hard-deletes the canvas and every version of one Space in the bearer's org, then fences the Space. Only the pinned
 // coordinator principal may call it. The org comes from the verified bearer and never from the body. The purge is
 // idempotent by construction: a replay finds no rows and returns zero counts, so the idempotency key is validated and not
-// stored. The receipt is top-level, not wrapped in data, because the Application deletion leg reads it that way.
+// stored. The receipt is top-level, not wrapped in data, because the Application deletion leg reads it that way. It names the
+// verified bearer's org (org_id) and the request's Space (space_ref), which that leg checks against the delivery.
 func (h *CanvasPurgeHandler) Purge(w http.ResponseWriter, r *http.Request) {
 	bearer, ok := bearerOf(w, r)
 	if !ok {
@@ -78,6 +79,7 @@ func (h *CanvasPurgeHandler) Purge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"request_id":      body.DeletionRequestID,
 		"owner_plane":     "data",
+		"org_id":          bearer.OrgID,
 		"space_ref":       body.SpaceRef,
 		"canvases_purged": counts.CanvasesPurged,
 		"versions_purged": counts.VersionsPurged,

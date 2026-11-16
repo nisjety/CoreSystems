@@ -977,7 +977,7 @@ paths:
                 space_ref: { type: string, maxLength: 256 }
                 idempotency_key: { type: string, maxLength: 256 }
       responses:
-        '200': { description: "Receipt with request_id, owner_plane data, space_ref, canvases_purged, versions_purged and owner_outcome succeeded" }
+        '200': { description: "Receipt with request_id, owner_plane data, org_id (the verified bearer org), space_ref, canvases_purged, versions_purged and owner_outcome succeeded" }
         '400': { description: invalid_canvas_request }
         '403': { description: canvas_purge_not_authorized or insufficient_scope }
         '503': { description: canvas_unavailable }
