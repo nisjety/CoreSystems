@@ -594,3 +594,9 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - P1 test-gap: 3 policy spec pins in auth-core will fail until the train updates them.
 - P2 OWNER NOTE: the scope is browser:write (as named in D16), so this token also authorises AcquireGrant/DeriveRunGrant for its org, not revoke-only. A narrower scope needs a broker change. Accepting as built unless told otherwise.
 - P3: dispatch paths that never reach a terminal state still revoke nothing (unchanged gap).
+
+### W3-DEC-KIND (707ff7c72) BUILT
+- Control signs a 2-min claim that a Space is the caller's personal Space (new route space-kind-evidence); gateway refuses ZDR then relays it; model-gateway forwards it; session-core RestoreMemory verifies it and stamps the thread personal.
+- P1 NOT WIRED -> W3-DEC-KIND2 running: SPA sends no space_ref, so the claim path is inert (fails closed, no regression).
+- P1: Go/Python memory.proto bindings stale (buf generate owed).
+- P2: claim replayable 2 min by same subject/Space (no nonce); route not in decision-audit table; a row linking to multiple unrecorded threads only covers one Space per claim.
