@@ -678,7 +678,7 @@ fn search_response(
     }
 }
 
-fn pg_row_to_entry(
+pub(crate) fn pg_row_to_entry(
     row: crate::dreaming::MemorySearchRow,
     owner_user_id: &str,
 ) -> MemoryEntry {
@@ -857,6 +857,9 @@ impl MemoryService for MemoryGrpc {
         request: Request<SearchMemoryRequest>,
     ) -> Result<Response<SearchMemoryResponse>, Status> {
         let caller = identity(&request)?;
+        // WS17-S8: a per-turn personal-context grant rides in metadata (space/memory_personal_context.rs).
+        let personal_grant =
+            crate::space::memory_personal_context::grant_from_metadata(request.metadata());
         let req = request.into_inner();
         if req.org_id.trim().is_empty() {
             return Err(Status::invalid_argument("org_id is required"));
@@ -895,6 +898,24 @@ impl MemoryService for MemoryGrpc {
         }
 
         let limit = if req.limit == 0 { 10 } else { req.limit };
+        // WS17-S8: a turn that carries a personal-context grant asks for the owner's personal rows only. The room's
+        // own recall is the ordinary call, so this answer carries no room rows, and only a full memory gate reaches it.
+        if let Some(grant) = personal_grant.as_ref() {
+            if decision.access != MemoryAccess::Full {
+                return Ok(Response::new(search_response(Vec::new(), None)));
+            }
+            return crate::space::memory_personal_context::personal_only_answer(
+                &self.pool,
+                grant,
+                req.org_id.trim(),
+                &owner_user_id,
+                req.thread_id.trim(),
+                &req.query,
+                limit,
+            )
+            .await
+            .map(Response::new);
+        }
         // EP-8 S7: with Space memory on, a shared room reads the room's memory and nothing else,
         // neither the durable personal rows nor the semantic mirror. A lookup failure is an error,
         // never a fall-back to the wider reader.

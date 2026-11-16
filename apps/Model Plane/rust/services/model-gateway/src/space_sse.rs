@@ -641,6 +641,112 @@ pub(crate) async fn room_work_summary(
     crate::room_run::work_summary_from_buffer(&replay, policy.limits)
 }
 
+// ---------------------------------------------------------------------------------------------------
+// WS17-S8: personal memory for one shared-room turn (design WS17 D5 and D6). The gateway mints a Control
+// `model.memory.personal_context` decision for the turn and injects it into `space_context`. This seam
+// forwards it to Session Core as a second, personal-only `SearchMemory` call. It holds no authority: Session
+// Core verifies the decision, the owner and the thread, and only then returns the owner's own rows.
+// ---------------------------------------------------------------------------------------------------
+
+/// The per-turn personal-memory decision the gateway injected into a room turn's `space_context` (WS17-S8): a
+/// Control decision token and its ref. It is carried, never trusted, here.
+#[derive(Clone, serde::Deserialize)]
+pub struct PersonalMemoryTurn {
+    pub(crate) decision_token: String,
+    pub(crate) decision_ref: String,
+}
+
+impl std::fmt::Debug for PersonalMemoryTurn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token is a credential for one turn: it never reaches a log or a debug dump.
+        f.debug_struct("PersonalMemoryTurn")
+            .field("decision_ref", &self.decision_ref)
+            .field("decision_token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// The rows asked of Session Core for one turn's personal memory: the limit the ordinary prefetch asks.
+const PERSONAL_TURN_LIMIT: u32 = 5;
+/// The metadata keys Session Core reads a personal-context grant from (`space/memory_personal_context.rs`).
+const PERSONAL_CONTEXT_TOKEN_METADATA: &str = "x-space-personal-context-decision";
+const PERSONAL_CONTEXT_REF_METADATA: &str = "x-space-personal-context-ref";
+
+/// The personal memory a room turn adds to its recall (WS17-S8). A turn with no grant in its `space_context` gets
+/// `entries` back unchanged. A turn with a grant asks Session Core once more, for the owner's personal rows for
+/// this turn only (the ordinary prefetch already carries the room's own rows), and appends their text. A failure,
+/// a timeout or a refusal keeps `entries` as they were: personal memory is advisory and never holds the answer.
+pub(crate) async fn with_personal_memory_turn(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    query: &str,
+    bearer: &VerifiedSessionBearer,
+    space: Option<&crate::session_flow::ThreadSpaceContext>,
+    mut entries: Vec<String>,
+) -> Vec<String> {
+    use mp_contracts::model_plane::v1::SearchMemoryRequest;
+
+    let Some(grant) = space.and_then(|space| space.personal_memory_turn.as_ref()) else {
+        return entries;
+    };
+    let Ok(mut request) = authenticated_session_request(
+        SearchMemoryRequest {
+            // Left empty deliberately: Session Core takes the owner from the VERIFIED thread.
+            user_id: String::new(),
+            thread_id: thread_id.to_owned(),
+            query: query.to_owned(),
+            topic_filter: Vec::new(),
+            limit: PERSONAL_TURN_LIMIT,
+            org_id: org_id.to_owned(),
+            updated_after: None,
+        },
+        bearer,
+    ) else {
+        tracing::warn!("personal memory turn skipped: request not forwardable");
+        return entries;
+    };
+    let (Ok(token), Ok(decision_ref)) = (
+        grant
+            .decision_token
+            .parse::<tonic::metadata::AsciiMetadataValue>(),
+        grant
+            .decision_ref
+            .parse::<tonic::metadata::AsciiMetadataValue>(),
+    ) else {
+        tracing::warn!("personal memory turn skipped: decision is not forwardable");
+        return entries;
+    };
+    request
+        .metadata_mut()
+        .insert(PERSONAL_CONTEXT_TOKEN_METADATA, token);
+    request
+        .metadata_mut()
+        .insert(PERSONAL_CONTEXT_REF_METADATA, decision_ref);
+
+    let response = tokio::time::timeout(
+        crate::sse::MEMORY_PREFETCH_TIMEOUT,
+        state.memory_client.clone().search_memory(request),
+    )
+    .await;
+    match response {
+        Ok(Ok(resp)) => {
+            for entry in resp.into_inner().entries {
+                if !entry.content.trim().is_empty() && !entries.contains(&entry.content) {
+                    entries.push(entry.content);
+                }
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "personal memory turn lookup failed; continuing without it");
+        }
+        Err(_elapsed) => {
+            tracing::warn!("personal memory turn lookup timed out; continuing without it");
+        }
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -80,6 +80,8 @@ export interface SpaceDeferredSend {
   readonly skills?: readonly Skill[]
   /** The picks to give back with the words on a cancel. */
   readonly picks?: SpaceDeferredPicks
+  /** The personal-memory choice the member made when they sent (WS17-S8), so waiting does not change what is asked. */
+  readonly usePersonalMemory?: boolean
 }
 
 /**

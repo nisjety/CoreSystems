@@ -191,6 +191,11 @@ export interface SpaceSendInput {
   /** Set when the message continues an existing room thread. */
   readonly replyThreadId?: string
   /**
+   * The member chose to use their own personal memory for this one turn (WS17-S8). Sent as
+   * `use_personal_memory` only when true; `retry` repeats it with the send.
+   */
+  readonly usePersonalMemory?: boolean
+  /**
    * The name of this send. Left out by the composer (the pipeline mints one);
    * `retry` passes the first attempt's id back so the repeat is the same send.
    */
@@ -243,6 +248,8 @@ const askStrategy: SpaceSendStrategy = async (run) => {
       mentionedAgentRef: input.mentionedAgentRef,
       locale: input.locale,
       threadId: input.replyThreadId,
+      // WS17-S8: a per-turn opt-in; left undefined (so absent on the wire) unless the member chose it.
+      usePersonalMemory: input.usePersonalMemory === true ? true : undefined,
       // The send's name (F-t1-033). `sendId` is undefined while the key is off,
       // which leaves both fields off the wire.
       clientMessageId: run.sendId,

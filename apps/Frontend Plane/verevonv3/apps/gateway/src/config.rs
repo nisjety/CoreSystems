@@ -634,6 +634,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// Control's run-action decision, the room's entitlement and the owner-or-manager gate decide every use.
     /// On in development, off in production (`space_flag`).
     pub(crate) agent_self_api_api: bool,
+    /// `SPACE_PERSONAL_MEMORY_TURN_API` (WS17-S8): the per-turn opt-in to use the user's own personal memory for one
+    /// shared-room answer (the `use_personal_memory` body flag, the Control `memory-personal-context-decision` mint and
+    /// the `features.personal_memory_turn` flag). Off answers the flag as absent: the turn runs without personal memory.
+    /// A rollout control, never an authorization input: Control's decision and Session Core's verification decide every
+    /// use. On in development, off in production (`space_flag`).
+    pub(crate) space_personal_memory_turn_api: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -757,6 +763,7 @@ impl SpaceFeatureFlags {
             private_panel_ui: space_flag("SPACE_PRIVATE_PANEL_UI"),
             space_memory_declassify_api: space_flag("SPACE_MEMORY_DECLASSIFY_API"),
             agent_self_api_api: space_flag("SPACE_AGENT_SELF_API_API"),
+            space_personal_memory_turn_api: space_flag("SPACE_PERSONAL_MEMORY_TURN_API"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }

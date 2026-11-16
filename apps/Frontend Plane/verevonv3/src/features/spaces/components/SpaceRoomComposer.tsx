@@ -311,6 +311,16 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // Per message, never remembered: it resets after every send. Offered only where the library is on.
   const [keepInRoom, setKeepInRoom] = createSignal(false)
   const keepOffered = () => roomFilesDurableEnabled() && canAddRoomFiles(props.viewerRole?.())
+  // WS17-S8: the member's choice to use their own personal memory for this one room turn. A per-turn opt-in:
+  // it is cleared with the send, and it does not carry over to another room. Offered only where the room's
+  // `features.personal_memory_turn` is on (see personalMemoryOffered).
+  const [personalMemoryTurn, setPersonalMemoryTurn] = createSignal(false)
+  createEffect(
+    () => props.spaceRef,
+    () => {
+      setPersonalMemoryTurn(false)
+    },
+  )
   let fileInputRef: HTMLInputElement | undefined
   let textareaRef: HTMLTextAreaElement | undefined
   const MARKDOWN_ROWS_MIN = 2
@@ -440,6 +450,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         setText('')
         discardDraft()
       }
+      // A human post is a send too: the per-turn personal-memory choice does not survive it.
+      setPersonalMemoryTurn(false)
       startWakes(entry.content, entry.mentions, receipt)
       props.onClearReplyTarget?.()
       props.onExchangeSettled?.()
@@ -560,6 +572,9 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // Per-turn attachments ride a turn for the agent only. A human post is a durable message of the
   // member's own words, so files never go with one; durable room files are the Files tab (WS14-S9).
   const attachAvailable = () => attachFlagOn() && effectiveMode() === 'ask' && !roleBlocked()
+  // WS17-S8: the personal-memory choice is offered for an Ask turn only (a human post starts no model turn),
+  // where the room's flag is on and the member may post. Presentation only; Control decides each turn.
+  const personalMemoryOffered = () => spaceRoomFeature('personal_memory_turn') && effectiveMode() === 'ask' && !roleBlocked()
   // The model catalogue, for the vision check only. It is the same request the picker and a send
   // already share; read at mount and only when images ride as parts of the turn.
   const [catalogueModels, setCatalogueModels] = createSignal<readonly ModelInfo[] | undefined>(undefined)
@@ -608,6 +623,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     for (const file of files()) revokeRoomAttachment(file)
     setFiles([])
     setKeepInRoom(false)
+    // The per-turn personal-memory choice goes with the send that carried it (the same points the box is cleared).
+    setPersonalMemoryTurn(false)
   }
   onCleanup(clearFiles)
   function handlePaste(event: ClipboardEvent): void {
@@ -696,6 +713,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         locale: i18n.locale(),
         skills: ready.skills ?? [],
         replyThreadId: ready.threadId,
+        // The personal-memory choice made when the message was sent (WS17-S8); absent unless it was made.
+        ...(ready.usePersonalMemory === true ? { usePersonalMemory: true } : {}),
       })
     },
   )
@@ -1111,12 +1130,16 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
           people: mention.people(),
           agents: mention.agents().filter((agent) => agent.source === 'typed'),
         },
+        // The personal-memory choice rides the waiting message (WS17-S8); a cancel gives it back with the words.
+        ...(personalMemoryOffered() && personalMemoryTurn() ? { usePersonalMemory: true } : {}),
       })
       setText('')
       discardDraft()
       setMentionedAgentRef(undefined)
       mention.clear()
       setPickedSkills([])
+      // The message has left the box for its turn: the choice is spent with it (a cancel restores it).
+      setPersonalMemoryTurn(false)
       closePicker()
       return
     }
@@ -1174,6 +1197,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       locale: i18n.locale(),
       skills: pickedSkills(),
       replyThreadId: props.replyTarget?.()?.threadId,
+      // WS17-S8: the per-turn personal-memory choice, sent only while the room offers it and the member picked it.
+      ...(personalMemoryOffered() && personalMemoryTurn() ? { usePersonalMemory: true } : {}),
     }
     // The pipeline raises `submitting` and the exchange block synchronously,
     // before its first await; the box is cleared right after, as before.
@@ -1217,6 +1242,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       spaceRef: props.spaceRef,
     })
     if (outcome === 'refused') return
+    // A steer is delivered into the running turn, so the per-turn personal-memory choice is spent with it.
+    setPersonalMemoryTurn(false)
     if (text().trim() === content) {
       setText('')
       discardDraft()
@@ -1235,6 +1262,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // since, and its skills and mention picks beside any made since (the skill cap still holds).
   function giveBack(waiting: SpaceDeferredSend): void {
     setText((current) => (current.trim() === '' ? waiting.content : `${waiting.content}\n\n${current}`))
+    // The words come back with the personal-memory choice they were sent with (WS17-S8).
+    if (waiting.usePersonalMemory === true) setPersonalMemoryTurn(true)
     const skills = waiting.skills ?? []
     if (skills.length > 0) {
       setPickedSkills((current) => {
@@ -1857,6 +1886,19 @@ ${managers.map((m) => `@${m.label}`).join(' ')} ${request}`
               'Abonnementsmodeller er tekstbaserte. Fjern agenten/ferdigheten, eller velg en Verevon-modell.',
               'Subscription models are text-only. Remove the agent/skill, or choose a Verevon model.',
             )}
+          </p>
+        </Show>
+        <Show when={personalMemoryOffered()}>
+          <p class="verevon-space-room-composer__hint">
+            <label>
+              <input
+                type="checkbox"
+                checked={personalMemoryTurn()}
+                disabled={submitting() || preparing() || postBusy() || blockedByApproval()}
+                onChange={(event) => setPersonalMemoryTurn(event.currentTarget.checked)}
+              />{' '}
+              <span>{i18n.tr('Bruk mitt personlige minne for dette svaret', 'Use my personal memory for this answer')}</span>
+            </label>
           </p>
         </Show>
         <button

@@ -101,6 +101,8 @@ export type SpaceContext = {
     tool_policy_editor?: boolean
     /** WS14: the room file library's rollout, `{turn_attachments, durable, files_tab}`. */
     room_files?: { turn_attachments?: boolean; durable?: boolean; files_tab?: boolean }
+    /** WS17-S8: a room turn may offer the member's own personal memory for that one turn (rollout only; Control decides each turn). */
+    personal_memory_turn?: boolean
   }
   /**
    * WS12-S7: what the organisation's message policy lets this member do, as hints for which controls

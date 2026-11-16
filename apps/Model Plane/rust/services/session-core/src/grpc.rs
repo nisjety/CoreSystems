@@ -120,8 +120,8 @@ pub(crate) const THREAD_PREVIEW_MAX_CHARS: usize = 180;
 const DEFAULT_RESIDENCY: &str = "swedencentral";
 const MAX_USER_CHECKPOINT_ID_BYTES: usize = 200;
 const MAX_USER_CHECKPOINT_STATE_BYTES: usize = 4 * 1024 * 1024;
-const CONTROL_SPACE_DECISION_VERSION: &str = "v2";
-const CONTROL_SPACE_DECISION_AUDIENCE: &str = "model-plane";
+pub(crate) const CONTROL_SPACE_DECISION_VERSION: &str = "v2";
+pub(crate) const CONTROL_SPACE_DECISION_AUDIENCE: &str = "model-plane";
 const CONTROL_THREAD_CREATE_ACTION: &str = "model.thread.create";
 const CONTROL_THREAD_APPEND_ACTION: &str = "model.thread.append";
 const CONTROL_THREAD_APPEND_SCHEMA: &str = "sha256:thread-append-v1";
@@ -141,7 +141,7 @@ const CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA: &str = "sha256:space-scheduled-run
 const CONTROL_SCHEDULED_RUN_EXECUTION_CONTRACT_SCHEMA: &str =
     "sha256:space-scheduled-run-execute-v2";
 const MAX_SCHEDULED_CONTRACT_BYTES: usize = 64 * 1024;
-const MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES: usize = 16 * 1024;
 // Delegated-identity design, Gap B (03-design-2-token-exchange.md §2.5). A
 // distinct envelope version from CONTROL_SPACE_DECISION_VERSION ("v2") --
 // deliberately not reusing that tag or the full Space Decision claim shape

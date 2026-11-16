@@ -57,12 +57,15 @@ pub(crate) mod sidebar;
 mod schedule_template;
 mod stream;
 pub(crate) mod memory;
+mod personal_memory_turn;
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
     "space_context",
     "space_append_context",
+    // WS17-S8: the per-turn personal-memory decision is minted here, never supplied by the browser.
+    "personal_memory_turn",
     "space_decision_token",
     "space_decision_ref",
     "recipient_audience_ref",
@@ -190,12 +193,26 @@ pub(crate) async fn inject_personal_thread_context(
     inject_personal_thread_context_for_wake(state, user, org_id, body, None).await
 }
 
+/// Every caller of the injector goes through here: the Space context is injected as before, then the WS17-S8
+/// personal-memory opt-in (`personal_memory_turn.rs`) runs. The browser's request flag is removed on every turn, and
+/// only a room turn that asked for personal memory gets a per-turn decision.
+pub(crate) async fn inject_personal_thread_context_for_wake(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    body: &mut Value,
+    wake: Option<&mentions::WakeIntent>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    inject_space_context_for_wake(state, user, org_id, body, wake).await?;
+    personal_memory_turn::inject_for_turn(state, user, org_id, body).await
+}
+
 /// [`inject_personal_thread_context`] with the wake the mention injector verified (WS08-S4). With a
 /// [`mentions::WakeIntent`] and an existing thread, Control is asked for a `model.run.wake` decision
 /// (bound to the stored post, its content digest, the agent and origin `direct`) instead of a
 /// `thread:append` one, and the body carries `wake_context`; model-gateway then appends no turn.
 /// The intent is a typed argument, never a body field, so a browser cannot supply one.
-pub(crate) async fn inject_personal_thread_context_for_wake(
+async fn inject_space_context_for_wake(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
@@ -5999,6 +6016,8 @@ async fn space_context(
                     "browser_card": state.space_features.browser_card,
                     // WS17-S7: the reviewed declassify of one personal memory into a shared room (one flag).
                     "memory_declassify": state.space_features.space_memory_declassify_api,
+                    // WS17-S8: the per-turn personal-memory opt-in (the room composer's control follows it).
+                    "personal_memory_turn": state.space_features.space_personal_memory_turn_api,
                     // WS18-S5: the room agent's self-API switch (the toggle and its chips follow it).
                     "agent_self_api": state.space_features.agent_self_api_api,
                     "status": state.space_features.status_api,

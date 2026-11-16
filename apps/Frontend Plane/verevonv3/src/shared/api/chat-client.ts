@@ -503,6 +503,12 @@ export type ChatInvokeRequest = {
    * today's behavior byte-identically.
    */
   minPrivacyTier?: PrivacyTier
+  /**
+   * WS17-S8: the member chose to use their own personal memory for this one room turn. Sent as
+   * `use_personal_memory: true` only when set, and never as `false`, so every other body is byte-identical.
+   * A request only: Control decides each turn, and the gateway refuses one it may not serve (`personal_memory_not_authorized`).
+   */
+  usePersonalMemory?: boolean
 }
 
 // ── SSE events (mapped from model-gateway's real event names) ────────────────
@@ -2373,6 +2379,8 @@ export function buildChatWireBody(input: ChatInvokeRequest): Record<string, unkn
     client_utc_offset_minutes: clientUtcOffsetMinutes(new Date()),
     ...(uiLocale ? { ui_locale: uiLocale } : {}),
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
+    // WS17-S8: present ONLY when the member chose their personal memory for this turn; never `false`, so every other body is unchanged.
+    ...(request.usePersonalMemory === true ? { use_personal_memory: true } : {}),
     // Present only on a builder preview (EP-6 S8), so every other body is byte-identical to what it was.
     ...(request.agentPreview ? { agent_preview: { agent_ref: request.agentPreview.agentRef.trim() } } : {}),
     // Present only on a wake, so every other body is byte-identical to what it was.
@@ -3305,6 +3313,14 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
       code: err.code,
       message: 'Organisasjonens agentpolicy kan ikke leses akkurat nå, så agenten startet ikke. Ingenting ble kjørt.',
       retryable: true,
+    }
+  }
+  // WS17-S8: Control refused the personal memory of this room turn. The code is kept so the room states it (errors.ts);
+  // the untyped 403 below would read as lost access to the conversation. Any details the refusal carries are not shown.
+  if (err instanceof ApiError && err.code === 'personal_memory_not_authorized') {
+    return {
+      code: err.code,
+      message: 'Du har ikke tilgang til å bruke det personlige minnet ditt i dette rommet. Ingenting er brukt.',
     }
   }
   // A typed Space denial (a policy, entitlement, role or ZDR refusal) is the

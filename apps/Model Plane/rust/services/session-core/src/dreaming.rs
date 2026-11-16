@@ -2459,7 +2459,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn memory_score(confidence: f64, exact_bonus: f64) -> f32 {
+pub(crate) fn memory_score(confidence: f64, exact_bonus: f64) -> f32 {
     (confidence + exact_bonus).clamp(0.0, 1.0) as f32
 }
 

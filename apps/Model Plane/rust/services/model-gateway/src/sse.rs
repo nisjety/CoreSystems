@@ -4685,6 +4685,7 @@ pub async fn invoke_stream_sse(
             ),
             profile_read
         );
+        let memory_entries = crate::space_sse::with_personal_memory_turn(&state, &org_id, &session_run.thread_id, &user_content, &model_bearer, req.space_context.as_ref(), memory_entries).await;
         if user_profile_prefix {
             let injection =
                 crate::run_context::decide_profile(&crate::run_context::ProfileReads {
@@ -29166,6 +29167,7 @@ mod do_attachment_tests {
             action_schema_hash: "sha256:schema".to_owned(),
             payload_digest: "sha256:payload".to_owned(),
             idempotency_key: "idem-1".to_owned(),
+            personal_memory_turn: None,
         }
     }
 

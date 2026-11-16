@@ -1663,6 +1663,9 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // WS17-S6b private panel (gateway domains/spaces/private_panel.rs): the outage a panel call can answer.
   private_panel_unavailable: { no: 'Det private panelet er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'The private panel is temporarily unavailable. Try again shortly.' },
 
+  // WS17-S8 per-turn personal memory in a room (gateway refuses the turn when Control says no; nothing is used).
+  personal_memory_not_authorized: { no: 'Du har ikke tilgang til å bruke det personlige minnet ditt i dette rommet. Ingenting er brukt.', en: 'You do not have access to use your personal memory in this room. Nothing was used.' },
+
   // WS19-S5 room canvas (gateway domains/spaces/canvas.rs). The canvas routes word their refusals through
   // canvasErrorMessage below, so a code that also means something elsewhere (space_decision_unavailable,
   // delegated_auth_unavailable, ...) gets the canvas sentence there. invalid_space is an internal-only code and

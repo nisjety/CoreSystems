@@ -148,6 +148,10 @@ pub struct ThreadSpaceContext {
     pub action_schema_hash: String,
     pub payload_digest: String,
     pub idempotency_key: String,
+    /// WS17-S8: the per-turn personal-memory decision the gateway minted when the user asked for their personal memory
+    /// for this room turn. Absent on every other turn. Session Core verifies it; model-gateway only forwards it.
+    #[serde(default)]
+    pub personal_memory_turn: Option<crate::space_sse::PersonalMemoryTurn>,
 }
 
 /// The BFF-injected authority for starting one agent run from a stored human post (WS08-S3): the
@@ -311,6 +315,7 @@ async fn create_thread_scoped(
         action_schema_hash: String::new(),
         payload_digest: String::new(),
         idempotency_key: String::new(),
+        personal_memory_turn: None,
     });
     let response = client
         .create_thread(authenticated_request(
@@ -553,6 +558,7 @@ async fn append_user_message(
         action_schema_hash: String::new(),
         payload_digest: String::new(),
         idempotency_key: String::new(),
+        personal_memory_turn: None,
     });
     let request = authenticated_request(
         AppendMessageRequest {
