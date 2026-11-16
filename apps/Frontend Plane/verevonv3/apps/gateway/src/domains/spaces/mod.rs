@@ -43,6 +43,7 @@ pub(crate) mod room_admin;
 pub(crate) mod files;
 pub(crate) mod personal_agents;
 pub(crate) mod canvas;
+pub(crate) mod self_api;
 pub(crate) mod private_panel;
 pub(crate) mod memory_declassify;
 mod message_search;
@@ -76,6 +77,9 @@ const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
     // WS10-S4: the Control-signed approval proofs. A browser never supplies either.
     "grant_use_token",
     "space_approval_decision_token",
+    // WS18-S5: the self-API tool profile and feature are the gateway's to set, never a browser's.
+    "tool_profile",
+    "space_self_api",
 ];
 
 /// WS08-S4: the wake fields of a chat body. A browser never supplies `wake_context` (the BFF
@@ -178,6 +182,10 @@ pub(crate) async fn inject_personal_thread_context(
     org_id: &str,
     body: &mut Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
+    // WS18-S5: this entry runs no mention decision, so a client-named self-API feature is removed here.
+    if let Some(object) = body.as_object_mut() {
+        self_api::strip_self_api_feature(object);
+    }
     inject_personal_thread_context_for_wake(state, user, org_id, body, None).await
 }
 
@@ -1156,6 +1164,7 @@ fn module_routes() -> Router<AppState> {
         .merge(memory::routes())
         .merge(personal_agents::routes())
         .merge(canvas::routes())
+        .merge(self_api::routes())
         .merge(private_panel::routes())
         .merge(memory_declassify::routes())
 }
@@ -4712,6 +4721,8 @@ async fn compose_space_agents_from_members(
                         // EP-6 S9: the agent version this binding pins. Absent follows the
                         // published version.
                         ("pinnedVersion", "pinned_version"),
+                        // WS18-S5: the binding switch for agent self-API (absent is off).
+                        ("selfApiEnabled", "self_api_enabled"),
                     ] {
                         if let Some(value) = binding.get(from) {
                             if !value.is_null() {
@@ -5284,6 +5295,8 @@ pub(crate) async fn inject_mentioned_space_agent(
     for field in AGENT_PIN_FIELDS {
         object.remove(field);
     }
+    // WS18-S5: a browser never names the self-API feature. The binding policy below is its only grant.
+    self_api::strip_self_api_feature(object);
     // The wake request is consumed here whatever happens next; the other wake fields are never the
     // browser's (see FORGED_WAKE_FIELDS).
     let wake_request = object.remove("wake").filter(|value| !value.is_null());
@@ -5411,7 +5424,8 @@ pub(crate) async fn inject_mentioned_space_agent(
     // fields existed keep behaving exactly as they did — while a PRESENT
     // field is a human decision and binds.
     enforce_wake_policy(state, user, org_id, &space_ref, &agent).await?;
-    apply_mention_binding_policy(object, &agent)?;
+    let self_api_allowed = self_api::self_api_allowed(state, user, &agent).await;
+    apply_mention_binding_policy(object, &agent, self_api_allowed)?;
 
     let name = agent
         .get("name")
@@ -5592,6 +5606,9 @@ async fn enforce_wake_policy(
 ///   the turn may never run autonomously: `plan_mode` is forced off and the
 ///   `agentic` feature is stripped, so a room mention cannot start an
 ///   unattended run. Only an explicit `"auto"` leaves them untouched.
+/// * `self_api_allowed` (WS18-S5: the binding's `self_api_enabled`, the flag, and an org that is not
+///   zero-retention) — adds `agentic` and `space_self_api` and sets `plan_mode` false. Otherwise any
+///   client-named `space_self_api` is removed.
 /// * `allowed_tools: []` — strips the `tools` feature and any tool specs, so
 ///   the agent answers from its instructions and the conversation alone.
 /// * `allowed_tools: [...]` (non-empty) — narrows `tools` to the specs whose
@@ -5605,6 +5622,7 @@ async fn enforce_wake_policy(
 fn apply_mention_binding_policy(
     object: &mut Map<String, Value>,
     agent: &Value,
+    self_api_allowed: bool,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     // WS08-S4: the refusals (`trigger_modes` without "mention", `blocked`) are decided by the pure
     // evaluator the mention planner also uses; no role is passed, so `respond_to` (which needs the
@@ -5628,6 +5646,15 @@ fn apply_mention_binding_policy(
                 features.retain(|feature| feature.as_str() != Some("agentic"));
             }
         }
+    }
+
+    // WS18-S5: the self-API grant comes after the approval rule above, which strips `agentic` for a confirmation
+    // binding. An allowed self-API binding gets `agentic` back: its tools are the server-resolved registry rows
+    // only, and every action still needs Control's decision. Any other turn loses a client-named feature here.
+    if self_api_allowed {
+        self_api::grant_self_api_feature(object);
+    } else {
+        self_api::strip_self_api_feature(object);
     }
 
     if let Some(allowed_tools) = agent.get("allowed_tools").and_then(Value::as_array) {
@@ -5967,6 +5994,8 @@ async fn space_context(
                     "private_panel": state.space_features.private_panel_ui,
                     // WS17-S7: the reviewed declassify of one personal memory into a shared room (one flag).
                     "memory_declassify": state.space_features.space_memory_declassify_api,
+                    // WS18-S5: the room agent's self-API switch (the toggle and its chips follow it).
+                    "agent_self_api": state.space_features.agent_self_api_api,
                     "status": state.space_features.status_api,
                     "reminders": state.space_features.reminders_api,
                     // WS08-S4: mentions and addressed wake. The picker follows the record flag;

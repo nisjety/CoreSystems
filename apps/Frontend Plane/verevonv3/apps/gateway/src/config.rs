@@ -615,6 +615,14 @@ pub(crate) struct SpaceFeatureFlags {
     /// 404 `feature_disabled`. A rollout control, never an authorization input: Control's decision and model-gateway's
     /// own checks decide every write. On in development, off in production (`space_flag`).
     pub(crate) space_memory_declassify_api: bool,
+    /// `SPACE_AGENT_SELF_API_API` (WS18-S5): the binding switch for agent self-API
+    /// (`PUT /api/v1/spaces/{space_ref}/agents/{binding_ref}/self-api`), its read
+    /// (`GET /api/v1/spaces/{space_ref}/agent-self-api`), the `spaces.set_agent_self_api` action, the
+    /// `space_self_api` feature a mention turn is granted, and `features.agent_self_api` in the Space
+    /// context. Off answers 404 `feature_disabled`. A rollout control, never an authorization input:
+    /// Control's run-action decision, the room's entitlement and the owner-or-manager gate decide every use.
+    /// On in development, off in production (`space_flag`).
+    pub(crate) agent_self_api_api: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -735,6 +743,7 @@ impl SpaceFeatureFlags {
             canvas_ui: space_flag("SPACE_CANVAS_UI"),
             private_panel_ui: space_flag("SPACE_PRIVATE_PANEL_UI"),
             space_memory_declassify_api: space_flag("SPACE_MEMORY_DECLASSIFY_API"),
+            agent_self_api_api: space_flag("SPACE_AGENT_SELF_API_API"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }

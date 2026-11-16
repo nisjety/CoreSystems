@@ -121,6 +121,8 @@ export const spaceAgentBindingsForGateway = query({
         approvalMode: binding.approvalMode,
         // EP-6 S9: the agent version this binding pins; absent follows the published version.
         pinnedVersion: binding.pinnedVersion,
+        // WS18-S5: the binding switch for agent self-API. Absent is off; projection only.
+        selfApiEnabled: binding.selfApiEnabled === true,
         // WS08-S5: who may wake this agent. Absent means `members`; projection only, the
         // gateway enforces it on the mention path.
         respondTo: binding.respondTo,
@@ -995,6 +997,79 @@ export const setSpaceAgentBindingPinForGateway = mutation({
       bindingRef,
       subjectId,
       pinnedVersion: requested ?? null,
+      projectionVersion: nextVersion,
+      changed: true,
+    };
+  },
+});
+
+/**
+ * WS18-S5: the binding switch for agent self-API. `enabled` turns one bound agent's self-API (the
+ * Space tools that act on the run's own thread) on or off in this room.
+ *
+ * The gateway has already checked that the caller is the Space's owner or a manager (the route
+ * `PUT /api/v1/spaces/{space_ref}/agents/{binding_ref}/self-api` and `spaces.set_agent_self_api`).
+ * This re-checks that the binding belongs to that Space and organization and is `active`, then
+ * bumps `projectionVersion`. It leaves `updatedAt` alone, as the pin does, so this switch never
+ * makes a second manager's wake-policy change look stale. The switch grants nothing: Control's
+ * run-action decision still decides every action. No content is read or stored, so Zero Data
+ * Retention organizations behave the same.
+ *
+ * Errors are stable strings the gateway maps to typed envelopes: `invalid_self_api_request`,
+ * `agent_binding_not_found`, `agent_binding_not_active`.
+ */
+export const setSpaceAgentSelfApiForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    bindingRef: v.string(),
+    enabled: v.boolean(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    bindingRef: string;
+    selfApiEnabled: boolean;
+    projectionVersion: number;
+    changed: boolean;
+  }> => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const spaceRef = args.spaceRef.trim();
+    const bindingRef = args.bindingRef.trim();
+    if (!spaceRef || !bindingRef) throw new Error("invalid_self_api_request");
+
+    const binding = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_binding_ref", (q: any) => q.eq("bindingRef", bindingRef))
+      .unique();
+    if (
+      !binding ||
+      (binding as any).spaceRef !== spaceRef ||
+      (binding as any).externalOrgId !== args.externalOrgId
+    ) {
+      throw new Error("agent_binding_not_found");
+    }
+    if ((binding as any).status !== "active") throw new Error("agent_binding_not_active");
+
+    const current = (binding as any).selfApiEnabled === true;
+    const projectionVersion = (binding as any).projectionVersion as number;
+    if (current === args.enabled) {
+      return { bindingRef, selfApiEnabled: current, projectionVersion, changed: false };
+    }
+
+    const nextVersion = projectionVersion + 1;
+    await ctx.db.patch(binding._id, {
+      selfApiEnabled: args.enabled,
+      projectionVersion: nextVersion,
+    });
+    return {
+      bindingRef,
+      selfApiEnabled: args.enabled,
       projectionVersion: nextVersion,
       changed: true,
     };

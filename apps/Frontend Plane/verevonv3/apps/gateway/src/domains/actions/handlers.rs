@@ -122,6 +122,7 @@ use super::dispatchers_spaces::ws17::{
     dispatch_spaces_open_private_panel, dispatch_spaces_withdraw_agent,
 };
 use super::dispatchers_spaces::ws17::dispatch_memory_declassify_to_space;
+use super::dispatchers_spaces::ws18::dispatch_spaces_set_agent_self_api;
 use super::dispatchers_spaces::ws19::{
     dispatch_spaces_restore_canvas_version, dispatch_spaces_save_canvas,
 };
@@ -1203,6 +1204,9 @@ pub(super) async fn execute_action(
         }
         "spaces.agent_binding.pin" => {
             boxed_dispatch(|| dispatch_spaces_set_agent_pin(&state, &user, &body.input)).await
+        }
+        "spaces.set_agent_self_api" => {
+            boxed_dispatch(|| dispatch_spaces_set_agent_self_api(&state, &user, &body.input)).await
         }
         "spaces.decide_approval" => {
             boxed_dispatch(|| {

@@ -14663,6 +14663,8 @@ fn spawn_run_dispatch(
     agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
     // Coordinator mode (`coordinator_forwarded`): sent as `RunAgentRequest.coordinator`, `false` for every other dispatch.
     coordinator: bool,
+    // The Space self-API tool profile (WS18-S5): `space_self_api`, or empty for every other run.
+    tool_profile: String,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -14793,6 +14795,8 @@ fn spawn_run_dispatch(
     run_agent_req.max_questions = max_questions;
     // Coordinator mode, decided by the caller (`coordinator_forwarded`): sent only while its switch is on.
     run_agent_req.coordinator = coordinator;
+    // The tool profile (WS18-S5): empty unless the run is a granted Space self-API turn; see `tool_profile_for_run`.
+    run_agent_req.tool_profile = tool_profile;
     // A wide-research run (EP-2 S8) delegates no wider than its org-clamped item cap: the narrower
     // of that cap and the server's own subagent budget, never wider than either.
     if let Some(wide) = wide_research {
@@ -15807,6 +15811,18 @@ fn agentic_run_stream(
             ),
             resume.is_some(),
         );
+        // The Space self-API tool profile (WS18-S5): `space_self_api` only for a Space-scoped agentic turn the gateway
+        // granted the feature, never for a zero-retention or waived run. Empty otherwise, so no other run changes.
+        let tool_profile = crate::space_routes::self_api::tool_profile_for_run(
+            crate::space_routes::self_api::space_self_api_enabled(),
+            &features,
+            &space_id,
+            zdr,
+            matches!(
+                retention_class,
+                Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+            ),
+        );
         // Construct the authenticated request before reporting the run as
         // started. A deterministic local credential/metadata failure is a
         // confirmed pre-dispatch rejection, not an ambiguous remote outage.
@@ -15858,6 +15874,7 @@ fn agentic_run_stream(
             wide_research,
             agent_tool_allowlist,
             coordinator,
+            tool_profile,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {

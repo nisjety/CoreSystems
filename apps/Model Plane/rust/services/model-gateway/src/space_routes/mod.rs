@@ -18,6 +18,7 @@ mod posts;
 mod revisions;
 mod runs;
 mod search;
+pub mod self_api;
 mod timeline;
 
 use crate::state::AppState;

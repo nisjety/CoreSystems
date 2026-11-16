@@ -202,6 +202,11 @@ export const spaceTables = {
     // follow the agent's published version. Written only by the setSpaceAgentBindingPinForGateway
     // mutation (spaceAgents.ts), the gateway's pin route and `spaces.agent_binding.pin` (EP-6 S9).
     pinnedVersion: v.optional(v.number()),
+    // WS18-S5: the binding switch for agent self-API (the run's own thread: rename, pin, later post
+    // card). ABSENT means off. Written only by `spaceAgents:setSpaceAgentSelfApiForGateway`, behind the
+    // gateway's owner-or-manager gate. It grants nothing: Control's run-action decision still decides
+    // every action, and the flag and the organization's posture are checked at the gateway.
+    selfApiEnabled: v.optional(v.boolean()),
     projectionVersion: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
