@@ -489,3 +489,20 @@ export function retractSpaceMemoryResultFrom(raw: unknown): RetractSpaceMemoryRe
   if (!memoryId || !spaceRef) throw new Error('invalid_memory_takeback_response')
   return { memoryId, spaceRef, deleted: row.deleted === true }
 }
+
+/**
+ * What restoring one withheld memory answers (WS17-D9, `memory.restore`): the row's id, with `restored` true when it is
+ * ordinary personal memory again. Written only through the action registry; a reply that does not match throws, and the
+ * caller reports the restore as not made.
+ */
+export interface RestoreMemoryResult {
+  memoryId: string
+  restored: boolean
+}
+
+export function restoreMemoryResultFrom(raw: unknown): RestoreMemoryResult {
+  const row = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const memoryId = typeof row.memory_id === 'string' ? row.memory_id.trim() : ''
+  if (!memoryId || row.restored !== true) throw new Error('invalid_memory_restore_response')
+  return { memoryId, restored: true }
+}

@@ -249,6 +249,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'memory.set_state': exempt('human_identity_or_security', 'external_write'),
   'memory.reset': exempt('irreversible_destructive', 'destructive'),
   'memory.remember': exempt('human_identity_or_security', 'external_write'),
+  // WS17-D9: a person restores one of their own withheld memories to personal memory. Human only: an agent never restores memory.
+  'memory.restore': exempt('human_identity_or_security', 'external_write'),
   'memory.profile.save': exempt('human_identity_or_security', 'external_write'),
   'memory.profile.rebuild': exempt('human_identity_or_security', 'external_write'),
   'learning.accept_skill': exempt('agent_cannot_self_govern', 'context_write'),

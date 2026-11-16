@@ -426,6 +426,7 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         // WS17-S7: share one of the caller's personal memories into a Space room under a Control
         // `model.memory.declassify` decision in the body. Static, so it wins over `:memory_id` (DELETE only).
         .route("/v1/memories/declassify", post(declassify_memory_entry))
+        .route("/v1/memories/:memory_id/restore", post(restore_memory_entry))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
         // Space memory for the Space's owner or admin (EP-8 S7). POST so the Control
         // `model.space.memory.manage` decision rides in the body, never a URL; Session Core
@@ -17686,6 +17687,98 @@ fn declassify_error(status: &tonic::Status) -> HttpJsonError {
     )
 }
 
+/// The upper bound of a restore's memory id, in bytes (WS17 D9).
+const RESTORE_MAX_ID_BYTES: usize = 200;
+
+/// `POST /v1/memories/:memory_id/restore` (WS17 D9): the signed-in owner restores one withheld legacy row to personal
+/// memory. Zero Data Retention is refused first, as the typed catalogue refusal. Session Core re-checks the owner, the
+/// row and every thread it is linked to; the body names no org or user.
+async fn restore_memory_entry(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(memory_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::RestoreMemoryRequest;
+    require_non_zdr_durable_mutation(&claims)?;
+    let memory_id = memory_id.trim();
+    if memory_id.is_empty() || memory_id.len() > RESTORE_MAX_ID_BYTES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"code": "invalid_request", "message": "A valid memory id is required.", "details": {}}})),
+        ));
+    }
+    let response = state
+        .memory_client
+        .clone()
+        .restore_memory(authenticated_session_request(
+            RestoreMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                memory_id: memory_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| restore_error(&status))?
+        .into_inner();
+    Ok(Json(json!({ "memory_id": memory_id, "restored": response.restored })))
+}
+
+/// Session Core's refusal of a restore. A typed ZDR refusal keeps its catalogue body (412). A refusal of the restore
+/// (409) names its closed reason, and any other reason reads as `unknown`. Nothing else from the upstream message crosses.
+fn restore_error(status: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(status) {
+        return crate::zdr_posture::http(&refusal);
+    }
+    let (http, code, message, details) = match status.code() {
+        tonic::Code::FailedPrecondition => (
+            StatusCode::CONFLICT,
+            "memory_restore_refused",
+            "This memory cannot be restored.",
+            json!({ "reason": restore_reason(status.message()) }),
+        ),
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
+            StatusCode::FORBIDDEN,
+            "memory_restore_not_authorized",
+            "Restoring this memory is not authorized.",
+            json!({}),
+        ),
+        tonic::Code::NotFound => (
+            StatusCode::NOT_FOUND,
+            "memory_not_found",
+            "The memory is not available.",
+            json!({}),
+        ),
+        tonic::Code::InvalidArgument => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The restore request is not valid.",
+            json!({}),
+        ),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "memory_restore_unavailable",
+            "Restoring memory is temporarily unavailable.",
+            json!({}),
+        ),
+    };
+    (
+        http,
+        Json(json!({"error": {"code": code, "message": message, "details": details}})),
+    )
+}
+
+/// The closed reason of a restore refusal: the token after `memory_restore_refused:`, or `unknown` for anything else.
+fn restore_reason(message: &str) -> &'static str {
+    match message.strip_prefix("memory_restore_refused:") {
+        Some("not_withheld") => "not_withheld",
+        Some("thread_is_shared_room") => "thread_is_shared_room",
+        Some("thread_kind_unknown") => "thread_kind_unknown",
+        _ => "unknown",
+    }
+}
+
 /// Erases one named agent's memory in a Space, under a Control Space memory decision issued for
 /// that agent (EP-6 P3). Session Core verifies the decision and is the authority; the erase is not
 /// gated by the agent switch, so rows written while it was on go too. Allowed under every posture,
@@ -23274,6 +23367,13 @@ mod user_profile_route_tests {
             &self,
             _: TonicRequest<pb::DeclassifyMemoryRequest>,
         ) -> Result<TonicResponse<pb::DeclassifyMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn restore_memory(
+            &self,
+            _: TonicRequest<pb::RestoreMemoryRequest>,
+        ) -> Result<TonicResponse<pb::RestoreMemoryResponse>, Status> {
             unused()
         }
 

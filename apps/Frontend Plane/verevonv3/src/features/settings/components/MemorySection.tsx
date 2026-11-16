@@ -10,6 +10,7 @@ import {
   PROFILE_NOT_ENABLED,
   rebuildProfile,
   resetMemory,
+  restoreMemoryResultFrom,
   saveProfile,
   setMemoryState,
   type MemoryControls,
@@ -18,7 +19,10 @@ import {
   type MemoryState,
   type UserProfileResult,
 } from '@/shared/api/memory-client'
-import { ApiError } from '@/shared/api/api-error'
+import { ApiError, hasErrorCode } from '@/shared/api/api-error'
+import { executeAction } from '@/shared/actions/action-client'
+import type { ActionActor } from '@/shared/actions/types'
+import { getSession } from '@/shared/session/session-store'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { MemoryDeclassifyDialog } from '@/features/spaces/components/MemoryDeclassifyDialog'
@@ -182,6 +186,44 @@ function profileLength(text: string): number {
   return [...text].length
 }
 
+/** The signed-in actor for an action, or `null` while the session has no user or organisation (nothing is sent then). */
+function currentActor(): ActionActor | null {
+  const session = getSession()
+  const userId = session.user?.id ?? ''
+  const orgId = session.activeOrg?.id ?? ''
+  return userId && orgId ? { type: 'human', userId, orgId } : null
+}
+
+/**
+ * The sentence for a failed restore. A refusal names its reason in the error details, and each reason has its own copy;
+ * any other failure reads as the generic line.
+ */
+function restoreErrorMessage(err: unknown, i18n: ReturnType<typeof useI18n>): string {
+  if (hasErrorCode(err, 'memory_restore_refused')) {
+    const details = err instanceof ApiError ? err.details : null
+    const reason = details && !Array.isArray(details) ? details.reason : undefined
+    if (reason === 'thread_is_shared_room') {
+      return i18n.tr(
+        'Notatet kommer fra et delt rom, så det kan ikke gjenopprettes.',
+        'This note came from a shared room, so it cannot be restored.',
+      )
+    }
+    if (reason === 'thread_kind_unknown') {
+      return i18n.tr(
+        'Rommet notatet kommer fra har ikke registrert sin type ennå, så det kan ikke gjenopprettes ennå.',
+        'The room this note came from has not recorded its type yet, so it cannot be restored yet.',
+      )
+    }
+    if (reason === 'not_withheld') {
+      return i18n.tr('Dette minnet er allerede gjenopprettet.', 'This memory is already restored.')
+    }
+  }
+  return translateApiError(err, i18n.tr, {
+    no: 'Kunne ikke gjenopprette minnet.',
+    en: 'Could not restore the memory.',
+  })
+}
+
 export function MemorySection() {
   const i18n = useI18n()
   const [memories, { refetch }] = createResource(() => listMemories())
@@ -202,6 +244,8 @@ export function MemorySection() {
   const [shareOffered] = createResource(() => memoryDeclassifyOffered())
   // The personal memory whose share dialog is open.
   const [sharingEntry, setSharingEntry] = createSignal<MemoryEntry | null>(null)
+  // WS17-D9: the withheld row being restored, if any (one at a time).
+  const [restoringId, setRestoringId] = createSignal<string | null>(null)
 
   const list = createMemo(() => memories()?.memories ?? [])
   const degraded = createMemo(() => memories()?.degraded ?? false)
@@ -336,6 +380,26 @@ export function MemorySection() {
       )
     } finally {
       setBusyId(null)
+    }
+  }
+
+  // WS17-D9: a withheld row is restored by its owner through the action registry (`memory.restore`). Session Core refuses a
+  // row whose room is a shared room, or whose room type is not recorded yet, and the refusal says which.
+  const handleRestore = async (entry: MemoryEntry) => {
+    const who = currentActor()
+    if (restoringId() !== null || !who) return
+    setRestoringId(entry.memoryId)
+    setActionError(null)
+    try {
+      const execution = await executeAction('memory.restore', who, { memoryId: entry.memoryId })
+      restoreMemoryResultFrom(execution.result)
+      await refetch()
+    } catch (err) {
+      setActionError(restoreErrorMessage(err, i18n))
+      // A refusal can mean the row changed under us (already restored), so the list is read afresh either way.
+      await refetch()
+    } finally {
+      setRestoringId(null)
     }
   }
 
@@ -581,8 +645,8 @@ export function MemorySection() {
                         <span
                           class="verevon-trust-chip"
                           aria-label={i18n.tr(
-                            'Lært i et delt rom før beskyttelsen kom. Ingen samtale husker dette. Du kan beholde eller slette det.',
-                            'Learned in a shared room before protection existed. No conversation recalls it. You can keep or delete it.',
+                            'Lært i et delt rom før beskyttelsen kom. Ingen samtale husker dette. Du kan beholde, gjenopprette eller slette det.',
+                            'Learned in a shared room before protection existed. No conversation recalls it. You can keep, restore or delete it.',
                           )}
                         >
                           {i18n.tr('Tilbakeholdt – lært i et delt rom', 'Withheld – learned in a shared room')}
@@ -594,6 +658,18 @@ export function MemorySection() {
                     </span>
                   </div>
                   <div>
+                    <Show when={entry.withheldReason}>
+                      <SettingsButton
+                        settingsSize="sm"
+                        disabled={restoringId() !== null}
+                        onClick={() => void handleRestore(entry)}
+                        aria-label={`${i18n.tr('Gjenopprett minne', 'Restore memory')}: ${entry.content}`}
+                      >
+                        <Show when={restoringId() === entry.memoryId} fallback={i18n.tr('Gjenopprett', 'Restore')}>
+                          <Loader2 size={14} aria-hidden="true" /> {i18n.tr('Gjenoppretter…', 'Restoring…')}
+                        </Show>
+                      </SettingsButton>{' '}
+                    </Show>
                     <Show when={shareOffered() === true && !entry.withheldReason}>
                       <SettingsButton
                         settingsSize="sm"

@@ -53,7 +53,7 @@ use super::dispatchers::{
     dispatch_learning_undo, dispatch_mcp_delete_server,
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
-    dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset,
+    dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset, dispatch_memory_restore,
     dispatch_memory_set_state, dispatch_monitoring_check_now,
     dispatch_monitoring_create_monitor, dispatch_monitoring_delete_monitor,
     dispatch_navbar_create_calendar_event,
@@ -474,6 +474,9 @@ pub(super) async fn execute_action(
         }
         "memory.remember" => {
             boxed_dispatch(|| dispatch_memory_remember(&state, &user, &headers, &body.input)).await
+        }
+        "memory.restore" => {
+            boxed_dispatch(|| dispatch_memory_restore(&state, &user, &headers, &body.input)).await
         }
         "learning.accept_skill" => {
             boxed_dispatch(|| dispatch_learning_accept_skill(&state, &user, &headers, &body.input))

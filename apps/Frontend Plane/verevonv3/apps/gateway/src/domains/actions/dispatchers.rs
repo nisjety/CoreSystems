@@ -72,7 +72,8 @@ use crate::domains::learning::{
 };
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
 use crate::domains::memory::{
-    delete_memory, remember_memory, reset_memory, set_memory_controls, RememberBody, ResetBody,
+    delete_memory, remember_memory, reset_memory, restore_memory, set_memory_controls, RememberBody,
+    ResetBody,
     SetControlsBody,
 };
 use crate::domains::monitoring::{
@@ -3573,6 +3574,30 @@ pub(super) async fn dispatch_memory_delete(
     .into_response();
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("memory.delete", user, status, payload)
+}
+
+// WS17-D9: the owner restores one withheld row, through memory.rs's real restore handler (the same user-bound hop and
+// tokens as memory.delete; the browser never names whose memory it restores).
+pub(super) async fn dispatch_memory_restore(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let memory_id = ticket_string(input, "memoryId");
+    if memory_id.is_empty() {
+        return ticket_bad_request("memory.restore requires a non-empty 'memoryId'");
+    }
+    let response = restore_memory(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(memory_id.to_owned()),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("memory.restore", user, status, payload)
 }
 
 // The three memory actions below reuse memory.rs's handlers for the same reason

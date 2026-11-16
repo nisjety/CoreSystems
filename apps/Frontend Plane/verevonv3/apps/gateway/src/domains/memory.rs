@@ -64,6 +64,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/memory/{id}",
             patch(correct_memory).delete(delete_memory),
         )
+        .route("/api/v1/memory/{id}/restore", post(restore_memory))
         // Per-org/user rate limiting, ordered like `agents_runs.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first →
@@ -449,6 +450,25 @@ pub(crate) async fn remember_memory(
         Method::POST,
         "/v1/memories",
         Some(json!({ "thread_id": thread_id, "content": content })),
+    )
+    .await
+}
+
+/// `POST /api/v1/memory/{id}/restore` (WS17-D9): the signed-in owner restores one withheld row to personal memory. Only
+/// the row id crosses; org and user come from the verified session on the far side, and Session Core decides.
+pub(crate) async fn restore_memory(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(memory_id): Path<String>,
+) -> impl IntoResponse {
+    forward_memory(
+        &state,
+        &user,
+        &headers,
+        Method::POST,
+        &format!("/v1/memories/{}/restore", urlencoding::encode(&memory_id)),
+        None,
     )
     .await
 }

@@ -4216,6 +4216,13 @@ mod tests {
             Err(Status::unimplemented("declassify_memory not needed in test"))
         }
 
+        async fn restore_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::RestoreMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::RestoreMemoryResponse>, Status> {
+            Err(Status::unimplemented("restore_memory not needed in test"))
+        }
+
         async fn health(
             &self,
             _: Request<mp_contracts::model_plane::v1::MemoryHealthRequest>,

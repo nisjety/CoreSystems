@@ -10,6 +10,7 @@ use crate::{
     memory_control::{MemoryAccess, OrgMemoryPolicy},
     write_policy,
 };
+use crate::space::memory_scope::ORIGIN_ROOM_UNVERIFIED;
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
@@ -19,7 +20,8 @@ use mp_contracts::model_plane::v1::{
     GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse,
     ListMemoryRequest, ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest,
     MemoryHealthResponse, MemoryState, RebuildUserProfileRequest, ResetMemoryRequest,
-    ResetMemoryResponse, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest,
+    ResetMemoryResponse, RestoreMemoryRequest, RestoreMemoryResponse, SearchMemoryRequest,
+    SearchMemoryResponse, SetMemoryControlsRequest,
     SetMemoryControlsResponse, SetUserProfileRequest, UserProfile, UserProfileResponse,
 };
 use sqlx::PgPool;
@@ -591,6 +593,190 @@ impl MemoryGrpc {
         metrics::counter!("mp_session_space_memory_declassified_total", "op" => "retract").increment(1);
         Ok(Response::new(delete_response(true, None)))
     }
+
+    /// `RestoreMemory` (WS17 D9): the owner restores one withheld legacy row to ordinary personal memory. A person,
+    /// for their own row only. A ZDR caller is refused before the row or its threads are read: restoring makes a row
+    /// recallable, which is a durable mutation. The row and its threads are checked in `restore_withheld_row`.
+    async fn restore_withheld_memory(
+        &self,
+        caller: &VerifiedIdentity,
+        req: &RestoreMemoryRequest,
+    ) -> Result<Response<RestoreMemoryResponse>, Status> {
+        let (org_id, user_id, memory_id) = (req.org_id.trim(), req.user_id.trim(), req.memory_id.trim());
+        caller.authorize_org(org_id)?;
+        if caller.zdr() {
+            return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition));
+        }
+        if caller.is_service() {
+            return Err(Status::permission_denied("withheld memory is restored by its owner"));
+        }
+        caller.authorize_user(user_id)?;
+        if memory_id.is_empty() {
+            return Err(Status::invalid_argument("memory_id is required"));
+        }
+        restore_withheld_row(&self.pool, org_id, user_id, memory_id).await?;
+        // Ids only, never content: who restored which withheld row.
+        tracing::info!(org_id, memory_id, actor = user_id, "withheld memory restored to personal memory by its owner");
+        metrics::counter!("mp_session_withheld_memory_restored_total", "outcome" => "restored").increment(1);
+        Ok(Response::new(RestoreMemoryResponse { restored: true }))
+    }
+}
+
+/// The refusal code of a `RestoreMemory` refusal: the failed-precondition message `memory_restore_refused:<reason>`.
+const RESTORE_REFUSED: &str = "memory_restore_refused";
+
+/// Why a withheld row may not be restored (WS17 D9). `reason()` is the closed token the gateway passes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreRefusal {
+    /// The row is not withheld: it is already ordinary personal memory.
+    NotWithheld,
+    /// A thread the row is linked to is in a shared room: its stored kind is anything but `personal`.
+    ThreadIsSharedRoom,
+    /// The room status cannot be verified: a linked thread is in a Space whose kind was never recorded, a linked
+    /// thread no longer exists, or the row links to no thread at all. Unknown is refused, never guessed.
+    ThreadKindUnknown,
+}
+
+impl RestoreRefusal {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::NotWithheld => "not_withheld",
+            Self::ThreadIsSharedRoom => "thread_is_shared_room",
+            Self::ThreadKindUnknown => "thread_kind_unknown",
+        }
+    }
+
+    fn status(self) -> Status {
+        Status::failed_precondition(format!("{}:{}", RESTORE_REFUSED, self.reason()))
+    }
+}
+
+/// A thread a withheld row is linked to, as the restore reads it: its Space and the Control kind stamped on it.
+struct LinkedThread {
+    id: String,
+    space_id: Option<String>,
+    space_kind: Option<String>,
+}
+
+/// The threads a withheld row is linked to: its session, and each `thread:<id>` source link, each once.
+fn restore_linked_threads(session_id: Option<&str>, source_links: &[String]) -> Vec<String> {
+    let session = session_id.map(str::trim).filter(|id| !id.is_empty());
+    let from_links = source_links
+        .iter()
+        .filter_map(|link| link.strip_prefix("thread:"))
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let mut linked: Vec<String> = Vec::new();
+    for id in session.into_iter().chain(from_links) {
+        if !linked.iter().any(|known| known == id) {
+            linked.push(id.to_owned());
+        }
+    }
+    linked
+}
+
+/// The rule over the threads of a withheld row (WS17 D9), pure: every linked thread must be a `personal` thread or sit
+/// in no Space. Any other stored kind is a shared room, which is refused and wins over an unknown one. A missing
+/// thread, a Space whose kind was never recorded, or no linked thread at all is unknown, and is refused.
+fn restore_verdict(linked: &[String], threads: &[LinkedThread]) -> Result<(), RestoreRefusal> {
+    if linked.is_empty() {
+        return Err(RestoreRefusal::ThreadKindUnknown);
+    }
+    let mut unknown = false;
+    for id in linked {
+        let Some(thread) = threads.iter().find(|thread| &thread.id == id) else {
+            unknown = true;
+            continue;
+        };
+        let kind = thread.space_kind.as_deref().map(str::trim).filter(|kind| !kind.is_empty());
+        let in_space = thread
+            .space_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|space| !space.is_empty());
+        match kind {
+            Some("personal") => {}
+            Some(_) => return Err(RestoreRefusal::ThreadIsSharedRoom),
+            None if in_space => unknown = true,
+            None => {}
+        }
+    }
+    if unknown {
+        Err(RestoreRefusal::ThreadKindUnknown)
+    } else {
+        Ok(())
+    }
+}
+
+/// `RestoreMemory`'s write (WS17 D9): one transaction moves a withheld row of the owner's to personal memory. The row
+/// is locked and read with the owner, scope and currency in its predicate, and each linked thread is read under a
+/// share lock, so a thread cannot be stamped with its kind between the verdict and the change. Only the origin and the
+/// Space reference change: the content, kind, links and every other column are untouched.
+async fn restore_withheld_row(pool: &PgPool, org_id: &str, owner: &str, memory_id: &str) -> Result<(), Status> {
+    let mut tx = pool.begin().await.map_err(|e| Status::internal(e.to_string()))?;
+    let row: Option<(String, Option<String>, Vec<String>)> = sqlx::query_as(
+        "SELECT origin_kind, session_id, source_links FROM agent_memory \
+         WHERE id = $1 AND org_id = $2 AND owner = $3 AND scope = 'user' \
+           AND review_state = 'accepted' AND is_latest = true \
+           AND (expires_at IS NULL OR expires_at > now()) \
+         FOR UPDATE",
+    )
+    .bind(memory_id)
+    .bind(org_id)
+    .bind(owner)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    let Some((origin_kind, session_id, source_links)) = row else {
+        return Err(Status::not_found("memory not found"));
+    };
+    let verdict = if origin_kind == ORIGIN_ROOM_UNVERIFIED {
+        let linked = restore_linked_threads(session_id.as_deref(), &source_links);
+        let threads: Vec<LinkedThread> = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT id, space_id, space_kind FROM threads WHERE org_id = $1 AND id = ANY($2) FOR SHARE",
+        )
+        .bind(org_id)
+        .bind(linked.as_slice())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .into_iter()
+        .map(|(id, space_id, space_kind)| LinkedThread {
+            id,
+            space_id,
+            space_kind,
+        })
+        .collect();
+        restore_verdict(&linked, &threads)
+    } else {
+        Err(RestoreRefusal::NotWithheld)
+    };
+    if let Err(refusal) = verdict {
+        tx.rollback().await.map_err(|e| Status::internal(e.to_string()))?;
+        // Ids and a closed reason only: which withheld row could not be restored, and why.
+        tracing::info!(org_id, memory_id, actor = owner, reason = refusal.reason(), "withheld memory restore refused");
+        metrics::counter!("mp_session_withheld_memory_restored_total", "outcome" => refusal.reason()).increment(1);
+        return Err(refusal.status());
+    }
+    let restored: Option<String> = sqlx::query_scalar(
+        "UPDATE agent_memory SET origin_kind = 'personal', space_ref = NULL \
+         WHERE id = $1 AND org_id = $2 AND owner = $3 AND scope = 'user' \
+           AND origin_kind = 'room_unverified' \
+         RETURNING id",
+    )
+    .bind(memory_id)
+    .bind(org_id)
+    .bind(owner)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    if restored.is_none() {
+        tx.rollback().await.map_err(|e| Status::internal(e.to_string()))?;
+        return Err(Status::aborted("memory restore raced; retry"));
+    }
+    tx.commit().await.map_err(|e| Status::internal(e.to_string()))?;
+    Ok(())
 }
 
 fn timestamp(at: DateTime<Utc>) -> prost_types::Timestamp {
@@ -1461,6 +1647,15 @@ impl MemoryService for MemoryGrpc {
         let caller = identity(&request)?;
         let req = request.into_inner();
         self.declassify_space_memory(&caller, &req).await
+    }
+
+    async fn restore_memory(
+        &self,
+        request: Request<RestoreMemoryRequest>,
+    ) -> Result<Response<RestoreMemoryResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        self.restore_withheld_memory(&caller, &req).await
     }
 
     async fn erase_agent_memory(

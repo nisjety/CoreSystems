@@ -93,6 +93,11 @@ service MemoryService {
   // transaction inserts the `declassified` room row and its ledger row. User callers only, for
   // themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check.
   rpc DeclassifyMemory(DeclassifyMemoryRequest) returns (DeclassifyMemoryResponse);
+
+  // WS17 D9: the owner restores one withheld legacy row (origin `room_unverified`) to ordinary personal memory,
+  // once every thread the row is linked to is verified not to be a shared room. User callers only, for
+  // themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check. Ids only.
+  rpc RestoreMemory(RestoreMemoryRequest) returns (RestoreMemoryResponse);
 }
 
 message SearchMemoryRequest {
@@ -651,4 +656,21 @@ message DeclassifyMemoryRequest {
 message DeclassifyMemoryResponse {
   string memory_id = 1;
   bool deduplicated = 2;
+}
+
+// WS17 D9: restore one withheld legacy memory row to the owner's personal memory. Ids only, never content.
+message RestoreMemoryRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The owner of the row. Must be the caller.
+  string user_id = 2;
+
+  // The withheld row: a `user`-scope row owned by the caller whose origin is `room_unverified`.
+  string memory_id = 3;
+}
+
+// The restore's answer. `restored` is true when the row is ordinary personal memory again.
+message RestoreMemoryResponse {
+  bool restored = 1;
 }

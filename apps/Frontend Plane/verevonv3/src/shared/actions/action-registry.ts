@@ -699,6 +699,17 @@ const memoryDeleteInput = z.object({
   memoryId: z.string().min(1),
 })
 
+// WS17-D9: the owner restores one withheld memory (learned in a shared room before containment) to personal memory.
+// Whose memory it is comes from the session; the gateway and Session Core decide whether its room is a shared room.
+const memoryRestoreInput = z.object({
+  memoryId: z.string().min(1),
+})
+
+const memoryRestoreOutput = z.object({
+  memory_id: z.string(),
+  restored: z.boolean(),
+})
+
 // The caller's own memory state; whose memory it is comes from the session.
 const memorySetStateInput = z.object({
   state: z.enum(['on', 'paused', 'off']),
@@ -4322,6 +4333,18 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: memoryRememberInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'memory.restore',
+    label: 'Restore memory',
+    description:
+      'Restore one memory learned in a shared room before protection existed to your own personal memory, so your conversations may recall it again. Refused when the room it came from is a shared room or its type is not recorded yet. Refused under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: memoryRestoreInput,
+    outputSchema: memoryRestoreOutput,
   },
   {
     id: 'memory.profile.save',
