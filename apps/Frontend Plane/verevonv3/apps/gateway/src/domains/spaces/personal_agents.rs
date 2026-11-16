@@ -43,6 +43,8 @@ const PERSONAL_AGENTS_SURFACE: &str = "personal_agents";
 /// Control's typed 403 on an organization-agent registration: the caller is not an active organization
 /// member (`CodeAgentAccessForbidden` in Control's `agent_registry.go`).
 const AGENT_ACCESS_FORBIDDEN: &str = "agent_access_forbidden";
+/// Control's typed 422 on an organization-agent registration: the subject id or the visibility and add policy pair is not valid.
+const AGENT_POLICY_INVALID: &str = "agent_policy_invalid";
 
 /// The WS17-S5 routes, merged by `module_routes()` in `spaces/mod.rs`.
 pub(super) fn routes() -> Router<AppState> {
@@ -751,9 +753,11 @@ pub(crate) async fn withdraw_agent_core(
 /// Control admission for a room bind (WS17-S5), run before the Convex bind. An org definition Control
 /// does not know yet is registered first (org-visible, anyone; the binder is recorded as the registrant,
 /// not an owner, because Control keeps an org definition ownerless), then admitted under Control's
-/// `AdmitDenial`. Control's typed refusals pass through unchanged: 403 `agent_access_forbidden` on the
-/// registration (the caller is not an active organization member), 403 `agent_not_addable` with
-/// `details.reason`, 404 `agent_not_found`, 409, 422. Any other registration failure is the 503.
+/// `AdmitDenial`. Control's typed refusals pass through unchanged: on the registration, 403
+/// `agent_access_forbidden` (the caller is not an active organization member) and 422 `agent_policy_invalid`
+/// (the subject id or the visibility and add policy pair is not valid); on the admission, 403 `agent_not_addable` with
+/// `details.reason`, 404 `agent_not_found`, 409 and 422. Any other registration failure is the 503, and so is an
+/// admission outage.
 pub(crate) async fn admit_for_bind(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -781,13 +785,13 @@ pub(crate) async fn admit_for_bind(
     let subject = subject_of(agent_ref);
     if str_field(&definition, "visibility") != "owner" {
         // A 409 means another registrant holds the id; admission below decides, so only an outage
-        // stops the bind here. Control's typed 403 `agent_access_forbidden` is relayed unchanged; any
-        // other refusal is the retryable 503.
+        // stops the bind here. Control's typed 403 `agent_access_forbidden` and 422 `agent_policy_invalid`
+        // are relayed unchanged; any other refusal is the retryable 503.
         let (registered, registration) =
             register_subject(state, user, org_id, &subject, "org", "anyone").await;
-        if registered == StatusCode::FORBIDDEN
-            && registration.pointer("/error/code").and_then(Value::as_str)
-                == Some(AGENT_ACCESS_FORBIDDEN)
+        let typed = registration.pointer("/error/code").and_then(Value::as_str);
+        if (registered == StatusCode::FORBIDDEN && typed == Some(AGENT_ACCESS_FORBIDDEN))
+            || (registered == StatusCode::UNPROCESSABLE_ENTITY && typed == Some(AGENT_POLICY_INVALID))
         {
             return Err((registered, Json(registration)));
         }

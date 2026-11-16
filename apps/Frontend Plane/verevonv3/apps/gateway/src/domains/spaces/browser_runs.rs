@@ -56,7 +56,7 @@ use crate::{
     envelope::{error, error_with_details, unwrap_data},
     middleware::AuthenticatedUser,
     upstream::{authorized_org_id, proxy_json},
-    zdr::{self, OrgZdrPosture},
+    zdr::{self, OrgPosture, OrgZdrPosture},
 };
 
 const DEFAULT_LIST_LIMIT: u32 = 20;
@@ -179,7 +179,8 @@ fn zdr_browser_refusal() -> Reply {
 }
 
 /// Zero Data Retention fails closed before any Control call: the request's own flag, then the org's posture. A
-/// failed lookup is 503, never "not zero retention".
+/// failed lookup is 503, never "not zero retention". The room reads (R2 to R4) keep this cached posture; the start
+/// takes [`zdr_start_gate`] instead, which reads the posture live.
 async fn zdr_gate(state: &AppState, user: &AuthenticatedUser, headers: &HeaderMap) -> Option<Reply> {
     if zdr::request_zdr(headers, None) {
         return Some(zdr_browser_refusal());
@@ -188,6 +189,28 @@ async fn zdr_gate(state: &AppState, user: &AuthenticatedUser, headers: &HeaderMa
         OrgZdrPosture::Disabled => None,
         OrgZdrPosture::Enabled => Some(zdr_browser_refusal()),
         OrgZdrPosture::Unknown => Some((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(zdr::zdr_refusal_body(zdr::ZDR_DECISION_UNAVAILABLE)),
+        )),
+    }
+}
+
+/// The start's zero-retention gate: the same order and the same typed answers as [`zdr_gate`], but the org's
+/// posture is read live from org-core (`org_posture_live`), never through the 60-second cache. A run persists its
+/// thread and its goal, so an org that has just turned ZDR on is refused at once. It runs before any Control call.
+async fn zdr_start_gate(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    org_id: &str,
+) -> Option<Reply> {
+    if zdr::request_zdr(headers, None) {
+        return Some(zdr_browser_refusal());
+    }
+    match zdr::org_posture_live(state, user, org_id).await {
+        OrgPosture::NotZdr => None,
+        OrgPosture::Zdr => Some(zdr_browser_refusal()),
+        OrgPosture::Unknown => Some((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(zdr::zdr_refusal_body(zdr::ZDR_DECISION_UNAVAILABLE)),
         )),
@@ -958,7 +981,7 @@ pub(crate) async fn submit_start(
     if !valid_space_ref(space_ref) {
         return start_refusal(StatusCode::BAD_REQUEST, "invalid_space", "A Space reference is required.");
     }
-    if let Some(refusal) = zdr_gate(state, user, headers).await {
+    if let Some(refusal) = zdr_start_gate(state, user, headers, &org_id).await {
         return refusal;
     }
     let start = match parse_start(body) {
