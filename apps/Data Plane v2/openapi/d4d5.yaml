@@ -957,6 +957,31 @@ paths:
         '404': { description: canvas_not_found or canvas_version_not_found }
         '409': { description: canvas_head_moved or idempotency_key_conflict }
 
+  # ── Room canvas purge (WS19-S8; Space-deletion coordinator only; not behind WIKISTORE_SPACE_CANVAS) ──
+  # The bearer must be the verified service principal service:control-space-deletion with scope data:space-canvas:delete.
+  # No X-Space-Decision header. The org is the bearer's org. The receipt is top-level, not wrapped in data.
+  /v1/internal/space-canvas/purge:
+    post:
+      summary: Purge one Space's canvas and versions, then fence the Space against a later create
+      tags: [space-canvas]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [deletion_request_id, space_ref, idempotency_key]
+              properties:
+                deletion_request_id: { type: string, maxLength: 512 }
+                space_ref: { type: string, maxLength: 256 }
+                idempotency_key: { type: string, maxLength: 256 }
+      responses:
+        '200': { description: "Receipt with request_id, owner_plane data, space_ref, canvases_purged, versions_purged and owner_outcome succeeded" }
+        '400': { description: invalid_canvas_request }
+        '403': { description: canvas_purge_not_authorized or insufficient_scope }
+        '503': { description: canvas_unavailable }
+
   # ── Graph (Rust service :9203 admin port) ─────────────────────────────
   /v1/graphs/{org_id}:
     get:

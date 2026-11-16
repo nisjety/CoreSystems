@@ -228,7 +228,7 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The head read below returns no content and feeds only the operation and canvas id that the digest binds. Save runs
-	// after the digest matches, and it re-reads the canvas under its lock.
+	// after the digest matches, and it refuses unless the canvas it finds under the Space lock is this same canvas (WS19-S8).
 	activeID, err := h.repo.ActiveCanvasID(r.Context(), bearer.OrgID, spaceRef)
 	if err != nil {
 		writeCanvasStoreError(w, err)
@@ -257,6 +257,7 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 	res, err := h.repo.Save(r.Context(), canvas.SaveInput{
 		OrgID:             bearer.OrgID,
 		SpaceRef:          spaceRef,
+		CanvasID:          activeID,
 		ExpectedVersionID: body.ExpectedVersionID,
 		Content:           body.Content,
 		Summary:           summary,
@@ -316,6 +317,7 @@ func (h *CanvasHandler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 	res, err := h.repo.Restore(r.Context(), canvas.RestoreInput{
 		OrgID:                bearer.OrgID,
 		SpaceRef:             spaceRef,
+		CanvasID:             activeID,
 		RestoreFromVersionID: versionID,
 		ExpectedVersionID:    body.ExpectedVersionID,
 		IdempotencyKey:       body.IdempotencyKey,

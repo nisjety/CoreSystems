@@ -160,6 +160,8 @@ func main() {
 	}
 	log.Info().Bool("space_canvas", cfg.SpaceCanvasEnabled).Int("control_decision_keys", len(canvasKeys)).Msg("room canvas posture")
 	canvasHandler := handler.NewCanvasHandler(canvas.NewRepo(pool), cfg.SpaceCanvasEnabled, canvasKeys)
+	// WS19-S8 canvas purge for Space deletion. It is not gated by the canvas flag (see MountCanvasPurgeRoute).
+	canvasPurgeHandler := handler.NewCanvasPurgeHandler(canvas.NewRepo(pool))
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
@@ -174,6 +176,7 @@ func main() {
 
 	handler.MountRoutes(r, authMiddleware, wikiHandler)
 	handler.MountCanvasRoutes(r, authMiddleware, canvasHandler)
+	handler.MountCanvasPurgeRoute(r, authMiddleware, canvasPurgeHandler)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
 	srv := &http.Server{Addr: addr, Handler: r}

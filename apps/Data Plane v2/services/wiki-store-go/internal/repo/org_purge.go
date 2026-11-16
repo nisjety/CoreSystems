@@ -31,9 +31,10 @@
 //     the entire Operating Map tree for that org.
 //   - wiki_event_outbox                   — its own org_id column, no FK to
 //     wiki_pages; purged explicitly.
-//   - space_canvases, space_canvas_versions — the room canvas (WS19). Each
-//     carries its own org_id; purged explicitly by canvas.PurgeOrgTx, versions
-//     first, inside this transaction.
+//   - space_canvases, space_canvas_versions, space_canvas_purges — the room
+//     canvas and its Space purge fences (WS19). Each carries its own org_id;
+//     purged explicitly by canvas.PurgeOrgTx, versions first, inside this
+//     transaction.
 //
 // Does NOT purge documents, chunks, embeddings, graph data, or retrieval
 // traces for the org: those tables live in sibling Data Plane v2 services

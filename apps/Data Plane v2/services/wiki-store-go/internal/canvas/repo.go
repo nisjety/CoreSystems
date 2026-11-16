@@ -139,11 +139,13 @@ type VersionPage struct {
 	NextBefore *int
 }
 
-// SaveInput is one save. ExpectedVersionID is the head the editor opened from. Nil means the editor believes the Space
-// has no canvas yet.
+// SaveInput is one save. CanvasID is the canvas the Control decision named: the Space's active canvas for a save, or ""
+// for a create. The write refuses unless the canvas it finds under the lock is exactly that one. ExpectedVersionID is the
+// head the editor opened from. Nil means the editor believes the Space has no canvas yet.
 type SaveInput struct {
 	OrgID             string
 	SpaceRef          string
+	CanvasID          string
 	ExpectedVersionID *string
 	Content           string
 	Summary           *string
@@ -152,10 +154,12 @@ type SaveInput struct {
 	Provenance        Provenance
 }
 
-// RestoreInput copies the text of one version of the same canvas into a new head, stamped change_kind restore.
+// RestoreInput copies the text of one version of the same canvas into a new head, stamped change_kind restore. CanvasID is
+// the canvas the decision named and is required: a restore never lands in any other canvas.
 type RestoreInput struct {
 	OrgID                string
 	SpaceRef             string
+	CanvasID             string
 	RestoreFromVersionID string
 	ExpectedVersionID    *string
 	IdempotencyKey       string
@@ -290,6 +294,7 @@ func (r *Repo) Save(ctx context.Context, in SaveInput) (WriteResult, error) {
 		op:       opSave,
 		orgID:    in.OrgID,
 		spaceRef: in.SpaceRef,
+		canvasID: in.CanvasID,
 		expected: in.ExpectedVersionID,
 		content:  in.Content,
 		summary:  summary,
@@ -304,6 +309,9 @@ func (r *Repo) Save(ctx context.Context, in SaveInput) (WriteResult, error) {
 func (r *Repo) Restore(ctx context.Context, in RestoreInput) (WriteResult, error) {
 	if err := validateScope(in.OrgID, in.SpaceRef); err != nil {
 		return WriteResult{}, err
+	}
+	if in.CanvasID == "" {
+		return WriteResult{}, invalidRequest("a restore must name the canvas the decision covers")
 	}
 	if err := validateAuthor(in.Author); err != nil {
 		return WriteResult{}, err
@@ -326,6 +334,7 @@ func (r *Repo) Restore(ctx context.Context, in RestoreInput) (WriteResult, error
 		op:          opRestore,
 		orgID:       in.OrgID,
 		spaceRef:    in.SpaceRef,
+		canvasID:    in.CanvasID,
 		expected:    in.ExpectedVersionID,
 		restoreFrom: in.RestoreFromVersionID,
 		idemKey:     in.IdempotencyKey,
@@ -440,8 +449,9 @@ func (r *Repo) GetVersion(ctx context.Context, orgID, spaceRef, versionID string
 	})
 }
 
-// PurgeSpace hard-deletes every canvas of one Space and its versions. It runs on the unscoped pool, so RLS does not
-// apply: every statement filters by org_id as well as space_ref. A replay finds nothing and returns zero counts.
+// PurgeSpace hard-deletes every canvas of one Space and its versions, then fences the Space so no canvas can be created
+// for it again. It runs on the unscoped pool, so RLS does not apply: every statement filters by org_id as well as
+// space_ref. A replay finds nothing and returns zero counts.
 func (r *Repo) PurgeSpace(ctx context.Context, orgID, spaceRef string) (PurgeCounts, error) {
 	if err := validateScope(orgID, spaceRef); err != nil {
 		return PurgeCounts{}, err
@@ -451,6 +461,11 @@ func (r *Repo) PurgeSpace(ctx context.Context, orgID, spaceRef string) (PurgeCou
 		return PurgeCounts{}, fmt.Errorf("begin canvas space purge: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit succeeds
+
+	// The same lock writeTx takes: a write that holds it finishes first, and a later create finds the fence below.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, spaceLockKey(orgID, spaceRef)); err != nil {
+		return PurgeCounts{}, fmt.Errorf("lock canvas space for purge: %w", err)
+	}
 
 	versions, err := tx.Exec(ctx, `DELETE FROM space_canvas_versions
 		WHERE org_id = $1
@@ -463,14 +478,19 @@ func (r *Repo) PurgeSpace(ctx context.Context, orgID, spaceRef string) (PurgeCou
 	if err != nil {
 		return PurgeCounts{}, fmt.Errorf("purge canvases: %w", err)
 	}
+	// The fence stops a create decided before the deletion from landing after it. It is written even when the Space never
+	// had a canvas. A replay finds it already present.
+	if _, err := tx.Exec(ctx, `INSERT INTO space_canvas_purges (org_id, space_ref) VALUES ($1, $2) ON CONFLICT DO NOTHING`, orgID, spaceRef); err != nil {
+		return PurgeCounts{}, fmt.Errorf("record canvas space fence: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return PurgeCounts{}, fmt.Errorf("commit canvas space purge: %w", err)
 	}
 	return PurgeCounts{CanvasesPurged: canvases.RowsAffected(), VersionsPurged: versions.RowsAffected()}, nil
 }
 
-// PurgeOrgTx hard-deletes every canvas and version of one org inside the caller's transaction (HardPurgeByOrg), versions
-// first. Both statements filter by org_id. The caller runs them unscoped, as HardPurgeByOrg does.
+// PurgeOrgTx hard-deletes every canvas, version and Space fence of one org inside the caller's transaction (HardPurgeByOrg),
+// versions first. Every statement filters by org_id. The caller runs them unscoped, as HardPurgeByOrg does.
 func PurgeOrgTx(ctx context.Context, tx pgx.Tx, orgID string) (PurgeCounts, error) {
 	if strings.TrimSpace(orgID) == "" {
 		return PurgeCounts{}, errors.New("canvas: an org id is required")
@@ -483,6 +503,9 @@ func PurgeOrgTx(ctx context.Context, tx pgx.Tx, orgID string) (PurgeCounts, erro
 	if err != nil {
 		return PurgeCounts{}, fmt.Errorf("purge canvases: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM space_canvas_purges WHERE org_id = $1`, orgID); err != nil {
+		return PurgeCounts{}, fmt.Errorf("purge canvas space fences: %w", err)
+	}
 	return PurgeCounts{CanvasesPurged: canvases.RowsAffected(), VersionsPurged: versions.RowsAffected()}, nil
 }
 
@@ -491,6 +514,7 @@ type writeOp struct {
 	op          string
 	orgID       string
 	spaceRef    string
+	canvasID    string // the canvas the decision named; "" for a create
 	expected    *string
 	content     string // save: the new text
 	restoreFrom string // restore: the version whose text is copied
@@ -507,19 +531,18 @@ func (r *Repo) write(ctx context.Context, w writeOp) (WriteResult, error) {
 	})
 }
 
-// writeTx runs the write algorithm. The canvas row is locked first, so writers to one Space are serialised. Every check
-// after that reads the head under the lock.
+// writeTx runs the write algorithm. The Space's advisory lock is taken first, then the canvas row, so writers to one Space
+// are serialised and a purge cannot interleave with them. Every check after that reads the head under the locks.
 func writeTx(ctx context.Context, tx pgx.Tx, w writeOp) (WriteResult, error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, spaceLockKey(w.orgID, w.spaceRef)); err != nil {
+		return WriteResult{}, fmt.Errorf("lock canvas space: %w", err)
+	}
 	cv, found, err := findActiveCanvas(ctx, tx, w.orgID, w.spaceRef, true)
 	if err != nil {
 		return WriteResult{}, err
 	}
-	if !found && w.op == opRestore {
-		return WriteResult{}, &Error{Code: CodeCanvasNotFound, Message: "the Space has no canvas"}
-	}
-	if !found && w.expected != nil {
-		// The editor opened a canvas that is gone: never created here, or purged.
-		return WriteResult{}, &Error{Code: CodeHeadMoved, Message: "the canvas head moved"}
+	if err := bindDecidedCanvas(ctx, tx, w, cv, found); err != nil {
+		return WriteResult{}, err
 	}
 
 	// The text this write stores: the save's own text, or the text of the restored version.
@@ -687,6 +710,70 @@ func writeTx(ctx context.Context, tx pgx.Tx, w writeOp) (WriteResult, error) {
 		Inserted:      true,
 		HeadVersionID: versionID,
 	}, nil
+}
+
+// bindDecidedCanvas refuses a write that would land anywhere but the canvas its Control decision named. Called under the
+// Space lock and the canvas row lock, so no purge or concurrent writer can change the answer before the write. An empty
+// CanvasID is a create: the Space must still have no canvas, and a purged Space is fenced and cannot take one. A save or
+// restore must find exactly its canvas. Every refusal stores nothing.
+func bindDecidedCanvas(ctx context.Context, tx pgx.Tx, w writeOp, cv Canvas, found bool) error {
+	if w.canvasID == "" {
+		if found {
+			return headMovedAt(ctx, tx, w.orgID, cv)
+		}
+		if w.expected != nil {
+			// The editor opened a canvas that is gone: never created here, or purged.
+			return &Error{Code: CodeHeadMoved, Message: "the canvas head moved"}
+		}
+		fenced, err := spaceCanvasFenced(ctx, tx, w.orgID, w.spaceRef)
+		if err != nil {
+			return err
+		}
+		if fenced {
+			return &Error{Code: CodeCanvasNotFound, Message: "the Space has no canvas"}
+		}
+		return nil
+	}
+	if !found {
+		if w.op == opRestore {
+			return &Error{Code: CodeCanvasNotFound, Message: "the Space has no canvas"}
+		}
+		return &Error{Code: CodeHeadMoved, Message: "the canvas head moved"}
+	}
+	if cv.CanvasID != w.canvasID {
+		return headMovedAt(ctx, tx, w.orgID, cv)
+	}
+	return nil
+}
+
+// headMovedAt is the typed head-moved refusal, naming the canvas's current head.
+func headMovedAt(ctx context.Context, tx pgx.Tx, orgID string, cv Canvas) error {
+	var head *Version
+	if cv.HeadVersionID != nil {
+		h, err := loadVersion(ctx, tx, orgID, cv.CanvasID, *cv.HeadVersionID, false)
+		if err != nil {
+			return fmt.Errorf("load canvas head: %w", err)
+		}
+		head = &h
+	}
+	return &Error{Code: CodeHeadMoved, Message: "the canvas head moved since you opened it", Head: headRefOf(head)}
+}
+
+// spaceCanvasFenced reports whether the Space was purged. A fenced Space never takes a new canvas.
+func spaceCanvasFenced(ctx context.Context, tx pgx.Tx, orgID, spaceRef string) (bool, error) {
+	var fenced bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM space_canvas_purges WHERE org_id = $1 AND space_ref = $2)`,
+		orgID, spaceRef).Scan(&fenced); err != nil {
+		return false, fmt.Errorf("read canvas space fence: %w", err)
+	}
+	return fenced, nil
+}
+
+// spaceLockKey names the advisory lock that serialises the writes to one Space and the purge of that Space. The database
+// hashes the key, as the retrieval engine does for its Space locks.
+func spaceLockKey(orgID, spaceRef string) string {
+	return "space_canvas:" + orgID + ":" + spaceRef
 }
 
 // checkWriteLimits applies the per-run and per-author write limits inside the write transaction. The counts use the
