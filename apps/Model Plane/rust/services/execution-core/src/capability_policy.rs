@@ -423,21 +423,25 @@ struct ModelActionViewRequest<'a> {
     control_view_token: &'a str,
 }
 
+// Capability Core adds fields to this response over time: `reason_code` on the
+// data object when it omits a row, and `level` and `autonomy_rung` on each
+// tool in view v2 (WS18-S2). Unknown fields are therefore tolerated, so an
+// addition cannot refuse the whole view or a parked resume. None of them is
+// read here, and none grants anything: `resolve` still checks the run binding,
+// the tool name, the parameter bytes, the schema hash and approval. WS18-S4
+// must read `level` before it offers any row.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ModelActionViewEnvelope {
     data: ModelActionViewData,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ModelActionViewData {
     run_id: String,
     actions: Vec<ModelActionViewTool>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ModelActionViewTool {
     name: String,
     description: String,
