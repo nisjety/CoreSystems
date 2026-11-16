@@ -120,6 +120,22 @@ service SpaceBrowserRead {
   // The Space a run belongs to, read for execution-core's three-way Space agreement. The caller must be
   // the run's owner. An empty `space_id` names a run that is not in a Space.
   rpc ResolveRunSpace(ResolveRunSpaceRequest) returns (ResolveRunSpaceResponse);
+
+  // The room's browser runs of one Space, newest first (WS20-S4, R2). Unlike the two reads above, each
+  // room read carries the caller's Control `model.thread.read` decision for this Space, which Session
+  // Core verifies (signature, org, subject, window), refuses for a removed member, and bounds to the
+  // decision's audience ceiling. The projection is content-free: ids, the starter's subject id, the
+  // run phase, the step count and at most eight hosts. Never a goal, URL, title, rationale, selector,
+  // frame or evidence byte.
+  rpc ListRoomBrowserRuns(ListRoomBrowserRunsRequest) returns (ListRoomBrowserRunsResponse);
+
+  // One page of a browser run's room timeline (WS20-S4, R3), read through the closed projection
+  // allowlist. Only the event types the projector names leave the database.
+  rpc ReadRoomBrowserTimeline(ReadRoomBrowserTimelineRequest) returns (ReadRoomBrowserTimelineResponse);
+
+  // Whether an evidence id is one of the run's persisted observations (WS20-S4, R4). Returns the Quarry
+  // artifact reference model-gateway fetches; Session Core never returns the bytes.
+  rpc AuthorizeRoomBrowserEvidence(AuthorizeRoomBrowserEvidenceRequest) returns (AuthorizeRoomBrowserEvidenceResponse);
 }
 
 message CountActiveRoomBrowserRunsRequest {
@@ -147,4 +163,115 @@ message ResolveRunSpaceRequest {
 message ResolveRunSpaceResponse {
   // The run's Space, or empty when the run is not in a Space.
   string space_id = 1;
+}
+
+message ListRoomBrowserRunsRequest {
+  // The Space whose runs are listed. The decision below must name this Space.
+  string space_id = 1;
+  // Empty lists every thread of the Space; set, only that thread's runs (it must belong to the Space).
+  string thread_id = 2;
+  // 1 to 50; zero takes the default of 20.
+  uint32 limit = 3;
+  // The run id of the last run of the previous page; empty for the first page.
+  string before_run_id = 4;
+  // The Control `model.thread.read` decision reference and token for this Space.
+  string space_read_decision_ref = 5;
+  string space_read_decision_token = 6;
+}
+
+message ListRoomBrowserRunsResponse {
+  repeated RoomBrowserRun runs = 1;
+  // Pass as `before_run_id` for the next page; empty when the list is complete.
+  string next_run_id = 2;
+  // Unix seconds after which this verdict no longer holds (the decision's expiry, capped).
+  int64 valid_until_unix = 3;
+}
+
+// One browser run of a Space as the room may see it. Ids, the starter's subject id, the honest phase,
+// counts and hosts only.
+message RoomBrowserRun {
+  string run_id = 1;
+  string thread_id = 2;
+  // The starter: the run owner's subject id.
+  string started_by_subject_id = 3;
+  // The honest run phase (`queued`, `running`, `completed`, `failed`, `cancelled`).
+  string phase = 4;
+  int64 started_at_unix = 5;
+  // Zero while the run is not finished.
+  int64 finished_at_unix = 6;
+  // Distinct hosts the run acted on, first seen first, at most eight. Hosts only, never a URL.
+  repeated string hosts = 7;
+  // The run's browser actions so far.
+  uint32 step_count = 8;
+}
+
+message ReadRoomBrowserTimelineRequest {
+  string space_id = 1;
+  string run_id = 2;
+  // The event id of the last event the caller already read; empty starts at the beginning.
+  string after_event_id = 3;
+  // 1 to 200; zero takes the default of 50.
+  uint32 limit = 4;
+  string space_read_decision_ref = 5;
+  string space_read_decision_token = 6;
+}
+
+message ReadRoomBrowserTimelineResponse {
+  RoomBrowserRunHeader run = 1;
+  repeated RoomBrowserEvent events = 2;
+  // Pass as `after_event_id` for the next page; empty when the timeline has no more events.
+  string next_event_id = 3;
+  // Unix seconds after which this verdict no longer holds.
+  int64 valid_until_unix = 4;
+}
+
+// The run a timeline belongs to, without its hosts or counts.
+message RoomBrowserRunHeader {
+  string run_id = 1;
+  string thread_id = 2;
+  string started_by_subject_id = 3;
+  string phase = 4;
+  int64 started_at_unix = 5;
+  int64 finished_at_unix = 6;
+}
+
+// One projected timeline row. Only the fields the projector names are set; a field that does not apply
+// to the kind is empty.
+message RoomBrowserEvent {
+  // The events table id; the cursor the next page starts after.
+  string event_id = 1;
+  int64 at_unix = 2;
+  // action, observation, paused, resumed, approval_required, approval_decided, handoff_requested,
+  // handoff_resolved, result.
+  string kind = 3;
+  // The agent's action id of the step the row belongs to.
+  string step = 4;
+  string action_type = 5;
+  // The host of the page or action target. Never a full URL.
+  string host = 6;
+  string status = 7;
+  string risk_category = 8;
+  // An observation's screenshot reference; read through AuthorizeRoomBrowserEvidence.
+  string evidence_id = 9;
+  string approval_id = 10;
+  // approval_decided: the decision as recorded.
+  string decision = 11;
+  // handoff_requested: the closed hand-off kind.
+  string handoff_kind = 12;
+  // handoff_resolved and result: the closed outcome.
+  string outcome = 13;
+}
+
+message AuthorizeRoomBrowserEvidenceRequest {
+  string space_id = 1;
+  string run_id = 2;
+  // The evidence id the timeline named (an observation's screenshot reference).
+  string evidence_id = 3;
+  string space_read_decision_ref = 4;
+  string space_read_decision_token = 5;
+}
+
+message AuthorizeRoomBrowserEvidenceResponse {
+  // The Quarry artifact reference to fetch. It is the evidence id, once checked against the run.
+  string artifact_id = 1;
 }

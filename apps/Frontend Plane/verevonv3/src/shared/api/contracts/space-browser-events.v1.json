@@ -1,0 +1,101 @@
+{
+  "contract": "space-browser-events",
+  "schemaVersion": 1,
+  "planRef": "WS20-S4 room-safe read (build plan 3.E, WS20)",
+  "owner": "Session Core SpaceBrowserRead projector (space/browser_read.rs), relayed by model-gateway space_routes/browser.rs and the gateway domains/spaces/browser_runs.rs",
+  "decision": "SD-23: room members see receipts only (ids, starter, phase, counts, hosts, closed timeline fields); live frames for the starter only",
+  "authority": {
+    "read": "Control model.thread.read decision for the Space, verified by Session Core (signature, org, subject, window, zero-retention claim), a removed-member refusal, and the decision's audience ceiling",
+    "zdr": "typed refusal feature_not_supported(browser_run) at every layer; a zero-retention caller or org answers 412 before any Control call",
+    "rollout": "SPACE_BROWSER_RUN_API (model-gateway and gateway space_features.browser_run); off answers 404 feature_unavailable; never an authorization input"
+  },
+  "routes": {
+    "R2": {
+      "gateway": "GET /api/v1/spaces/{space_ref}/browser-runs?thread_id=&limit=&cursor=",
+      "modelGateway": "GET /v1/spaces/{space_id}/browser/runs",
+      "sessionCore": "SpaceBrowserRead.ListRoomBrowserRuns",
+      "limit": { "default": 20, "max": 50 },
+      "response": { "data": "RoomBrowserRun[]", "meta": { "next_cursor": "run id or null" } },
+      "runFields": ["run_id", "thread_id", "started_by.subject_id", "phase", "started_at", "finished_at", "hosts", "step_count", "control.mode", "handoff.open", "view.scope"]
+    },
+    "R3": {
+      "gateway": "GET /api/v1/spaces/{space_ref}/browser-runs/{run_id}/timeline?after=&limit=",
+      "modelGateway": "GET /v1/spaces/{space_id}/browser/runs/{run_id}/timeline",
+      "sessionCore": "SpaceBrowserRead.ReadRoomBrowserTimeline",
+      "limit": { "default": 50, "max": 200 },
+      "response": { "data": { "run": "RoomBrowserRunHeader", "events": "RoomBrowserEvent[]", "next_event_id": "event id or null", "valid_until": "RFC 3339" } }
+    },
+    "R4": {
+      "gateway": "GET /api/v1/spaces/{space_ref}/browser-runs/{run_id}/evidence/{evidence_id}",
+      "modelGateway": "GET /v1/spaces/{space_id}/browser/runs/{run_id}/evidence/{evidence_id}",
+      "sessionCore": "SpaceBrowserRead.AuthorizeRoomBrowserEvidence (the id must be an observation screenshot reference of this run); the bytes come from Quarry GET /v1/artifacts/{id} with model-gateway's scrape:read",
+      "response": "image bytes (image/png, image/jpeg or image/webp)",
+      "headers": {
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox"
+      },
+      "maxBytes": 4194304
+    }
+  },
+  "closedKinds": ["action", "observation", "paused", "resumed", "approval_required", "approval_decided", "handoff_requested", "handoff_resolved", "result"],
+  "timelineRow": {
+    "always": ["event_id", "at", "kind"],
+    "optional": ["step", "action_type", "host", "status", "risk_category", "evidence_id", "approval_id", "decision", "handoff_kind", "outcome"],
+    "perKind": {
+      "action": { "source": "BROWSER_ACTION_DISPATCHED", "fields": ["step", "action_type", "host"] },
+      "observation": { "source": "BROWSER_OBSERVATION_RECEIVED", "fields": ["step", "status", "host", "evidence_id"] },
+      "paused": { "source": "BROWSER_RUN_PAUSED", "fields": [] },
+      "resumed": { "source": "BROWSER_RUN_RESUMED", "fields": [] },
+      "approval_required": { "source": "BROWSER_ACTION_APPROVAL_REQUIRED", "fields": ["step", "action_type", "host", "risk_category", "approval_id"] },
+      "approval_decided": { "source": "BROWSER_ACTION_DECIDED", "fields": ["step", "approval_id", "decision"] },
+      "handoff_requested": { "source": "BROWSER_HANDOFF_REQUESTED (WS20-S7, not yet written)", "fields": ["host", "handoff_kind", "approval_id"] },
+      "handoff_resolved": { "source": "BROWSER_HANDOFF_RESOLVED (WS20-S7, not yet written)", "fields": ["approval_id", "outcome"] },
+      "result": { "source": "RUN_COMPLETED or RUN_FAILED", "fields": ["outcome"], "outcomes": ["completed", "failed"] }
+    }
+  },
+  "runRow": {
+    "hosts": "at most 8, distinct, first seen first, bare lowercase hostnames only",
+    "stepCount": "count of BROWSER_ACTION_DISPATCHED rows",
+    "control": "mode is agent only until the Quarry lease (WS20-S6) exists",
+    "handoff": "open is false until WS20-S7 exists",
+    "view": "scope is owner until the room view exists (SD-23)"
+  },
+  "hostRule": {
+    "keep": "the lowercase hostname of the URL, after the scheme, userinfo, port, path, query and fragment are dropped",
+    "drop": "an IP literal (bracketed or dotted) yields no host; any byte outside [a-z0-9.-] yields no host",
+    "examples": [
+      { "input": "https://Shop.Example.test:8443/cart?id=7#top", "host": "shop.example.test" },
+      { "input": "https://user:pass@fixture.test/login", "host": "fixture.test" },
+      { "input": "http://[::1]/", "host": null }
+    ]
+  },
+  "droppedFields": [
+    "goal and any model text",
+    "reason (the model's rationale)",
+    "page_title and any title",
+    "url and page_url (full URLs)",
+    "selector and dom_snapshot_ref",
+    "decided_by (the approver's subject)",
+    "frames, screenshots bytes and any content",
+    "unknown event types (every type outside the closedKinds sources)"
+  ],
+  "sampleProjection": {
+    "input": {
+      "BROWSER_ACTION_DISPATCHED": { "action_id": "a1", "action_type": "navigate", "url": "https://fixture.test/pricing?ref=team", "reason": "open the pricing page" },
+      "BROWSER_OBSERVATION_RECEIVED": { "action_id": "a1", "status": "ok", "page_url": "https://fixture.test/pricing?ref=team", "page_title": "Pricing", "screenshot_ref": "art_01SHOT", "dom_snapshot_ref": "dom_01" },
+      "BROWSER_ACTION_APPROVAL_REQUIRED": { "action_id": "a2", "action_type": "click", "url": "https://fixture.test/buy", "selector": "#buy", "reason": "purchase", "risk_category": "purchase", "approval_id": "appr_01" },
+      "BROWSER_ACTION_DECIDED": { "action_id": "a2", "approval_id": "appr_01", "decision": "denied", "decided_by": "user_owner_01" }
+    },
+    "output": [
+      { "event_id": "evt_1", "at": "2026-10-20T10:00:01Z", "kind": "action", "step": "a1", "action_type": "navigate", "host": "fixture.test" },
+      { "event_id": "evt_2", "at": "2026-10-20T10:00:03Z", "kind": "observation", "step": "a1", "status": "ok", "host": "fixture.test", "evidence_id": "art_01SHOT" },
+      { "event_id": "evt_3", "at": "2026-10-20T10:00:09Z", "kind": "approval_required", "step": "a2", "action_type": "click", "host": "fixture.test", "risk_category": "purchase", "approval_id": "appr_01" },
+      { "event_id": "evt_4", "at": "2026-10-20T10:00:12Z", "kind": "approval_decided", "step": "a2", "approval_id": "appr_01", "decision": "denied" }
+    ]
+  },
+  "limitsOfThisContract": [
+    "The handoff kinds are closed words named by WS20-S7; their event names are UNVERIFIED until that slice lands.",
+    "This file is the golden for the projection. The Rust projector and the gateway reduction must reproduce sampleProjection; no test runs it in this wave."
+  ]
+}

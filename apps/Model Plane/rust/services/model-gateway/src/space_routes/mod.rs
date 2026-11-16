@@ -30,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .merge(approvals::router())
         .merge(artifacts::router())
         .merge(attention::router())
+        .merge(browser::router())
         .merge(posts::router())
         .merge(revisions::router())
         .merge(runs::router())

@@ -1,4 +1,6 @@
-//! Room browser run start, the model-gateway side of the Control decision (build plan WS20-S2, WS20-S3).
+//! Room browser run start, the model-gateway side of the Control decision (build plan WS20-S2, WS20-S3), and the
+//! room reads of the same runs (WS20-S4, R2 to R4: the list, the timeline and one evidence image). The reads carry the
+//! caller's Control `model.thread.read` decision in the query, as `artifacts.rs` does, and Session Core verifies it.
 //!
 //! `browser_run.rs` calls these in the start, after the zero-retention refusal and before any thread, run
 //! or grant is written:
@@ -19,12 +21,19 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use axum::{http::StatusCode, Json};
+use axum::{
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    Extension, Json, Router,
+};
 use chrono::Utc;
 use mp_contracts::model_plane::v1::{
-    browser_broker_client::BrowserBrokerClient,
-    space_browser_read_client::SpaceBrowserReadClient, CountActiveRoomBrowserRunsRequest,
-    DeriveRunGrantRequest, DeriveRunGrantResponse,
+    browser_broker_client::BrowserBrokerClient, space_browser_read_client::SpaceBrowserReadClient,
+    AuthorizeRoomBrowserEvidenceRequest, CountActiveRoomBrowserRunsRequest, DeriveRunGrantRequest,
+    DeriveRunGrantResponse, ListRoomBrowserRunsRequest, ReadRoomBrowserTimelineRequest,
+    RoomBrowserEvent, RoomBrowserRun, RoomBrowserRunHeader,
 };
 use mp_contracts::space_browser::{
     capacity_admits, check_audience_revisions_agree, goal_digest, profile_request_admitted,
@@ -38,8 +47,9 @@ use serde_json::{json, Value};
 use tonic::transport::Channel;
 use tracing::warn;
 
-use crate::auth::{VerifiedBrowserBearer, VerifiedSessionBearer};
+use crate::auth::{Claims, VerifiedBrowserBearer, VerifiedSessionBearer};
 use crate::browser_run::{authenticated_browser_request, keyed_run_key};
+use crate::quarry::QuarryError;
 use crate::session_flow::{SessionRun, ThreadSpaceContext};
 use crate::state::AppState;
 
@@ -576,4 +586,517 @@ pub(crate) async fn append_room_result(
         Some(metadata),
     )
     .await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Room reads (WS20-S4, R2 to R4): the room's list, the run's timeline and one evidence image.
+// ---------------------------------------------------------------------------------------------
+
+/// How long a Session Core room read may take before the read answers 503 rather than wait on it.
+const ROOM_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// The room read page sizes: the list's default and most, and the timeline's.
+const ROOM_LIST_DEFAULT_LIMIT: u32 = 20;
+const ROOM_LIST_MAX_LIMIT: u32 = 50;
+const ROOM_TIMELINE_DEFAULT_LIMIT: u32 = 50;
+const ROOM_TIMELINE_MAX_LIMIT: u32 = 200;
+/// The longest id a room read accepts, and the longest decision reference and token it carries.
+const ROOM_MAX_ID_BYTES: usize = 128;
+const ROOM_MAX_REF_BYTES: usize = 512;
+const ROOM_MAX_TOKEN_BYTES: usize = 8 * 1024;
+/// The largest evidence image a room read relays (WS20-S4, R4: 4 MB).
+pub(crate) const ROOM_MAX_EVIDENCE_BYTES: usize = 4 * 1024 * 1024;
+/// The image types an evidence read relays. Any other artifact type is refused before it leaves the gateway.
+const ROOM_EVIDENCE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
+
+/// The room read routes, merged by `space_routes::router`. User principals only: `authorize_principal_route`
+/// admits no service or API key here. The Control read decision is checked in Session Core, never in this file.
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/v1/spaces/:space_id/browser/runs", get(list_room_browser_runs))
+        .route(
+            "/v1/spaces/:space_id/browser/runs/:run_id/timeline",
+            get(read_room_browser_timeline),
+        )
+        .route(
+            "/v1/spaces/:space_id/browser/runs/:run_id/evidence/:evidence_id",
+            get(read_room_browser_evidence),
+        )
+}
+
+/// The Control read decision a room read carries in its query string, as `artifacts.rs` carries it. The pair is
+/// never logged or echoed here.
+#[derive(Debug, Default, Deserialize)]
+struct RoomReadDecisionQuery {
+    space_read_decision_ref: Option<String>,
+    space_read_decision_token: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ListRoomRunsQuery {
+    thread_id: Option<String>,
+    limit: Option<String>,
+    cursor: Option<String>,
+    space_read_decision_ref: Option<String>,
+    space_read_decision_token: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RoomTimelineQuery {
+    after: Option<String>,
+    limit: Option<String>,
+    space_read_decision_ref: Option<String>,
+    space_read_decision_token: Option<String>,
+}
+
+/// A room read id: non-empty, bounded, and free of control characters.
+fn room_id_ok(value: &str) -> bool {
+    !value.is_empty() && value.len() <= ROOM_MAX_ID_BYTES && !value.chars().any(char::is_control)
+}
+
+fn room_invalid() -> ApiError {
+    typed_error(StatusCode::BAD_REQUEST, "invalid_request", "the browser run request is invalid")
+}
+
+/// The one 403 for a caller that may not read this Space's runs, whatever the reason.
+fn room_not_authorized() -> ApiError {
+    typed_error(
+        StatusCode::FORBIDDEN,
+        "space_read_not_authorized",
+        "reading this Space's browser runs is not permitted",
+    )
+}
+
+/// The typed `browser_run` refusal of a zero-retention caller or turn (the catalogue body, 412).
+fn room_zdr_refused() -> ApiError {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(Refusal::feature_not_supported("browser_run").json_body()),
+    )
+}
+
+/// The 503 of a Session Core room read that failed, timed out or could not be reached.
+fn room_unavailable() -> ApiError {
+    typed_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session_unavailable",
+        "the Space's browser runs could not be read",
+    )
+}
+
+/// The gate every room read passes before Session Core is asked, each refusal failing closed in this order: the
+/// rollout switch (404 `feature_unavailable` while `SPACE_BROWSER_RUN_API` is off, the same switch as the start),
+/// the Space reference's shape, a user principal, the zero-retention posture of the credential (412), and the
+/// decision pair (403). Returns the decision pair, trimmed.
+fn room_read_gate(
+    state: &AppState,
+    claims: &Claims,
+    space_id: &str,
+    decision: (Option<&str>, Option<&str>),
+) -> Result<(String, String), ApiError> {
+    if !state.space_browser_run.enabled() {
+        return Err(typed_error(
+            StatusCode::NOT_FOUND,
+            "feature_unavailable",
+            "room browser runs are not enabled",
+        ));
+    }
+    if !room_id_ok(space_id.trim()) {
+        return Err(room_invalid());
+    }
+    if claims.user_id.trim().is_empty() {
+        return Err(room_not_authorized());
+    }
+    if crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))? {
+        return Err(room_zdr_refused());
+    }
+    let reference = decision.0.map(str::trim).unwrap_or_default();
+    let token = decision.1.map(str::trim).unwrap_or_default();
+    if reference.is_empty()
+        || reference.len() > ROOM_MAX_REF_BYTES
+        || token.is_empty()
+        || token.len() > ROOM_MAX_TOKEN_BYTES
+    {
+        return Err(room_not_authorized());
+    }
+    Ok((reference.to_owned(), token.to_owned()))
+}
+
+/// A page size from its query text: absent is the default, and a value outside `1..=most` is refused.
+fn room_limit(raw: Option<&str>, default: u32, most: u32) -> Result<u32, ApiError> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(default),
+        Some(value) => match value.parse::<u32>() {
+            Ok(limit) if (1..=most).contains(&limit) => Ok(limit),
+            _ => Err(typed_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "limit is out of range",
+            )),
+        },
+    }
+}
+
+/// The HTTP form of a Session Core room-read refusal. A zero-retention refusal is the typed catalogue body; the
+/// others are fixed words, never the upstream text. `not_found` is the code and message of a NotFound.
+fn room_read_refusal(status: &tonic::Status, not_found: (&'static str, &'static str)) -> ApiError {
+    warn!(code = ?status.code(), "room browser read refused");
+    if Refusal::from_status(status).is_some() {
+        return room_zdr_refused();
+    }
+    match status.code() {
+        tonic::Code::Unauthenticated => {
+            typed_error(StatusCode::UNAUTHORIZED, "unauthorized", "authentication required")
+        }
+        tonic::Code::PermissionDenied => room_not_authorized(),
+        tonic::Code::NotFound => typed_error(StatusCode::NOT_FOUND, not_found.0, not_found.1),
+        tonic::Code::InvalidArgument => room_invalid(),
+        _ => room_unavailable(),
+    }
+}
+
+/// A list row as the room sees it: ids, the starter's subject id, the phase, counts and hosts. The control, hand-off
+/// and view fields are fixed in this slice: no Quarry lease (WS20-S6), no hand-off (WS20-S7) and no room view
+/// (SD-23: the view stays with the starter) exist yet.
+fn room_run_json(run: &RoomBrowserRun) -> Value {
+    json!({
+        "run_id": run.run_id,
+        "thread_id": run.thread_id,
+        "started_by": { "subject_id": run.started_by_subject_id },
+        "phase": run.phase,
+        "started_at_unix": run.started_at_unix,
+        "finished_at_unix": unix_or_null(run.finished_at_unix),
+        "hosts": run.hosts,
+        "step_count": run.step_count,
+        "control": { "mode": "agent" },
+        "handoff": { "open": false },
+        "view": { "scope": "owner" },
+    })
+}
+
+fn room_header_json(run: &RoomBrowserRunHeader) -> Value {
+    json!({
+        "run_id": run.run_id,
+        "thread_id": run.thread_id,
+        "started_by": { "subject_id": run.started_by_subject_id },
+        "phase": run.phase,
+        "started_at_unix": run.started_at_unix,
+        "finished_at_unix": unix_or_null(run.finished_at_unix),
+        "control": { "mode": "agent" },
+        "handoff": { "open": false },
+        "view": { "scope": "owner" },
+    })
+}
+
+fn unix_or_null(value: i64) -> Value {
+    if value > 0 {
+        json!(value)
+    } else {
+        Value::Null
+    }
+}
+
+/// A timeline row as the room sees it: the event id, the time, the kind, and only the closed fields the projector
+/// set. An empty field is left out.
+fn room_event_json(event: &RoomBrowserEvent) -> Value {
+    let mut out = json!({
+        "event_id": event.event_id,
+        "at_unix": event.at_unix,
+        "kind": event.kind,
+    });
+    let optional = [
+        ("step", &event.step),
+        ("action_type", &event.action_type),
+        ("host", &event.host),
+        ("status", &event.status),
+        ("risk_category", &event.risk_category),
+        ("evidence_id", &event.evidence_id),
+        ("approval_id", &event.approval_id),
+        ("decision", &event.decision),
+        ("handoff_kind", &event.handoff_kind),
+        ("outcome", &event.outcome),
+    ];
+    for (key, value) in optional {
+        if !value.is_empty() {
+            out[key] = json!(value);
+        }
+    }
+    out
+}
+
+/// `GET /v1/spaces/:space_id/browser/runs` (WS20-S4, R2): the Space's browser runs, newest first, with the Control
+/// read decision in the query.
+async fn list_room_browser_runs(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSessionBearer,
+    Path(space_id): Path<String>,
+    Query(query): Query<ListRoomRunsQuery>,
+) -> Response {
+    let (reference, token) = match room_read_gate(
+        &state,
+        &claims,
+        &space_id,
+        (
+            query.space_read_decision_ref.as_deref(),
+            query.space_read_decision_token.as_deref(),
+        ),
+    ) {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let limit = match room_limit(
+        query.limit.as_deref(),
+        ROOM_LIST_DEFAULT_LIMIT,
+        ROOM_LIST_MAX_LIMIT,
+    ) {
+        Ok(limit) => limit,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let thread_id = query.thread_id.unwrap_or_default().trim().to_owned();
+    let cursor = query.cursor.unwrap_or_default().trim().to_owned();
+    if (!thread_id.is_empty() && !room_id_ok(&thread_id))
+        || (!cursor.is_empty() && !room_id_ok(&cursor))
+    {
+        return room_invalid().into_response();
+    }
+    let request = match session_request(
+        ListRoomBrowserRunsRequest {
+            space_id: space_id.trim().to_owned(),
+            thread_id,
+            limit,
+            before_run_id: cursor,
+            space_read_decision_ref: reference,
+            space_read_decision_token: token,
+        },
+        &bearer,
+    ) {
+        Ok(request) => request,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let mut client: SpaceBrowserReadClient<Channel> = state.space_browser_read_client.clone();
+    let reply = match tokio::time::timeout(ROOM_READ_TIMEOUT, client.list_room_browser_runs(request))
+        .await
+    {
+        Ok(Ok(reply)) => reply.into_inner(),
+        Ok(Err(status)) => {
+            return room_read_refusal(&status, ("run_not_found", "the browser runs are not available"))
+                .into_response()
+        }
+        Err(_elapsed) => return room_unavailable().into_response(),
+    };
+    let runs: Vec<Value> = reply.runs.iter().map(room_run_json).collect();
+    let next_cursor = if reply.next_run_id.is_empty() {
+        Value::Null
+    } else {
+        json!(reply.next_run_id)
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "runs": runs,
+            "next_cursor": next_cursor,
+            "valid_until": reply.valid_until_unix,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/spaces/:space_id/browser/runs/:run_id/timeline` (WS20-S4, R3): one page of the run's projected events.
+async fn read_room_browser_timeline(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSessionBearer,
+    Path((space_id, run_id)): Path<(String, String)>,
+    Query(query): Query<RoomTimelineQuery>,
+) -> Response {
+    let (reference, token) = match room_read_gate(
+        &state,
+        &claims,
+        &space_id,
+        (
+            query.space_read_decision_ref.as_deref(),
+            query.space_read_decision_token.as_deref(),
+        ),
+    ) {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let run_id = run_id.trim().to_owned();
+    if !room_id_ok(&run_id) {
+        return room_invalid().into_response();
+    }
+    let limit = match room_limit(
+        query.limit.as_deref(),
+        ROOM_TIMELINE_DEFAULT_LIMIT,
+        ROOM_TIMELINE_MAX_LIMIT,
+    ) {
+        Ok(limit) => limit,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let after = query.after.unwrap_or_default().trim().to_owned();
+    if !after.is_empty() && !room_id_ok(&after) {
+        return room_invalid().into_response();
+    }
+    let request = match session_request(
+        ReadRoomBrowserTimelineRequest {
+            space_id: space_id.trim().to_owned(),
+            run_id,
+            after_event_id: after,
+            limit,
+            space_read_decision_ref: reference,
+            space_read_decision_token: token,
+        },
+        &bearer,
+    ) {
+        Ok(request) => request,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let mut client: SpaceBrowserReadClient<Channel> = state.space_browser_read_client.clone();
+    let reply = match tokio::time::timeout(
+        ROOM_READ_TIMEOUT,
+        client.read_room_browser_timeline(request),
+    )
+    .await
+    {
+        Ok(Ok(reply)) => reply.into_inner(),
+        Ok(Err(status)) => {
+            return room_read_refusal(&status, ("run_not_found", "the browser run is not available"))
+                .into_response()
+        }
+        Err(_elapsed) => return room_unavailable().into_response(),
+    };
+    let events: Vec<Value> = reply.events.iter().map(room_event_json).collect();
+    let run = reply.run.as_ref().map_or(Value::Null, room_header_json);
+    let next_event_id = if reply.next_event_id.is_empty() {
+        Value::Null
+    } else {
+        json!(reply.next_event_id)
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "run": run,
+            "events": events,
+            "next_event_id": next_event_id,
+            "valid_until": reply.valid_until_unix,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/spaces/:space_id/browser/runs/:run_id/evidence/:evidence_id` (WS20-S4, R4): one evidence image. Session
+/// Core checks that the id is one of this run's observations; model-gateway then fetches the bytes from Quarry with
+/// its own `scrape:read` credential. The response is the image alone, sandboxed and never cached.
+async fn read_room_browser_evidence(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSessionBearer,
+    Path((space_id, run_id, evidence_id)): Path<(String, String, String)>,
+    Query(query): Query<RoomReadDecisionQuery>,
+) -> Response {
+    let (reference, token) = match room_read_gate(
+        &state,
+        &claims,
+        &space_id,
+        (
+            query.space_read_decision_ref.as_deref(),
+            query.space_read_decision_token.as_deref(),
+        ),
+    ) {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let run_id = run_id.trim().to_owned();
+    let evidence_id = evidence_id.trim().to_owned();
+    if !room_id_ok(&run_id) || !room_id_ok(&evidence_id) {
+        return room_invalid().into_response();
+    }
+    let request = match session_request(
+        AuthorizeRoomBrowserEvidenceRequest {
+            space_id: space_id.trim().to_owned(),
+            run_id,
+            evidence_id,
+            space_read_decision_ref: reference,
+            space_read_decision_token: token,
+        },
+        &bearer,
+    ) {
+        Ok(request) => request,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let mut client: SpaceBrowserReadClient<Channel> = state.space_browser_read_client.clone();
+    let artifact_id = match tokio::time::timeout(
+        ROOM_READ_TIMEOUT,
+        client.authorize_room_browser_evidence(request),
+    )
+    .await
+    {
+        Ok(Ok(reply)) => reply.into_inner().artifact_id,
+        Ok(Err(status)) => {
+            return room_read_refusal(&status, ("evidence_not_found", "the evidence is not available"))
+                .into_response()
+        }
+        Err(_elapsed) => return room_unavailable().into_response(),
+    };
+    let (content_type, bytes) = match state
+        .quarry
+        .artifact_bytes(&artifact_id, &claims.org_id, ROOM_MAX_EVIDENCE_BYTES)
+        .await
+    {
+        Ok(found) => found,
+        Err(QuarryError::Typed { status: 404 | 410, .. }) => {
+            return typed_error(
+                StatusCode::NOT_FOUND,
+                "evidence_not_found",
+                "the evidence is not available",
+            )
+            .into_response()
+        }
+        Err(QuarryError::Typed { status: 413, .. }) => {
+            return typed_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "evidence_too_large",
+                "the evidence is too large",
+            )
+            .into_response()
+        }
+        Err(error) => {
+            warn!(error_class = %error.log_class(), "room browser evidence fetch failed");
+            return typed_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "evidence_unavailable",
+                "the evidence is unavailable",
+            )
+            .into_response();
+        }
+    };
+    let media = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let Some(media_type) = ROOM_EVIDENCE_TYPES
+        .iter()
+        .copied()
+        .find(|allowed| *allowed == media.as_str())
+    else {
+        return typed_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "evidence_unsupported",
+            "this evidence cannot be shown",
+        )
+        .into_response();
+    };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, media_type),
+            (header::CACHE_CONTROL, "private, no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CONTENT_SECURITY_POLICY, "sandbox"),
+        ],
+        bytes,
+    )
+        .into_response()
 }

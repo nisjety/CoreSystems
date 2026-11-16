@@ -1056,6 +1056,79 @@ impl Client {
         Ok(raw)
     }
 
+    /// GET `/v1/artifacts/{id}` as bytes, for a room browser evidence image (WS20-S4, R4), with the
+    /// `scrape:read` credential this client already uses. Returns the upstream content type and the body.
+    /// A body larger than `max_bytes` is refused as HTTP 413 before it is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`QuarryError`] when the edge is unavailable, answers a refusal (a 404 stays a 404), or
+    /// the body is larger than `max_bytes`.
+    pub(crate) async fn artifact_bytes(
+        &self,
+        artifact_id: &str,
+        org_id: &str,
+        max_bytes: usize,
+    ) -> Result<(String, Vec<u8>), QuarryError> {
+        if !self.available() {
+            return Err(QuarryError::Unavailable);
+        }
+        let endpoint = format!("{}/v1/artifacts/{artifact_id}", self.base_url);
+        let mut retried_unauthorized = false;
+        let resp = loop {
+            let token = self.token(org_id, SCRAPE_SCOPES).await?;
+            let mut req = self.http.get(&endpoint);
+            if !token.is_empty() {
+                req = req.bearer_auth(&token);
+            }
+            if !org_id.is_empty() {
+                req = req.header("X-Quarry-Org", org_id);
+            }
+            let resp = attribution::apply(req).send().await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.invalidate_if_matches(org_id, SCRAPE_SCOPES, &token)
+                    .await?;
+                retried_unauthorized = true;
+                continue;
+            }
+            break resp;
+        };
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let raw = resp.text().await?;
+            return Err(QuarryError::Typed {
+                code: format!("HTTP_{status}"),
+                message: truncate(&raw, 200),
+                status,
+            });
+        }
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        if resp
+            .content_length()
+            .is_some_and(|length| length > u64::try_from(max_bytes).unwrap_or(u64::MAX))
+        {
+            return Err(QuarryError::Typed {
+                code: "HTTP_413".to_owned(),
+                message: "artifact is too large".to_owned(),
+                status: 413,
+            });
+        }
+        let bytes = resp.bytes().await?;
+        if bytes.len() > max_bytes {
+            return Err(QuarryError::Typed {
+                code: "HTTP_413".to_owned(),
+                message: "artifact is too large".to_owned(),
+                status: 413,
+            });
+        }
+        Ok((content_type, bytes.to_vec()))
+    }
+
     /// `GET /v1/agent/runs/{run_id}/procedure-draft` on the edge (Teach mode, F-t3-081), as the
     /// person who drove the run. `bearer` is that person's own `aud=quarry` credential, which the
     /// caller verified; it is never this gateway's service principal, because the edge checks the

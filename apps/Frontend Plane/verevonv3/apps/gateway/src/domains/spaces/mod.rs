@@ -50,6 +50,7 @@ mod message_search;
 pub(crate) mod mentions;
 mod timeline;
 mod pins;
+mod browser_runs;
 mod room_artifacts;
 pub(crate) mod run_live;
 pub(crate) mod sidebar;
@@ -1156,6 +1157,7 @@ fn module_routes() -> Router<AppState> {
         .merge(message_lifecycle::routes())
         .merge(message_search::routes())
         .merge(pins::routes())
+        .merge(browser_runs::routes())
         .merge(room_artifacts::routes())
         .merge(timeline::routes())
         .merge(run_live::routes())

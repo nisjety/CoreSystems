@@ -331,6 +331,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// never an authorization input: Quarry and model-gateway still decide each attach, and a Zero
     /// Data Retention run takes no attachment.
     pub(crate) browser_ai_run_attach_session: bool,
+    /// `SPACE_BROWSER_RUN_API` (WS20-S4): the room browser run reads, `GET /api/v1/spaces/{space_ref}/browser-runs`
+    /// (list), `.../browser-runs/{run_id}/timeline` and `.../browser-runs/{run_id}/evidence/{evidence_id}`. Off
+    /// answers 404 `feature_unavailable`. A rollout control, never an authorization input: Control's read decision,
+    /// Session Core's membership and audience checks, and the zero-retention refusals decide what a caller may read.
+    /// Production is off; dev may default on, through `space_flag`. The model-gateway switch of the same name gates
+    /// the start and the reads there too.
+    pub(crate) browser_run: bool,
     /// `CHAT_LOCALE_HINT` (WS16-S6): stamp the viewer's interface language (`nb-NO` or `en-US`) on
     /// the model-bound body as the request-scoped `locale` field. Off removes the field, whatever
     /// the browser sent. A rollout control, never an authorization input: the field is a framing
@@ -690,6 +697,7 @@ impl SpaceFeatureFlags {
             chat_media_transcripts: chat_media_transcripts_from(
                 env::var("CHAT_MEDIA_TRANSCRIPTS_ENABLED").ok().as_deref(),
             ),
+            browser_run: space_flag("SPACE_BROWSER_RUN_API"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
