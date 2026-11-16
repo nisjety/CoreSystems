@@ -955,6 +955,7 @@ impl SpaceRunActionsGrpc {
     }
 }
 
+#[tonic::async_trait]
 impl SpaceRunActions for SpaceRunActionsGrpc {
     async fn apply_run_thread_action(
         &self,
