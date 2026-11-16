@@ -1698,6 +1698,12 @@ message ThreadSummary {
   // read of that thread before it happens; a listing without a thread_id filter leaves it false and
   // it must not be read as "holds none". A flag only, never a retention class or run id.
   bool holds_retention_run = 30;
+
+  // Who set the title: "owner" (a person, or any write before WS18-S3) or "agent" (a run-bound agent
+  // action, WS18-S3). Presentation provenance only, never a grant.
+  string title_source = 31;
+  // Who set the pin: "owner" or "agent" (WS18-S3). Presentation provenance only, never a grant.
+  string pinned_source = 32;
 }
 
 message ListThreadsResponse {

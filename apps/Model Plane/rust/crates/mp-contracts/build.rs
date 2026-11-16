@@ -65,6 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/space_events.proto",
         "model_plane/v1/space_history.proto",
         "model_plane/v1/space_attention.proto",
+        // WS18-S3: SpaceRunActions (session-core's run-bound owner path for the agent self-API).
+        "model_plane/v1/space_run.proto",
         // EP-4 S4: McpElicitationService (gateway.proto imports it too).
         "model_plane/v1/mcp_elicitation.proto",
         // EP-3 S2: ArtifactRevisionService (session-core's artifact revision store).
@@ -117,8 +119,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hit again 2026-09-07 adding ListRunsRequest.space_id + the Space read
     // decision fields: model-gateway rebuilt and session-core did not, so the
     // room Work listing would have compiled against a contract without the
-    // fields. Touching this comment is the fingerprint bust (last: EP-7 S1,
-    // thread_goals.proto and RunContext.goal_recitation).
+    // fields. Touching this comment is the fingerprint bust (last: WS18-S3,
+    // space_run.proto and ThreadSummary.title_source / pinned_source).
     for p in &proto_paths {
         println!("cargo:rerun-if-changed={}", p.display());
     }

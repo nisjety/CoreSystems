@@ -1296,6 +1296,10 @@ services:
       # thread and run reads. OFF unless set (full history); dev override turns it on. Paired with
       # user-core SPACE_HISTORY_WINDOW_CLAIM. Never an authorization input: a presentation rule only.
       SESSION_CORE_SPACE_HISTORY_FLOOR: ${SESSION_CORE_SPACE_HISTORY_FLOOR:-0}
+      # WS18-S3: SpaceRunActions.ApplyRunThreadAction (rename and pin on a run's own thread under a Control
+      # run-action decision). OFF unless set; dev override turns it on; 0 and a restart answer feature_disabled.
+      # Never an authorization input.
+      SPACE_SELF_API_SESSION_CORE: ${SPACE_SELF_API_SESSION_CORE:-0}
       SPACE_WAKE_CORE: ${SPACE_WAKE_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # WS14-S5: store resume questions (ask_user waits for its answer in the same run). Only the literal true; needs the executor's AGENT_ASK_USER_RESUME_ENABLED and the loop checkpoint flip.

@@ -40,6 +40,7 @@ use mp_contracts::model_plane::v1::{
     space_events_server::SpaceEventsServer,
     space_history_service_server::SpaceHistoryServiceServer,
     space_room_read_service_server::SpaceRoomReadServiceServer,
+    space_run_actions_server::SpaceRunActionsServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
     thread_export_service_server::ThreadExportServiceServer,
     thread_fork_service_server::ThreadForkServiceServer,
@@ -99,7 +100,7 @@ const RUN_TERMINAL_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunTermi
 pub(crate) const CHECKPOINT_SAVED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.CheckpointSaved";
 const THREAD_CREATED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.ThreadCreated";
 const MESSAGE_APPENDED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.MessageAppended";
-const THREAD_PRESENTATION_UPDATED_TYPE_URL: &str =
+pub(crate) const THREAD_PRESENTATION_UPDATED_TYPE_URL: &str =
     "type.googleapis.com/model_plane.v1.ThreadPresentationUpdated";
 const THREAD_ARCHIVED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.ThreadArchived";
 const CONTEXT_MESSAGE_LIMIT: i64 = 20;
@@ -726,7 +727,7 @@ pub(crate) fn compact_thread_text(
 /// Values are rejected rather than silently truncated so a caller cannot claim
 /// that a title/preview was preserved when it was materially altered.
 #[allow(clippy::result_large_err)]
-fn normalize_thread_presentation_text(
+pub(crate) fn normalize_thread_presentation_text(
     value: &str,
     field: &'static str,
     max_chars: usize,
@@ -10756,6 +10757,9 @@ impl SessionCore for SessionService {
                 unread: bool,
                 last_read_at: DateTime<Utc>,
                 forked_from_thread_id: Option<String>,
+                // WS18-S3: the provenance words of the title and the pin, read as stored.
+                title_source: String,
+                pinned_source: String,
                 // {reply_count, last_author}: one JSON column so the row stays a flat struct.
                 reply_stats: Option<serde_json::Value>,
             }
@@ -10767,7 +10771,8 @@ impl SessionCore for SessionService {
                            (t.starred_at IS NOT NULL) AS starred,
                            (t.last_assistant_at IS NOT NULL AND t.last_assistant_at > t.last_read_at) AS unread,
                            t.last_read_at,
-                           t.forked_from_thread_id
+                           t.forked_from_thread_id,
+                           t.title_source, t.pinned_source
                     FROM threads t
                     WHERE t.org_id = $1
                       AND ($6::BIGINT IS NULL
@@ -10814,6 +10819,8 @@ impl SessionCore for SessionService {
                     page.unread,
                     page.last_read_at,
                     page.forked_from_thread_id,
+                    page.title_source,
+                    page.pinned_source,
                     jsonb_build_object('reply_count', reply_stats.reply_count,
                                        'last_author', reply_stats.last_author) AS reply_stats
                  FROM page
@@ -10928,6 +10935,8 @@ impl SessionCore for SessionService {
                             last_read_at,
                             forked_from_thread_id,
                             reply_stats,
+                            title_source,
+                            pinned_source,
                         } = row;
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
@@ -10958,6 +10967,8 @@ impl SessionCore for SessionService {
                             unread,
                             last_read_at: Some(to_proto_timestamp(last_read_at)),
                             forked_from_thread_id: forked_from_thread_id.unwrap_or_default(),
+                            title_source,
+                            pinned_source,
                             attention_state: pb::AttentionState::Unspecified as i32,
                             attention_since: None,
                             attention_unseen: false,
@@ -11096,11 +11107,13 @@ impl SessionCore for SessionService {
             let changed: Option<(String, String)> = sqlx::query_as(
                 "UPDATE threads
                  SET presentation_title = CASE WHEN $3 THEN $4 ELSE presentation_title END,
+                     title_source = CASE WHEN $3 THEN 'owner' ELSE title_source END,
                      presentation_preview = CASE WHEN $5 THEN $6 ELSE presentation_preview END,
                      pinned_at = CASE
                          WHEN $7 THEN CASE WHEN $8 THEN $9 ELSE NULL END
                          ELSE pinned_at
                      END,
+                     pinned_source = CASE WHEN $7 THEN 'owner' ELSE pinned_source END,
                      persona_enabled = CASE WHEN $10 THEN $11 ELSE persona_enabled END,
                      archived_at = CASE WHEN $12 THEN NULL ELSE archived_at END,
                      memory_mode = CASE WHEN $13 THEN $14 ELSE memory_mode END,
@@ -12992,6 +13005,8 @@ pub async fn serve(
     // Message revisions (WS12-S4): its own handle on the pool and the Letta mirror, taken before they move.
     let message_revision_pool = pool.clone();
     let letta_for_revisions = letta_memory.clone();
+    // Space run actions (WS18-S3): its own handle on the pool, taken before `pool` moves.
+    let space_run_actions_pool = pool.clone();
     let session = SessionService {
         pool,
         retrieval_client,
@@ -13119,6 +13134,11 @@ pub async fn serve(
         ))
         .add_service(SpaceRoomReadServiceServer::with_interceptor(
             crate::space::read_service::SpaceRoomReadGrpc::new(session_read_pool),
+            auth.clone(),
+        ))
+        // WS18-S3: SpaceRunActions, the run-bound owner path of the agent self-API.
+        .add_service(SpaceRunActionsServer::with_interceptor(
+            crate::space::self_api::SpaceRunActionsGrpc::new(space_run_actions_pool),
             auth.clone(),
         ))
         .add_service(SpaceHistoryServiceServer::with_interceptor(

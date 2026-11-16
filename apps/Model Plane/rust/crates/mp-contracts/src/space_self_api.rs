@@ -339,3 +339,19 @@ pub fn idempotency_key(action_id: &str, run_id: &str, step_id: &str) -> String {
     hasher.update(step_id.as_bytes());
     format!("{action_id}:{:x}", hasher.finalize())
 }
+
+/// The Session Core rollout switch of `ApplyRunThreadAction` (WS18-S3). Read once at boot; `0` and a
+/// restart answer `feature_disabled`. A rollout control, never an authorization input: a stored
+/// Control decision still has to verify.
+pub const SESSION_CORE_ENV: &str = "SPACE_SELF_API_SESSION_CORE";
+
+/// Whether `ApplyRunThreadAction` is served, from the raw switch value (`1`, `true`, `on`, `yes`,
+/// `enabled`; anything else is off).
+pub fn session_core_enabled_from(value: Option<&str>) -> bool {
+    crate::agentic_subscription::switch_value_is_on(value)
+}
+
+/// [`session_core_enabled_from`] of the process environment.
+pub fn session_core_enabled() -> bool {
+    session_core_enabled_from(std::env::var(SESSION_CORE_ENV).ok().as_deref())
+}

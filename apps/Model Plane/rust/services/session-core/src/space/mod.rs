@@ -33,6 +33,9 @@
 //!   activity summary (WS15-S6; behind SPACE_TIMELINE_CORE).
 //! - [`thread_activity`]: the thread activity summary backfill and pending probe (WS15-S5; the summary itself is
 //!   kept by the trigger in migration 0078).
+//! - [`self_api`]: `SpaceRunActions`, the run-bound owner path of the agent self-API: rename and pin on the run's own
+//!   thread under a Control `run-action-v1` decision, receipts and the probe (WS18-S3; receipts are migration 0084,
+//!   the switch is `SPACE_SELF_API_SESSION_CORE`).
 
 pub(crate) mod append;
 pub(crate) mod approval_gate;
@@ -51,6 +54,7 @@ pub(crate) mod quarantine;
 pub(crate) mod read_service;
 pub(crate) mod revisions;
 pub(crate) mod run_control;
+pub(crate) mod self_api;
 pub(crate) mod thread_activity;
 pub(crate) mod timeline;
 #[cfg(test)]

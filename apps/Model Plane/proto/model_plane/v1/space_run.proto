@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// SpaceRunActions: the run-bound owner path of the Space agent self-API (build plan WS18-S3).
+//
+// Separate file and service, and not RunService (K4-07). A room agent acts on its own run's thread
+// through a registry action (`space.thread.rename`, `space.thread.pin`, `space.thread.post_card`).
+// Session Core verifies a Control `run-action-v1` decision and recomputes the payload digest from the
+// typed arguments; the model supplies argument values only. Receipts and events carry ids, kinds and
+// digests only. WS20-S4 adds its read service to this file (`SpaceBrowserRead`).
+service SpaceRunActions {
+  // Apply one registry action to the run's own thread. The caller is the run's owner (a user
+  // principal). A zero-retention credential is refused with `zdr_durable_mutation_forbidden`.
+  rpc ApplyRunThreadAction(ApplyRunThreadActionRequest) returns (ApplyRunThreadActionResponse);
+
+  // Service probe for execution-core (identity `service:execution-core`, scope
+  // `session:run-thread-action:probe`): reports whether the verifier and the registry schema are
+  // present and whether the switch is on. Never touches content.
+  rpc ProbeRunThreadActions(ProbeRunThreadActionsRequest) returns (ProbeRunThreadActionsResponse);
+}
+
+// One agent action on the run's own thread. Exactly one argument message is set, and it must be the
+// one the action takes.
+message ApplyRunThreadActionRequest {
+  // Server-authoritative tenant scope; must equal the caller's org.
+  string org_id = 1;
+  // The run whose thread the action acts on. The caller must own it.
+  string run_id = 2;
+  // The registry action id (`space.thread.rename`, `space.thread.pin`, `space.thread.post_card`).
+  string action_id = 3;
+  // `{action_id}:{hex}`, the key the Control decision binds. A retry with the same key replays the
+  // receipt of the first application.
+  string idempotency_key = 4;
+  // The Control `run-action-v1` decision for this run, action, key and digest.
+  string control_decision_token = 5;
+
+  oneof args {
+    RenameThreadArgs rename = 10;
+    PinThreadArgs pin = 11;
+    PostCardArgs post_card = 12;
+  }
+}
+
+// Arguments of `space.thread.rename`.
+message RenameThreadArgs {
+  // 1 to 96 characters.
+  string title = 1;
+}
+
+// Arguments of `space.thread.pin`.
+message PinThreadArgs {
+  bool pinned = 1;
+}
+
+// Arguments of `space.thread.post_card` (the card write lands with WS18-S7).
+message PostCardArgs {
+  // 1 to 120 characters.
+  string title = 1;
+  // 1 to 2000 characters. Plain text only.
+  string body = 2;
+  // One of info, progress, done, blocked.
+  string tone = 3;
+  // At most 8 fields.
+  repeated CardField fields = 4;
+}
+
+// One label and value of a card.
+message CardField {
+  // 1 to 40 characters.
+  string label = 1;
+  // 1 to 200 characters.
+  string value = 2;
+}
+
+message ApplyRunThreadActionResponse {
+  // The receipt that records this application (or replays it).
+  string receipt_id = 1;
+  RunActionOutcome outcome = 2;
+  string thread_id = 3;
+  // Empty until a card is written (WS18-S7).
+  string message_id = 4;
+}
+
+// How an application ended. Values are prefixed: enum values share the package scope.
+enum RunActionOutcome {
+  RUN_ACTION_OUTCOME_UNSPECIFIED = 0;
+  // The effect was written.
+  RUN_ACTION_OUTCOME_APPLIED = 1;
+  // The same key and digest were seen before; the stored receipt is returned and nothing is written.
+  RUN_ACTION_OUTCOME_REPLAYED = 2;
+  // The thread already held the requested state; a receipt records the call and nothing changed.
+  RUN_ACTION_OUTCOME_NOOP = 3;
+}
+
+message ProbeRunThreadActionsRequest {}
+
+message ProbeRunThreadActionsResponse {
+  // Whether the Control decision keys are configured for this process.
+  bool verifier_configured = 1;
+  // Whether the golden registry loads and carries the Phase 1 rows.
+  bool schema_present = 2;
+  // The value of SPACE_SELF_API_SESSION_CORE as read at boot.
+  bool flag_on = 3;
+}
