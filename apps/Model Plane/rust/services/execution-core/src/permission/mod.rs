@@ -98,7 +98,9 @@ pub fn evaluate_call(
 /// executor binding and fail closed separately.
 #[must_use]
 pub fn requires_durable_owner_approval(tool_name: &str) -> bool {
+    // A Space registry row whose golden approval is `owner_approval` needs the same durable approval (WS18-S4).
     crate::owner_actions::requires_durable_approval(tool_name)
+        || crate::space_self_api::requires_owner_approval(tool_name)
 }
 
 /// The autonomy rung a specific call requires.
@@ -121,6 +123,11 @@ pub fn requires_durable_owner_approval(tool_name: &str) -> bool {
 /// and only the arguments say which.
 #[must_use]
 pub fn rung_required_for(tool_name: &str, tool_input: &str) -> AutonomyRung {
+    // A Space registry row states its rung in the golden registry (WS18-S4). The name classifier below
+    // would misread `space.thread.post_card` as outbound ("post").
+    if let Some(rung) = crate::space_self_api::autonomy_rung(tool_name) {
+        return rung;
+    }
     if is_risky_call(tool_name, tool_input) {
         return AutonomyRung::DangerFullAccess;
     }
@@ -227,9 +234,12 @@ pub fn is_restricted_context_write(tool_name: &str) -> bool {
     let name = tool_name.trim();
     // E3.7.10: a crawl or a batch can ingest pages into the org's knowledge base, a durable
     // write the seed declares `context_write`; plan mode and a delegated leaf must not run it.
+    // A Space registry row at the `workspace_write` rung is a durable thread write (WS18-S4), so the same
+    // restricted contexts refuse it.
     name == "save_memory"
         || crate::web_tools::is_durable_crawl_tool(name)
         || crate::workspace_tools::is_workspace_write(name)
+        || crate::space_self_api::autonomy_rung(name) == Some(AutonomyRung::WorkspaceWrite)
 }
 
 /// Operation-aware risk classification for a specific tool call. Extends
@@ -245,6 +255,11 @@ pub fn is_restricted_context_write(tool_name: &str) -> bool {
 pub fn is_risky_call(tool_name: &str, tool_input: &str) -> bool {
     if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
         return provider_action_is_risky(tool_input);
+    }
+    // A Space registry row is risky by its declared level and approval, not by its name (WS18-S4). An
+    // `allow` row without approval does not pause under `ask`, because approval resume is not built for it.
+    if let Some(risky) = crate::space_self_api::registry_risky(tool_name) {
+        return risky;
     }
     is_risky_tool(tool_name)
 }

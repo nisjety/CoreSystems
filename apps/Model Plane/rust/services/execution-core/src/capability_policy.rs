@@ -234,6 +234,16 @@ pub trait CapabilityPolicy: Send + Sync {
     ) -> Result<Vec<mp_contracts::model_plane::v1::ToolDefinition>, Status> {
         Ok(Vec::new())
     }
+
+    /// The Space registry rows (WS18-S4) a run with the `space_self_api` tool profile is offered. Only
+    /// that profile asks for them; every other run keeps `resolve_server_tool_definitions` alone.
+    async fn resolve_space_self_api_definitions(
+        &self,
+        _run_id: &str,
+        _org_id: &str,
+    ) -> Result<Vec<mp_contracts::model_plane::v1::ToolDefinition>, Status> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Clone)]
@@ -269,6 +279,9 @@ impl GrpcCapabilityPolicy {
     /// Returns an error when the required deployment-owned service-principal
     /// configuration is missing or invalid.
     pub fn from_env(channel: Channel) -> anyhow::Result<Self> {
+        // WS18-S4: a switched-on Space self-API with an incomplete configuration refuses to start, as the
+        // ticket lane does. Off (the default) builds nothing.
+        crate::space_self_api::shared().map_err(anyhow::Error::msg)?;
         Ok(Self {
             channel,
             tokens: TokenSource::Service(Arc::new(ServiceTokenProvider::from_env()?)),
@@ -408,6 +421,17 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         };
         client.resolve(tokens, run_id, org_id).await
     }
+
+    async fn resolve_space_self_api_definitions(
+        &self,
+        run_id: &str,
+        org_id: &str,
+    ) -> Result<Vec<mp_contracts::model_plane::v1::ToolDefinition>, Status> {
+        let TokenSource::Service(tokens) = &self.tokens else {
+            return Ok(Vec::new());
+        };
+        crate::space_self_api::SpaceSelfApiClient::resolve_profile(tokens, run_id, org_id).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -424,12 +448,11 @@ struct ModelActionViewRequest<'a> {
 }
 
 // Capability Core adds fields to this response over time: `reason_code` on the
-// data object when it omits a row, and `level` and `autonomy_rung` on each
-// tool in view v2 (WS18-S2). Unknown fields are therefore tolerated, so an
-// addition cannot refuse the whole view or a parked resume. None of them is
-// read here, and none grants anything: `resolve` still checks the run binding,
-// the tool name, the parameter bytes, the schema hash and approval. WS18-S4
-// must read `level` before it offers any row.
+// data object when it omits a row, and `level` and `autonomy_rung` on each tool
+// in view v2 (WS18-S2). Unknown fields are tolerated, so an addition cannot
+// refuse a parked resume. Every row is admitted by `space_self_api::admit_view`
+// (WS18-S4), which reads `level` and checks the row against the golden registry;
+// no field grants anything by itself.
 #[derive(Debug, Deserialize)]
 struct ModelActionViewEnvelope {
     data: ModelActionViewData,
@@ -438,16 +461,7 @@ struct ModelActionViewEnvelope {
 #[derive(Debug, Deserialize)]
 struct ModelActionViewData {
     run_id: String,
-    actions: Vec<ModelActionViewTool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelActionViewTool {
-    name: String,
-    description: String,
-    parameters_json: String,
-    action_schema_hash: String,
-    requires_approval: bool,
+    actions: Vec<crate::space_self_api::ViewTool>,
 }
 
 impl ServerResolvedModelActionViewClient {
@@ -544,34 +558,14 @@ impl ServerResolvedModelActionViewClient {
         }
         let response = serde_json::from_slice::<ModelActionViewEnvelope>(&body)
             .map_err(|_| Status::permission_denied("model action view response is invalid"))?;
-        if response.data.run_id != run_id || response.data.actions.len() > 1 {
-            return Err(Status::permission_denied(
-                "model action view response is not run-bound",
-            ));
-        }
-        response
-            .data
-            .actions
-            .into_iter()
-            .map(|tool| {
-                if tool.name != crate::ticket_tools::TOOL_NAME
-                    || tool.description.trim().is_empty()
-                    || tool.parameters_json
-                        != crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON
-                    || tool.action_schema_hash != crate::ticket_tools::TICKET_CREATE_SCHEMA_SHA256
-                    || !tool.requires_approval
-                {
-                    return Err(Status::permission_denied(
-                        "model action view returned an invalid tool definition",
-                    ));
-                }
-                Ok(mp_contracts::model_plane::v1::ToolDefinition {
-                    name: tool.name,
-                    description: tool.description,
-                    parameters_json: tool.parameters_json,
-                })
-            })
-            .collect()
+        // Registry-driven (WS18-S4): every row must be a golden registry row whose name, bytes, hash, approval
+        // and rung equal it, or the whole view is refused. This v1 view keeps only `tickets.create`.
+        crate::space_self_api::admit_view(
+            run_id,
+            &response.data.run_id,
+            &response.data.actions,
+            false,
+        )
     }
 }
 
@@ -1784,6 +1778,10 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
     // that never calls this function at all.
     if crate::plan::is_plan_tool(tool_name) {
         return Some("cap.memory.index".to_owned());
+    }
+    // A Space registry row (WS18-S4) is governed by the capability its golden row names, never by a name here.
+    if let Some(capability_id) = crate::space_self_api::capability_id(tool_name) {
+        return Some(capability_id);
     }
     let capability = match tool_name {
         "shell" => "cap.command.shell",

@@ -16,6 +16,10 @@ const SESSION_CORE_AUDIENCE: &str = "session-core";
 const TERMINALIZE_SCOPE: &str = "session:terminalize";
 const HEARTBEAT_SCOPE: &str = "session:heartbeat";
 const SCHEDULED_STEP_SCOPE: &str = "session:scheduled-step";
+// WS18-S4: the owner-path probe (`ProbeRunThreadActions`). Identity `service:execution-core` only; the
+// org is the global organization the principal registry lists for execution-core.
+const RUN_THREAD_ACTION_PROBE_SCOPE: &str = "session:run-thread-action:probe";
+const RUN_THREAD_ACTION_PROBE_ORG: &str = "global";
 const REFRESH_SKEW: Duration = Duration::from_secs(30);
 const MAX_TOKEN_TTL_SECONDS: u64 = 3600;
 const MAX_CACHE_ENTRIES: usize = 10_000;
@@ -39,6 +43,7 @@ enum TerminalScope {
     Terminalize,
     Heartbeat,
     ScheduledStep,
+    RunThreadActionProbe,
 }
 
 impl TerminalScope {
@@ -47,6 +52,7 @@ impl TerminalScope {
             Self::Terminalize => TERMINALIZE_SCOPE,
             Self::Heartbeat => HEARTBEAT_SCOPE,
             Self::ScheduledStep => SCHEDULED_STEP_SCOPE,
+            Self::RunThreadActionProbe => RUN_THREAD_ACTION_PROBE_SCOPE,
         }
     }
 
@@ -55,6 +61,7 @@ impl TerminalScope {
             Self::Terminalize => "managed-run terminalization",
             Self::Heartbeat => "managed-run heartbeat",
             Self::ScheduledStep => "scheduled-step claim and receipt",
+            Self::RunThreadActionProbe => "run-thread action probe",
         }
     }
 }
@@ -176,6 +183,16 @@ impl SessionTerminalTokenProvider {
         org_id: &str,
     ) -> Result<String, SessionTerminalTokenError> {
         self.token(org_id, TerminalScope::ScheduledStep).await
+    }
+
+    /// The credential of the Space owner-path probe (WS18-S4): `session:run-thread-action:probe`, minted
+    /// for execution-core's own identity in the global organization. It is not on the trait, so test
+    /// fakes of `ManagedRunTokenProvider` need no change.
+    pub(crate) async fn run_thread_action_probe_token(
+        &self,
+    ) -> Result<String, SessionTerminalTokenError> {
+        self.token(RUN_THREAD_ACTION_PROBE_ORG, TerminalScope::RunThreadActionProbe)
+            .await
     }
 
     async fn token(

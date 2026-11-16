@@ -320,6 +320,13 @@ message RunAgentRequest {
   // zero-retention or waived turn or a continuation. Execution-core applies it only while the same switch is on.
   // Field 27 is the next free number on this message.
   bool coordinator = 27;
+
+  // The tool profile of this run (WS18-S4; additive). Empty is the ordinary run, exactly as before the field
+  // existed. `space_self_api` offers only the server-resolved Space registry rows (`space.thread.*`) and no
+  // built-in, MCP, client or ask tool; any other non-empty value offers no tool. The gateway derives it per
+  // binding, never from the client. Field 25 was planned for this, but `wide_research` took it (see 4.6.C),
+  // so the next free number, 28, is used.
+  string tool_profile = 28;
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only

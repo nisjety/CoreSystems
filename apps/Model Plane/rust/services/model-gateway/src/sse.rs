@@ -15068,6 +15068,9 @@ fn build_run_agent_request(
         agent_tool_allowlist: None,
         // Coordinator mode is set by the caller (`spawn_run_dispatch`), which decides it from the turn; none here.
         coordinator: false,
+        // The tool profile (WS18-S4 field 28) is set by the Space self-API caller (WS18-S5); empty here, so every
+        // run keeps the bytes it was. This line is the compile fix for the new field, not a feature.
+        tool_profile: String::new(),
     }
 }
 

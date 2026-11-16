@@ -123,6 +123,20 @@ const READ_SCOPE: &str = "capability:read";
 /// Audited purpose sent to Auth Core with the token request.
 const TOKEN_REASON: &str = "execution runtime capability health attestation";
 
+/// Scope of the owner-action health lane (capability-core `OwnerActionHealthWriteScope`). The lane is
+/// per attester: execution-core may attest only the Model-owned rows its attester table names, and only
+/// in the global organization.
+const OWNER_ACTION_HEALTH_SCOPE: &str = "capability:owner-action:health:write";
+
+/// The owner-action lane's route (capability-core `attestOwnerActionHealth`).
+const OWNER_ACTION_HEALTH_PATH: &str = "/api/v1/capabilities/owner-actions/health";
+
+/// The organization the owner-action lane accepts; any other is refused.
+const OWNER_ACTION_ORG: &str = "global";
+
+/// Audited purpose sent with the owner-action token request.
+const OWNER_ACTION_TOKEN_REASON: &str = "execution runtime owner-action health attestation";
+
 /// capability-core's `AvailabilityAttestationTTL`. Mirrored here as the ceiling
 /// the heartbeat interval is clamped against — never as a value we send.
 const ATTESTATION_TTL_SECS: u64 = 300;
@@ -1243,6 +1257,127 @@ impl HealthAttestor {
         }
         self.attest_all(&planned).await
     }
+
+    /// Attest one owner-action capability on capability-core's owner lane (WS18-S4). The lane is global
+    /// only and accepts this service only for the Model-owned rows its attester table names. The row version
+    /// is read first, as the generic lane does, so a catalog bump cannot turn renewals into silent refusals.
+    ///
+    /// # Errors
+    /// Returns an error when the credential cannot be minted, the row cannot be read, or capability-core
+    /// refuses the attestation.
+    pub async fn attest_owner_action(&self, planned: &Attestation) -> anyhow::Result<()> {
+        let bearer = self
+            .tokens
+            .token_with_scopes(
+                OWNER_ACTION_ORG,
+                &[READ_SCOPE, OWNER_ACTION_HEALTH_SCOPE],
+                OWNER_ACTION_TOKEN_REASON,
+            )
+            .await?;
+        let version = self.row_version(&bearer, &planned.capability_id).await?;
+        let body = Attestation {
+            version,
+            ..planned.clone()
+        };
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, OWNER_ACTION_HEALTH_PATH))
+            .bearer_auth(&bearer)
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "capability-core refused the {} owner-action attestation (status {})",
+                planned.capability_id,
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Probe Session Core's owner path and, only when it is ready, attest the Space capabilities this
+    /// build executes (WS18-S4). A probe that does not complete, or that reports the verifier, the registry
+    /// or the switch as not ready, attests nothing, so the rows lapse inside their TTL. Returns the number
+    /// attested.
+    pub async fn attest_space_owner_round(
+        &self,
+        probe: &crate::space_self_api::SessionProbe,
+    ) -> usize {
+        let Some(report) = probe.report().await else {
+            return 0;
+        };
+        if !(report.verifier_configured && report.schema_present && report.flag_on) {
+            tracing::warn!(
+                verifier_configured = report.verifier_configured,
+                schema_present = report.schema_present,
+                flag_on = report.flag_on,
+                "Space run-action owner path is not ready; its capabilities stay unavailable"
+            );
+            return 0;
+        }
+        let mut attested = 0;
+        for capability_id in crate::space_self_api::attested_capability_ids() {
+            let planned = Attestation {
+                capability_id,
+                version: String::new(),
+                state: "available".to_owned(),
+                reason_code: "space_self_api_probed".to_owned(),
+                reason: "Session Core answered the run-action probe and the registry rows this build executes are present."
+                    .to_owned(),
+                execution_mode: EXECUTION_MODE_AGENTIC.to_owned(),
+                cost_class: COST_CLASS_BOUNDED.to_owned(),
+            };
+            match self.attest_owner_action(&planned).await {
+                Ok(()) => {
+                    attested += 1;
+                    tracing::info!(
+                        capability = %planned.capability_id,
+                        "owner-action capability health attested"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    capability = %planned.capability_id,
+                    "owner-action capability health attestation failed; capability stays unavailable"
+                ),
+            }
+        }
+        attested
+    }
+}
+
+/// Start the Space owner-path heartbeat when `EXECUTION_CORE_SPACE_SELF_API` is on (WS18-S4). It runs on
+/// its own schedule, so the sandbox and interpreter probes that gate [`spawn_heartbeat`] do not gate it.
+/// Detached and infallible: a misconfiguration logs at WARN and leaves the Space capabilities unavailable.
+pub fn spawn_space_owner_heartbeat() {
+    let Some(probe) = crate::space_self_api::SessionProbe::from_env() else {
+        return;
+    };
+    let attestor = match HealthAttestor::from_env() {
+        Ok(Some(attestor)) => attestor,
+        Ok(None) => {
+            tracing::warn!(
+                "CAPABILITY_CORE_HTTP_URL is not configured: Space owner-action health cannot be attested"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Space owner-action health attestation is unavailable");
+            return;
+        }
+    };
+    let interval = Duration::from_secs(interval_secs(
+        std::env::var("EXECUTION_HEALTH_ATTEST_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    ));
+    tokio::spawn(async move {
+        loop {
+            attestor.attest_space_owner_round(&probe).await;
+            tokio::time::sleep(interval).await;
+        }
+    });
 }
 
 /// Start the health-attestation heartbeat.
@@ -1252,6 +1387,7 @@ impl HealthAttestor {
 /// the capabilities unavailable — which is the correct fail-closed state, not an
 /// outage of execution-core itself.
 pub fn spawn_heartbeat() {
+    spawn_space_owner_heartbeat();
     let outcome = probe();
     let mut planned = attestable(outcome);
     planned.extend(workspace_attestations(

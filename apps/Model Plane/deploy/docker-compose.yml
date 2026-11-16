@@ -1838,6 +1838,11 @@ services:
       # WS06-S9 Space `shell` lease rule: `observe` (default) leases when it can and counts
       # the unleased calls; `enforce` refuses a Space shell call without a sandbox lease.
       EXECUTION_CORE_SPACE_SHELL_LEASE: ${EXECUTION_CORE_SPACE_SHELL_LEASE:-observe}
+      # WS18-S4 Space agent self-API (view v2, adapter, probe and owner-lane attestation). Off by default: 0 offers
+      # no Space tool. A rollout switch only; Control, Capability Core and Session Core still verify every call.
+      EXECUTION_CORE_SPACE_SELF_API: ${EXECUTION_CORE_SPACE_SELF_API:-0}
+      # WS18-S4: lets an `ask` row be offered. Off until WS10-S9 registers the resumable approval kind.
+      EXECUTION_CORE_SPACE_SELF_API_RESUMABLE: ${EXECUTION_CORE_SPACE_SELF_API_RESUMABLE:-0}
       # Build plan WS10-S3 Space approval gate: `off` keeps today's behaviour, `shadow` reads
       # Control's per-tool levels and only counts where they would differ, `enforce` folds them
       # with the existing gates and passes an ask by a spent once-approval or a Control

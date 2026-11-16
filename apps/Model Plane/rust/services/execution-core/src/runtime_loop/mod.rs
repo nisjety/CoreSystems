@@ -1877,6 +1877,21 @@ async fn execute_step_inner(
         // verifier. Missing/partial deployment authority is a tool failure,
         // not a fallback to a generic HTTP executor.
         crate::ticket_tools::execute_if_configured(tool_input, run_id, org_id, step_id).await
+    } else if crate::space_self_api::is_space_action(tool_name) {
+        // WS18-S4: a Space registry row acts on the run's own thread. The adapter asks Control for a
+        // run-bound decision and sends it with the run owner's delegated bearer to Session Core, which
+        // recomputes the digest. Zero retention is refused there before any Control call.
+        crate::space_self_api::execute_if_configured(
+            tool_name,
+            tool_input,
+            run_id,
+            org_id,
+            step_id,
+            zdr || waived,
+            session_channel.clone(),
+            session_bearer,
+        )
+        .await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
         execute_mcp(
             tool_name,

@@ -209,6 +209,9 @@ const ACTION_TOOL_NAMES: &[&str] = &[
     "browser_agent",
     "shell",
     "tickets.create",
+    // The Space rows that act on the run's own thread (WS18-S4); card and pause rows join with their executors.
+    "space.thread.rename",
+    "space.thread.pin",
 ];
 
 /// The connected-app read tool, offered only for a selected connection (WS23-S3). It names what
@@ -2101,6 +2104,32 @@ pub(crate) struct OfferedTools {
     pub(crate) deferred: runtime_loop::tool_index::DeferredIndex,
 }
 
+/// The Space registry rows a `space_self_api` run is offered (WS18-S4): the server-resolved definitions
+/// only. A view that cannot be read offers nothing and is logged by its code, never its content.
+async fn space_profile_defs(
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    req: &pb::RunAgentRequest,
+) -> Vec<pb::ToolDefinition> {
+    match capability_policy
+        .resolve_space_self_api_definitions(&req.run_id, &req.org_id)
+        .await
+    {
+        Ok(resolved) => {
+            let mut defs = Vec::new();
+            append_server_resolved_tool_defs(&mut defs, &resolved);
+            defs
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = ?error.code(),
+                run_id = %req.run_id,
+                "Space action view unavailable; the run is offered no Space tool"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// The tools `req` is offered, by what kind of request it is (WS03 S8-A):
 ///
 /// * a fresh request: [`merged_tool_defs_with_sources`], derivable only when nothing a caller
@@ -2126,6 +2155,32 @@ async fn offered_tools(
     // A waived route keeps nothing and runs no MCP call, exactly like a ZDR run: the same
     // flag, so no listing, no token and no lookup is made for either.
     let retention_bound = req.zdr || waived;
+    // WS18-S4: a run that names a tool profile is offered that profile's set and nothing else. The Space
+    // profile starts from the server-resolved registry rows alone (no built-in, MCP, client or ask tool), so
+    // a room agent gets least privilege. An unknown profile offers no tool.
+    match req.tool_profile.as_str() {
+        "" => {}
+        profile if crate::space_self_api::is_profile(profile) => {
+            let defs = if retention_bound {
+                Vec::new()
+            } else {
+                space_profile_defs(capability_policy, req).await
+            };
+            return OfferedTools {
+                defs,
+                derivable: false,
+                deferred: runtime_loop::tool_index::DeferredIndex::default(),
+            };
+        }
+        _ => {
+            tracing::warn!(run_id = %req.run_id, "unknown tool profile; the run is offered no tool");
+            return OfferedTools {
+                defs: Vec::new(),
+                derivable: false,
+                deferred: runtime_loop::tool_index::DeferredIndex::default(),
+            };
+        }
+    }
     let mut untrusted = BTreeSet::new();
     let (mut defs, mut derivable) = merged_tool_defs_governed(
         &req.run_id,
@@ -2587,6 +2642,7 @@ fn append_untrusted_tool_defs(
     for tool in untrusted_tools {
         if tool.name.trim().is_empty()
             || crate::owner_actions::is_reserved(&tool.name)
+            || crate::space_self_api::is_reserved(&tool.name)
             || is_browser_tool_name(&tool.name)
         {
             continue;
@@ -2610,10 +2666,13 @@ pub(super) fn append_server_resolved_tool_defs(
     resolved_tools: &[pb::ToolDefinition],
 ) {
     for tool in resolved_tools {
-        let Some(action) = crate::owner_actions::ServerResolvedAction::pinned(&tool.name) else {
-            continue;
+        // The pinned owner action (`tickets.create`) keeps its own pin. Any other reserved name is admitted
+        // only as the golden registry row it names, byte for byte (WS18-S4).
+        let admitted = match crate::owner_actions::ServerResolvedAction::pinned(&tool.name) {
+            Some(action) => action.admits(tool),
+            None => crate::space_self_api::admits(tool),
         };
-        if !action.admits(tool) {
+        if !admitted {
             continue;
         }
         if !tools.iter().any(|existing| existing.name == tool.name) {

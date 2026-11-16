@@ -1311,6 +1311,13 @@ fn reject_direct_owner_action(
             "reserved owner actions cannot be invoked through ExecuteStep",
         ));
     }
+    // Every Space registry row (WS18-S4) is run-bound: it is offered by the agent loop's signed view
+    // only, never named on this RPC, whatever its approval says.
+    if crate::space_self_api::is_reserved(tool_name.trim()) {
+        return Err(Status::permission_denied(
+            "reserved owner actions cannot be invoked through ExecuteStep",
+        ));
+    }
     Ok(())
 }
 
