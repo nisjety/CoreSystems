@@ -562,3 +562,13 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - P2: registry reason text for canvas rows still says 403 (re-pin needed); stale code in DATA_PLANE_CODES.
 
 ## Compile pass (started)
+| Area | Result |
+|---|---|
+| Go: user-core, wiki-store-go, capability-core, letta-bridge | go build clean |
+| Frontend gateway (Rust) | clean after b6edfad7e (recursion_limit 256; revoke_session_grant path) |
+| Model Plane Rust (mp-contracts, session-core, model-gateway, execution-core) --lib --bins | clean |
+| retrieval-engine-rs | clean |
+| SPA tsc -b | clean except 33 environmental (quarry-client.ts 21, RemoteSupportPage.tsx 12: unbuilt workspace packages) after ebdc4f545 |
+| Convex tsc --noEmit | clean after ebdc4f545 |
+- Real bugs caught: core.ts entry shadowing crashed normalizeSpaceThreadTurns at runtime; 3 components used onMount which solid-js 2.0 rc lacks (never mounted).
+- Not checked: test targets (--tests/--all-targets), clippy, lint.
