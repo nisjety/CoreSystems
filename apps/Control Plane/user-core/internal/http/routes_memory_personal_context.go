@@ -47,7 +47,7 @@ func (s *Server) issueMemoryPersonalContextDecision(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	evidence, err := s.spaceRepo.ResolveSharedMemoryDeclassifyDecisionEvidence(
+	evidence, err := s.spaceRepo.ResolveSharedMemoryPersonalContextDecisionEvidence(
 		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
 	if s.writeSpaceDenial(c, err, request.SpaceRef, spaces.ExpectAny, memoryPersonalContextDeniedMessage,
 		http.StatusForbidden, memoryPersonalContextDeniedMessage) {

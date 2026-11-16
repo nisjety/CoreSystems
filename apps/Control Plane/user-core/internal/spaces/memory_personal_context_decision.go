@@ -57,9 +57,9 @@ func (r MemoryPersonalContextDecisionRequest) Validate() error {
 }
 
 // ValidateForMemoryPersonalContext authorizes one turn of personal memory in a shared Space: the caller is a
-// current editor, manager or owner and a current recipient; the org's memory_declassify_entitled bit is on
-// (the disclosure entitlement the declassify decision uses; the plan names no separate bit for this turn);
-// and the Space is not under Zero Data Retention. A personal Space has no room to speak in and is refused.
+// current editor, manager or owner and a current recipient; the org's memory_personal_turn_entitled bit is on
+// (D12: its own deny-by-default floor, never the declassify bit); and the Space is not under Zero Data Retention.
+// A personal Space has no room to speak in and is refused.
 func (e PersonalThreadDecisionEvidence) ValidateForMemoryPersonalContext() error {
 	if err := e.validateSharedMemoryBase(); err != nil {
 		return err
@@ -67,8 +67,8 @@ func (e PersonalThreadDecisionEvidence) ValidateForMemoryPersonalContext() error
 	if e.Privacy.ZeroDataRetention {
 		return zdrForbidsDenial("memory_personal_context", "personal memory in a Space is not available under Zero Data Retention")
 	}
-	if !e.MemoryDeclassifyEntitled {
-		return entitlementOffDenial("memory_declassify", "personal memory use in a Space is not entitled for this organization")
+	if !e.MemoryPersonalTurnEntitled {
+		return entitlementOffDenial("memory_personal_turn", "personal memory use in a Space is not entitled for this organization")
 	}
 	return e.Privacy.Validate()
 }
@@ -108,8 +108,8 @@ func memoryPersonalContextPayloadDigest(evidence PersonalThreadDecisionEvidence,
 }
 
 // IssueMemoryPersonalContextDecision authorizes one turn of personal memory for one thread by one current
-// editor, manager or owner. The evidence comes from ResolveSharedMemoryDeclassifyDecisionEvidence, the shared
-// Space resolver the memory decisions use. Zero Data Retention is refused before issuance.
+// editor, manager or owner. The evidence comes from ResolveSharedMemoryPersonalContextDecisionEvidence (D12), which
+// reads the personal-turn bit. Zero Data Retention is refused before issuance.
 func IssueMemoryPersonalContextDecision(evidence PersonalThreadDecisionEvidence, request MemoryPersonalContextDecisionRequest, now time.Time) (Decision, error) {
 	if err := request.Validate(); err != nil {
 		return Decision{}, err

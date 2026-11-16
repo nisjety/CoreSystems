@@ -28,7 +28,8 @@ const agentSweepActor = "sweeper:owner-inactive"
 // SweepInactiveOwnerAgents suspends every agent whose owner is no longer an active
 // organization member: the agent definition, its admissions in every room, and its
 // service memberships in those rooms. One transaction per tick. It returns the number
-// of agent definitions suspended by this pass.
+// of agent definitions suspended by this pass. Only owner-visible (personal) agents are swept: an
+// org-visible agent is org-owned (D10), so its registrant leaving the organization does not suspend it.
 func (r *Repository) SweepInactiveOwnerAgents(ctx context.Context) (int, error) {
 	if r == nil || r.db == nil {
 		return 0, nil
@@ -50,14 +51,14 @@ func (r *Repository) SweepInactiveOwnerAgents(ctx context.Context) (int, error) 
 	rows, err := tx.Query(ctx, `
 		UPDATE agent_subjects a
 		SET lifecycle=$1, suspended_reason=$2, revision=a.revision+1, updated_at=NOW()
-		WHERE a.owner_user_id IS NOT NULL AND a.lifecycle=$3
+		WHERE a.visibility=$4 AND a.owner_user_id IS NOT NULL AND a.lifecycle=$3
 		  AND NOT EXISTS (
 			SELECT 1 FROM user_org_memberships u JOIN users x ON x.id=u.user_id
 			WHERE u.user_id=a.owner_user_id AND u.org_id=a.org_id
 			  AND u.status='active' AND x.status='active'
 		  )
 		RETURNING a.org_id, a.agent_subject_id`,
-		AgentLifecycleSuspended, "owner_inactive", AgentLifecycleActive)
+		AgentLifecycleSuspended, "owner_inactive", AgentLifecycleActive, AgentVisibilityOwner)
 	if err != nil {
 		return 0, fmt.Errorf("suspend agents of inactive owners: %w", err)
 	}

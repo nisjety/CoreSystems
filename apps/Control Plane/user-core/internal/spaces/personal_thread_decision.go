@@ -141,6 +141,9 @@ type PersonalThreadDecisionEvidence struct {
 	// MemoryDeclassifyEntitled (WS17-S7) is the declassify bit, filled only by
 	// ResolveSharedMemoryDeclassifyDecisionEvidence. Deny by default.
 	MemoryDeclassifyEntitled bool
+	// MemoryPersonalTurnEntitled (WS17-S8, D12) is the per-turn personal-memory bit, filled
+	// only by ResolveSharedMemoryPersonalContextDecisionEvidence. Deny by default.
+	MemoryPersonalTurnEntitled bool
 }
 
 func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {

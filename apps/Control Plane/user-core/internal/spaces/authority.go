@@ -296,9 +296,15 @@ type EffectPolicy struct {
 	// refused under Space ZDR.
 	CanvasEntitled bool `json:"canvas_entitled"`
 	// BrowserEntitled (WS20-S1) lets a Space start a room-scoped browser run
-	// (model.space.browser_run). Deny by default; the agent_computer preset
+	// (model.space.browser_run). Deny by default and explicit-only (D7): no preset
 	// carries it; refused under Space ZDR. Column browser_entitled (DEC-19).
 	BrowserEntitled bool `json:"browser_entitled"`
+	// MemoryPersonalTurnEntitled (WS17-S8, D12) lets the current editor, manager or
+	// owner of a shared Space use their own personal memory for one turn in that room
+	// (model.memory.personal_context). Its own deny-by-default floor: it is never read
+	// from MemoryDeclassifyEntitled. Refused under Space ZDR (ZDR inert). Column
+	// memory_personal_turn_entitled (migration 049); in no preset.
+	MemoryPersonalTurnEntitled bool `json:"memory_personal_turn_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {

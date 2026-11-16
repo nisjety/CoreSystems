@@ -20,7 +20,7 @@ import (
 // short-lived decision that the model-gateway verifier checks before it starts the
 // run (WS20-S2). The decision binds the goal by digest, the canonical domain policy,
 // the view scope and the run limits. It never carries the goal text. browser_entitled
-// is deny by default, the agent_computer preset is the only one that turns it on, and
+// is deny by default and explicit-only (D7): no preset turns it on, and
 // Space zero data retention refuses every browser run decision (ZDR inert).
 const (
 	browserRunAction   = "model.space.browser_run"

@@ -89,6 +89,16 @@ func (r *Repository) RegisterAgentSubject(ctx context.Context, req AgentRegister
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// An org-visible definition is owned by the organization, not by the actor (D10), so it is
+	// registered without an owner. Only an active organization member may register or repeat one.
+	var orgAccess string
+	if req.Visibility == AgentVisibilityOrg {
+		orgAccess, err = orgMemberAccess(ctx, tx, req.OrgID, req.AgentSubjectID, req.ActorID)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+
 	// The id is unique across organizations, so the lookup is by id alone.
 	var existingOrg string
 	var existingOwner *string
@@ -98,7 +108,20 @@ func (r *Repository) RegisterAgentSubject(ctx context.Context, req AgentRegister
 		FROM agent_subjects WHERE agent_subject_id=$1 FOR UPDATE`, req.AgentSubjectID).Scan(
 		&existingOrg, &existingOwner, &existing.Visibility, &existing.AddPolicy, &existing.Lifecycle, &existing.Revision)
 	if err == nil {
-		if existingOrg != req.OrgID || existingOwner == nil || *existingOwner != req.ActorID {
+		if existingOrg != req.OrgID {
+			return nil, false, AgentError(409, CodeAgentSubjectConflict, "this agent id is already registered", nil)
+		}
+		if existingOwner == nil {
+			// An ownerless (org-owned) definition repeats for any active member of its organization. An
+			// owner-visible definition always has an owner, so only an org-visible repeat reaches this branch.
+			if existing.Visibility != AgentVisibilityOrg || req.Visibility != AgentVisibilityOrg {
+				return nil, false, AgentError(409, CodeAgentSubjectConflict, "this agent id is already registered", nil)
+			}
+			existing.AgentSubjectID = req.AgentSubjectID
+			existing.Role = agentRoleOf("", req.ActorID, orgAccess)
+			return &existing, false, nil
+		}
+		if *existingOwner != req.ActorID {
 			return nil, false, AgentError(409, CodeAgentSubjectConflict, "this agent id is already registered", nil)
 		}
 		existing.AgentSubjectID = req.AgentSubjectID
@@ -109,20 +132,31 @@ func (r *Repository) RegisterAgentSubject(ctx context.Context, req AgentRegister
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, fmt.Errorf("read agent subject for registration: %w", err)
 	}
+	// An org-visible definition is ownerless (D10): owner_user_id stays NULL and registered_by keeps
+	// the registrant for the record. An owner-visible definition is owned by the actor, as before.
+	var owner *string
+	view := AgentView{
+		AgentSubjectID: req.AgentSubjectID, Visibility: req.Visibility,
+		AddPolicy: req.AddPolicy, Lifecycle: AgentLifecycleActive, Revision: 1,
+	}
+	if req.Visibility == AgentVisibilityOrg {
+		view.Role = agentRoleOf("", req.ActorID, orgAccess)
+	} else {
+		owner = &req.ActorID
+		view.OwnerUserID = req.ActorID
+		view.Role = "owner"
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO agent_subjects
 			(org_id, agent_subject_id, owner_user_id, visibility, add_policy, lifecycle, revision, registered_by)
-		VALUES ($1, $2, $3, $4, $5, 'active', 1, $3)`,
-		req.OrgID, req.AgentSubjectID, req.ActorID, req.Visibility, req.AddPolicy); err != nil {
+		VALUES ($1, $2, $3, $4, $5, 'active', 1, $6)`,
+		req.OrgID, req.AgentSubjectID, owner, req.Visibility, req.AddPolicy, req.ActorID); err != nil {
 		return nil, false, fmt.Errorf("insert agent subject: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit agent registration: %w", err)
 	}
-	return &AgentView{
-		AgentSubjectID: req.AgentSubjectID, OwnerUserID: req.ActorID, Visibility: req.Visibility,
-		AddPolicy: req.AddPolicy, Lifecycle: AgentLifecycleActive, Revision: 1, Role: "owner",
-	}, true, nil
+	return &view, true, nil
 }
 
 // VisibleAgents lists the agent definitions the actor may see in the organization:
@@ -276,6 +310,12 @@ func (r *Repository) UpdateAgentAccess(ctx context.Context, req AgentAccessReque
 	}
 	if !CanEditAgentAccess(isOwner, access) {
 		return nil, AgentError(403, CodeAgentAccessForbidden, "only the owner or a manager may change this agent", nil)
+	}
+	if owner == nil && req.Visibility == AgentVisibilityOwner {
+		// D10: an organization agent has no owner, so it cannot become owner-visible. The owner CHECK
+		// on agent_subjects would refuse the write, so the refusal is typed here instead.
+		return nil, AgentError(422, CodeAgentPolicyInvalid, "an organization agent has no owner, so it cannot become owner-visible",
+			map[string]any{"field": "visibility"})
 	}
 	if req.ExpectedRevision != revision {
 		return nil, AgentError(409, CodeAgentStateChanged, "the agent changed since it was read",
@@ -688,6 +728,19 @@ func agentActorAccess(ctx context.Context, tx pgx.Tx, orgID, agentID, actorID st
 	return access, active, nil
 }
 
+// orgMemberAccess reads the caller's access-list role on an agent and refuses a caller who is not an active
+// organization member. Only an org-visible (ownerless, D10) definition is registered or repeated through it.
+func orgMemberAccess(ctx context.Context, tx pgx.Tx, orgID, agentID, actorID string) (string, error) {
+	access, active, err := agentActorAccess(ctx, tx, orgID, agentID, actorID)
+	if err != nil {
+		return "", err
+	}
+	if !active {
+		return "", AgentError(403, CodeAgentAccessForbidden, "only an active organization member may register an organization agent", nil)
+	}
+	return access, nil
+}
+
 // agentEntries reads an agent's access list, ordered by principal.
 func agentEntries(ctx context.Context, tx pgx.Tx, orgID, agentID string) ([]AgentAccessEntry, error) {
 	rows, err := tx.Query(ctx, `
@@ -939,7 +992,7 @@ func deactivateAgentMemberships(ctx context.Context, tx pgx.Tx, spaceRef string,
 // agent of ownerID that is admitted to the room, because the owner has left it. It returns
 // the agents whose service membership in the room is active. The caller deactivates them
 // in the same transaction. The admission ledger records the suspension. The caller must
-// hold the room row lock.
+// hold the room row lock. Org-visible agents, ownerless or org-owned (D10), are never matched here.
 func suspendOwnedAgentsInRoom(ctx context.Context, tx pgx.Tx, spaceRef, orgID, ownerID, actorID, reason string) ([]string, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT adm.agent_subject_id

@@ -30,9 +30,11 @@ var orgPolicyPresets = []OrgPolicyPreset{
 	{ID: PresetAgentWork, Keys: []string{
 		"thread_create", "thread_read", "retrieval_read", "import_write", "agent_action", "schedule_fire",
 	}},
+	// browser (WS20-S1) is deliberately in no preset (D7): a room browser run is
+	// explicit-only, so an org admin turns browser_entitled on as its own step.
 	{ID: PresetAgentComputer, Keys: []string{
 		"thread_create", "thread_read", "retrieval_read", "import_write", "agent_action", "schedule_fire",
-		"sandbox_capability", "process_registry", "browser",
+		"sandbox_capability", "process_registry",
 	}},
 }
 

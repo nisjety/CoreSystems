@@ -161,12 +161,22 @@ var entitlementCatalog = []EntitlementSpec{
 	{
 		// WS20-S1: a room-scoped browser run (model.space.browser_run). The run starts
 		// a browser session for the Space and writes a result turn, so it is inert
-		// under Space ZDR (ZDRInert). Deny by default; the agent_computer preset is the
-		// only one that carries it (org_policy_presets.go).
+		// under Space ZDR (ZDRInert). Deny by default and explicit-only (D7): no preset
+		// carries it (org_policy_presets.go).
 		Key: "browser", Column: "browser_entitled",
 		Decisions: []string{"model.space.browser_run"}, ZDR: ZDRInert,
 		Get: func(p EffectPolicy) bool { return p.BrowserEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.BrowserEntitled = v },
+	},
+	{
+		// WS17-S8 (D12): the per-message personal-memory opt-in in a shared Space
+		// (model.memory.personal_context). It has its own floor, not the declassify bit,
+		// so an org that allows declassifying does not thereby allow personal memory in
+		// rooms. A turn is refused under Space ZDR (ZDRInert). Deny by default; in no preset.
+		Key: "memory_personal_turn", Column: "memory_personal_turn_entitled",
+		Decisions: []string{"model.memory.personal_context"}, ZDR: ZDRInert,
+		Get: func(p EffectPolicy) bool { return p.MemoryPersonalTurnEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.MemoryPersonalTurnEntitled = v },
 	},
 }
 
