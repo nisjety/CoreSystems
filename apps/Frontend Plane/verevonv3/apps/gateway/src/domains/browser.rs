@@ -6272,7 +6272,7 @@ fn session_grant_refusal(upstream: Option<StatusCode>) -> Response {
 
 /// What a session's BrowserBroker grant covers (WS8.D).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SessionGrantScope<'a> {
+pub(crate) enum SessionGrantScope<'a> {
     /// The start host only: the first-host session grant every session had before WS8.D.
     StartHost(Option<&'a str>),
     /// A submitted assistant task, scoped to a fresh browser and its start host.
@@ -6331,7 +6331,7 @@ fn session_start_constraints(human_grant: bool, start_host: Option<&str>) -> Opt
 /// `Ok(None)` means the session opens without a grant: the mode is `Off`, or it is
 /// `Permissive` and issuance failed. In `Strict` every failure is an error response
 /// and no Quarry run is started. Hosts are never logged.
-async fn issue_session_grant(
+pub(crate) async fn issue_session_grant(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
@@ -6398,7 +6398,7 @@ async fn issue_session_grant(
 /// Revokes a session grant, best effort: a failure leaves the grant to expire
 /// on its own TTL, and revoking an already-gone grant is a 200 upstream. Answers whether the
 /// revoke went through (a 2xx), so a caller can tell a stop that happened from one that did not.
-async fn revoke_session_grant(
+pub(crate) async fn revoke_session_grant(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,

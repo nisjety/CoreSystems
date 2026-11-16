@@ -21,6 +21,7 @@ import { ws16SpaceActions } from './ws16'
 import { ws17SpaceActions } from './ws17'
 import { ws18SpaceActions } from './ws18'
 import { ws19SpaceActions } from './ws19'
+import { ws20SpaceActions } from './ws20'
 import { ep08SpaceActions } from './ep08'
 
 export const spaceActions = [
@@ -39,6 +40,7 @@ export const spaceActions = [
   ...ws17SpaceActions,
   ...ws18SpaceActions,
   ...ws19SpaceActions,
+  ...ws20SpaceActions,
   // EP-8 S7 is appended last, not sorted in: action-registry.test.ts pins the order of the first
   // Space entries (base, then ws01, ws03, ws04), and an earlier slot would move them.
   ...ep08SpaceActions,

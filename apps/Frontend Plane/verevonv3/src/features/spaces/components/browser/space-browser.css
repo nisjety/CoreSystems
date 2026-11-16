@@ -1,0 +1,194 @@
+/* WS20-S5: the room browser run's card, start panel, thread section and pane view. Presentation only. */
+
+.verevon-space-browser-thread {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+}
+
+.verevon-space-browser-thread__entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.verevon-space-browser-thread__reason,
+.verevon-space-browser-thread__status,
+.verevon-space-browser-view__note,
+.verevon-space-browser-view__status,
+.verevon-space-browser-card__status,
+.verevon-space-browser-start__reason,
+.verevon-space-browser-start__hint,
+.verevon-space-browser-start__share {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-muted, #5b6470);
+}
+
+.verevon-space-browser-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border, #d8dde3);
+  border-radius: 0.5rem;
+}
+
+.verevon-space-browser-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.verevon-space-browser-card__chip {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--surface-muted, #eef1f4);
+}
+
+.verevon-space-browser-card__phase {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.verevon-space-browser-card__phase[data-live='true']::before {
+  content: '';
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-right: 0.35rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.verevon-space-browser-card__meta,
+.verevon-space-browser-card__hosts,
+.verevon-space-browser-card__control,
+.verevon-space-browser-view__meta {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.verevon-space-browser-card__steps,
+.verevon-space-browser-view__rows {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.verevon-space-browser-card__shot {
+  width: 100%;
+  max-height: 12rem;
+  object-fit: contain;
+  border-radius: 0.35rem;
+  border: 1px solid var(--border, #d8dde3);
+}
+
+.verevon-space-browser-card__open,
+.verevon-space-browser-thread__browse,
+.verevon-space-browser-start__actions button {
+  justify-self: start;
+  padding: 0.35rem 0.75rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border, #d8dde3);
+  background: var(--surface, #ffffff);
+  cursor: pointer;
+  font: inherit;
+}
+
+.verevon-space-browser-start {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border, #d8dde3);
+  border-radius: 0.5rem;
+}
+
+.verevon-space-browser-start__title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.verevon-space-browser-start__form,
+.verevon-space-browser-start__hosts {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.verevon-space-browser-start__label {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+}
+
+.verevon-space-browser-start__label textarea,
+.verevon-space-browser-start__label input {
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--border, #d8dde3);
+}
+
+.verevon-space-browser-start__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-browser-start__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: var(--surface-muted, #eef1f4);
+  font-size: 0.85rem;
+}
+
+.verevon-space-browser-start__chip button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.verevon-space-browser-start__runtime {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.verevon-space-browser-start__error {
+  margin: 0;
+  color: var(--danger, #b42318);
+  font-size: 0.875rem;
+}
+
+.verevon-space-browser-start__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.verevon-space-browser-view {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.75rem;
+}
+
+.verevon-space-browser-view__shots {
+  display: grid;
+  gap: 0.5rem;
+}

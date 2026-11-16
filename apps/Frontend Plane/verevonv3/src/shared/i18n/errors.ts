@@ -1602,6 +1602,41 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_thread_scope_unavailable: { no: 'Rommet for denne samtalen kunne ikke fastslås. Prøv igjen om litt.', en: 'The room for this conversation could not be determined. Try again shortly.' },
   invalid_agent: { no: 'Agenten er ikke gyldig. Velg en agent i listen og prøv igjen.', en: 'The agent is not valid. Choose an agent from the list and try again.' },
 
+  // WS20-S5 room browser run: the start (R1) and its room reads (R2-R4, the evidence is the starter's only).
+  invalid_space: { no: 'Rommet er ikke gyldig. Last inn siden på nytt.', en: 'The room is not valid. Reload the page.' },
+  browser_domain_policy_invalid: {
+    no: 'Domenene må være én til åtte offentlige domenenavn, uten IP-adresse, port, sti eller jokertegn.',
+    en: 'The domains must be one to eight public host names, without an IP address, port, path or wildcard.',
+  },
+  browser_share_view_unavailable: {
+    no: 'Å dele live-visningen med rommet er ikke tilgjengelig ennå. Bare du ser live-visningen.',
+    en: 'Sharing the live view with the room is not available yet. Only you see the live view.',
+  },
+  space_browser_not_authorized: {
+    no: 'Du kan ikke starte en nettleserkjøring i dette rommet. Det krever redigeringstilgang.',
+    en: 'You cannot start a browser run in this room. It needs edit access.',
+  },
+  browser_not_entitled: {
+    no: 'Nettleserkjøringer er ikke slått på for organisasjonen din ennå.',
+    en: 'Browser runs are not turned on for your organization yet.',
+  },
+  browser_capacity: {
+    no: 'Rommet har allerede to nettleserkjøringer i gang. Vent til en av dem er ferdig.',
+    en: 'This room already has two browser runs in progress. Wait for one of them to finish.',
+    retryable: true,
+  },
+  browser_evidence_withheld: {
+    no: 'Skjermbildet vises bare for den som startet kjøringen.',
+    en: 'The screenshot is shown only to the person who started the run.',
+  },
+  evidence_not_found: { no: 'Skjermbildet finnes ikke lenger.', en: 'The screenshot is no longer available.' },
+  evidence_too_large: { no: 'Skjermbildet er for stort til å vises.', en: 'The screenshot is too large to show.' },
+  evidence_unsupported: { no: 'Dette bildeformatet kan ikke vises.', en: 'This image format cannot be shown.' },
+  evidence_unavailable: {
+    no: 'Skjermbildet er midlertidig utilgjengelig. Prøv igjen om litt.',
+    en: 'The screenshot is temporarily unavailable. Try again shortly.',
+    retryable: true,
+  },
   // WS17-S5 personal agents (gateway domains/spaces/personal_agents.rs). feature_disabled, active_membership_required,
   // agent_not_found, agent_membership_unconfirmed, agent_registry_unavailable, invalid_agent_name and
   // invalid_agent_instructions keep their copy above. An add refusal's reason is keyed by the reason itself.

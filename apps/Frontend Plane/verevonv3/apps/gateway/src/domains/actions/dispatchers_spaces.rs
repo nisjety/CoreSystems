@@ -16,3 +16,4 @@ pub(super) mod ws16;
 pub(super) mod ws17;
 pub(super) mod ws18;
 pub(super) mod ws19;
+pub(super) mod ws20;

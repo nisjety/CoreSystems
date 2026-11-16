@@ -338,6 +338,10 @@ pub(crate) struct SpaceFeatureFlags {
     /// Production is off; dev may default on, through `space_flag`. The model-gateway switch of the same name gates
     /// the start and the reads there too.
     pub(crate) browser_run: bool,
+    /// `SPACE_BROWSER_CARD` (WS20-S5): the room's browser card, its timeline rows and the browser pane. Off hides them;
+    /// the start and the reads follow `SPACE_BROWSER_RUN_API`. Production is off; dev may default on, through
+    /// `space_flag`. Presentation only, never an authorization input.
+    pub(crate) browser_card: bool,
     /// `CHAT_LOCALE_HINT` (WS16-S6): stamp the viewer's interface language (`nb-NO` or `en-US`) on
     /// the model-bound body as the request-scoped `locale` field. Off removes the field, whatever
     /// the browser sent. A rollout control, never an authorization input: the field is a framing
@@ -698,6 +702,7 @@ impl SpaceFeatureFlags {
                 env::var("CHAT_MEDIA_TRANSCRIPTS_ENABLED").ok().as_deref(),
             ),
             browser_run: space_flag("SPACE_BROWSER_RUN_API"),
+            browser_card: space_flag("SPACE_BROWSER_CARD"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),

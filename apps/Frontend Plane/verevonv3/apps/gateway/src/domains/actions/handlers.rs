@@ -90,6 +90,7 @@ use super::dispatchers_client_routed::{
     dispatch_agents_admitted_actions_list, dispatch_client_executed, dispatch_owner_not_wired,
 };
 use super::dispatchers_spaces::ws01::{dispatch_spaces_create_post, dispatch_spaces_reply_in_thread};
+use super::dispatchers_spaces::ws20::dispatch_spaces_browser_run_start;
 use super::dispatchers_spaces::ws04::{
     dispatch_spaces_change_member_role, dispatch_spaces_join_room, dispatch_spaces_leave_room,
     dispatch_spaces_update_room_details, dispatch_spaces_update_room_settings,
@@ -1168,6 +1169,10 @@ pub(super) async fn execute_action(
         }
         "spaces.reply_in_thread" => {
             boxed_dispatch(|| dispatch_spaces_reply_in_thread(&state, &user, &headers, &body.input))
+                .await
+        }
+        "spaces.browser_run.start" => {
+            boxed_dispatch(|| dispatch_spaces_browser_run_start(&state, &user, &headers, &body.input))
                 .await
         }
         "spaces.change_member_role" => {

@@ -12,7 +12,7 @@ import { spaceRoomFeature } from './space-room-features'
  * pane closed and is never an authorisation input.
  */
 
-export type SpacePaneId = 'thread' | 'private_panel'
+export type SpacePaneId = 'thread' | 'private_panel' | 'browser'
 
 export interface SpacePaneDefinition {
   readonly id: SpacePaneId
@@ -29,6 +29,11 @@ function readSpacePrivatePanelParam(value: string | readonly string[] | null | u
   return typeof value === 'string' && value === 'private' ? 'private' : null
 }
 
+/** `?browser_run=<id>` opens one room browser run (WS20-S5). The id is a request only; the gateway decides what is read. */
+function readSpaceBrowserRunParam(value: string | readonly string[] | null | undefined): string | null {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : null
+}
+
 export const SPACE_PANES: readonly SpacePaneDefinition[] = [
   {
     id: 'thread',
@@ -43,6 +48,14 @@ export const SPACE_PANES: readonly SpacePaneDefinition[] = [
     searchParam: 'panel',
     readParam: readSpacePrivatePanelParam,
     enabled: () => spaceRoomFeature('private_panel'),
+  },
+  {
+    // WS20-S5: one room browser run's pane. Behind `features.browser_card`; the run's content is read through its
+    // gateway routes, which decide who may see what (the screenshots are the starter's alone).
+    id: 'browser',
+    searchParam: 'browser_run',
+    readParam: readSpaceBrowserRunParam,
+    enabled: () => spaceRoomFeature('browser_card'),
   },
 ]
 

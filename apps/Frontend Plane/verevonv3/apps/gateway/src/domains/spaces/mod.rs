@@ -50,7 +50,7 @@ mod message_search;
 pub(crate) mod mentions;
 mod timeline;
 mod pins;
-mod browser_runs;
+pub(crate) mod browser_runs;
 mod room_artifacts;
 pub(crate) mod run_live;
 pub(crate) mod sidebar;
@@ -5994,6 +5994,9 @@ async fn space_context(
                         && state.space_features.canvas_ui,
                     // WS17-S6: the owner's private panel (one flag; the routes and the action follow it).
                     "private_panel": state.space_features.private_panel_ui,
+                    // WS20-S5: the room browser run's start and reads (`browser_run`) and its card and pane (`browser_card`).
+                    "browser_run": state.space_features.browser_run,
+                    "browser_card": state.space_features.browser_card,
                     // WS17-S7: the reviewed declassify of one personal memory into a shared room (one flag).
                     "memory_declassify": state.space_features.space_memory_declassify_api,
                     // WS18-S5: the room agent's self-API switch (the toggle and its chips follow it).

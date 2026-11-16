@@ -83,6 +83,8 @@ import {
 } from './sidepane/SpaceAuxPane'
 import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
 import { SpacePrivatePanel } from './sidepane/SpacePrivatePanel'
+import { SpaceBrowserThreadSection } from './browser/SpaceBrowserThreadSection'
+import { SpaceBrowserView } from './browser/SpaceBrowserView'
 import { SpaceShareToRoomDialog } from './SpaceShareToRoomDialog'
 import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
 import { isDmKind, withSpaceKindTraits } from '../lib/space-kind'
@@ -200,6 +202,15 @@ export default function SpacePage() {
   const privatePanelOpen = createMemo(() => resolveOpenSpacePane(searchParams)?.id === 'private_panel')
   const openPrivatePanel = () => setSearchParams({ panel: 'private', thread_id: undefined, m: undefined })
   const closePrivatePanel = () => setSearchParams({ panel: undefined }, { replace: true })
+  // WS20-S5: `?browser_run=<id>` opens one room browser run beside the room. The run's pane takes the place of the
+  // thread pane; the thread pane's own parameter is removed so the registry resolves the run's pane.
+  const browserRunId = createMemo(() => {
+    const pane = resolveOpenSpacePane(searchParams)
+    return pane?.id === 'browser' ? pane.value : null
+  })
+  const openBrowserRun = (runId: string) =>
+    setSearchParams({ browser_run: runId, thread_id: undefined, m: undefined, panel: undefined })
+  const closeBrowserRun = () => setSearchParams({ browser_run: undefined }, { replace: true })
   // The reviewed draft a panel turn starts: non-null while the share dialog is open.
   const [shareDraft, setShareDraft] = createSignal<string | null>(null)
   // Click-through from the composer's activity strip (WS09-S6): the thread pane when it is on, else
@@ -998,7 +1009,28 @@ export default function SpacePage() {
                         agentName={roomAgentName(agents.error ? [] : agents() ?? [])}
                         agents={() => (agents.error ? [] : agents() ?? [])}
                         footer={
-                          roomIsArchived(current()) ? (
+                          <>
+                          {/* WS20-S5: the thread's browser runs and the start entry, behind `features.browser_run` / `browser_card`. */}
+                          <SpaceBrowserThreadSection
+                            spaceRef={current().space.space_ref}
+                            threadId={threadId()}
+                            canStart={current().membership.role !== 'viewer' && !roomIsArchived(current())}
+                            disabledReason={
+                              roomIsArchived(current())
+                                ? i18n.tr('Rommet er arkivert.', 'The room is archived.')
+                                : i18n.tr(
+                                    'Du kan se nettleserkjøringer her, men bare redaktører kan starte dem.',
+                                    'You can see browser runs here, but only editors can start them.',
+                                  )
+                            }
+                            viewerSubjectId={current().membership.subject_id}
+                            nameOf={(subjectId: string) =>
+                              (roster.error ? [] : roster() ?? []).find((member) => member.subject_id === subjectId)
+                                ?.display_name ?? i18n.tr('Tidligere medlem', 'Former member')
+                            }
+                            onOpen={openBrowserRun}
+                          />
+                          {roomIsArchived(current()) ? (
                             <SpaceArchivedNotice />
                           ) : current().features?.human_posts === true ? (
                             <SpaceRoomComposer
@@ -1023,7 +1055,8 @@ export default function SpacePage() {
                               postMaxChars={() => current().limits?.post_max_chars}
                               journal={sendJournal}
                             />
-                          ) : undefined
+                          ) : undefined}
+                          </>
                         }
                       />
                     </SpaceAuxPane>
@@ -1047,6 +1080,27 @@ export default function SpacePage() {
                     onShare={(text) => setShareDraft(text)}
                   />
                 </SpaceAuxPane>
+              </Show>
+              {/* WS20-S5: one room browser run's pane, opened through the pane registry (`?browser_run=`). */}
+              <Show when={browserRunId()}>
+                {(runId) => (
+                  <SpaceAuxPane
+                    label={i18n.tr('Nettleserkjøring', 'Browser run')}
+                    width={auxPaneWidth()}
+                    onWidthChange={setAuxPaneWidth}
+                    onClose={closeBrowserRun}
+                  >
+                    <SpaceBrowserView
+                      spaceRef={current().space.space_ref}
+                      runId={runId}
+                      viewerSubjectId={current().membership.subject_id}
+                      nameOf={(subjectId: string) =>
+                        (roster.error ? [] : roster() ?? []).find((member) => member.subject_id === subjectId)
+                          ?.display_name ?? i18n.tr('Tidligere medlem', 'Former member')
+                      }
+                    />
+                  </SpaceAuxPane>
+                )}
               </Show>
               <Show when={shareDraft()}>
                 {(draft) => (
