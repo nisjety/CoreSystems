@@ -21,7 +21,8 @@ type canvasCaller struct {
 
 // authorizeCaller verifies the decision a canvas request carries and binds it to the route, as authorize does for a human. agentOK
 // says whether the route accepts an agent decision at all. A route that does not accept one refuses a run-action envelope before any
-// verification, with space_decision_mismatch.
+// verification, with space_decision_mismatch. A decision issued under zero data retention is refused with the catalogue
+// refusal once its signature verifies, before the binding checks.
 func (h *CanvasHandler) authorizeCaller(r *http.Request, bearer *authctx.Claims, spaceRef string, write, agentOK bool) (canvasCaller, *canvasRefusal) {
 	token := strings.TrimSpace(r.Header.Get(canvasDecisionHeader))
 	if token == "" || len(token) > spacedecision.MaxEnvelopeBytes {
@@ -42,6 +43,9 @@ func (h *CanvasHandler) authorizeCaller(r *http.Request, bearer *authctx.Claims,
 		if err != nil {
 			return canvasCaller{}, refusalFromErr(err)
 		}
+		if run.ZeroDataRetention {
+			return canvasCaller{}, canvasZDRRefusal()
+		}
 		if err := run.CheckCanvas(bearer.OrgID, bearer.UserID, spaceRef, write); err != nil {
 			return canvasCaller{}, refusalFromErr(err)
 		}
@@ -50,6 +54,9 @@ func (h *CanvasHandler) authorizeCaller(r *http.Request, bearer *authctx.Claims,
 	claims, err := spacedecision.Verify(token, h.keys, now)
 	if err != nil {
 		return canvasCaller{}, refusalFromErr(err)
+	}
+	if claims.ZeroDataRetention {
+		return canvasCaller{}, canvasZDRRefusal()
 	}
 	if err := claims.CheckCanvas(bearer.OrgID, bearer.UserID, spaceRef, write); err != nil {
 		return canvasCaller{}, refusalFromErr(err)

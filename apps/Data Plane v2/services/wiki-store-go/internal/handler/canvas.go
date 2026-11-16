@@ -60,7 +60,8 @@ func (h *CanvasHandler) flagGate(next http.Handler) http.Handler {
 	})
 }
 
-// refuseCanvasZDR refuses every canvas route, reads included, for a token that carries zdr=true (D-5).
+// refuseCanvasZDR refuses every canvas route, reads included, for a token that carries zdr=true (D-5). The refusal is the
+// Model Plane catalogue's zdr_durable_mutation_forbidden (412), the answer the gateway gives a ZDR caller too.
 func refuseCanvasZDR(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := authctx.FromContext(r.Context())
@@ -69,7 +70,7 @@ func refuseCanvasZDR(next http.Handler) http.Handler {
 			return
 		}
 		if claims.RestrictiveZDR() {
-			writeCanvasError(w, http.StatusForbidden, "zdr_persistence_forbidden", "verified token zdr=true forbids durable canvas persistence", nil)
+			canvasZDRRefusal().write(w)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -351,18 +352,29 @@ func (h *CanvasHandler) authorize(r *http.Request, bearer *authctx.Claims, space
 	return caller.user, refused
 }
 
-// canvasRefusal is one typed refusal of a canvas request: the HTTP status, the wire code and the message.
+// canvasRefusal is one typed refusal of a canvas request: the HTTP status, the wire code and the message. zdr marks the Model
+// Plane catalogue refusal of zero data retention, which is written in the catalogue body (writeCanvasZDRRefusal).
 type canvasRefusal struct {
 	status  int
 	code    string
 	message string
+	zdr     bool
 }
 
 func refusalOf(status int, code, message string) *canvasRefusal {
 	return &canvasRefusal{status: status, code: code, message: message}
 }
 
+// canvasZDRRefusal is the catalogue refusal of a zero data retention token or decision on a canvas route.
+func canvasZDRRefusal() *canvasRefusal {
+	return &canvasRefusal{status: http.StatusPreconditionFailed, code: canvasZDRCode, message: canvasZDRMessage, zdr: true}
+}
+
 func (f *canvasRefusal) write(w http.ResponseWriter) {
+	if f.zdr {
+		writeCanvasZDRRefusal(w)
+		return
+	}
 	writeCanvasError(w, f.status, f.code, f.message, nil)
 }
 
@@ -512,6 +524,26 @@ func writeCanvasError(w http.ResponseWriter, status int, code, message string, d
 		"code":    code,
 		"message": message,
 		"details": details,
+	}})
+}
+
+// The Model Plane catalogue refusal of zero data retention (zdr_refusal.rs DURABLE_MUTATION_FORBIDDEN, the sentence the gateway
+// carries) and the surface label the gateway gives it on a room canvas.
+const (
+	canvasZDRCode    = "zdr_durable_mutation_forbidden"
+	canvasZDRMessage = "Zero Data Retention credentials cannot create, change, or delete durable state."
+	canvasSurface    = "room_canvas"
+)
+
+// writeCanvasZDRRefusal answers the catalogue refusal of zero data retention: 412 with {error:{code,message,retryable,action,details}},
+// the body the gateway's own refusal has for a ZDR caller. The catalogue fixes retryable false and action none for this code.
+func writeCanvasZDRRefusal(w http.ResponseWriter) {
+	writeJSON(w, http.StatusPreconditionFailed, map[string]any{"error": map[string]any{
+		"code":      canvasZDRCode,
+		"message":   canvasZDRMessage,
+		"retryable": false,
+		"action":    "none",
+		"details":   map[string]any{"surface": canvasSurface},
 	}})
 }
 

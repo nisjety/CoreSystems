@@ -876,8 +876,9 @@ paths:
         - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
       responses:
         '200': { description: "Head with content, or unchanged" }
-        '403': { description: "zdr_persistence_forbidden, space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
+        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
         '404': { description: canvas_not_found or space_canvas_disabled }
+        '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas), reads included" }
 
   /v1/space-canvas/spaces/{space_ref}/versions:
     get:
@@ -891,6 +892,7 @@ paths:
       responses:
         '200': { description: One page of versions }
         '400': { description: invalid_canvas_request or invalid_cursor }
+        '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas), reads included" }
     post:
       summary: Save a canvas version (compare-and-swap on expected_version_id)
       tags: [space-canvas]
@@ -914,8 +916,9 @@ paths:
         '200': { description: Unchanged (content equals the head) }
         '201': { description: "Created, with deduplicated true on an idempotent replay" }
         '400': { description: invalid_canvas_request }
-        '403': { description: Decision refusal or zdr_persistence_forbidden }
+        '403': { description: Decision refusal }
         '409': { description: "canvas_head_moved (details.head, null when the Space has no canvas yet) or idempotency_key_conflict" }
+        '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas)" }
         '413': { description: canvas_too_large (details.max_bytes) }
         '429': { description: canvas_rate_limited or canvas_run_write_limit }
         '503': { description: canvas_unavailable }
@@ -931,6 +934,7 @@ paths:
       responses:
         '200': { description: OK }
         '404': { description: canvas_version_not_found or canvas_not_found }
+        '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas)" }
 
   /v1/space-canvas/spaces/{space_ref}/versions/{version_id}/restore:
     post:
@@ -956,6 +960,7 @@ paths:
         '201': { description: Created }
         '404': { description: canvas_not_found or canvas_version_not_found }
         '409': { description: canvas_head_moved or idempotency_key_conflict }
+        '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas)" }
 
   # ── Room canvas purge (WS19-S8; Space-deletion coordinator only; not behind WIKISTORE_SPACE_CANVAS) ──
   # The bearer must be the verified service principal service:control-space-deletion with scope data:space-canvas:delete.

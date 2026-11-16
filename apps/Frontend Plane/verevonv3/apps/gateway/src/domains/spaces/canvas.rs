@@ -83,6 +83,7 @@ const DATA_PLANE_CODES: &[&str] = &[
     "canvas_run_write_limit",
     "space_canvas_disabled",
     "zdr_persistence_forbidden",
+    "zdr_durable_mutation_forbidden",
     "space_decision_required",
     "space_decision_invalid",
     "space_decision_mismatch",
