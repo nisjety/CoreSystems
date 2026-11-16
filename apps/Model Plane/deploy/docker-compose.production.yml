@@ -64,9 +64,9 @@ services:
       MODEL_GATEWAY_GOAL_JUDGE_SERVICE_ID: ""
       MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY: ""
       # C-05 (D2-769, D2-774): the one switch for the Space listing refusal, the same name execution-core reads.
-      # Interpolated, not pinned, so a deployment turns it on in its runtime environment; it must be on before
-      # MODEL_ACTION_ADMISSION=table with Spaces. Unset is off; only the literal "true" enables it.
-      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
+      # Interpolated, not pinned, so a deployment can set it in its runtime environment; it must stay on before
+      # MODEL_ACTION_ADMISSION=table with Spaces. Unset is on; only the literal "false" opts out.
+      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-true}
   session-core:
     <<: *hardened-service
     ports: !reset []
@@ -114,8 +114,8 @@ services:
       # Quarantine-and-release of flagged tool output (WS10-S8): off in production.
       EXECUTION_CORE_QUARANTINE_MODE: "off"
       # C-05 (D2-769): the Space listing refusal for a Do run, the same switch model-gateway reads. Interpolated, not
-      # pinned, so a deployment turns it on in its runtime environment. Unset is off; only the literal "true" enables it.
-      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
+      # pinned, so a deployment can set it in its runtime environment. Unset is on; only the literal "false" opts out.
+      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-true}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:?EXECUTION_CORE_AUTH_AUDIENCE is required}

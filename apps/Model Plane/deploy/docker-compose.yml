@@ -453,10 +453,10 @@ services:
       AGENTIC_SPACE_RETRIEVAL_ENABLED: ${AGENTIC_SPACE_RETRIEVAL_ENABLED:-false}
       # C-05 (D2-769, D2-774): the one switch for the Space listing refusal, the same name execution-core reads. On, the
       # inline loop refuses knowledge_list_documents on a Space-scoped turn (a tool error, before any Data Plane call).
-      # Off by default (the organisation-wide listing); only the literal `true`. Turn it on before
-      # MODEL_ACTION_ADMISSION=table, and no later than AGENTIC_SPACE_RETRIEVAL_ENABLED: the retrieval switch no
+      # On by default (fail closed, plan OD-06). Only the literal `false` opts out, to the organisation-wide listing. Keep
+      # it on before MODEL_ACTION_ADMISSION=table, and no later than AGENTIC_SPACE_RETRIEVAL_ENABLED: the retrieval switch no
       # longer refuses the listing.
-      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
+      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-true}
       # Inline tool-loop guard (WS25-S1): off, shadow or enforce. Unset is off; the plan's shadow
       # release is an owner flip, not this file's default.
       LOOP_GUARD_MODE: ${LOOP_GUARD_MODE:-}
@@ -2178,10 +2178,10 @@ services:
       # unattested until then. ZDR and non-Space runs never get them; plan mode refuses the writes.
       WORKSPACE_TOOLS: ${WORKSPACE_TOOLS:-off}
       # D2-769: the owner document listing (knowledge_list_documents) cannot be narrowed to a Space, so with this on a
-      # Space-scoped Do run is refused it with a typed error before any Data Plane call. Off by default (today's
-      # organisation-wide listing); only the literal `true`. Switch it on before MODEL_ACTION_ADMISSION=table in any
-      # Space-capable deployment.
-      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
+      # Space-scoped Do run is refused it with a typed error before any Data Plane call. On by default (fail closed, plan
+      # OD-06); only the literal `false` opts out, to today's organisation-wide listing. Keep it on before
+      # MODEL_ACTION_ADMISSION=table in any Space-capable deployment.
+      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-true}
       # D2-771: the direct ExecuteStep RPC searches the organisation for a Space-scoped knowledge_search today. With this on
       # such a step is withheld (typed PROJECT_KNOWLEDGE_UNAVAILABLE, before any Data Plane call) unless the caller forwards
       # x-space-retrieval-authorization. Off by default; only the literal `true`.

@@ -62,12 +62,13 @@ pub fn admission_table() -> bool {
 }
 
 /// Whether this deployment refuses the listing on a Space-scoped run (`OWNER_LIST_SPACE_REFUSE`).
-/// Strict: only the literal `true` switches it on, so the listing keeps its organisation-wide
-/// reach everywhere else. Dark by default (D2-769). The value is read raw, not through the
-/// trimming `env_value`, so a padded value such as ` true` stays off, as in model-gateway.
+/// Fail closed (D2-769, plan OD-06): unset and every value but the literal `false` refuse, and `false`
+/// is the one explicit opt-out, which keeps the listing organisation-wide. The value is read raw, not
+/// through the trimming `env_value`, so a padded ` false` keeps the refusal on, as in model-gateway's
+/// `owner_list_space_refuse_on`.
 #[must_use]
 pub fn space_refuse_enabled() -> bool {
-    std::env::var("OWNER_LIST_SPACE_REFUSE").ok().as_deref() == Some("true")
+    std::env::var("OWNER_LIST_SPACE_REFUSE").ok().as_deref() != Some("false")
 }
 
 /// Whether a call on a run in `space_id` is refused because the run is Space-scoped. The Data Plane
@@ -224,9 +225,9 @@ fn tool_error(message: String) -> ToolExecution {
 
 /// Runs the Do-loop read. The Space refusal comes first (D2-774), then the switch and retention checks,
 /// then the arguments, the run's org and the bearer; each refusal is a typed tool error returned before
-/// any RPC. `space_id` is the run's Space (empty for a run outside one): with
-/// `OWNER_LIST_SPACE_REFUSE=true` a Space-scoped run is refused, fail closed, because the listing
-/// cannot be narrowed to the Space.
+/// any RPC. `space_id` is the run's Space (empty for a run outside one): unless `OWNER_LIST_SPACE_REFUSE`
+/// is the literal `false`, a Space-scoped run is refused, fail closed, because the listing cannot be
+/// narrowed to the Space.
 pub async fn execute(
     tool_input: &str,
     org_id: &str,

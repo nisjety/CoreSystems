@@ -1855,12 +1855,13 @@
       "kind": "switch",
       "owner": "model-plane",
       "source": "compose",
-      "default": "false",
-      "purpose": "D2-769, C-05: a Space-scoped Do or inline run is refused knowledge_list_documents with a typed error before any Data Plane call. Off, the listing stays org-wide. Enable before MODEL_ACTION_ADMISSION=table with Spaces. Only the literal true.",
-      "codeDefault": "false",
+      "default": "true",
+      "purpose": "D2-769, C-05: a Space-scoped Do or inline run is refused knowledge_list_documents with a typed error before any Data Plane call. On by default. Only the literal false opts out, and that keeps the listing org-wide.",
+      "onDefaultReason": "Fail closed (plan OD-06, owner decision SD-22: no org-scope recall in shared rooms). Unset refuses the listing on a Space-scoped run; only the literal false opts out.",
+      "codeDefault": "true",
       "declarations": [
-        { "service": "model-gateway", "env": "OWNER_LIST_SPACE_REFUSE", "default": "false" },
-        { "service": "execution-core", "env": "OWNER_LIST_SPACE_REFUSE", "default": "false" }
+        { "service": "model-gateway", "env": "OWNER_LIST_SPACE_REFUSE", "default": "true" },
+        { "service": "execution-core", "env": "OWNER_LIST_SPACE_REFUSE", "default": "true" }
       ]
     },
     {
