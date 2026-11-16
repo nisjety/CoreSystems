@@ -1220,6 +1220,16 @@ impl RetrievalPipeline {
             }
             None => cache_key,
         };
+        // WS17-S9: the Space filters apply after this read, so a Space-scoped answer is keyed by its
+        // verified Space and recipient audience. Two rooms with one query and one grant set, or one
+        // room under an older audience revision, never share an entry.
+        let cache_key = match req.space_scope.as_ref() {
+            Some(scope) => crate::cache::compose_cache_key(&[
+                cache_key.as_str(),
+                scope.authority.cache_partition().as_str(),
+            ]),
+            None => cache_key,
+        };
         // CR-T15: an answer reranked with chunk context is its own partition, never shared with one
         // reranked on the raw text.
         let cache_key = key_for_rerank_input(

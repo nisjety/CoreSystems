@@ -10,13 +10,14 @@ const TRACE_INSERT_SQL: &str = r#"
         dense_retrieval_ms, sparse_retrieval_ms, rerank_ms, total_ms,
         candidate_count_dense, candidate_count_sparse,
         candidate_count_fused, candidate_count_reranked, mode_mix,
-        zdr_actions_applied, mode_mix_applied, actor_user_id
+        zdr_actions_applied, mode_mix_applied, actor_user_id,
+        space_ref, space_audience_hash, space_audience_revision
     ) VALUES (
         $1, $2, $3, $4, $5,
         $6, $7, $8, $9,
         $10, $11, $12, $13,
         $14, $15, $16, $17, $18,
-        $19, $20, $21
+        $19, $20, $21, $22, $23, $24
     )
 "#;
 
@@ -25,7 +26,7 @@ const TRACE_LOOKUP_SQL: &str = r#"
            reranker_name, zdr_mode, dense_retrieval_ms, sparse_retrieval_ms,
            rerank_ms, total_ms, candidate_count_dense, candidate_count_sparse,
            candidate_count_fused, candidate_count_reranked, created_at,
-           mode_mix
+           mode_mix, space_ref, space_audience_hash, space_audience_revision
     FROM retrieval_runs
     WHERE trace_id = $1 AND org_id = $2
       AND ($3::text IS NULL OR actor_user_id = $3)
@@ -153,6 +154,10 @@ pub async fn persist_trace(
         .bind(zdr_actions_json)
         .bind(mode_mix_applied_json)
         .bind(&req.user_id)
+        // WS17-S9: the Space and the recipient audience its verified decision carried; NULL when unscoped.
+        .bind(req.space_scope.as_ref().map(|scope| scope.authority.space_ref.as_str()))
+        .bind(req.space_scope.as_ref().map(|scope| scope.authority.recipient_audience_hash.as_str()))
+        .bind(req.space_scope.as_ref().map(|scope| scope.authority.recipient_audience_revision))
         .execute(&mut *tx)
         .await?;
 
@@ -255,6 +260,15 @@ pub struct TraceRun {
     /// JSONB shape: {w_dense, w_bm25, w_graph, w_wiki, rerank}.
     #[sqlx(default)]
     pub mode_mix: Option<serde_json::Value>,
+    /// The Space this run was authorised under (WS17-S9); NULL for an unscoped run.
+    #[sqlx(default)]
+    pub space_ref: Option<String>,
+    /// The recipient audience hash Control signed for that Space decision (WS17-S9).
+    #[sqlx(default)]
+    pub space_audience_hash: Option<String>,
+    /// The recipient audience revision Control signed for that Space decision (WS17-S9).
+    #[sqlx(default)]
+    pub space_audience_revision: Option<i64>,
 }
 
 #[derive(Debug, serde::Serialize, sqlx::FromRow)]

@@ -37,6 +37,10 @@ struct RetrievalDecisionClaims {
     subject_id: String,
     service_audience: String,
     recipient_audience_ref: String,
+    // WS17-S9: the recipient audience commitment and revision Control signed with
+    // the decision. Required (no serde default): a decision without them is refused.
+    recipient_audience_hash: String,
+    recipient_audience_revision: i64,
     privacy_policy_ref: String,
     resource_authorization_ref: String,
     authority_revision: i64,
@@ -124,7 +128,9 @@ pub fn verify_retrieval_space_decision(
         decision_ref: claims.decision_ref,
         org_id: claims.org_id,
         privacy_policy_ref: claims.privacy_policy_ref,
+        recipient_audience_hash: claims.recipient_audience_hash,
         recipient_audience_ref: claims.recipient_audience_ref,
+        recipient_audience_revision: claims.recipient_audience_revision,
         resource_authorization_ref: claims.resource_authorization_ref,
         space_ref: claims.space_ref,
     };
@@ -171,7 +177,11 @@ pub struct VerifiedSpaceAuthority {
     pub decision_ref: String,
     pub org_id: String,
     pub privacy_policy_ref: String,
+    /// WS17-S9: the recipient audience commitment Control signed (content-free hash).
+    pub recipient_audience_hash: String,
     pub recipient_audience_ref: String,
+    /// WS17-S9: the recipient audience revision Control signed; must be positive.
+    pub recipient_audience_revision: i64,
     pub resource_authorization_ref: String,
     pub space_ref: String,
 }
@@ -181,10 +191,14 @@ impl VerifiedSpaceAuthority {
         if self.authority_revision <= 0 {
             anyhow::bail!("Space authority revision must be positive");
         }
+        if self.recipient_audience_revision <= 0 {
+            anyhow::bail!("Space authority recipient audience revision must be positive");
+        }
         for (name, value) in [
             ("decision_ref", &self.decision_ref),
             ("org_id", &self.org_id),
             ("privacy_policy_ref", &self.privacy_policy_ref),
+            ("recipient_audience_hash", &self.recipient_audience_hash),
             ("recipient_audience_ref", &self.recipient_audience_ref),
             (
                 "resource_authorization_ref",
@@ -197,6 +211,16 @@ impl VerifiedSpaceAuthority {
             }
         }
         Ok(())
+    }
+
+    /// The retrieval-cache partition of this authority (WS17-S9). A Space-scoped
+    /// answer is reused only for the same Space under the same recipient audience
+    /// hash and revision, never for another room or an older audience.
+    pub fn cache_partition(&self) -> String {
+        format!(
+            "space={};audience={};audience_revision={}",
+            self.space_ref, self.recipient_audience_hash, self.recipient_audience_revision
+        )
     }
 }
 
@@ -466,7 +490,9 @@ mod tests {
                 decision_ref: "decision_1".into(),
                 org_id: "org_1".into(),
                 privacy_policy_ref: "privacy_3".into(),
+                recipient_audience_hash: "audience_hash_2".into(),
                 recipient_audience_ref: "audience_2".into(),
+                recipient_audience_revision: 3,
                 resource_authorization_ref: "resource_auth_8".into(),
                 space_ref: "space_1".into(),
             },

@@ -731,8 +731,36 @@ async fn retrieve(
     // it is supplied it is verified and resolved before the pipeline can see
     // any caller-controlled workspace/collection filter.
     req.space_scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers).await?;
+    let space_ref = req
+        .space_scope
+        .as_ref()
+        .map(|scope| scope.authority.space_ref.clone());
     let resp = pipeline.retrieve(req).await.map_err(retrieval_error)?;
-    Ok(Json(resp))
+    let Some(space_ref) = space_ref else {
+        return Ok(Json(resp).into_response());
+    };
+    // WS17-S9: every candidate of a Space-scoped answer names the verified Space it was retrieved under.
+    let mut body = serde_json::to_value(&resp)?;
+    label_space_candidates(&mut body, &space_ref);
+    Ok(Json(body).into_response())
+}
+
+/// Labels each candidate of a Space-scoped answer with the verified Space it came from (WS17-S9).
+fn label_space_candidates(body: &mut serde_json::Value, space_ref: &str) {
+    let Some(candidates) = body
+        .get_mut("candidates")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for candidate in candidates {
+        if let Some(fields) = candidate.as_object_mut() {
+            fields.insert(
+                "space_ref".to_owned(),
+                serde_json::Value::String(space_ref.to_owned()),
+            );
+        }
+    }
 }
 
 async fn get_trace(
@@ -3490,7 +3518,9 @@ mod space_files_tests {
                 decision_ref: "decision-1".to_string(),
                 org_id: "org-1".to_string(),
                 privacy_policy_ref: "privacy:org-1".to_string(),
+                recipient_audience_hash: "audience-hash:user-1".to_string(),
                 recipient_audience_ref: "audience:user-1".to_string(),
+                recipient_audience_revision: 1,
                 resource_authorization_ref: "resource:1".to_string(),
                 space_ref: SPACE.to_string(),
             },
