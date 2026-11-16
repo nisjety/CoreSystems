@@ -5,9 +5,10 @@
 //   GET  /api/v1/spaces/{ref}/canvas?known_version_id=      {data:{canvas, head, can_write}}, or {data:{unchanged, head_version_id}}
 //   GET  /api/v1/spaces/{ref}/canvas/versions?limit&cursor  {data:[version without text], meta:{limit, next_cursor}}
 //   GET  /api/v1/spaces/{ref}/canvas/versions/{version_id}  {data:version with its text}
-//   POST /api/v1/spaces/{ref}/canvas/versions               201 {data:{canvas_id, version, deduplicated}}, or 200 {data:{canvas_id, head_version_id, unchanged}}
-//   POST /api/v1/spaces/{ref}/canvas/versions/{version_id}/restore  the same two answers as a save
-// A Space with no canvas yet answers canvas and head null: an empty room is a state, not an error.
+// Writes are not here. A save and a restore go through the action registry (`spaces.save_canvas`,
+// `spaces.restore_canvas_version`, see features/spaces/lib/space-canvas-save.ts), and their answer is read by
+// `spaceCanvasWriteResultFrom`. A Space with no canvas yet answers canvas and head null: an empty room is a state,
+// not an error.
 import { apiErrorFromResponse, clientError, requestJson, signalSessionExpiry } from '../http'
 import { gatewayBaseUrl } from '../config'
 
@@ -155,8 +156,8 @@ export async function getSpaceCanvas(spaceRef: string, knownVersionId?: string |
   return { unchanged: false, canvas, head, canWrite: data?.can_write === true }
 }
 
-/** The answer of a save or a restore: a stored version, or the unchanged head. */
-function writeResultFrom(body: unknown): SpaceCanvasWriteResult {
+/** The answer of a save or a restore action: a stored version (201), or the unchanged head (200). */
+export function spaceCanvasWriteResultFrom(body: unknown): SpaceCanvasWriteResult {
   const wire = wireRecord(body)
   const canvasId = text(wire?.canvas_id)
   if (!canvasId) throw clientError(503, 'canvas_unavailable')
@@ -166,48 +167,6 @@ function writeResultFrom(body: unknown): SpaceCanvasWriteResult {
   const version = versionFrom(wireRecord(wire?.version))
   if (!version) throw clientError(503, 'canvas_unavailable')
   return { unchanged: false, canvasId, version, deduplicated: wire?.deduplicated === true }
-}
-
-/**
- * Save a new version over the head the editor opened from (`expectedVersionId`, null for the first version of a
- * Space). `clientSaveId` is the key the write is retried under (16 to 64 letters, digits, `-` or `_`). A head that
- * moved answers 409 `canvas_head_moved` with the head's id in the body; the caller reloads the head.
- */
-export async function saveSpaceCanvas(
-  spaceRef: string,
-  input: {
-    readonly expectedVersionId: string | null
-    readonly content: string
-    readonly summary?: string
-    readonly clientSaveId: string
-  },
-): Promise<SpaceCanvasWriteResult> {
-  const body = await requestJson<unknown>(`${spaceCanvasPath(spaceRef)}/versions`, {
-    method: 'POST',
-    body: JSON.stringify({
-      expected_version_id: input.expectedVersionId,
-      content: input.content,
-      ...(input.summary ? { summary: input.summary } : {}),
-      client_save_id: input.clientSaveId,
-    }),
-  })
-  return writeResultFrom(body)
-}
-
-/** Make an earlier version the current one. The restore is a new version; nothing in the history is removed. */
-export async function restoreSpaceCanvasVersion(
-  spaceRef: string,
-  versionId: string,
-  input: { readonly expectedVersionId: string | null; readonly clientSaveId: string },
-): Promise<SpaceCanvasWriteResult> {
-  const body = await requestJson<unknown>(
-    `${spaceCanvasPath(spaceRef)}/versions/${encodeURIComponent(versionId)}/restore`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ expected_version_id: input.expectedVersionId, client_save_id: input.clientSaveId }),
-    },
-  )
-  return writeResultFrom(body)
 }
 
 /**

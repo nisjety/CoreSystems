@@ -1623,6 +1623,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   room_role_insufficient: { no: 'Rollen din i rommet er ikke høy nok til å legge til agenter.', en: 'Your role in this room is not high enough to add agents.' },
   space_not_active: { no: 'Rommet er ikke aktivt akkurat nå, så agenten kan ikke legges til.', en: 'This room is not active right now, so the agent cannot be added.' },
 
+  // WS17-S6b private panel (gateway domains/spaces/private_panel.rs): a room that cannot open one yet, and an outage.
+  private_panel_creation_unavailable: { no: 'Et privat panel kan ikke åpnes her ennå.', en: "A private panel can't be opened here yet." },
+  private_panel_unavailable: { no: 'Det private panelet er midlertidig utilgjengelig. Ingenting er endret. Prøv igjen om litt.', en: 'The private panel is temporarily unavailable. Nothing was changed. Try again shortly.' },
+
   // WS19-S5 room canvas (gateway domains/spaces/canvas.rs). The canvas routes word their refusals through
   // canvasErrorMessage below, so a code that also means something elsewhere (space_decision_unavailable,
   // delegated_auth_unavailable, ...) gets the canvas sentence there. invalid_space is an internal-only code and

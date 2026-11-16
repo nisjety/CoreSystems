@@ -873,6 +873,8 @@ export default function SpacePage() {
                       <SpaceCanvasPanel
                         spaceRef={current().space.space_ref}
                         roster={() => (roster.error ? [] : roster() ?? [])}
+                        orgId={current().membership.org_id}
+                        actorId={current().membership.subject_id}
                       />
                     ),
                     arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} liveRuns={agentWork()?.live === true} />,

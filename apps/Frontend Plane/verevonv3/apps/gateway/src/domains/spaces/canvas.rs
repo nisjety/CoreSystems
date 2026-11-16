@@ -87,6 +87,7 @@ const DATA_PLANE_CODES: &[&str] = &[
     "space_decision_invalid",
     "space_decision_mismatch",
     "space_decision_digest_mismatch",
+    "space_history_floor_unsupported",
 ];
 
 /// The canvas routes, merged by `module_routes()` in `spaces/mod.rs`.
