@@ -244,6 +244,38 @@ pub fn zdr_or_refuse(
         .map_err(|refusal| http(&refusal))
 }
 
+/// Whether a capability-core request the shared proxy forwards is a removal that D20 allows under a ZDR claim
+/// (W3-DEC-ZDRDEL, W3-DEC-ZDRDEL2): it removes what it names and stores nothing. `method` and `path` are the pair the
+/// proxy forwards, with any query set aside. Every other non-GET still refuses a ZDR claim, and so do the org hook and
+/// permission-rule deletes, which persist state beyond the removal.
+#[must_use]
+pub fn zdr_allowed_removal(method: &str, path: &str) -> bool {
+    let route = path.split_once('?').map_or(path, |(route, _)| route);
+    let segments: Vec<&str> = route.split('/').collect();
+    match (method, segments.as_slice()) {
+        // `delete_cron_proxy`
+        ("DELETE", ["cron", id]) => removal_id(id),
+        // `delete_skill_proxy`
+        ("DELETE", ["skills", id]) => removal_id(id),
+        // `discard_skill_draft_proxy`
+        ("DELETE", ["skills", id, "draft"]) => removal_id(id),
+        // `delete_plugin_proxy`
+        ("DELETE", ["plugins", id]) => removal_id(id),
+        // `uninstall_plugin_proxy`: a POST that only removes the children an install created and takes the plugin out
+        // of service; the audit rows carry ids, names and the reason, no content.
+        ("POST", ["plugins", id, "uninstall"]) => removal_id(id),
+        // `delete_plugin_kill_proxy`: the digest and scope ride in the query, which the handler checks before the path
+        // is built.
+        ("DELETE", ["plugin-kill-list"]) => true,
+        _ => false,
+    }
+}
+
+/// A path id as one segment: not empty, and with no query or fragment mark that would move the target.
+fn removal_id(id: &str) -> bool {
+    !id.is_empty() && !id.contains('?') && !id.contains('#')
+}
+
 /// Whether a live view of a run is refused before Session Core is asked. A ZDR credential is refused
 /// here, and so is any posture refusal but the waiver's route mismatch, which is not a verdict yet: a
 /// waiver binds one connection, and the run's own route is decided once Session Core has verdicted the
@@ -925,8 +957,11 @@ pub(crate) mod tests {
     /// (a continuation) refuses a ZDR token through `continuation_gate` and checks a waiver against the
     /// stored receipt in Session Core (owner decision 17). Every other durable mutation refuses a ZDR
     /// token and a waived token through `require_non_zdr_durable_mutation`. Deletes and archives are
-    /// not in this list: they are allowed under every posture. Reads of durable state are not guarded
-    /// here: they send nothing to a processor.
+    /// allowed under every posture (D20) unless they persist state beyond the removal: the org hook and
+    /// permission-rule deletes do (the hook retires its row as history, the rule delete writes a policy
+    /// revision), so they stay in this list. The shared capability-core proxy (`proxy_to_capability_core`)
+    /// exempts only the removals `zdr_allowed_removal` names, and a waived token keeps its route mismatch
+    /// there. Reads of durable state are not guarded here: they send nothing to a processor.
     #[test]
     fn every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs() {
         const DURABLE_MUTATIONS: &[(&str, &str)] = &[

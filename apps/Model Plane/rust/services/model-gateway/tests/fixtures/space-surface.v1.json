@@ -4037,7 +4037,7 @@
       "idempotency": "unspecified",
       "flag": "PLUGIN_LOADER_ENABLED",
       "payload_allow_list": [],
-      "reason": "Removes a plugin kill-list entry, a removal that stores nothing: allowed under every posture (D20, W3-DEC-ZDRDEL). The model-gateway proxy still refuses this DELETE under a ZDR claim until it exempts removals (follow-up)."
+      "reason": "Removes a plugin kill-list entry, a removal that stores nothing: allowed under every posture (D20, W3-DEC-ZDRDEL, W3-DEC-ZDRDEL2). The model-gateway proxy exempts this DELETE under a ZDR claim (zdr_allowed_removal)."
     },
     {
       "id": "mg:POST:/v1/plugins/:id/install",
@@ -4066,12 +4066,12 @@
       "handler": "http_routes.rs::uninstall_plugin_proxy",
       "decision_type": "token_posture",
       "min_role": "authenticated",
-      "zdr_class": "refuse",
-      "basis": "guard:proxy_to_capability_core",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
       "idempotency": "unspecified",
       "flag": "PLUGIN_LOADER_ENABLED",
       "payload_allow_list": [],
-      "reason": "Uninstalls a plugin through Capability Core: the shared proxy refuses a zero-retention or waived token before anything is forwarded."
+      "reason": "Uninstalls a plugin: removes the children its install created and takes the plugin out of service, a removal that stores no content: allowed under every posture (D20, W3-DEC-ZDRDEL2). The model-gateway proxy exempts it under a ZDR claim (zdr_allowed_removal)."
     },
     {
       "id": "mg:POST:/v1/recommend/plan",
@@ -4870,7 +4870,7 @@
       "idempotency": "unspecified",
       "flag": null,
       "payload_allow_list": [],
-      "reason": "Discards a skill draft, a removal that stores nothing: allowed under every posture (D20, W3-DEC-ZDRDEL). The model-gateway proxy still refuses this DELETE under a ZDR claim until it exempts removals (follow-up)."
+      "reason": "Discards a skill draft, a removal that stores nothing: allowed under every posture (D20, W3-DEC-ZDRDEL, W3-DEC-ZDRDEL2). The model-gateway proxy exempts this DELETE under a ZDR claim (zdr_allowed_removal)."
     },
     {
       "id": "mg:POST:/v1/skills/:id/versions/:version/restore",

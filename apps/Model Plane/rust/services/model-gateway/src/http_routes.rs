@@ -8699,9 +8699,15 @@ pub(crate) async fn proxy_to_capability_core(
     method: &str,
     body: Option<&Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    // Refuse before delegating: the durable-mutation inventory checks this entry point on its own.
+    // Refuse before delegating: the durable-mutation inventory checks this entry point on its own. A removal that D20
+    // allows (`zdr_allowed_removal`) passes a ZDR claim; its posture is still decided, so a waived token keeps the
+    // route mismatch every plain route gives it.
     if method != "GET" {
-        require_non_zdr_durable_mutation(claims)?;
+        if crate::zdr_posture::zdr_allowed_removal(method, path) {
+            crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))?;
+        } else {
+            require_non_zdr_durable_mutation(claims)?;
+        }
     }
     proxy_to_capability_core_with_precondition(state, claims, bearer, path, method, body, None)
         .await
@@ -8720,8 +8726,13 @@ async fn proxy_to_capability_core_with_precondition(
 ) -> Result<Json<Value>, HttpJsonError> {
     // Capability Core remains authoritative, but stop an obvious issuer-ZDR
     // mutation at the public boundary before forwarding any body or credential.
+    // A removal D20 allows (`zdr_allowed_removal`) passes a ZDR claim; see the entry point above.
     if method != "GET" {
-        require_non_zdr_durable_mutation(claims)?;
+        if crate::zdr_posture::zdr_allowed_removal(method, path) {
+            crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))?;
+        } else {
+            require_non_zdr_durable_mutation(claims)?;
+        }
     }
     let base = &state.capability_core_base_url;
     let url = format!("{base}/api/v1/{path}");
