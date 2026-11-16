@@ -44,6 +44,35 @@ const (
 	genericGlobalHealthAttesterID = authz.ExecutionCoreServiceID
 )
 
+// Space run-action capability ids (WS18-S2). The four Model-owned rows are attested by
+// execution-core on the owner-action lane, after its Session Core probe. The
+// Application-owned pause row has no attester until its owner slice lands, so it is
+// absent from the table and stays unavailable.
+const (
+	spaceThreadRenameCapabilityID     = "cap.tool.space.thread.rename"
+	spaceThreadPinCapabilityID        = "cap.tool.space.thread.pin"
+	spaceThreadPostCardCapabilityID   = "cap.tool.space.thread.post_card"
+	spaceScheduleFollowUpCapabilityID = "cap.tool.space.schedule.follow_up"
+)
+
+// ownerActionHealthAttesters is the owner-action lane's attester table. Each owner-action
+// capability names the one service identity allowed to attest its health on that lane. The
+// owner lane refuses every id it does not list, and the generic and tenant lanes refuse
+// every id it does list.
+var ownerActionHealthAttesters = map[string]string{
+	ownerActionTicketCapabilityID:     authz.ConversationCoreServiceID,
+	spaceThreadRenameCapabilityID:     authz.ExecutionCoreServiceID,
+	spaceThreadPinCapabilityID:        authz.ExecutionCoreServiceID,
+	spaceThreadPostCardCapabilityID:   authz.ExecutionCoreServiceID,
+	spaceScheduleFollowUpCapabilityID: authz.ExecutionCoreServiceID,
+}
+
+// isOwnerActionCapability reports whether an id belongs to the owner-action lane.
+func isOwnerActionCapability(capabilityID string) bool {
+	_, owned := ownerActionHealthAttesters[strings.TrimSpace(capabilityID)]
+	return owned
+}
+
 var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 
 // The capabilities execution-core's generic health credential may attest.
@@ -294,10 +323,11 @@ func (h *CapabilitiesHandler) attestAvailabilityForLane(w http.ResponseWriter, r
 	globalAuthority := principalPresent && mayAttestGlobalCapability(principal)
 	switch lane {
 	case laneOwnerAction:
-		if !principalPresent || principal.PrincipalType != "service" ||
-			principal.ActorID != authz.ConversationCoreServiceID ||
+		attester, owned := ownerActionHealthAttesters[capabilityID]
+		if !principalPresent || principal.PrincipalType != "service" || !owned ||
+			principal.ActorID != attester ||
 			!principal.HasScope(authz.OwnerActionHealthWriteScope) ||
-			organizationID != "global" || capabilityID != ownerActionTicketCapabilityID {
+			organizationID != "global" {
 			jsonErr(w, "owner-action health attestation is not authorized", http.StatusForbidden)
 			return
 		}
@@ -317,7 +347,7 @@ func (h *CapabilitiesHandler) attestAvailabilityForLane(w http.ResponseWriter, r
 	// its tenant lane. This independently backs up the HTTP authorizer: a
 	// future route-policy regression cannot let a tenant health reporter make a
 	// globally registered owner action runnable.
-	if lane != laneOwnerAction && capabilityID == ownerActionTicketCapabilityID {
+	if lane != laneOwnerAction && isOwnerActionCapability(capabilityID) {
 		jsonErr(w, "owner-action capability requires a dedicated health attester", http.StatusForbidden)
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -229,17 +230,13 @@ func runActionSpec(actionID string) (runActionSpecRow, bool) {
 	return row, found
 }
 
-// runActionSelfAPIIssuable reports whether Control may issue or accept a golden
-// row for effect. CONTROL_SPACE_SELF_API_ACTIONS is an operator list, empty by
-// default. It can only narrow what the golden admits and never grants authority.
-// tickets.create predates the list and is exempt.
-func runActionSelfAPIIssuable(actionID string) bool {
+// runActionAllowlisted reports whether CONTROL_SPACE_SELF_API_ACTIONS names the
+// action. The list is an operator setting, empty by default, read at call time.
+// It can only narrow what the golden admits and never grants authority.
+func runActionAllowlisted(actionID string) bool {
 	actionID = strings.TrimSpace(actionID)
 	if actionID == "" {
 		return false
-	}
-	if actionID == ticketsCreateActionID {
-		return true
 	}
 	for _, item := range strings.Split(os.Getenv(spaceSelfAPIActionsEnv), ",") {
 		if strings.TrimSpace(item) == actionID {
@@ -247,4 +244,30 @@ func runActionSelfAPIIssuable(actionID string) bool {
 		}
 	}
 	return false
+}
+
+// runActionSelfAPIIssuable reports whether Control may issue or accept a golden
+// row for effect. tickets.create predates the list and is exempt from it for
+// decisions only; the model action view requires runActionAllowlisted for every
+// row, tickets.create included.
+func runActionSelfAPIIssuable(actionID string) bool {
+	actionID = strings.TrimSpace(actionID)
+	if actionID == ticketsCreateActionID {
+		return true
+	}
+	return runActionAllowlisted(actionID)
+}
+
+// runActionRegistryIDs lists the golden action ids in sorted order, so every
+// issuer orders its rows the same way. A malformed copy lists none.
+func runActionRegistryIDs() []string {
+	if runActionRegistryErr != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(runActionRegistry))
+	for id := range runActionRegistry {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }

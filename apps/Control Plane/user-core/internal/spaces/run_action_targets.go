@@ -21,6 +21,9 @@ const (
 
 // RunActionTargetsModeFromLookup reads RUN_ACTION_TARGETS strictly: only the
 // literal "table" offers every admitted row, anything else keeps tickets.create.
+// Superseded: nothing in production reads this switch. The model action view admits
+// rows only through CONTROL_SPACE_SELF_API_ACTIONS. It is kept so existing callers
+// compile, and it no longer widens any view.
 func RunActionTargetsModeFromLookup(lookup func(string) string) RunActionTargetsMode {
 	if lookup != nil && lookup(runActionTargetsEnv) == string(RunActionTargetsTable) {
 		return RunActionTargetsTable
@@ -40,17 +43,36 @@ type runActionTargetRow struct {
 	SchemaHash      string
 }
 
-// runActionTargets seeds tickets.create only. It is a variable so the tests can
-// exercise a second row without changing the production table.
-var runActionTargets = []runActionTargetRow{
-	{
-		ActionID:        ticketsCreateActionID,
-		ServiceAudience: ticketsCreateServiceAudience,
-		Permission:      ticketsCreateActionPermission,
-		Class:           runActionClassWriteApproval,
-		HashBasis:       runActionHashBasisOwnerContract,
-		SchemaHash:      ticketsCreateActionSchemaSHA256,
-	},
+// runActionTargets is the Control projection of the golden registry: one row per
+// golden action, built from the same parsed document as runActionSpec. It replaces
+// the one-row seed, so the owner reservation and this lookup cannot disagree with
+// the decision path. It is a variable so the tests can inject a row.
+var runActionTargets = runActionTargetRowsFromRegistry()
+
+// runActionTargetRowsFromRegistry projects every golden row in sorted id order. A
+// malformed golden copy projects no rows, so every lookup refuses.
+func runActionTargetRowsFromRegistry() []runActionTargetRow {
+	ids := runActionRegistryIDs()
+	rows := make([]runActionTargetRow, 0, len(ids))
+	for _, id := range ids {
+		spec, found := runActionSpec(id)
+		if !found {
+			continue
+		}
+		class := spec.AutonomyRung
+		if spec.Approval == "owner_approval" {
+			class = runActionClassWriteApproval
+		}
+		rows = append(rows, runActionTargetRow{
+			ActionID:        spec.ActionID,
+			ServiceAudience: spec.ServiceAudience,
+			Permission:      spec.Permission,
+			Class:           class,
+			HashBasis:       spec.HashBasis,
+			SchemaHash:      spec.SchemaSHA256,
+		})
+	}
+	return rows
 }
 
 func runActionTargetFor(actionID string) (runActionTargetRow, bool) {

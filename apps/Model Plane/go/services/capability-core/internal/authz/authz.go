@@ -37,9 +37,10 @@ const (
 	// Control-signed run view for a server-owned model tool definition. It is
 	// presentation-only and is never an owner-effect or catalog-write scope.
 	ModelActionViewScope = "capability:model-action:view"
-	// OwnerActionHealthWriteScope is held only by Conversation Core's dedicated
-	// owner-action readiness reporter. It cannot mutate the normal catalog or
-	// attest any capability other than the ticket adapter.
+	// OwnerActionHealthWriteScope is held only by the owner-action readiness reporters:
+	// Conversation Core for the ticket adapter and execution-core for the Model-owned Space
+	// rows. It cannot mutate the normal catalog, and the attester table in availability.go
+	// names the one capability id each identity may attest.
 	OwnerActionHealthWriteScope = "capability:owner-action:health:write"
 	// BrowserHealthWriteScope is held only by browser-broker's readiness
 	// reporter. It cannot write the catalog or attest any capability other
@@ -99,8 +100,8 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 	}
 	if request.URL.Path == "/api/v1/capabilities/owner-actions/health" {
 		if request.Method == http.MethodPost && principal.PrincipalType == "service" &&
-			principal.ActorID == ConversationCoreServiceID && principal.OrganizationID == "global" &&
-			principal.HasScope(OwnerActionHealthWriteScope) {
+			(principal.ActorID == ConversationCoreServiceID || principal.ActorID == ExecutionCoreServiceID) &&
+			principal.OrganizationID == "global" && principal.HasScope(OwnerActionHealthWriteScope) {
 			return nil
 		}
 		return errDenied

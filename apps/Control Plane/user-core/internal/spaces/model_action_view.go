@@ -21,18 +21,15 @@ const (
 	modelActionViewServiceAudience  = "model-plane-capability-core"
 	modelActionViewPermission       = "model-action:view"
 	ticketsCreateActionSchemaSHA256 = "sha256:c3aa12ec85c2d79f08e5e8cc726fd75af10ddab0b29f2a6e0dddb0bd42bb56df"
-	maxModelActionViewV2Actions     = 16
+	maxModelActionViewV2Actions     = 8
 	maxModelActionIDBytes           = 200
 )
 
-// ModelActionViewRequest contains no actor or target resource. With no ActionIDs
-// Control issues the single tickets.create v1 view. With ActionIDs it issues a v2
-// view naming the requested actions the target table admits in Targets' mode.
+// ModelActionViewRequest contains no actor, target resource or action id. Control
+// derives the v1 tickets.create view and the server-owned v2 list itself.
 type ModelActionViewRequest struct {
 	DecisionRef string
 	Nonce       string
-	ActionIDs   []string
-	Targets     RunActionTargetsMode
 }
 
 func (r ModelActionViewRequest) Validate() error {
@@ -191,8 +188,10 @@ func IssueModelActionView(evidence PersonalThreadDecisionEvidence, authority Run
 	return view, nil
 }
 
-// ModelActionViewV2 is the v2 view: the same authority as ModelActionView with
-// the owner actions it names. Capability Core offers an action only when its
+// ModelActionViewV2 is the v2 view: the same authority as ModelActionView with the
+// registry rows it names. Control lists only rows that the operator allowlist, the
+// golden registry, the caller's role floor and the agent-action entitlement all
+// admit, so the list is server-owned. Capability Core offers a row only when its
 // admission row is enabled and carries the schema hash signed here.
 type ModelActionViewV2 struct {
 	DecisionRef                string            `json:"decision_ref"`
@@ -220,7 +219,15 @@ type ModelActionViewV2 struct {
 	IssuedAt                   time.Time         `json:"issued_at"`
 	ExpiresAt                  time.Time         `json:"expires_at"`
 	Nonce                      string            `json:"nonce"`
-	ActionSchemaHashes         map[string]string `json:"action_schema_hashes"`
+	Actions                    []ModelActionRowV2 `json:"actions"`
+}
+
+// ModelActionRowV2 is one registry row a v2 view admits: its id, the schema hash the
+// golden registry pins for it, and the level Control admits it at.
+type ModelActionRowV2 struct {
+	ActionID         string `json:"action_id"`
+	ActionSchemaHash string `json:"action_schema_hash"`
+	Level            string `json:"level"`
 }
 
 func (v ModelActionViewV2) Validate() error {
@@ -255,14 +262,18 @@ func (v ModelActionViewV2) Validate() error {
 		!v.ExpiresAt.After(v.IssuedAt) || v.ExpiresAt.Sub(v.IssuedAt) > personalDecisionLifetime {
 		return fmt.Errorf("model action view authority is invalid")
 	}
-	if len(v.ActionSchemaHashes) == 0 || len(v.ActionSchemaHashes) > maxModelActionViewV2Actions {
+	if len(v.Actions) == 0 || len(v.Actions) > maxModelActionViewV2Actions {
 		return fmt.Errorf("model action view names an invalid number of actions")
 	}
-	for actionID, hash := range v.ActionSchemaHashes {
-		target, found := runActionTargetFor(actionID)
-		if !found || target.ActionID != actionID || target.SchemaHash != hash {
-			return fmt.Errorf("model action view names an action outside the target table")
+	seen := make(map[string]bool, len(v.Actions))
+	for _, action := range v.Actions {
+		spec, found := runActionSpec(action.ActionID)
+		if !found || spec.ActionID != action.ActionID || seen[action.ActionID] ||
+			spec.DecisionType != runActionDecisionKind || action.ActionSchemaHash != spec.SchemaSHA256 ||
+			action.Level != spec.DefaultLevel || (action.Level != "allow" && action.Level != "ask") {
+			return fmt.Errorf("model action view names an action outside the registry")
 		}
+		seen[action.ActionID] = true
 	}
 	return nil
 }
@@ -304,10 +315,11 @@ func signModelActionEnvelope(version string, key SigningKey, payload []byte) str
 	return signed + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key.PrivateKey, []byte(signed)))
 }
 
-// IssueModelActionViewV2 names the requested owner actions the target table admits
-// in the selected mode. Ids outside the table or the mode are dropped, and a view
-// that admits none is refused. The agent-action entitlement is required by
-// ValidateForAgentAction for every admitted row, so no row is offered without it.
+// IssueModelActionViewV2 lists the registry rows the operator allowlist admits for
+// this run. The list is server-owned: the request names no action. A row needs its
+// allowlist entry (tickets.create included), its run-action decision type and the
+// caller's role floor, and the agent-action entitlement that ValidateForAgentAction
+// checks first. An empty allowlist therefore yields no v2 view at all.
 func IssueModelActionViewV2(evidence PersonalThreadDecisionEvidence, authority RunActionAuthority, request ModelActionViewRequest, now time.Time) (ModelActionViewV2, error) {
 	if err := evidence.ValidateForAgentAction(); err != nil {
 		return ModelActionViewV2{}, err
@@ -315,14 +327,14 @@ func IssueModelActionViewV2(evidence PersonalThreadDecisionEvidence, authority R
 	if err := authority.Validate(); err != nil {
 		return ModelActionViewV2{}, err
 	}
-	if err := request.Validate(); err != nil || now.IsZero() || len(request.ActionIDs) == 0 || len(request.ActionIDs) > maxModelActionViewV2Actions {
+	if err := request.Validate(); err != nil || now.IsZero() {
 		return ModelActionViewV2{}, fmt.Errorf("model action view request is invalid")
 	}
 	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if !authorityMatchesEvidence(authority, evidence, expectedSourceRef) {
 		return ModelActionViewV2{}, fmt.Errorf("model action view authority does not match current Control authority")
 	}
-	schemaHashes, err := admittedActionSchemaHashes(request.ActionIDs, request.Targets)
+	actions, err := admittedModelActionViewV2Actions(evidence.Membership.Role)
 	if err != nil {
 		return ModelActionViewV2{}, err
 	}
@@ -352,26 +364,25 @@ func IssueModelActionViewV2(evidence PersonalThreadDecisionEvidence, authority R
 		IssuedAt:                   now.UTC(),
 		ExpiresAt:                  now.UTC().Add(personalDecisionLifetime),
 		Nonce:                      strings.TrimSpace(request.Nonce),
-		ActionSchemaHashes:         schemaHashes,
+		Actions:                    actions,
 	}
 	return view, nil
 }
 
-// admittedActionSchemaHashes maps each requested action the table admits in the
-// mode to the schema hash the table holds for it.
-func admittedActionSchemaHashes(actionIDs []string, mode RunActionTargetsMode) (map[string]string, error) {
-	hashes := make(map[string]string, len(actionIDs))
-	for _, actionID := range actionIDs {
-		actionID = strings.TrimSpace(actionID)
-		if actionID == "" || len(actionID) > maxModelActionIDBytes {
-			return nil, fmt.Errorf("model action view action id is invalid")
+// admittedModelActionViewV2Actions lists, in registry order, the run-action rows
+// the operator allowlist names and the caller's role meets. The schedule row has
+// another decision type and is never listed here.
+func admittedModelActionViewV2Actions(role string) ([]ModelActionRowV2, error) {
+	actions := make([]ModelActionRowV2, 0)
+	for _, id := range runActionRegistryIDs() {
+		spec, found := runActionSpec(id)
+		if !found || spec.DecisionType != runActionDecisionKind || !runActionAllowlisted(id) || RoleRank(role) < RoleRank(spec.MinRole) {
+			continue
 		}
-		if target, found := runActionTargetForMode(actionID, mode); found {
-			hashes[target.ActionID] = target.SchemaHash
-		}
+		actions = append(actions, ModelActionRowV2{ActionID: spec.ActionID, ActionSchemaHash: spec.SchemaSHA256, Level: spec.DefaultLevel})
 	}
-	if len(hashes) == 0 {
+	if len(actions) == 0 || len(actions) > maxModelActionViewV2Actions {
 		return nil, fmt.Errorf("model action view admits no requested action")
 	}
-	return hashes, nil
+	return actions, nil
 }

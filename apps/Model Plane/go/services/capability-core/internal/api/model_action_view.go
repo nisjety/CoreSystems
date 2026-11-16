@@ -36,6 +36,7 @@ const (
 	maxModelActionViewRequestBytes = 20 << 10
 	maxModelActionViewLifetime     = 2 * time.Minute
 	maxModelActionViewAdmissions   = 16
+	maxModelActionViewV2Actions    = 8
 )
 
 // This is a server-owned schema rather than a frontend Action Registry copy.
@@ -58,6 +59,8 @@ type modelActionToolDefinition struct {
 	ParametersJSON   string `json:"parameters_json"`
 	ActionSchemaHash string `json:"action_schema_hash"`
 	RequiresApproval bool   `json:"requires_approval"`
+	Level            string `json:"level,omitempty"`
+	AutonomyRung     string `json:"autonomy_rung,omitempty"`
 }
 
 type modelActionViewData struct {
@@ -118,20 +121,30 @@ type controlModelActionView struct {
 	ActionSchemaHash string `json:"action_schema_hash"`
 }
 
-// controlModelActionViewV2 names every action the view offers, each with the schema hash
-// Control signed for it. Capability Core offers an action only when its admission row is
-// enabled and carries that same hash.
+// controlModelActionViewV2 names every row the view offers, each with the registry id, the
+// schema hash Control signed for it and the level it is admitted at. Capability Core offers
+// a row only when its admission row is enabled and carries that same hash, and the golden
+// registry agrees with it.
 type controlModelActionViewV2 struct {
 	controlModelActionAuthority
-	ActionSchemaHashes map[string]string `json:"action_schema_hashes"`
+	Actions []controlModelActionViewV2Action `json:"actions"`
+}
+
+// controlModelActionViewV2Action is one signed row of a v2 view.
+type controlModelActionViewV2Action struct {
+	ActionID         string `json:"action_id"`
+	ActionSchemaHash string `json:"action_schema_hash"`
+	Level            string `json:"level"`
 }
 
 // verifiedModelActionView is a signed view after its signature, freshness and run binding
-// have been checked: the envelope version and the schema hash signed for each action.
+// have been checked: the envelope version, the schema hash signed for each action and, for
+// v2, the signed rows with their levels.
 type verifiedModelActionView struct {
 	version            string
 	authority          controlModelActionAuthority
 	actionSchemaHashes map[string]string
+	signedActions      []controlModelActionViewV2Action
 }
 
 // ControlModelActionViewVerifier trusts precisely one deployment-distributed
@@ -221,8 +234,21 @@ func (h *CapabilitiesHandler) resolveModelActionView(w http.ResponseWriter, requ
 		jsonErr(w, "model action admission is unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	candidates := make([]modelActionCandidate, 0, len(admitted))
+	if view.version == modelActionViewVersionV2 {
+		candidates, err = spaceModelActionCandidates(view, admitted)
+		if err != nil {
+			jsonErr(w, "Control model action view is not authorized", http.StatusForbidden)
+			return
+		}
+	} else {
+		for _, row := range admitted {
+			candidates = append(candidates, modelActionCandidate{row: row})
+		}
+	}
 	data := modelActionViewData{RunID: view.authority.RunID, Actions: []modelActionToolDefinition{}}
-	for _, row := range admitted {
+	for _, candidate := range candidates {
+		row := candidate.row
 		capability, err := h.availabilityStore.GetForOrg(request.Context(), row.CapabilityID, orgID)
 		if err != nil || capability == nil || capability.ID != row.CapabilityID || (capability.OrgID != orgID && capability.OrgID != "global") {
 			jsonErr(w, "model action capability is unavailable", http.StatusServiceUnavailable)
@@ -240,15 +266,19 @@ func (h *CapabilitiesHandler) resolveModelActionView(w http.ResponseWriter, requ
 			CostClass:         capability.CostClass,
 			HealthCheckedAt:   capability.HealthCheckedAt,
 		})
+		// An unavailable row is omitted, the first reason is reported once, and the loop
+		// continues so every later admitted row is still judged on its own health.
 		if availability.State != models.AvailabilityAvailable && availability.State != models.AvailabilityApprovalRequired {
-			data.ReasonCode = availability.ReasonCode
-			writeJSON(w, modelActionViewResponse{Data: data})
-			return
+			if data.ReasonCode == "" {
+				data.ReasonCode = availability.ReasonCode
+			}
+			continue
 		}
 		if availability.ExecutionMode != models.ExecutionAgentic {
-			data.ReasonCode = "execution_mode_unavailable"
-			writeJSON(w, modelActionViewResponse{Data: data})
-			return
+			if data.ReasonCode == "" {
+				data.ReasonCode = "execution_mode_unavailable"
+			}
+			continue
 		}
 		data.Actions = append(data.Actions, modelActionToolDefinition{
 			Name:             row.ToolName,
@@ -256,6 +286,8 @@ func (h *CapabilitiesHandler) resolveModelActionView(w http.ResponseWriter, requ
 			ParametersJSON:   row.ParametersJSON,
 			ActionSchemaHash: row.ActionSchemaHash,
 			RequiresApproval: row.RequiresApproval,
+			Level:            candidate.level,
+			AutonomyRung:     candidate.autonomyRung,
 		})
 	}
 	writeJSON(w, modelActionViewResponse{Data: data})
@@ -293,6 +325,43 @@ func (v *ControlModelActionViewVerifier) admittedRows(ctx context.Context, view 
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// modelActionCandidate is one admission row a verified view may offer. A v2 candidate
+// carries the level the signed view admits it at and the autonomy rung the golden
+// registry names; a v1 candidate carries neither.
+type modelActionCandidate struct {
+	row          *registry.AgentActionAdmission
+	level        string
+	autonomyRung string
+}
+
+// spaceModelActionCandidates joins each admission row a signed v2 view admits to the
+// golden registry and to the level Control signed. The golden row is authoritative. An
+// id it does not list, a row decided by another decision type, or any disagreement on
+// the schema hash, capability, parameters or approval refuses the whole view, so nothing
+// is offered around an integrity signal.
+func spaceModelActionCandidates(view verifiedModelActionView, admitted []*registry.AgentActionAdmission) ([]modelActionCandidate, error) {
+	levels := make(map[string]string, len(view.signedActions))
+	for _, action := range view.signedActions {
+		levels[action.ActionID] = action.Level
+	}
+	candidates := make([]modelActionCandidate, 0, len(admitted))
+	for _, row := range admitted {
+		if row == nil {
+			return nil, errModelActionHashMismatch
+		}
+		golden, found := spaceSelfAPIRowFor(row.ActionID)
+		level, signed := levels[row.ActionID]
+		if !found || !signed || golden.DecisionType != "run_action" ||
+			golden.SchemaSHA256 != row.ActionSchemaHash || golden.CapabilityID != row.CapabilityID ||
+			golden.ParametersJSON != row.ParametersJSON || row.RequiresApproval != (golden.Approval == "owner_approval") {
+			return nil, errModelActionHashMismatch
+		}
+		candidates = append(candidates, modelActionCandidate{row: row, level: level, autonomyRung: golden.AutonomyRung})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].row.ActionID < candidates[j].row.ActionID })
+	return candidates, nil
 }
 
 // ticketsCreateAdmission is the tickets.create row as the constants define it. The migration
@@ -363,10 +432,15 @@ func (v *ControlModelActionViewVerifier) Verify(token, runID, orgID string, now 
 		if err := view.Validate(now); err != nil {
 			return verifiedModelActionView{}, err
 		}
+		hashes := make(map[string]string, len(view.Actions))
+		for _, action := range view.Actions {
+			hashes[action.ActionID] = action.ActionSchemaHash
+		}
 		verified = verifiedModelActionView{
 			version:            parts[0],
 			authority:          view.controlModelActionAuthority,
-			actionSchemaHashes: view.ActionSchemaHashes,
+			actionSchemaHashes: hashes,
+			signedActions:      view.Actions,
 		}
 	}
 	if verified.authority.RunID != strings.TrimSpace(runID) || verified.authority.OrgID != strings.TrimSpace(orgID) {
@@ -398,13 +472,17 @@ func (v controlModelActionViewV2) Validate(now time.Time) error {
 	if err := v.controlModelActionAuthority.validate(now); err != nil {
 		return err
 	}
-	if len(v.ActionSchemaHashes) == 0 || len(v.ActionSchemaHashes) > maxModelActionViewAdmissions {
+	if len(v.Actions) == 0 || len(v.Actions) > maxModelActionViewV2Actions {
 		return fmt.Errorf("Control model action view authority is invalid")
 	}
-	for actionID, hash := range v.ActionSchemaHashes {
-		if strings.TrimSpace(actionID) == "" || len(actionID) > 200 || !schemaHashPattern.MatchString(hash) {
+	seen := make(map[string]bool, len(v.Actions))
+	for _, action := range v.Actions {
+		id := action.ActionID
+		if strings.TrimSpace(id) == "" || id != strings.TrimSpace(id) || len(id) > 200 || seen[id] ||
+			!schemaHashPattern.MatchString(action.ActionSchemaHash) || (action.Level != "allow" && action.Level != "ask") {
 			return fmt.Errorf("Control model action view authority is invalid")
 		}
+		seen[id] = true
 	}
 	return nil
 }

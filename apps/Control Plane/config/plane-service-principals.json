@@ -194,6 +194,7 @@
     "scopesByAudience": {
       "capability-core": [
         "capability:health:global:write",
+        "capability:owner-action:health:write",
         "capability:read"
       ],
       "quarry": [
@@ -214,6 +215,7 @@
       "session-core": [
         "approval:deliver",
         "session:heartbeat",
+        "session:run-thread-action:probe",
         "session:terminalize"
       ]
     },

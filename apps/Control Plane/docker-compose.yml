@@ -520,6 +520,9 @@ services:
             CONTROL_SPACE_SUBJECT_GRANTS: ${CONTROL_SPACE_SUBJECT_GRANTS:-false}
             # WS14-S1: shared-Space import decisions (room uploads). Strict literal true; off by default.
             CONTROL_SPACE_SHARED_IMPORT: ${CONTROL_SPACE_SHARED_IMPORT:-false}
+            # WS18-S2: comma list of golden run-action ids Control may list or sign for agent self-API.
+            # Empty (the default) lists no v2 view and refuses every Space decision. It only narrows.
+            CONTROL_SPACE_SELF_API_ACTIONS: ${CONTROL_SPACE_SELF_API_ACTIONS:-}
             # EP-8 S7: Space memory management decisions (a shared Space's manager or owner lists or
             # deletes the Space's memory). Strict literal true; off by default and in production.
             CONTROL_SPACE_MEMORY_DECISIONS: ${CONTROL_SPACE_MEMORY_DECISIONS:-false}

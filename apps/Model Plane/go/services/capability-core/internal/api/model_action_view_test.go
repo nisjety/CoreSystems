@@ -343,9 +343,13 @@ func validControlModelActionView(now time.Time) controlModelActionView {
 }
 
 func validControlModelActionViewV2(now time.Time, hashes map[string]string) controlModelActionViewV2 {
+	actions := make([]controlModelActionViewV2Action, 0, len(hashes))
+	for actionID, hash := range hashes {
+		actions = append(actions, controlModelActionViewV2Action{ActionID: actionID, ActionSchemaHash: hash, Level: "allow"})
+	}
 	return controlModelActionViewV2{
 		controlModelActionAuthority: validControlModelActionAuthority(now),
-		ActionSchemaHashes:          hashes,
+		Actions:                     actions,
 	}
 }
 

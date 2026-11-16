@@ -27,12 +27,14 @@ type runActionDecisionRequest struct {
 }
 
 // modelActionViewRequest intentionally has no action, subject, Space, target
-// resource, or policy fields. Control derives the only viewable action from
+// resource, or policy fields. Control derives the viewable actions from
 // independently resolved current authority; clients can name only the source
-// run whose eligibility they need rechecked.
+// run whose eligibility they need rechecked. ViewVersion 0 or 1 issues the v1
+// tickets.create view byte for byte as before; 2 issues the server-owned v2 list.
 type modelActionViewRequest struct {
-	RunID string `json:"run_id"`
-	OrgID string `json:"org_id"`
+	RunID       string `json:"run_id"`
+	OrgID       string `json:"org_id"`
+	ViewVersion int    `json:"view_version"`
 }
 
 // issueModelActionView issues a short-lived, view-only token for Capability
@@ -46,6 +48,10 @@ func (s *Server) issueModelActionView(c *gin.Context) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || strings.TrimSpace(request.RunID) == "" || strings.TrimSpace(request.OrgID) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid model action run is required"})
+		return
+	}
+	if request.ViewVersion < 0 || request.ViewVersion > 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid model action view version is required"})
 		return
 	}
 	if s.spaceRepo == nil || s.runActionAuthority == nil {
@@ -74,6 +80,23 @@ func (s *Server) issueModelActionView(c *gin.Context) {
 	nonce, err := randomDecisionPart()
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model action entropy unavailable"})
+		return
+	}
+	if request.ViewVersion == 2 {
+		viewV2, err := spaces.IssueModelActionViewV2(evidence, authority, spaces.ModelActionViewRequest{
+			DecisionRef: decisionRef,
+			Nonce:       nonce,
+		}, time.Now().UTC())
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "model action is not authorized"})
+			return
+		}
+		tokenV2, err := spaces.SignModelActionViewV2(key, viewV2)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model action signing failed"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"token": tokenV2}})
 		return
 	}
 	view, err := spaces.IssueModelActionView(evidence, authority, spaces.ModelActionViewRequest{
