@@ -513,6 +513,11 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .merge(crate::browser_grants::router())
         // Space room routes /v1/spaces/* (one file per feature under space_routes/).
         .merge(crate::space_routes::router())
+        // The owner's private panel thread, created with conversation scope only (W3-FIX-9, SD-22 v1).
+        .route(
+            "/v1/chat/conversation-threads",
+            post(crate::conversation_thread_routes::create_conversation_thread),
+        )
         // AI modality routes  /v1/ai/*
         .merge(ai_routes())
         // App-Plane proxies (capabilities/tasks/cron/memory/skills)

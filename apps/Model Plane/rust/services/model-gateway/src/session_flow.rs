@@ -248,6 +248,30 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+/// A source scope a session-core create may be asked for from this module (W3-FIX-9). Only the narrowing
+/// scope exists as a value, so no caller can ask for a wider one. A create with no scope sends no metadata,
+/// exactly as before.
+#[derive(Clone, Copy)]
+enum CreateScope {
+    /// The owner's private panel (SD-22 v1): its turns recall no workspace memory or knowledge.
+    Conversation,
+}
+
+impl CreateScope {
+    fn metadata(self) -> prost_types::Struct {
+        let mut fields = std::collections::BTreeMap::new();
+        match self {
+            Self::Conversation => {
+                fields.insert(
+                    "source_scope".to_owned(),
+                    json_to_prost_value(&serde_json::json!("conversation")),
+                );
+            }
+        }
+        prost_types::Struct { fields }
+    }
+}
+
 async fn create_thread(
     client: &mut mp_contracts::model_plane::v1::session_core_client::SessionCoreClient<
         tonic::transport::Channel,
@@ -257,6 +281,20 @@ async fn create_thread(
     user_id: &str,
     bearer: Option<&str>,
     space: Option<&ThreadSpaceContext>,
+) -> Result<String> {
+    create_thread_scoped(client, requested_session_key, org_id, user_id, bearer, space, None).await
+}
+
+async fn create_thread_scoped(
+    client: &mut mp_contracts::model_plane::v1::session_core_client::SessionCoreClient<
+        tonic::transport::Channel,
+    >,
+    requested_session_key: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    bearer: Option<&str>,
+    space: Option<&ThreadSpaceContext>,
+    scope: Option<CreateScope>,
 ) -> Result<String> {
     let space = space.cloned().unwrap_or_else(|| ThreadSpaceContext {
         space_id: String::new(),
@@ -283,7 +321,7 @@ async fn create_thread(
                     .if_empty_then(new_ulid()),
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
-                metadata: None,
+                metadata: scope.map(CreateScope::metadata),
                 // Chat ingress does not yet resolve a Control Space decision.
                 // Keep the entire envelope empty rather than treating its
                 // session_key or workspace context as authority.
@@ -312,6 +350,37 @@ async fn create_thread(
         .context("session-core create_thread failed")?;
 
     Ok(response.into_inner().thread_id)
+}
+
+/// The owner's private panel thread (W3-FIX-9, SD-22 v1): get or create the chat thread for one session key
+/// under the verified caller, created with `metadata.source_scope = "conversation"`. session-core reuses the
+/// thread for the same (org, user, session key) and refuses, never returns, a workspace thread under that key,
+/// so this never hands back a workspace thread. The thread has no space; no run is started and no message is
+/// stored.
+pub(crate) async fn create_conversation_thread(
+    state: &AppState,
+    bearer: &VerifiedSessionBearer,
+    org_id: &str,
+    user_id: &str,
+    session_key: &str,
+) -> Result<String, tonic::Status> {
+    let mut client = state.session_client.clone();
+    create_thread_scoped(
+        &mut client,
+        Some(session_key),
+        org_id,
+        user_id,
+        Some(bearer.as_str()),
+        None,
+        Some(CreateScope::Conversation),
+    )
+    .await
+    .map_err(|error| {
+        error
+            .downcast_ref::<tonic::Status>()
+            .cloned()
+            .unwrap_or_else(|| tonic::Status::unavailable("session-core create_thread failed"))
+    })
 }
 
 fn missing_thread_append_error(error: &tonic::Status) -> bool {

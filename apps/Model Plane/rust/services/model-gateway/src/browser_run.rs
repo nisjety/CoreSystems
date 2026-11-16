@@ -2112,6 +2112,17 @@ fn attach_derive_refusal(status: &tonic::Status) -> Option<ApiError> {
     Some((http, Json(json!({ "error": error }))))
 }
 
+/// Whether a session-core start refusal is a room's browser capacity (W3-FIX-6): `resource_exhausted` with the
+/// `x-mp-error-code` trailer `browser_capacity`. Any other refusal is not, and keeps its own answer.
+fn browser_capacity_refusal(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::ResourceExhausted
+        && status
+            .metadata()
+            .get("x-mp-error-code")
+            .and_then(|value| value.to_str().ok())
+            == Some("browser_capacity")
+}
+
 fn browser_run_zdr_refusal() -> ApiError {
     (
         StatusCode::PRECONDITION_FAILED,
@@ -2582,6 +2593,28 @@ async fn browser_run_start_inner(
         Err(error) => {
             if claimed_presented_grant {
                 state.run_start_guard.release_grant(&browser_grant.grant_id);
+            }
+            // W3-FIX-9: session-core refused the room start at its Space's browser capacity (W3-FIX-6) before it
+            // wrote a run, so no run exists for this key. The grant derived for this start is revoked, and the
+            // answer is 429 `browser_capacity` (the envelope the pre-check in `space_routes/browser.rs` uses). Not
+            // retried here.
+            if room.is_some()
+                && error
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(browser_capacity_refusal)
+            {
+                revoke_derived_run_grant(
+                    &state,
+                    &browser_bearer,
+                    &browser_grant,
+                    REVOKE_REASON_START_FAILED,
+                )
+                .await;
+                return Err(typed_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "browser_capacity",
+                    "this Space already has the maximum number of browser runs",
+                ));
             }
             if idempotency_key.is_some() {
                 // The derived grant stays. This request may be a retry of a

@@ -385,7 +385,7 @@ async fn restore_version_inner(
     else {
         return Err(canvas_not_found());
     };
-    let idempotency_key = save_idempotency_key(&body.client_save_id);
+    let idempotency_key = restore_idempotency_key(&body.client_save_id);
     let write = canvas_decision(
         state,
         user,
@@ -690,9 +690,15 @@ fn content_digest(content: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())))
 }
 
-/// The decision's idempotency key for a write, shared by save and restore.
+/// The decision's idempotency key for a save.
 fn save_idempotency_key(client_save_id: &str) -> String {
     format!("canvas-save-{client_save_id}")
+}
+
+/// The decision's idempotency key for a restore (W3-FIX-9): the prefix names the action, so a restore never
+/// shares a key with a save that carries the same client id. wiki-store only bounds the key's length.
+fn restore_idempotency_key(client_save_id: &str) -> String {
+    format!("canvas-restore-{client_save_id}")
 }
 
 // ---------------------------------------------------------------------------------------------

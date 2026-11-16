@@ -12,17 +12,18 @@
 //! delegation, and it is checked before any Convex call. Nothing here reads a message, and the browser
 //! never holds a token. No flag is an authorization input.
 //!
-//! Creation is refused in this build (see [`gated`]). The panel is an owner thread with
-//! `sourceScope:'conversation'` (SD-22 v1), and no create path locks that scope when a thread is
-//! created: `CreateThread` ignores its metadata, `threads.source_scope` defaults to `workspace`, and only
-//! the first user message locks it. A thread opened here would be a workspace-scope panel, so a room
-//! with no pointer answers 501 and writes nothing.
+//! Creation (W3-FIX-9): a room with no pointer gets its owner thread from model-gateway
+//! (`POST /v1/chat/conversation-threads`), created with `source_scope` conversation (SD-22 v1). session-core
+//! locks that scope at insert and refuses, never returns, a workspace thread under the same key. The key is a
+//! digest of the room reference, so a retry or a race finds the same thread. Only the returned id is recorded
+//! in Convex (first writer wins). A failure before the record writes no pointer and answers a typed refusal.
 //!
 //! Order of refusals on every route (each stops the next): flag (404 `feature_disabled`), organization
 //! (403 `active_membership_required`), Space reference (400 `invalid_space`), Zero Data Retention (typed
 //! 412 `zdr_durable_mutation_forbidden`, before any Control or Convex call), Control membership (403
 //! `active_membership_required`; a Control outage is 503 `space_decision_unavailable`), the Convex
-//! pointer read (503 `private_panel_unavailable`), then creation (501 `private_panel_creation_unavailable`).
+//! pointer read (503 `private_panel_unavailable`), then creation (503 `private_panel_unavailable`, or the
+//! typed ZDR refusal labelled with this surface).
 //! Errors are `{error:{code,message,details}}`.
 
 use axum::{
@@ -33,10 +34,15 @@ use axum::{
 };
 use reqwest::Method;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::{
     config::AppState,
     contracts::ActionActor,
+    domains::chat::shared::{
+        delegated_auth_unavailable, model_token, proxy_model_json_with_session,
+        required_session_token,
+    },
     envelope::error,
     middleware::AuthenticatedUser,
     upstream::{authorized_org_id, proxy_json},
@@ -52,6 +58,13 @@ const MAX_SPACE_REF_CHARS: usize = 200;
 /// The surface a ZDR refusal names (the catalogue code is feature-less).
 const PRIVATE_PANEL_SURFACE: &str = "private_panel";
 const POINTER_QUERY: &str = "spacePrivatePanels:getSpacePrivatePanelForGateway";
+/// The Convex record of the pointer, first writer wins: the thread id is the one model-gateway returned.
+const RECORD_MUTATION: &str = "spacePrivatePanels:recordSpacePrivatePanelForGateway";
+/// model-gateway's create of the owner's conversation-scope thread (W3-FIX-9).
+const CONVERSATION_THREAD_PATH: &str = "/v1/chat/conversation-threads";
+/// The session-key prefix of a room's private thread. session-core keys a thread by (organization, owner,
+/// session key), so one key is one owner's panel in one room.
+const PRIVATE_SESSION_PREFIX: &str = "private-panel-";
 
 /// Which half of the surface a request is. Membership is read differently: a read keeps an archived
 /// room's own pointer visible, a write needs a live room.
@@ -130,8 +143,7 @@ async fn gated(
     match (pointer, access) {
         (Some(pointer), _) => ok(panel_body(space_ref, Some(&pointer))),
         (None, Access::Read) => ok(panel_body(space_ref, None)),
-        // No create path locks conversation scope (see the module note), so no thread is made here.
-        (None, Access::Open) => creation_unavailable(),
+        (None, Access::Open) => create_pointer(state, user, headers, &org_id, space_ref).await,
     }
 }
 
@@ -177,6 +189,76 @@ async fn pointer_for(
     .await
     .map_err(|()| unavailable())?;
     Ok(value.is_object().then_some(value))
+}
+
+/// `POST` with no pointer: model-gateway gets or creates the owner's conversation-scope thread for this room,
+/// then its id is recorded in Convex. This runs only after Control's membership check and the ZDR refusal, and
+/// only the recorded pointer is ever answered. A failure before the record writes no pointer and answers a typed
+/// refusal. No path returns a workspace thread.
+async fn create_pointer(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    org_id: &str,
+    space_ref: &str,
+) -> Reply {
+    let model_bearer = model_token(state, user, headers).await;
+    let session_bearer = match required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(cause) => return delegated_auth_unavailable(cause),
+    };
+    let url = format!("{}{CONVERSATION_THREAD_PATH}", state.model_gateway_url);
+    let (status, Json(body)) = proxy_model_json_with_session(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({ "session_key": private_session_key(space_ref) })),
+        model_bearer.as_deref(),
+        Some(&session_bearer),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return creation_refused(status, body);
+    }
+    let Some(thread_id) = body
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    else {
+        return unavailable();
+    };
+    match convex_gateway_call(
+        state,
+        "mutation",
+        RECORD_MUTATION,
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "threadId": thread_id,
+        }),
+    )
+    .await
+    {
+        Ok(recorded) if recorded.is_object() => ok(panel_body(space_ref, Some(&recorded))),
+        _ => unavailable(),
+    }
+}
+
+/// The session key of the room's private thread: a digest of the room reference, so no key carries the raw
+/// reference and every key is a valid session key.
+fn private_session_key(space_ref: &str) -> String {
+    format!("{PRIVATE_SESSION_PREFIX}{}", hex::encode(Sha256::digest(space_ref.as_bytes())))
+}
+
+/// The answer for a refused create. The typed ZDR refusal keeps its catalogue code under this surface; anything
+/// else is `private_panel_unavailable`. No pointer is written in either case.
+fn creation_refused(status: StatusCode, body: Value) -> Reply {
+    if status == StatusCode::PRECONDITION_FAILED {
+        return label_zdr(status, body);
+    }
+    unavailable()
 }
 
 /// The wire body both routes answer with: ids only. An absent pointer or field is null.
@@ -270,16 +352,6 @@ fn unavailable() -> Reply {
         Json(error(
             "private_panel_unavailable",
             "Your private assistant is temporarily unavailable. Try again; nothing was changed.",
-        )),
-    )
-}
-
-fn creation_unavailable() -> Reply {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(error(
-            "private_panel_creation_unavailable",
-            "Your private assistant for this room cannot be opened yet. Nothing was created.",
         )),
     )
 }

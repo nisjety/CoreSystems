@@ -30,6 +30,7 @@ pub mod confidence;
 pub mod context_reattach;
 pub mod context_refs;
 pub mod conversation_delegation;
+pub mod conversation_thread_routes;
 pub mod coordinator;
 pub mod council_routes;
 pub mod dataplane;
