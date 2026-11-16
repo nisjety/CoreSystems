@@ -3240,10 +3240,17 @@ pub async fn dispatch_tool(
 }
 
 /// Whether the inline loop refuses the organisation-wide document inventory (`knowledge_list_documents`) on a turn
-/// with this Space (C-05, D2-774). Any non-empty Space id is present, and is refused while `OWNER_LIST_SPACE_REFUSE`
-/// is on, failing closed as the sibling Space arms do. Off, nothing is refused.
+/// with this Space (C-05, D2-774). Any non-empty Space id is present, and is refused while `owner_list_space_refuse`
+/// is set, which the caller takes from [`owner_list_space_refuse_on`] (on unless explicitly opted out).
 fn knowledge_list_space_refused(space_id: &str, owner_list_space_refuse: bool) -> bool {
     owner_list_space_refuse && !space_id.is_empty()
+}
+
+/// The Space refusal of `knowledge_list_documents` is on by default. `OWNER_LIST_SPACE_REFUSE` set to the literal
+/// `false` is the one explicit opt-out (plan OD-06, "fail closed"). Unset, `true` and every other value keep it on,
+/// and the value is read raw, so a padded `false` keeps it on too. execution-core's Do-run reader is not changed here.
+fn owner_list_space_refuse_on() -> bool {
+    std::env::var("OWNER_LIST_SPACE_REFUSE").ok().as_deref() != Some("false")
 }
 
 /// Lowercase hex SHA-256 of `bytes`, the spelling a bundle manifest records.
@@ -5163,6 +5170,11 @@ async fn dispatch_tool_with_cost(
         // verified request org, never model input, so a tool call can't read
         // another tenant's knowledge.
         "knowledge_search" => {
+            // SD-22: no organisation-wide retrieval on a Space-scoped turn. The offer withholds this tool there
+            // (`tools_for_space_scope`); this refusal is the second layer, before any argument is read or any call made.
+            if !space_id.is_empty() {
+                return err_outcome(call, "knowledge_search refused: space_scoped");
+            }
             let query = arg_str(&call.arguments_json, "query");
             if query.trim().is_empty() {
                 return err_outcome(call, "knowledge_search requires a 'query' argument");
@@ -5317,6 +5329,10 @@ async fn dispatch_tool_with_cost(
         // `knowledge_list_documents`, so they share `verevon_read_outcome`'s
         // provenance + result-parking path rather than a second one.
         "knowledge_graph_search" => {
+            // SD-22: refused on a Space-scoped turn (see `knowledge_search`), before any argument is read or call made.
+            if !space_id.is_empty() {
+                return err_outcome(call, "knowledge_graph_search refused: space_scoped");
+            }
             let query = arg_str(&call.arguments_json, "query");
             if query.trim().is_empty() {
                 return err_outcome(call, "knowledge_graph_search requires a 'query' argument");
@@ -5345,6 +5361,10 @@ async fn dispatch_tool_with_cost(
             )
         }
         "knowledge_wiki_search" => {
+            // SD-22: refused on a Space-scoped turn (see `knowledge_search`), before any argument is read or call made.
+            if !space_id.is_empty() {
+                return err_outcome(call, "knowledge_wiki_search refused: space_scoped");
+            }
             let query = arg_str(&call.arguments_json, "query");
             if query.trim().is_empty() {
                 return err_outcome(call, "knowledge_wiki_search requires a 'query' argument");
@@ -5375,6 +5395,10 @@ async fn dispatch_tool_with_cost(
         // contradiction in this org", which is the honest answer to "do our
         // sources disagree about anything?".
         "knowledge_contradictions" => {
+            // SD-22: refused on a Space-scoped turn (see `knowledge_search`), before any call is made.
+            if !space_id.is_empty() {
+                return err_outcome(call, "knowledge_contradictions refused: space_scoped");
+            }
             let Some(bearer) = data_plane_bearer else {
                 return err_outcome(
                     call,
@@ -5507,13 +5531,13 @@ async fn dispatch_tool_with_cost(
             .await,
         ),
         "knowledge_list_documents" | "knowledge.list_documents" => {
-            // D2-774 and C-05: the organisation-wide document inventory is not a Space's inventory. With the one Space
-            // listing switch (OWNER_LIST_SPACE_REFUSE, the switch execution-core reads too) on, a turn scoped to a Space
-            // is refused here, before any call crosses to Data Plane: a fixed token with no rows, so ZDR gets the same
-            // refusal and nothing is stored. The refusal does not wait on MODEL_ACTION_ADMISSION, which this loop never
-            // reads, or on AGENTIC_SPACE_RETRIEVAL_ENABLED, which decides only the retrieval header and receipt. Off, or
-            // with no Space, this arm is unchanged.
-            if knowledge_list_space_refused(space_id, crate::sse::owner_list_space_refuse_enabled()) {
+            // D2-774, C-05 and SD-22: the organisation-wide document inventory is not a Space's inventory. A turn scoped
+            // to a Space is refused here by default (fail closed); only OWNER_LIST_SPACE_REFUSE set to the literal `false`
+            // opts out (`owner_list_space_refuse_on`). The refusal comes before any call crosses to Data Plane: a fixed
+            // token with no rows, so ZDR gets the same refusal and nothing is stored. It does not wait on
+            // MODEL_ACTION_ADMISSION, which this loop never reads, or on AGENTIC_SPACE_RETRIEVAL_ENABLED. A turn with no
+            // Space is unchanged.
+            if knowledge_list_space_refused(space_id, owner_list_space_refuse_on()) {
                 return err_outcome(call, "knowledge_list_documents refused: space_scoped");
             }
             let Some(bearer) = data_plane_bearer else {
@@ -6582,6 +6606,31 @@ pub fn tool_allowed_for_retrieval_scope(name: &str, scope: crate::normalize::Ret
             !ORG_CLASS_TOOLS.contains(&name) && !CONNECTOR_CLASS_TOOLS.contains(&name)
         }
     }
+}
+
+/// The organisation-wide knowledge reads that a Space-scoped turn neither offers nor runs (SD-22: no org-scope recall
+/// in a shared room). Only the Space id reaches the inline loop, never the verified Space decision, so these reads
+/// cannot be scoped to the room's labels.
+const SPACE_WITHHELD_KNOWLEDGE_TOOLS: &[&str] = &[
+    "knowledge_search",
+    "knowledge_graph_search",
+    "knowledge_wiki_search",
+    "knowledge_contradictions",
+];
+
+/// A turn's tool set with its organisation-wide knowledge reads removed when the turn is Space-scoped (`space_id`
+/// non-empty). The document inventory goes too unless `OWNER_LIST_SPACE_REFUSE=false` opts out. A turn with no Space
+/// id keeps its set unchanged. A call to a withheld name that is made anyway is refused again by the dispatch arms.
+fn tools_for_space_scope(mut tools: Vec<ToolDefinition>, space_id: &str) -> Vec<ToolDefinition> {
+    if space_id.is_empty() {
+        return tools;
+    }
+    let inventory_refused = knowledge_list_space_refused(space_id, owner_list_space_refuse_on());
+    tools.retain(|tool| {
+        !SPACE_WITHHELD_KNOWLEDGE_TOOLS.contains(&tool.name.as_str())
+            && !(inventory_refused && tool.name == "knowledge_list_documents")
+    });
+    tools
 }
 
 fn tools_for_artifact_state(tools: &[ToolDefinition], has_artifacts: bool) -> Vec<ToolDefinition> {
@@ -9369,6 +9418,8 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
             tool.description.push_str(SKILL_MOUNT_TOOL_DESCRIPTION_LINE);
         }
     }
+    // A Space-scoped turn offers no organisation-wide knowledge read (SD-22); a turn with no Space is unchanged.
+    let tools = tools_for_space_scope(tools, space_id);
     // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
     // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
     let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
