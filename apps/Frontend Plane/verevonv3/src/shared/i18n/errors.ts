@@ -1819,11 +1819,14 @@ function describe(
   // A memory refusal is Session Core's, not Control's: its `details.reason` (`space_scope`,
   // `agent_run_scope`) shares a token with the Space denial vocabulary, so it is read below.
   // WS17-S5: an add refusal (`agent_not_addable`) carries its own reason words, read below, not the Space denial sentence.
+  // WS17-S7/S7b: a declassify or take-back refusal keeps its own sentence even when Control's denial carries a reason.
   if (
     isSpaceDenial(err) &&
     !(err instanceof LocalizedError) &&
     code !== 'memory_not_enabled' &&
-    code !== 'agent_not_addable'
+    code !== 'agent_not_addable' &&
+    code !== 'memory_declassify_not_authorized' &&
+    code !== 'memory_retract_not_authorized'
   ) {
     return {
       code,

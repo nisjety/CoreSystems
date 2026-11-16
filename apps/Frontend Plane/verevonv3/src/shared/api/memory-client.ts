@@ -451,41 +451,20 @@ export interface DeclassifySpaceMemoryResult {
   deduplicated: boolean
 }
 
-interface DeclassifySpaceMemoryResponse {
-  room_memory_id?: string
-  space_ref?: string
-  source_memory_id?: string
-  deduplicated?: boolean
-}
-
 /**
- * Shares one of the signed-in user's own memories to a room, as them, exactly as `reviewedContent` reads. The body
- * carries the memory id, the reviewed text and a retry key, and nothing else: the gateway and Control mint the subject,
- * the audience and the digest, and refuse any other field. `clientRequestId` names one share, so a retry of the same
- * text is stored once. A Zero Data Retention caller is refused with `zdr_durable_mutation_forbidden` (412) before any
- * Control call; a caller who may not share into that room is refused with `memory_declassify_not_authorized` (403).
+ * Reads the action result of `memory.declassify_to_space` (the route's 201 `data`). The share is written only through the
+ * action registry (`features/spaces/lib/space-memory-share.ts`), so this client never posts it. A reply that does not match
+ * throws, and the caller reports the share as not made; a retry with the same request id is stored once, so that is safe.
  */
-export async function declassifySpaceMemory(
-  spaceRef: string,
-  input: { memoryId: string; reviewedContent: string; clientRequestId: string },
-): Promise<DeclassifySpaceMemoryResult> {
-  const response = await requestJson<DeclassifySpaceMemoryResponse>(
-    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/memory/declassify`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        memory_id: input.memoryId,
-        reviewed_content: input.reviewedContent,
-        client_request_id: input.clientRequestId,
-      }),
-    },
-  )
-  return {
-    roomMemoryId: response.room_memory_id ?? '',
-    spaceRef: response.space_ref ?? spaceRef,
-    sourceMemoryId: response.source_memory_id ?? input.memoryId,
-    deduplicated: response.deduplicated === true,
+export function declassifySpaceMemoryResultFrom(raw: unknown): DeclassifySpaceMemoryResult {
+  const row = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const roomMemoryId = typeof row.room_memory_id === 'string' ? row.room_memory_id.trim() : ''
+  const spaceRef = typeof row.space_ref === 'string' ? row.space_ref.trim() : ''
+  const sourceMemoryId = typeof row.source_memory_id === 'string' ? row.source_memory_id.trim() : ''
+  if (!roomMemoryId || !spaceRef || !sourceMemoryId || typeof row.deduplicated !== 'boolean') {
+    throw new Error('invalid_memory_share_response')
   }
+  return { roomMemoryId, spaceRef, sourceMemoryId, deduplicated: row.deduplicated }
 }
 
 /**
@@ -497,35 +476,16 @@ export interface RetractSpaceMemoryResult {
   deleted: boolean
 }
 
-interface RetractSpaceMemoryResponse {
-  memory_id?: string
-  space_ref?: string
-  deleted?: boolean
-}
-
 /**
- * Takes back a copy this person shared into a room (WS17-S7b). Only the person who shared it can: anyone else, or a copy
- * already taken back, is refused with `memory_not_found` (404), and a room they may not act in with
- * `memory_retract_not_authorized` (403). The body carries the copy's id and a retry key and nothing else. Allowed under
- * Zero Data Retention, since a removal stores nothing.
+ * Reads the action result of `memory.retract_from_space` (the route's 200 `data`), written only through the action registry.
+ * `deleted` is true when the room no longer holds the copy; anything else reads as not taken back. A Zero Data Retention
+ * caller may take a copy back (a removal stores nothing); a copy already gone is refused as `memory_not_found` (404), and
+ * the caller treats that as taken back.
  */
-export async function retractSpaceMemory(
-  spaceRef: string,
-  input: { memoryId: string; clientRequestId: string },
-): Promise<RetractSpaceMemoryResult> {
-  const response = await requestJson<RetractSpaceMemoryResponse>(
-    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/memory/retract`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        memory_id: input.memoryId,
-        client_request_id: input.clientRequestId,
-      }),
-    },
-  )
-  return {
-    memoryId: response.memory_id ?? input.memoryId,
-    spaceRef: response.space_ref ?? spaceRef,
-    deleted: response.deleted === true,
-  }
+export function retractSpaceMemoryResultFrom(raw: unknown): RetractSpaceMemoryResult {
+  const row = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const memoryId = typeof row.memory_id === 'string' ? row.memory_id.trim() : ''
+  const spaceRef = typeof row.space_ref === 'string' ? row.space_ref.trim() : ''
+  if (!memoryId || !spaceRef) throw new Error('invalid_memory_takeback_response')
+  return { memoryId, spaceRef, deleted: row.deleted === true }
 }

@@ -21,6 +21,8 @@ import {
 import { ApiError } from '@/shared/api/api-error'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
+import { MemoryDeclassifyDialog } from '@/features/spaces/components/MemoryDeclassifyDialog'
+import { memoryDeclassifyOffered } from '@/features/spaces/lib/space-memory-share'
 
 /**
  * "What do you remember about me" — lists durable memory entries the system
@@ -196,6 +198,10 @@ export function MemorySection() {
   // `null` until the person types: the card shows the stored text until then.
   const [profileDraft, setProfileDraft] = createSignal<string | null>(null)
   const [profileBusy, setProfileBusy] = createSignal(false)
+  // WS17-S7: the "Share to a room" control shows only when the gateway says the declassify flag is on (presentation only).
+  const [shareOffered] = createResource(() => memoryDeclassifyOffered())
+  // The personal memory whose share dialog is open.
+  const [sharingEntry, setSharingEntry] = createSignal<MemoryEntry | null>(null)
 
   const list = createMemo(() => memories()?.memories ?? [])
   const degraded = createMemo(() => memories()?.degraded ?? false)
@@ -588,6 +594,15 @@ export function MemorySection() {
                     </span>
                   </div>
                   <div>
+                    <Show when={shareOffered() === true && !entry.withheldReason}>
+                      <SettingsButton
+                        settingsSize="sm"
+                        onClick={() => setSharingEntry(entry)}
+                        aria-label={`${i18n.tr('Del i et rom', 'Share to a room')}: ${entry.content}`}
+                      >
+                        {i18n.tr('Del i et rom', 'Share to a room')}
+                      </SettingsButton>{' '}
+                    </Show>
                     <SettingsButton
                       settingsSize="sm"
                       danger
@@ -673,6 +688,15 @@ export function MemorySection() {
           </div>
         </div>
       </div>
+      <Show when={sharingEntry()}>
+        {(entry) => (
+          <MemoryDeclassifyDialog
+            memoryId={entry().memoryId}
+            initialText={entry().content}
+            onClose={() => setSharingEntry(null)}
+          />
+        )}
+      </Show>
     </>
   )
 }
