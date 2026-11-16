@@ -3941,6 +3941,14 @@ pub(crate) async fn create_space_agent(
             )),
         );
     }
+    // Zero Data Retention: the agent's name and instructions are stored content. A ZDR org is refused
+    // here, before the name check, the Control role check and the Convex write (a failed posture lookup
+    // is the typed 503).
+    if let Some(refusal) =
+        crate::zdr::durable_write_refusal(&state, &user, None, Some(&body)).await
+    {
+        return refusal;
+    }
 
     let name = body
         .get("name")

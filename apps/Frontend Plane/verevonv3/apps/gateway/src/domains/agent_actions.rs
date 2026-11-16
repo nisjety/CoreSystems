@@ -2055,6 +2055,7 @@ async fn save_agent_draft(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(agent_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     let draft = match draft_from_request(&body) {
@@ -2062,6 +2063,24 @@ async fn save_agent_draft(
         Err(refusal) => return refusal,
     };
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    // The builder gate's first check, kept ahead of the ZDR guard: a caller with no membership keeps its
+    // 403 rather than a posture answer for an org it does not have.
+    if org_id.trim().is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to edit an agent.",
+            )),
+        );
+    }
+    // Zero Data Retention: the draft carries the agent's instructions, which Convex stores. Refused before
+    // the builder gate reads Convex and Control, and before the save.
+    if let Some(refusal) =
+        crate::zdr::durable_write_refusal(&state, &user, Some(&headers), Some(&body)).await
+    {
+        return refusal;
+    }
     let definition = match authorize_agent_builder(&state, &user, &org_id, &agent_id).await {
         Ok(definition) => definition,
         Err(refusal) => return refusal,

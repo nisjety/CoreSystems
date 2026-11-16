@@ -1215,11 +1215,11 @@
       "decision_type": "personal-owner",
       "min_role": "user",
       "zdr_class": "refuse",
-      "basis": "registry",
+      "basis": "guard:durable_write_refusal",
       "idempotency": "idempotency_key",
       "flag": "personal_agents_api",
       "payload_allow_list": [],
-      "reason": "Creates an agent definition whose free-text instructions are stored in Convex; classed as the stricter refusal, and the gateway has no runtime ZDR guard on this route yet."
+      "reason": "Creates an agent definition whose free-text name and instructions are stored in Convex: refused for a ZDR org with the typed 412 (details.surface personal_agents) after the flag and membership check and before any Control or Convex call (create_personal_agent_core, shared with the agents.create_personal action)."
     },
     {
       "id": "bff:POST:/api/v1/spaces",
@@ -1319,15 +1319,15 @@
       "method": "POST",
       "path": "/api/v1/spaces/{space_ref}/agents",
       "handler": "domains/spaces/mod.rs::create_space_agent",
-      "route_class": "Config",
+      "route_class": "DurableWrite",
       "decision_type": "membership",
       "min_role": "manager",
-      "zdr_class": "n/a",
-      "basis": "registry",
+      "zdr_class": "refuse",
+      "basis": "guard:durable_write_refusal",
       "idempotency": "unspecified",
       "flag": null,
       "payload_allow_list": [],
-      "reason": "Agent registry entry (configuration, ids only, K4-14)."
+      "reason": "Creates a room agent whose name and instructions are stored in Convex: refused for a ZDR org with the typed 412 after the membership check and before any Control or Convex call (the spaces.create_space_agent action shares this handler)."
     },
     {
       "id": "bff:POST:/api/v1/spaces/{space_ref}/agents/bind",
@@ -1778,6 +1778,24 @@
       "flag": "personal_agents_api",
       "payload_allow_list": [],
       "reason": "Writes an agent visibility, add policy and access entries (ids and roles only); Control allows only the owner or an agent manager."
+    },
+    {
+      "id": "bff:PUT:/api/v1/agents/{agent_id}/draft",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "PUT",
+      "path": "/api/v1/agents/{agent_id}/draft",
+      "handler": "domains/agent_actions.rs::save_agent_draft",
+      "route_class": "DurableWrite",
+      "decision_type": "personal-owner",
+      "min_role": "user",
+      "zdr_class": "refuse",
+      "basis": "guard:durable_write_refusal",
+      "idempotency": "last_write_wins",
+      "flag": "AGENT_DEFINITION_VERSIONS",
+      "payload_allow_list": [],
+      "reason": "Saves the editable draft of an agent definition, whose system prompt Convex stores: refused for a ZDR org with the typed 412 after the body and membership checks and before the builder gate's Convex and Control reads and the save; mounted only while AGENT_DEFINITION_VERSIONS is on."
     },
     {
       "id": "bff:PUT:/api/v1/me/primary-agent",
