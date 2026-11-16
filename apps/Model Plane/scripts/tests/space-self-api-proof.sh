@@ -565,6 +565,10 @@ case "$MODE" in
   *) fail "unknown mode: $MODE (use source or full)" ;;
 esac
 
+if [[ "$MODE" == full ]]; then
+  live_inputs # fail fast on missing live inputs, before the long source layers run
+fi
+
 run_source_layers
 run_postgres_layers
 
@@ -573,7 +577,6 @@ if [[ "$MODE" == source ]]; then
   exit 0
 fi
 
-live_inputs
 for phase in ${PROOF_PHASES:-flow}; do
   case "$phase" in
     flow) phase_flow ;;
