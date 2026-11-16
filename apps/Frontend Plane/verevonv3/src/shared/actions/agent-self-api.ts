@@ -7,7 +7,7 @@
 // the rows here against the golden and the pin.
 
 /** The sha256 of the vendored golden. Changing the golden changes this too. */
-export const REGISTRY_GOLDEN_DIGEST = '28478b9def67ee36c00fb72b8e59013523a510785a7c2f7e1b9e5371cc2dc458'
+export const REGISTRY_GOLDEN_DIGEST = '635587a25114dcd34d183a7de0ff43e13ce935a990d849a57a063a6640c09f8d'
 
 export type SpaceSelfApiActionId = 'space.thread.rename' | 'space.thread.pin' | 'space.thread.post_card'
 
@@ -25,8 +25,9 @@ export type SpaceSelfApiRow = {
 }
 
 /**
- * The phase 1 Space rows of the golden, in its order. The phase 2 and 3 rows (`space.agent.pause_self`,
- * `space.schedule.follow_up`) are not in this view, and `tickets.create` is the Conversation Core row, not a Space row.
+ * The WS18 rows of the golden that this view states, in its order (phase 1). Not in this view: the phase 2 and 3 rows
+ * (`space.agent.pause_self`, `space.schedule.follow_up`), the WS19 canvas rows (`space.canvas.read`, `space.canvas.write`,
+ * owned by wiki-store) and `tickets.create` (the Conversation Core row). This view does not state any of these.
  */
 export const SPACE_SELF_API_ROWS: readonly SpaceSelfApiRow[] = [
   {
