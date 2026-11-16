@@ -612,3 +612,9 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - D17 (Control-signed proof -> gateway relay -> session-core verify -> SPA wiring) is now fully wired end to end.
 - P2 minor gap: room-level SpaceAgentMemoryPanel (withheld flag) has no origin_space_ref/restore control, separate from personal MemorySection. Logged, not built.
 - P2: spaceRef sent even for shared-room rows (harmless, one extra Control call, still refused as before).
+
+### W3-DEC-ZDRDEL2 (e72363eac) BUILT
+- model-gateway proxy_to_capability_core now exempts the 6 removals from ZDR refusal; uninstall_plugin registry row -> n/a; pins re-synced (digest 05ab47b5...).
+- P1 NOT YET LIVE -> W3-DEC-ZDRDEL3 running: capability-core (Go) authz.go still denies every non-GET for ZDR, and plugin_catalog.go deleteKill's pluginWriter independently refuses.
+- P2 OWNER: waived tokens still get a route mismatch on these removals -- does D20 cover waived tokens too, or ZDR-only? (holding as ZDR-only pending answer)
+- P2: org hook/permission-rule deletes correctly stay refused (they persist a revision/history row, not a pure removal).
