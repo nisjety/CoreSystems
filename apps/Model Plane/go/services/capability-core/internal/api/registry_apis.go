@@ -274,12 +274,28 @@ func validSkillScope(value string) bool {
 
 // skillActorSQL names the actor of the skill change the transaction is about to
 // make. Skill revisions are written by a trigger on agent_skills (session-core
-// migration 0064), which reads these transaction-local settings; the names are
-// pinned to the migration by TestSkillActorSettingsMatchTheMigration. run_id and
+// migrations 0064 and 0134), which reads these transaction-local settings; the names
+// are pinned to the migration by TestSkillActorSettingsMatchTheMigration. run_id and
 // thread_id are session-core's (a learned proposal's source); the registry has none.
+// $5 is the retention posture (skillRetentionPosture): a removal under ZDR keeps no
+// skill text in its revision.
 const skillActorSQL = `SELECT set_config('mp.actor_kind', $1, true), set_config('mp.actor_id', $2, true),
 	set_config('mp.run_id', '', true), set_config('mp.thread_id', '', true),
-	set_config('mp.reason', $3, true), set_config('mp.skill_action', $4, true)`
+	set_config('mp.reason', $3, true), set_config('mp.skill_action', $4, true),
+	set_config('mp.zdr_posture', $5, true)`
+
+// skillRetentionPosture is the retention posture a skill change is made under, read from the verified
+// principal in ctx: "true" under zero data retention, and also when the token states no posture (the
+// authz gate refuses such a write before a handler runs); "false" only for a verified, explicit non-ZDR
+// posture. With no verified principal the answer is "true" as well, so no skill text is kept without a
+// known non-ZDR posture behind it. The revision trigger keeps a content-free revision for "true".
+func skillRetentionPosture(ctx context.Context) string {
+	principal, ok := authctx.PrincipalFromContext(ctx)
+	if !ok || principal.ZeroDataRetention || !principal.RetentionPolicyPresent {
+		return "true"
+	}
+	return "false"
+}
 
 // skillTxBeginner is the pool's transaction entry point. The registry's own
 // interface stays Exec/Query/QueryRow so fakes need not implement it; a skill
@@ -410,7 +426,7 @@ func (h *SkillsHandler) mutateSkill(r *http.Request, action, reason string, fn f
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	kind, id := skillActor(r)
-	if _, err := tx.Exec(ctx, skillActorSQL, kind, id, reason, action); err != nil {
+	if _, err := tx.Exec(ctx, skillActorSQL, kind, id, reason, action, skillRetentionPosture(ctx)); err != nil {
 		return err
 	}
 	if err := fn(tx); err != nil {

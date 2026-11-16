@@ -201,7 +201,8 @@ func (l *Loader) plan(ctx context.Context, manifest Manifest) []planned {
 }
 
 // authorize is the admin and ZDR gate shared by install and uninstall. A ZDR or unknown posture is
-// refused only when requireNonZDR is set (install): removing a child persists nothing new.
+// refused only when requireNonZDR is set (install). An uninstall under ZDR removes skill children too:
+// the revision each one leaves keeps no text (session-core migration 0134).
 func authorize(caller Caller, requireNonZDR bool) error {
 	if requireNonZDR && (caller.ZeroDataRetention || !caller.RetentionPolicyKnown) {
 		return &Error{Code: CodeZDRRefused, Message: "a plugin cannot be installed under zero data retention: it stores skills and servers"}

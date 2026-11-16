@@ -99,7 +99,7 @@ func (s *pluginChildStore) CreateSkill(ctx context.Context, tx plugins.DB, write
 	if write.Kind == skilllint.KindTemplate && !s.skills.authoredKinds {
 		return "", errors.New("authored kinds are not enabled")
 	}
-	if _, err := tx.Exec(ctx, skillActorSQL, "user", write.ActorID, write.Source, ""); err != nil {
+	if _, err := tx.Exec(ctx, skillActorSQL, "user", write.ActorID, write.Source, "", skillRetentionPosture(ctx)); err != nil {
 		return "", err
 	}
 	id := "skill_" + uuid.New().String()
@@ -167,13 +167,14 @@ func (s *pluginChildStore) CreateMCPServer(ctx context.Context, tx plugins.DB, w
 }
 
 // RemoveSkill deletes a skill or template a plugin created, as the skill delete route does: the
-// revision trigger records the admin and the plugin as the reason, and with bundle retention on the
+// revision trigger records the admin and the plugin as the reason (dropped under zero retention, where
+// the revision holds no text), and with bundle retention on the
 // skill's bundles go with it. A skill already deleted by hand changes nothing.
 func (s *pluginChildStore) RemoveSkill(ctx context.Context, tx plugins.DB, orgID, id, actorID, reason string) error {
 	if s.skills == nil {
 		return errors.New("skills are not available in this deployment")
 	}
-	if _, err := tx.Exec(ctx, skillActorSQL, "user", actorID, reason, ""); err != nil {
+	if _, err := tx.Exec(ctx, skillActorSQL, "user", actorID, reason, "", skillRetentionPosture(ctx)); err != nil {
 		return err
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID)
