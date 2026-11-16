@@ -457,6 +457,10 @@ services:
       # it on before MODEL_ACTION_ADMISSION=table, and no later than AGENTIC_SPACE_RETRIEVAL_ENABLED: the retrieval switch no
       # longer refuses the listing.
       OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-true}
+      # Space agent self-API (Space plan WS18-S5; this compose line from WS18-S10): model-gateway honours the space_self_api
+      # feature only for an agentic Space turn that is not ZDR or waived. Unset or 0 is off, and so in production. A rollout
+      # switch, never an authorization input: Control's decision and execution-core's registry gate every effect.
+      MODEL_GATEWAY_SPACE_SELF_API: ${MODEL_GATEWAY_SPACE_SELF_API:-0}
       # Inline tool-loop guard (WS25-S1): off, shadow or enforce. Unset is off; the plan's shadow
       # release is an owner flip, not this file's default.
       LOOP_GUARD_MODE: ${LOOP_GUARD_MODE:-}

@@ -409,6 +409,10 @@ services:
       SPACE_ADDRESSED_WAKE_API: ${SPACE_ADDRESSED_WAKE_API:-true}
       # WS08-S5: the owner or manager writer of an agent respond_to policy. Off answers 404 feature_disabled.
       SPACE_AGENT_WAKE_POLICY_API: ${SPACE_AGENT_WAKE_POLICY_API:-true}
+      # Space agent self-API (Space plan WS18-S5; this compose line from WS18-S10): the self-API routes, the
+      # spaces.set_agent_self_api action, the space_self_api grant on mention turns and features.agent_self_api. Off unless
+      # set, and off in production where it is unset (APP_ENV=production). A rollout switch, never an authorization input.
+      SPACE_AGENT_SELF_API_API: ${SPACE_AGENT_SELF_API_API:-false}
       # WS05-S6: owner/admin domain verification routes (proxied to org-core, which has its own
       # ORG_DOMAIN_VERIFICATION_ENABLED). Rollout control only; the live owner/admin role decides access.
       ORG_IDENTITY_ADMIN_API: ${ORG_IDENTITY_ADMIN_API:-true}
