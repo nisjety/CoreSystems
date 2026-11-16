@@ -4032,12 +4032,12 @@
       "handler": "http_routes.rs::delete_plugin_kill_proxy",
       "decision_type": "token_posture",
       "min_role": "authenticated",
-      "zdr_class": "refuse",
-      "basis": "guard:proxy_to_capability_core",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
       "idempotency": "unspecified",
       "flag": "PLUGIN_LOADER_ENABLED",
       "payload_allow_list": [],
-      "reason": "Removes a plugin kill-list entry through Capability Core: the shared proxy refuses a zero-retention or waived token before anything is forwarded."
+      "reason": "Removes a plugin kill-list entry, a removal that stores nothing: allowed under every posture (D20, W3-DEC-ZDRDEL). The model-gateway proxy still refuses this DELETE under a ZDR claim until it exempts removals (follow-up)."
     },
     {
       "id": "mg:POST:/v1/plugins/:id/install",
@@ -4865,12 +4865,12 @@
       "handler": "http_routes.rs::discard_skill_draft_proxy",
       "decision_type": "token_posture",
       "min_role": "authenticated",
-      "zdr_class": "refuse",
-      "basis": "guard:proxy_to_capability_core",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
       "idempotency": "unspecified",
       "flag": null,
       "payload_allow_list": [],
-      "reason": "Discards a skill draft through Capability Core: the shared proxy refuses a zero-retention or waived token before anything is forwarded, as it does for every skill write."
+      "reason": "Discards a skill draft, a removal that stores nothing: allowed under every posture (D20, W3-DEC-ZDRDEL). The model-gateway proxy still refuses this DELETE under a ZDR claim until it exempts removals (follow-up)."
     },
     {
       "id": "mg:POST:/v1/skills/:id/versions/:version/restore",
