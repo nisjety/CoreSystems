@@ -77,10 +77,12 @@
       "data-plane": "persistent"
     },
     "scopes": [
+      "data:space-binding:delete",
       "data:space-canvas:delete"
     ],
     "scopesByAudience": {
       "data-plane": [
+        "data:space-binding:delete",
         "data:space-canvas:delete"
       ]
     }

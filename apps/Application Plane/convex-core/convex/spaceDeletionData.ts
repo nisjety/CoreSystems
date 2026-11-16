@@ -1,15 +1,22 @@
 /** Data Plane deletion adapter: binding revocation, then the room canvas purge (WS19-S8), then the Application's private-panel
- * pointer purge (WS17-S6). It carries only the Control-minted
- * `aud=data-plane` deletion credential; a failed delivery remains retriable
- * and no response can update a different owner/request receipt. */
+ * pointer purge (WS17-S6). Each delivery mints one organization-bound `aud=data-plane` token from the Control deletion
+ * principal (auth-core `POST /api/data-plane/internal-token`, W3-FIX-10) and presents it to both Data legs. A mint or leg
+ * failure releases the delivery for retry, and no response can update a different owner/request receipt. */
 import { v } from "convex/values";
-import { internalAction, internalMutation } from "./_generated/server";
+import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
 
 const DATA_SPACE_DELETION_URL = process.env.DATA_SPACE_DELETION_URL || "";
 // The room canvas purge is the second Data leg (WS19-S8). Its receipt is required before the owner receipt is acknowledged.
 const DATA_SPACE_CANVAS_DELETION_URL = process.env.DATA_SPACE_CANVAS_DELETION_URL || "";
-const CONTROL_SPACE_DELETION_DATA_BEARER = process.env.CONTROL_SPACE_DELETION_DATA_BEARER || "";
+// The Data legs take their organization from the bearer, so each delivery mints its own token for the request's organization
+// (W3-FIX-10; the static bearer covered one org). The principal id is the subject the Data plane pins; the credential is the
+// registry row's consumerEnv. The minted token is never logged or stored.
+const AUTH_CORE_URL = process.env.AUTH_CORE_URL || "";
+const CONTROL_SPACE_DELETION_SERVICE_API_KEY = process.env.CONTROL_SPACE_DELETION_SERVICE_API_KEY || "";
+const CONTROL_SPACE_DELETION_SERVICE_ID = "control-space-deletion";
+const DATA_DELETION_TOKEN_SCOPES = ["data:space-binding:delete", "data:space-canvas:delete"];
+const DATA_DELETION_TOKEN_SKEW_MS = 10_000;
 type DataOutcome = "succeeded" | "partial" | "failed" | "unknown";
 
 export function dataDeletionReceipt(receipt: unknown, requestId: string): { status: DataOutcome; receiptRef: string; detail: string } | null {
@@ -30,6 +37,16 @@ export function dataCanvasPurgeReceipt(receipt: unknown, requestId: string, spac
   return { status: outcome.status, receiptRef: outcome.receiptRef, detail: `Data canvas purge receipt: ${outcome.status}` };
 }
 
+// The retrieval leg names the organization its purge ran in: its org_id is the verified bearer's org, which is the org the token
+// was minted for, so its receipt must name the delivery's organization. The canvas purge response names no org, so that leg is
+// bound by its token alone and keeps dataCanvasPurgeReceipt.
+export function dataSpaceDeletionReceipt(receipt: unknown, requestId: string, orgId: string): { status: DataOutcome; receiptRef: string; detail: string } | null {
+  if (!receipt || typeof receipt !== "object") return null;
+  const outcome = dataDeletionReceipt(receipt, requestId);
+  if (!outcome || (receipt as { org_id?: unknown }).org_id !== orgId) return null;
+  return outcome;
+}
+
 // One owner receipt covers both Data legs, so it keeps the weaker outcome: failed, then unknown, then partial, then
 // succeeded. The detail names both legs.
 const DATA_OUTCOME_RANK: Record<DataOutcome, number> = { succeeded: 0, partial: 1, unknown: 2, failed: 3 };
@@ -44,10 +61,72 @@ export function combineDataOutcomes(
 function configurationError(): string | null {
   if (!DATA_SPACE_DELETION_URL.trim()) return "DATA_SPACE_DELETION_URL is not configured";
   if (!DATA_SPACE_CANVAS_DELETION_URL.trim()) return "DATA_SPACE_CANVAS_DELETION_URL is not configured";
-  if (!CONTROL_SPACE_DELETION_DATA_BEARER.trim()) return "CONTROL_SPACE_DELETION_DATA_BEARER is not configured";
+  if (!AUTH_CORE_URL.trim()) return "AUTH_CORE_URL is not configured";
+  if (!CONTROL_SPACE_DELETION_SERVICE_API_KEY.trim()) return "CONTROL_SPACE_DELETION_SERVICE_API_KEY is not configured";
   return null;
 }
 function nextWorker(eventId: string): string { return `space-deletion-data:${eventId}:${crypto.randomUUID()}`; }
+
+// Typed mint outcome: the caller releases the delivery on any failure and never acknowledges on one.
+type DataDeletionTokenMint =
+  | { ok: true; token: string }
+  | { ok: false; code: "auth_token_rejected" | "auth_token_unavailable" | "auth_token_invalid"; detail: string };
+
+// POST /api/data-plane/internal-token for the Control deletion principal (auth-core plane-token.controller.ts). The row is
+// `tenancy: directory`, so auth-core checks that org-core holds `orgId` before it signs (403 when it does not, 503 when the
+// directory cannot be read), and it signs only the scopes the row names. The headers and body match the Application Plane's
+// Go mint (conversation-core integration client). Nothing here throws, and a token is returned only on success.
+async function mintDataDeletionToken(orgId: string): Promise<DataDeletionTokenMint> {
+  let response: Response;
+  try {
+    response = await fetch(`${AUTH_CORE_URL.trim().replace(/\/+$/, "")}/api/data-plane/internal-token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-service-id": CONTROL_SPACE_DELETION_SERVICE_ID,
+        "x-service-api-key": CONTROL_SPACE_DELETION_SERVICE_API_KEY,
+      },
+      body: JSON.stringify({
+        orgId,
+        scopes: DATA_DELETION_TOKEN_SCOPES,
+        reason: "Control-authorized Space deletion binding revocation and canvas purge",
+      }),
+    });
+  } catch {
+    return { ok: false, code: "auth_token_unavailable", detail: "token authority request failed" };
+  }
+  if (response.status === 401 || response.status === 403) {
+    return { ok: false, code: "auth_token_rejected", detail: `token authority refused with HTTP ${response.status}` };
+  }
+  if (response.status !== 200) {
+    return { ok: false, code: "auth_token_unavailable", detail: `token authority returned HTTP ${response.status}` };
+  }
+  let payload: unknown;
+  try { payload = await response.json(); } catch {
+    return { ok: false, code: "auth_token_invalid", detail: "token authority returned an invalid body" };
+  }
+  const minted = (payload && typeof payload === "object" ? payload : {}) as { token?: unknown; expiresAt?: unknown };
+  const token = typeof minted.token === "string" ? minted.token.trim() : "";
+  const expiresAt = typeof minted.expiresAt === "string" ? Date.parse(minted.expiresAt) : Number.NaN;
+  if (!token || !Number.isFinite(expiresAt) || expiresAt <= Date.now() + DATA_DELETION_TOKEN_SKEW_MS) {
+    return { ok: false, code: "auth_token_invalid", detail: "token authority returned an unusable token" };
+  }
+  return { ok: true, token };
+}
+
+// The Space record's own organization. Auth Core binds the minted token to the request's organization, so the Space must belong
+// to that organization before any token is signed. The receipt check cannot show this, because both sides echo the bearer's org.
+// Null when the Space is missing or ambiguous, which releases the delivery.
+export const spaceOrgForDeletion = internalQuery({
+  args: { spaceRef: v.string() },
+  handler: async (ctx, args) => {
+    const spaces = await ctx.db
+      .query("spaces")
+      .withIndex("by_space_ref", (q: any) => q.eq("spaceRef", args.spaceRef))
+      .take(2);
+    return spaces.length === 1 ? spaces[0].externalOrgId : null;
+  },
+});
 
 // WS17-S6: the owner's private-panel pointers for a Space being deleted (Application's own rows, ids only). One batch
 // per call, so a large room stays inside one mutation; the adapter repeats until `more` is false. The panel's thread is
@@ -79,11 +158,19 @@ export const deliverOne = internalAction({
     };
     const misconfigured = configurationError();
     if (misconfigured) return release(misconfigured);
+    // W3-FIX-10: one org-bound token for both legs. The Space record must belong to the request's organization, checked before any
+    // token is signed. A mint failure releases the delivery and never reaches an acknowledgement.
+    const orgId = claimed.request.externalOrgId.trim();
+    if (!orgId) return release("Data deletion request has no organization");
+    const spaceOrg = await ctx.runQuery(internal.spaceDeletionData.spaceOrgForDeletion, { spaceRef: claimed.request.spaceRef });
+    if (spaceOrg !== orgId) return release("Space organization does not match the deletion request");
+    const minted = await mintDataDeletionToken(orgId);
+    if (!minted.ok) return release(`${minted.code}: ${minted.detail}`);
     let response: Response;
     try {
       response = await fetch(DATA_SPACE_DELETION_URL, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${CONTROL_SPACE_DELETION_DATA_BEARER}`, "Content-Type": "application/json" },
+        headers: { "Authorization": `Bearer ${minted.token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           deletion_request_id: claimed.request.requestId,
           space_ref: claimed.request.spaceRef,
@@ -95,15 +182,15 @@ export const deliverOne = internalAction({
     if (response.status !== 200) return release(`Data Space deletion returned HTTP ${response.status}`);
     let receipt: unknown;
     try { receipt = await response.json(); } catch { return release("Data Space deletion returned an invalid receipt"); }
-    const outcome = dataDeletionReceipt(receipt, claimed.request.requestId);
-    if (!outcome) return release("Data Space deletion receipt did not match the claimed request");
+    const outcome = dataSpaceDeletionReceipt(receipt, claimed.request.requestId, orgId);
+    if (!outcome) return release("Data Space deletion receipt did not match the claimed request or organization");
     // Second leg (WS19-S8): purge the room canvas. Both receipts are needed before the owner receipt is acknowledged. A retry
     // repeats both legs, which is safe because the binding revocation and the canvas purge are idempotent.
     let canvasResponse: Response;
     try {
       canvasResponse = await fetch(DATA_SPACE_CANVAS_DELETION_URL, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${CONTROL_SPACE_DELETION_DATA_BEARER}`, "Content-Type": "application/json" },
+        headers: { "Authorization": `Bearer ${minted.token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           deletion_request_id: claimed.request.requestId,
           space_ref: claimed.request.spaceRef,
