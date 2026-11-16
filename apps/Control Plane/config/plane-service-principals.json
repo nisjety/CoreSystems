@@ -66,6 +66,25 @@
       ]
     }
   },
+  "control-space-deletion": {
+    "tenancy": "directory",
+    "audiences": [
+      "data-plane"
+    ],
+    "consumerEnv": "CONTROL_SPACE_DELETION_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "data-plane": "persistent"
+    },
+    "scopes": [
+      "data:space-canvas:delete"
+    ],
+    "scopesByAudience": {
+      "data-plane": [
+        "data:space-canvas:delete"
+      ]
+    }
+  },
   "conversation-core": {
     "tenancy": "directory",
     "audiences": [

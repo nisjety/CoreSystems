@@ -207,6 +207,11 @@ func (e PersonalThreadDecisionEvidence) ValidateForCanvas(write bool) error {
 // The operation, canvas, expected head, restore source and content commitment are
 // all bound, so a decision cannot be replayed for other text or another head.
 // wiki-store recomputes this formula; the golden vector in testdata pins it.
+//
+// The decision ref, the recipient audience and privacy policy and resource
+// authorization refs and the idempotency key are hashed trimmed, exactly as
+// newEvidenceDecision writes them into the decision, so the verifier's recomputation
+// over the signed decision fields matches.
 func canvasPayloadDigest(evidence PersonalThreadDecisionEvidence, request CanvasDecisionRequest, schema string) string {
 	hash := sha256.New()
 	hash.Write([]byte(canvasDigestHeader))
@@ -214,13 +219,13 @@ func canvasPayloadDigest(evidence PersonalThreadDecisionEvidence, request Canvas
 		{"org_id", evidence.Membership.OrgID},
 		{"user_id", evidence.Membership.SubjectID},
 		{"space_id", evidence.Membership.SpaceRef},
-		{"space_decision_ref", request.DecisionRef},
-		{"recipient_audience_ref", evidence.RecipientAudienceRef},
-		{"recipient_audience_hash", evidence.RecipientAudienceHash},
-		{"privacy_policy_ref", evidence.Privacy.PolicyRef},
-		{"resource_authorization_ref", evidence.ResourceAuthorizationRef},
+		{"space_decision_ref", strings.TrimSpace(request.DecisionRef)},
+		{"recipient_audience_ref", strings.TrimSpace(evidence.RecipientAudienceRef)},
+		{"recipient_audience_hash", strings.TrimSpace(evidence.RecipientAudienceHash)},
+		{"privacy_policy_ref", strings.TrimSpace(evidence.Privacy.PolicyRef)},
+		{"resource_authorization_ref", strings.TrimSpace(evidence.ResourceAuthorizationRef)},
 		{"action_schema_hash", schema},
-		{"idempotency_key", request.IdempotencyKey},
+		{"idempotency_key", strings.TrimSpace(request.IdempotencyKey)},
 		{"op", request.Op},
 		{"canvas_id", request.CanvasID},
 		{"expected_version_id", request.ExpectedVersionID},

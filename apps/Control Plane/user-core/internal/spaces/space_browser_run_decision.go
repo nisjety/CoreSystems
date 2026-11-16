@@ -245,6 +245,11 @@ func (e PersonalThreadDecisionEvidence) ValidateForBrowserRun() error {
 // joined in canonical order. That join is unambiguous because validated hosts contain
 // no newline. The golden vectors in testdata pin this formula for the model-gateway
 // verifier (WS20-S2); this function is the source of truth.
+//
+// The recipient audience, privacy policy and resource authorization refs and the
+// idempotency key are hashed trimmed, exactly as newEvidenceDecision writes them into
+// the decision. The verifier recomputes the digest from the signed decision fields, so
+// hashing the raw value would fail closed for a value with surrounding whitespace.
 func browserRunPayloadDigest(evidence PersonalThreadDecisionEvidence, request BrowserRunDecisionRequest, claims BrowserRunClaims) string {
 	hash := sha256.New()
 	hash.Write([]byte(browserRunDigestHeader))
@@ -259,12 +264,12 @@ func browserRunPayloadDigest(evidence PersonalThreadDecisionEvidence, request Br
 		{"view_scope", claims.ViewScope},
 		{"max_steps", strconv.Itoa(claims.MaxSteps)},
 		{"max_runtime_s", strconv.Itoa(claims.MaxRuntimeS)},
-		{"recipient_audience_ref", evidence.RecipientAudienceRef},
-		{"recipient_audience_hash", evidence.RecipientAudienceHash},
-		{"privacy_policy_ref", evidence.Privacy.PolicyRef},
-		{"resource_authorization_ref", evidence.ResourceAuthorizationRef},
+		{"recipient_audience_ref", strings.TrimSpace(evidence.RecipientAudienceRef)},
+		{"recipient_audience_hash", strings.TrimSpace(evidence.RecipientAudienceHash)},
+		{"privacy_policy_ref", strings.TrimSpace(evidence.Privacy.PolicyRef)},
+		{"resource_authorization_ref", strings.TrimSpace(evidence.ResourceAuthorizationRef)},
 		{"action_schema_hash", browserRunSchema},
-		{"idempotency_key", request.IdempotencyKey},
+		{"idempotency_key", strings.TrimSpace(request.IdempotencyKey)},
 	} {
 		hash.Write([]byte(field.name))
 		hash.Write([]byte{0})

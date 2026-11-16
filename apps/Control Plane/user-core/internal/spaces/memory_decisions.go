@@ -176,6 +176,11 @@ func (r *Repository) ResolveSharedMemoryDeclassifyDecisionEvidence(ctx context.C
 // memory_declassify_payload_digest recomputes it: the prefix, then each (name, value) as name, a NUL, a
 // u64 big-endian length and the value, in this order, then the authority and recipient-audience
 // revisions. Every field is length-prefixed so concatenation stays unambiguous.
+//
+// The decision ref, the recipient audience and privacy policy and resource authorization refs and the
+// idempotency key are hashed trimmed, exactly as newEvidenceDecision writes them into the decision, so
+// Session Core's recomputation over the signed decision fields matches. Validate does not refuse a
+// surrounding space on the decision ref or the idempotency key, so the trim is what keeps them equal.
 func memoryDeclassifyPayloadDigest(evidence PersonalThreadDecisionEvidence, request MemoryDeclassifyDecisionRequest) string {
 	hash := sha256.New()
 	hash.Write([]byte("model.memory.declassify\x00v1\x00"))
@@ -183,16 +188,16 @@ func memoryDeclassifyPayloadDigest(evidence PersonalThreadDecisionEvidence, requ
 		{"org_id", evidence.Membership.OrgID},
 		{"user_id", evidence.Membership.SubjectID},
 		{"space_id", evidence.Membership.SpaceRef},
-		{"space_decision_ref", request.DecisionRef},
-		{"recipient_audience_ref", evidence.RecipientAudienceRef},
-		{"recipient_audience_hash", evidence.RecipientAudienceHash},
-		{"privacy_policy_ref", evidence.Privacy.PolicyRef},
-		{"resource_authorization_ref", evidence.ResourceAuthorizationRef},
+		{"space_decision_ref", strings.TrimSpace(request.DecisionRef)},
+		{"recipient_audience_ref", strings.TrimSpace(evidence.RecipientAudienceRef)},
+		{"recipient_audience_hash", strings.TrimSpace(evidence.RecipientAudienceHash)},
+		{"privacy_policy_ref", strings.TrimSpace(evidence.Privacy.PolicyRef)},
+		{"resource_authorization_ref", strings.TrimSpace(evidence.ResourceAuthorizationRef)},
 		{"operation", request.Operation},
 		{"memory_id", request.MemoryID},
 		{"content_digest", request.ContentDigest},
 		{"action_schema_hash", memoryDeclassifySchema},
-		{"idempotency_key", request.IdempotencyKey},
+		{"idempotency_key", strings.TrimSpace(request.IdempotencyKey)},
 	} {
 		hash.Write([]byte(field.name))
 		hash.Write([]byte{0})
