@@ -413,6 +413,18 @@ func main() {
 	// rollout control, never an authorization input.
 	spaceRepo.SetHistoryWindowClaim(os.Getenv("SPACE_HISTORY_WINDOW_CLAIM") == "true")
 	spaceRepo.SetSandboxEgressTiers(os.Getenv("SPACE_SANDBOX_EGRESS_TIERS") == "true")
+		// WS17-S4: agent admission (ADR 4). SPACE_AGENT_ADMISSION is off (unset), observe or
+		// enforce. An unknown value stops startup, so a typo never runs another mode. The owner
+		// sweep runs only when the mode is not off.
+		agentAdmission, agentAdmissionErr := spaces.ParseAgentAdmissionMode(os.Getenv("SPACE_AGENT_ADMISSION"))
+		if agentAdmissionErr != nil {
+			log.Fatalf("invalid SPACE_AGENT_ADMISSION: %v", agentAdmissionErr)
+		}
+		spaceRepo.SetAgentAdmissionMode(agentAdmission)
+		if agentAdmission != spaces.AgentAdmissionOff {
+			go spaceRepo.RunAgentAdmissionSweeper(ctx)
+			log.Printf("Space agent admission enabled (mode %s)", agentAdmission)
+		}
 	httpServer.SetSpaceRepository(spaceRepo)
 	// WS05-S5: Space decision denied/issued audit events. Strict literal true;
 	// off by default; a rollout control, never an authorization input.

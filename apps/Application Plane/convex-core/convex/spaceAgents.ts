@@ -1162,6 +1162,17 @@ export const confirmSpaceAgentMembershipForGateway = action({
       return { status: "rejected", httpStatus: applied.status };
     }
 
+    // WS17-S4: Control leaves off the roster any agent it has not admitted (SPACE_AGENT_ADMISSION
+    // enforce) and lists it in data.skipped_unadmitted. A roster that skipped anyone is not
+    // applied: the bindings stay pending until the admission is fixed and the sync is retried.
+    const applyBody = (await applied.json().catch(() => null)) as {
+      data?: { skipped_unadmitted?: unknown };
+    } | null;
+    const skippedUnadmitted = applyBody?.data?.skipped_unadmitted;
+    if (Array.isArray(skippedUnadmitted) && skippedUnadmitted.length > 0) {
+      return { status: "rejected", httpStatus: applied.status };
+    }
+
     await ctx.runMutation(internal.spaceAgents.markSpaceBindingsActive, {
       spaceRef: args.spaceRef,
       externalOrgId: args.externalOrgId,

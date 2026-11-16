@@ -130,6 +130,24 @@ var entitlementCatalog = []EntitlementSpec{
 		Get: func(p EffectPolicy) bool { return p.MessageModerateEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.MessageModerateEntitled = v },
 	},
+	{
+		// WS17-S4: a room may admit an owner-visible (personal) agent. Admission is
+		// configuration (ids only) and stays allowed under Space ZDR (D-7), so the
+		// bit gates no decision type.
+		Key: "personal_agent_admit", Column: "personal_agent_admit_entitled",
+		Decisions: nil, ZDR: ZDRCompatible,
+		Get: func(p EffectPolicy) bool { return p.PersonalAgentAdmitEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.PersonalAgentAdmitEntitled = v },
+	},
+	{
+		// WS17-S4: declassifying a personal memory into a room. The decisions it
+		// gates ship with WS17-S7 (listed there); the bit persists memory content,
+		// so it is inert under Space ZDR.
+		Key: "memory_declassify", Column: "memory_declassify_entitled",
+		Decisions: nil, ZDR: ZDRInert,
+		Get: func(p EffectPolicy) bool { return p.MemoryDeclassifyEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.MemoryDeclassifyEntitled = v },
+	},
 }
 
 // effectPolicyPrivacyColumns are the nine privacy/attestation columns, in the

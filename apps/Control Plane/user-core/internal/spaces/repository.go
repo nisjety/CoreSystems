@@ -50,6 +50,9 @@ type Repository struct {
 	// (EP-9 E2). Off: the capability decision keeps the v1 form and the
 	// egress ceiling columns are neither read nor written.
 	sandboxEgressTiers bool
+	// agentAdmission is SPACE_AGENT_ADMISSION (WS17-S4): off, observe or enforce. Off, or an
+	// unset value, leaves the roster unchanged. A rollout control, never an authorization input.
+	agentAdmission AgentAdmissionMode
 }
 
 // SetSandboxEgressTiers turns the SPACE_SANDBOX_EGRESS_TIERS switch on or off.
@@ -856,6 +859,25 @@ func (r *Repository) replaceMemberships(ctx context.Context, replacement Members
 		if subjectType+"\x00"+subjectID == ownerKey && role != "owner" {
 			continue
 		}
+		// WS17-S4 roster skip (SPACE_AGENT_ADMISSION): an agent-* service subject must be admitted here.
+		if subjectType == "service" && IsAgentSubjectID(subjectID) && r.agentAdmissionChecks() {
+			admitted, err := agentRosterAdmitted(ctx, tx, space.SpaceRef, space.OrgID, subjectID)
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
+			if !admitted {
+				if r.agentAdmission == AgentAdmissionEnforce {
+					// Off the roster: the stale pass below takes an existing row off it.
+					delete(declared, subjectType+"\x00"+subjectID)
+					detail.SkippedUnadmitted = append(detail.SkippedUnadmitted, subjectID)
+					continue
+				}
+				if err := insertAdmissionEvent(ctx, tx, space.SpaceRef, subjectID, AdmissionEventWouldSkip,
+					applicationLifecycleActor, ""); err != nil {
+					return nil, nil, nil, "", err
+				}
+			}
+		}
 		var wasActive sql.NullBool
 		var priorRole, priorSource sql.NullString
 		if err := tx.QueryRow(ctx, `
@@ -938,6 +960,34 @@ func (r *Repository) replaceMemberships(ctx context.Context, replacement Members
 		}
 	}
 	rows.Close()
+
+	// WS17-S4 cascade B (ADR 4): a member this roster removes takes their owner-visible agents
+	// out of the room with them. Their admissions are suspended here, and each such agent whose
+	// service membership is active joins the stale list, so it is deactivated and ledgered like
+	// any other removed subject. It runs whatever SPACE_AGENT_ADMISSION is set to, because it
+	// only removes access.
+	seenStale := make(map[string]struct{}, len(stale))
+	for _, member := range stale {
+		seenStale[member.SubjectType+"\x00"+member.SubjectID] = struct{}{}
+	}
+	for _, member := range stale {
+		if member.SubjectType != "user" {
+			continue
+		}
+		ownedAgents, err := suspendOwnedAgentsInRoom(ctx, tx, space.SpaceRef, space.OrgID, member.SubjectID,
+			applicationLifecycleActor, "owner_removed")
+		if err != nil {
+			return nil, nil, nil, "", err
+		}
+		for _, agentID := range ownedAgents {
+			key := "service\x00" + agentID
+			if _, dup := seenStale[key]; dup {
+				continue
+			}
+			seenStale[key] = struct{}{}
+			stale = append(stale, MemberGrant{SubjectType: "service", SubjectID: agentID})
+		}
+	}
 
 	var revokedUserSubjects []string
 	for _, member := range stale {

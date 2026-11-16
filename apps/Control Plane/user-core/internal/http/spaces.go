@@ -358,6 +358,7 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 		"members":               len(replacement.Members),
 		"revisions":             detail.Revisions,
 		"skipped_control_owned": detail.SkippedControlOwned,
+			"skipped_unadmitted":    unadmittedList(detail.SkippedUnadmitted),
 	}})
 }
 

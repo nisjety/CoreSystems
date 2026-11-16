@@ -285,6 +285,12 @@ type EffectPolicy struct {
 	// ThreadCreateEntitled, and both are inert under Zero Data Retention.
 	MessageReviseEntitled   bool `json:"message_revise_entitled"`
 	MessageModerateEntitled bool `json:"message_moderate_entitled"`
+	// PersonalAgentAdmitEntitled (WS17-S4) lets a room admit an owner-visible
+	// (personal) agent. Deny by default; org-visible agents are unaffected.
+	PersonalAgentAdmitEntitled bool `json:"personal_agent_admit_entitled"`
+	// MemoryDeclassifyEntitled (WS17-S4) gates declassifying a personal memory
+	// into a room (WS17-S7). Deny by default; refused under Space ZDR.
+	MemoryDeclassifyEntitled bool `json:"memory_declassify_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {

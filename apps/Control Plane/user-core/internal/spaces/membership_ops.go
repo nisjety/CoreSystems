@@ -106,6 +106,9 @@ type ReplaceMembershipsDetail struct {
 	// SkippedControlOwned counts declared members left untouched because their
 	// row is owned by a Control actor (source member_ops or self_join).
 	SkippedControlOwned int
+	// SkippedUnadmitted lists the agent-* service subjects left off the roster under
+	// SPACE_AGENT_ADMISSION=enforce (WS17-S4). Empty in off and observe.
+	SkippedUnadmitted []string
 	// Events lists the user rows that became active or inactive, with the
 	// ledger event that recorded each (role-only changes are ledger-only).
 	Events []MembershipChangeEvent
@@ -602,6 +605,17 @@ func (r *Repository) RemoveMember(ctx context.Context, req MemberOpRequest) (*Me
 		WHERE space_ref=$1 AND subject_type='user' AND subject_id=$2`,
 		op.space.SpaceRef, req.SubjectID, req.ActorID); err != nil {
 		return nil, fmt.Errorf("remove Space member: %w", err)
+	}
+	// WS17-S4 cascade B: the removed member's owner-visible agents leave the room with them.
+	// Their admissions are suspended and their service memberships deactivated in this
+	// transaction; the admission ledger records the suspension.
+	ownedAgents, err := suspendOwnedAgentsInRoom(ctx, op.tx, op.space.SpaceRef, op.space.OrgID,
+		req.SubjectID, req.ActorID, "owner_removed")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := deactivateAgentMemberships(ctx, op.tx, op.space.SpaceRef, ownedAgents, "agent_removed"); err != nil {
+		return nil, err
 	}
 	result, err := op.commitChange(ctx, req, ledgerEntry{Action: action, FromRole: targetRole},
 		&MemberOpResult{SpaceRef: op.space.SpaceRef, SubjectID: req.SubjectID, FromRole: targetRole})

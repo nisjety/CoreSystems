@@ -101,6 +101,10 @@ func serviceScopeForRequest(request *http.Request) string {
 			return "authz:read"
 		}
 		return "authz:write"
+	case strings.HasPrefix(path, "/api/v1/internal/agents/"):
+		// WS17-S4: the personal agent registry, access list and owner link. Delegated
+		// (scopes_space_agents.go registers the prefix); never the users:* default.
+		return agentsManageScope
 	case path == "/api/v1/internal/memberships/ensure":
 		return "memberships:write"
 	case path == "/api/v1/internal/users/enrich-from-provider":
