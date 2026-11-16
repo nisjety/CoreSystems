@@ -34,7 +34,7 @@ cap.tool.space.canvas.read	source_only	working-tree	-	-	-	-	-	No immutable candi
 cap.tool.space.canvas.write	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.space.schedule.follow_up	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.space.thread.pin	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
-cap.tool.space.thread.post_card	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.space.thread.post_card	source_only	working-tree	-	-	-	-	-	Admission row enabled by migration 0047 (owner decision D3); promotion still needs candidate and live evidence.
 cap.tool.space.thread.rename	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.shipping.track	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.social.publish	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.

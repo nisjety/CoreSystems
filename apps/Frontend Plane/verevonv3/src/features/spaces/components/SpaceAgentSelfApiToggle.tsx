@@ -7,7 +7,7 @@ import './space-tool-policy.css'
 import './space-wake-policy.css'
 
 /**
- * WS18-S6: the owner's and managers' switch for one bound agent's own-thread tools (rename, pin). It writes through the
+ * WS18-S6: the owner's and managers' switch for one bound agent's own-thread tools (rename, pin, post cards). It writes through the
  * action registry (`spaces.set_agent_self_api`), so the gateway checks the caller's live role; it grants nothing on its
  * own, since Control decides each action at run time. The page shows it only behind `features.agent_self_api`, to an
  * owner or manager, for an active binding.
@@ -72,8 +72,8 @@ export function SpaceAgentSelfApiToggle(props: {
         />
         <span>
           {i18n.tr(
-            'La agenten organisere tråder: gi nytt navn og fest',
-            'Let this agent organise threads: rename and pin',
+            'La agenten organisere tråder: gi nytt navn, fest og legg inn kort',
+            'Let this agent organise threads: rename, pin and post cards',
           )}
         </span>
       </label>
