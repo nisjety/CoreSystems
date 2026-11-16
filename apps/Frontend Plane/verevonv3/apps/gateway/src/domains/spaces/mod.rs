@@ -3916,6 +3916,9 @@ const CREATE_AGENT_ROLES: [&str; 2] = ["owner", "manager"];
 const MAX_CREATE_AGENT_NAME_CHARS: usize = 60;
 const MAX_CREATE_AGENT_INSTRUCTIONS_CHARS: usize = 4000;
 
+/// The `details.surface` of the Zero Data Retention refusal on a room agent create (W3-FIX-18's label style).
+const ROOM_AGENTS_SURFACE: &str = "room_agents";
+
 /// Creates a simple agent from inside the room — the scope plan's §UI-3b
 /// two-step, server-confirmed flow, sequenced here so the browser never holds
 /// authority: (1) Application lands the definition and a `pending` binding in
@@ -3944,10 +3947,15 @@ pub(crate) async fn create_space_agent(
     // Zero Data Retention: the agent's name and instructions are stored content. A ZDR org is refused
     // here, before the name check, the Control role check and the Convex write (a failed posture lookup
     // is the typed 503).
-    if let Some(refusal) =
+    if let Some((status, Json(mut refusal))) =
         crate::zdr::durable_write_refusal(&state, &user, None, Some(&body)).await
     {
-        return refusal;
+        if status == StatusCode::PRECONDITION_FAILED {
+            if let Some(object) = refusal.get_mut("error").and_then(Value::as_object_mut) {
+                object.insert("details".to_owned(), json!({ "surface": ROOM_AGENTS_SURFACE }));
+            }
+        }
+        return (status, Json(refusal));
     }
 
     let name = body

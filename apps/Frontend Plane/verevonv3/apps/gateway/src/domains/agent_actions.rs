@@ -190,6 +190,43 @@ fn cron_create_names_explicit_space(body: &Value) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
+/// The `details.surface` a Zero Data Retention refusal from this file names (W3-FIX-18 labels its own 412s the same way).
+const AGENT_BUILDER_SURFACE: &str = "agent_builder";
+const SKILLS_SURFACE: &str = "skills";
+const PLUGINS_SURFACE: &str = "plugins";
+const SCHEDULES_SURFACE: &str = "schedules";
+const EVENT_TRIGGERS_SURFACE: &str = "event_triggers";
+
+/// The Zero Data Retention guard of a content-persisting route in this file: `durable_write_refusal`, run before any
+/// authority check, token mint, Control or Convex call. A caller with no active membership gets the 403 the builder
+/// and schedule routes give, since there is no org posture to read for one. A ZDR org gets the typed 412, labelled
+/// `details.surface`; a failed posture lookup gets the typed 503. `None` lets the write go on.
+async fn zdr_write_guard(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    body: Option<&Value>,
+    surface: &'static str,
+) -> Option<(StatusCode, Json<Value>)> {
+    if crate::upstream::authorized_org_id(state, user).await.trim().is_empty() {
+        return Some((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to change this.",
+            )),
+        ));
+    }
+    let (status, Json(mut refusal)) =
+        crate::zdr::durable_write_refusal(state, user, Some(headers), body).await?;
+    if status == StatusCode::PRECONDITION_FAILED {
+        if let Some(object) = refusal.get_mut("error").and_then(Value::as_object_mut) {
+            object.insert("details".to_owned(), json!({ "surface": surface }));
+        }
+    }
+    Some((status, Json(refusal)))
+}
+
 /// Rebuild a forwardable query string from the incoming params, dropping empty
 /// values. Upstream handlers read `q`, `kind`, `limit`, `after_id`.
 fn build_query(params: &HashMap<String, String>) -> String {
@@ -386,6 +423,11 @@ async fn create_skill(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), SKILLS_SURFACE).await
+    {
+        return refusal.into_response();
+    }
     let forwarded = if can_author_skills(&state, &user).await {
         body
     } else {
@@ -432,6 +474,11 @@ async fn update_skill(
     Path(skill_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), SKILLS_SURFACE).await
+    {
+        return refusal.into_response();
+    }
     let admin = can_author_skills(&state, &user).await;
     if !admin && !skill_member_authoring_enabled() {
         return (
@@ -584,6 +631,9 @@ async fn publish_skill(
     headers: HeaderMap,
     Path(skill_id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(refusal) = zdr_write_guard(&state, &user, &headers, None, SKILLS_SURFACE).await {
+        return refusal.into_response();
+    }
     proxy_skill_draft_call(&state, &user, &headers, &skill_id, "publish", Method::POST).await
 }
 
@@ -605,6 +655,9 @@ async fn restore_skill_version(
     headers: HeaderMap,
     Path((skill_id, version)): Path<(String, u32)>,
 ) -> impl IntoResponse {
+    if let Some(refusal) = zdr_write_guard(&state, &user, &headers, None, SKILLS_SURFACE).await {
+        return refusal.into_response();
+    }
     let action = format!("versions/{version}/restore");
     proxy_skill_draft_call(&state, &user, &headers, &skill_id, &action, Method::POST).await
 }
@@ -643,6 +696,11 @@ async fn import_skill(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), SKILLS_SURFACE).await
+    {
+        return refusal.into_response();
+    }
     let admin = can_author_skills(&state, &user).await;
     let Some(forwarded) = skill_import_body(&body, admin, skill_member_authoring_enabled()) else {
         return (
@@ -711,6 +769,11 @@ async fn create_plugin(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), PLUGINS_SURFACE).await
+    {
+        return refusal.into_response();
+    }
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
@@ -748,6 +811,11 @@ async fn update_plugin(
     Path(plugin_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), PLUGINS_SURFACE).await
+    {
+        return refusal.into_response();
+    }
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
@@ -905,6 +973,11 @@ async fn install_plugin(
     Path(plugin_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), PLUGINS_SURFACE).await
+    {
+        return refusal;
+    }
     let path = format!("plugins/{}/install", urlencoding::encode(&plugin_id));
     proxy_plugin_request(&state, &user, &headers, Method::POST, &path, Some(body)).await
 }
@@ -946,6 +1019,11 @@ async fn create_plugin_kill(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), PLUGINS_SURFACE).await
+    {
+        return refusal;
+    }
     proxy_plugin_request(
         &state,
         &user,
@@ -1059,6 +1137,11 @@ async fn run_cron_now(
     Path(cron_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), SCHEDULES_SURFACE).await
+    {
+        return refusal.into_response();
+    }
     let token = shared::model_token(&state, &user, &headers).await;
     let capability = match shared::required_capability_token(&state, &user, &headers).await {
         Ok(token) => token,
@@ -1134,6 +1217,8 @@ struct EventTriggerCreateBody {
     schedule_id: String,
     #[serde(alias = "wakeFilterJson")]
     wake_filter_json: String,
+    /// The body's own `zdr` flag, read by the ZDR guard (a request-level flag counts as ZDR). Never forwarded.
+    zdr: Value,
 }
 
 /// The fields of a trigger change the gateway forwards: the revision the caller read, the paths it names and their values.
@@ -1152,6 +1237,8 @@ struct EventTriggerUpdateBody {
     schedule_id: String,
     #[serde(alias = "wakeFilterJson")]
     wake_filter_json: String,
+    /// The body's own `zdr` flag, read by the ZDR guard (a request-level flag counts as ZDR). Never forwarded.
+    zdr: Value,
 }
 
 /// The body of a dry run: the one stored webhook event to dry run against.
@@ -1205,6 +1292,12 @@ async fn create_event_trigger(
     headers: HeaderMap,
     Json(body): Json<EventTriggerCreateBody>,
 ) -> impl IntoResponse {
+    let zdr_body = json!({ "zdr": body.zdr });
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&zdr_body), EVENT_TRIGGERS_SURFACE).await
+    {
+        return refusal.into_response();
+    }
     let url = format!("{}/v1/event-triggers", state.model_gateway_url);
     let upstream = json!({
         "space_ref": body.space_ref,
@@ -1237,6 +1330,12 @@ async fn update_event_trigger(
     Path(trigger_id): Path<String>,
     Json(body): Json<EventTriggerUpdateBody>,
 ) -> impl IntoResponse {
+    let zdr_body = json!({ "zdr": body.zdr });
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&zdr_body), EVENT_TRIGGERS_SURFACE).await
+    {
+        return refusal.into_response();
+    }
     let url = event_trigger_url(&state.model_gateway_url, &trigger_id, "");
     let upstream = json!({
         "expected_revision": body.expected_revision,
@@ -1361,6 +1460,11 @@ async fn create_cron(
             )),
         )
             .into_response();
+    }
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, Some(&body), SCHEDULES_SURFACE).await
+    {
+        return refusal.into_response();
     }
     if cron_create_names_explicit_space(&body) && !can_author_skills(&state, &user).await {
         return (
@@ -2077,7 +2181,7 @@ async fn save_agent_draft(
     // Zero Data Retention: the draft carries the agent's instructions, which Convex stores. Refused before
     // the builder gate reads Convex and Control, and before the save.
     if let Some(refusal) =
-        crate::zdr::durable_write_refusal(&state, &user, Some(&headers), Some(&body)).await
+        zdr_write_guard(&state, &user, &headers, Some(&body), AGENT_BUILDER_SURFACE).await
     {
         return refusal;
     }
@@ -2118,8 +2222,26 @@ async fn publish_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(agent_id): Path<String>,
+    headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    // The builder gate's first check, kept ahead of the ZDR guard as save_agent_draft keeps it.
+    if org_id.trim().is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to edit an agent.",
+            )),
+        );
+    }
+    // Zero Data Retention: publishing copies the saved draft's instructions into an immutable version. Refused
+    // before the builder gate reads Convex and Control, and before the publish.
+    if let Some(refusal) =
+        zdr_write_guard(&state, &user, &headers, None, AGENT_BUILDER_SURFACE).await
+    {
+        return refusal;
+    }
     let definition = match authorize_agent_builder(&state, &user, &org_id, &agent_id).await {
         Ok(definition) => definition,
         Err(refusal) => return refusal,
