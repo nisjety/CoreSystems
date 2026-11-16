@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onMount, Show } from 'solid-js'
+import { createMemo, createSignal, For, onSettled, Show } from 'solid-js'
 
 import { X } from '@/shared/icons'
 import { hasErrorCode } from '@/shared/api/api-error'
@@ -113,7 +113,7 @@ export function MemoryDeclassifyDialog(props: MemoryDeclassifyDialogProps) {
     shared() === null &&
     currentActor() !== null
 
-  onMount(() => {
+  onSettled(() => {
     queueMicrotask(() => textarea?.focus())
     void loadRooms()
   })

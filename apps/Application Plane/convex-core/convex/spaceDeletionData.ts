@@ -169,7 +169,7 @@ export const deliverOne = internalAction({
     const spaceOrg = await ctx.runQuery(internal.spaceDeletionData.spaceOrgForDeletion, { spaceRef: claimed.request.spaceRef });
     if (spaceOrg !== orgId) return release("Space organization does not match the deletion request");
     const minted = await mintDataDeletionToken(orgId);
-    if (!minted.ok) return release(`${minted.code}: ${minted.detail}`);
+    if (minted.ok === false) return release(`${minted.code}: ${minted.detail}`);
     let response: Response;
     try {
       response = await fetch(DATA_SPACE_DELETION_URL, {

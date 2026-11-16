@@ -1,4 +1,4 @@
-import { createSignal, onMount, Show } from 'solid-js'
+import { createSignal, onSettled, Show } from 'solid-js'
 
 import { X } from '@/shared/icons'
 import { createSpacePost, SPACE_POST_MAX_CHARS_DEFAULT } from '@/shared/api/spaces-client'
@@ -44,7 +44,7 @@ export function SpaceShareToRoomDialog(props: SpaceShareToRoomDialogProps) {
   const overLimit = () => text().length > limit()
   const canSend = () => trimmed().length > 0 && !overLimit() && !sending()
 
-  onMount(() => {
+  onSettled(() => {
     queueMicrotask(() => textarea?.focus())
   })
 

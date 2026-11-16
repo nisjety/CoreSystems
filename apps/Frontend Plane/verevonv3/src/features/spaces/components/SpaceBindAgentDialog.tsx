@@ -42,7 +42,10 @@ function rowState(agent: InstallableSpaceAgent): SpaceAgentAddState {
 
 /** The sentence for a reason a row or a refused bind names, from errors.ts; an unknown reason gets the generic line. */
 function refusalCopy(reason: string | null | undefined, tr: (noText: string, enText: string) => string): string {
-  const copy = ERROR_COPY[isAgentAddRefusalReason(reason) ? reason : 'agent_not_addable']
+  const key = isAgentAddRefusalReason(reason) ? reason : 'agent_not_addable'
+  const copy = ERROR_COPY[key]
+  // Every refusal reason and `agent_not_addable` is a key of ERROR_COPY: the guard only narrows the index lookup.
+  if (!copy) throw new Error(`refusalCopy: no error copy for ${key}`)
   return tr(copy.no, copy.en)
 }
 

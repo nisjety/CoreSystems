@@ -956,7 +956,7 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
     const work = role === 'assistant' ? spaceRunWorkFrom(record.work) : undefined
     const reactions = spaceReactionsFrom(record.reactions)
     // The typed entry is the server's; the room's registry reads it (WS15-S9, WS18-S7).
-    const entry = record.entry && typeof record.entry === 'object' && !Array.isArray(record.entry) ? record.entry : undefined
+    const typedEntry = record.entry && typeof record.entry === 'object' && !Array.isArray(record.entry) ? record.entry : undefined
     turns.push({
       role,
       content,
@@ -972,7 +972,7 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
       ...(revisionState && revisedBySubjectId ? { revisedBySubjectId } : {}),
       ...(revisionState === 'deleted' && record.agent_followed_up === true ? { agentFollowedUp: true } : {}),
       ...(revisionState !== 'deleted' && reactions.length > 0 ? { reactions } : {}),
-      ...(revisionState !== 'deleted' && entry ? { entry } : {}),
+      ...(revisionState !== 'deleted' && typedEntry ? { entry: typedEntry } : {}),
     })
   }
   return turns

@@ -1,5 +1,6 @@
 import { useBeforeLeave } from '@solidjs/router'
-import { createEffect, createMemo, createSignal, onCleanup, Show, type JSX } from 'solid-js'
+import { createEffect, createMemo, createSignal, onCleanup, Show } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ActionActor } from '@/shared/actions/types'
@@ -156,8 +157,10 @@ function CanvasConflictBanner(props: ConflictBannerProps) {
               <button
                 type="button"
                 class="verevon-space-secondary-action"
-                aria-expanded={reviewing()}
-                onClick={() => setReviewing((open) => !open)}
+                aria-expanded={reviewing() ? 'true' : 'false'}
+                onClick={() => {
+                  setReviewing((open) => !open)
+                }}
               >
                 {reviewing() ? tr('Skjul endringene', 'Hide differences') : tr('Se over endringene', 'Review differences')}
               </button>
@@ -592,8 +595,10 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
                 <button
                   type="button"
                   class="verevon-space-secondary-action"
-                  aria-expanded={historyOpen()}
-                  onClick={() => setHistoryOpen((open) => !open)}
+                  aria-expanded={historyOpen() ? 'true' : 'false'}
+                  onClick={() => {
+                    setHistoryOpen((open) => !open)
+                  }}
                 >
                   {historyOpen() ? tr('Skjul historikken', 'Hide history') : tr('Historikk', 'History')}
                 </button>

@@ -1,4 +1,4 @@
-import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createSignal, onSettled } from 'solid-js'
 
 import { spaceBrowserEvidenceUrl, type SpaceBrowserRun } from '@/shared/api/spaces-client/browser-runs'
 import { useI18n } from '@/shared/i18n'
@@ -36,13 +36,13 @@ export function SpaceBrowserCard(props: SpaceBrowserCardProps) {
     visible,
   })
 
-  onMount(() => {
+  onSettled(() => {
     if (typeof IntersectionObserver === 'undefined' || !root) return
     const observer = new IntersectionObserver((entries) => {
       setVisible(entries.some((entry) => entry.isIntersecting))
     })
     observer.observe(root)
-    onCleanup(() => observer.disconnect())
+    return () => observer.disconnect()
   })
 
   const starter = () => props.viewerSubjectId === props.run.startedBySubjectId

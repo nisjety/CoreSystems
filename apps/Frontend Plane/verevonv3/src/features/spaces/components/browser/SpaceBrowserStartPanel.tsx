@@ -140,10 +140,12 @@ export function SpaceBrowserStartPanel(props: SpaceBrowserStartPanelProps) {
           <span>{i18n.tr('Hva skal agenten gjøre?', 'What should the agent do?')}</span>
           <textarea
             rows={3}
-            maxLength={SPACE_BROWSER_MAX_GOAL_CHARS}
+            maxlength={SPACE_BROWSER_MAX_GOAL_CHARS}
             value={goal()}
             disabled={!props.canStart || busy()}
-            onInput={(event) => setGoal(event.currentTarget.value)}
+            onInput={(event) => {
+              setGoal(event.currentTarget.value)
+            }}
           />
         </label>
         <div class="verevon-space-browser-start__hosts">

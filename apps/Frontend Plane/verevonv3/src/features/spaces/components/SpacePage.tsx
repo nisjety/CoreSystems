@@ -807,7 +807,7 @@ export default function SpacePage() {
                     <button
                       type="button"
                       class="verevon-space-secondary-action"
-                      aria-expanded={privatePanelOpen()}
+                      aria-expanded={privatePanelOpen() ? 'true' : 'false'}
                       onClick={() => (privatePanelOpen() ? closePrivatePanel() : openPrivatePanel())}
                     >
                       {i18n.tr('Privat assistent', 'Private assistant')}
