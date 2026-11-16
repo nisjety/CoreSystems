@@ -2416,7 +2416,10 @@ dependencies = [
 name = "mp-contracts"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
+ "chrono",
+ "ed25519-dalek",
  "prost",
  "prost-types",
  "serde",

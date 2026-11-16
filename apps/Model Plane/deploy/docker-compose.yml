@@ -867,6 +867,12 @@ services:
       # WS09-S8: the room manager's Stop route. Off in production-style profiles; the dev override
       # turns it on. Never an authorization input (Session Core verifies the Control decision).
       SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-false}
+      # WS20-S2: the room browser run start verifies a Control browser-run decision. Off unless set; the dev
+      # override turns it on. With it on, the Control key pair below must be set or start-up refuses.
+      # A rollout control, never an authorization input.
+      SPACE_BROWSER_RUN_API: ${SPACE_BROWSER_RUN_API:-0}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
       # WS11-S2: POST /v1/spaces/attention, the cross-room attention aggregate. Off unless set; dev
       # override turns it on. A rollout control, never an authorization input.
       SPACE_ATTENTION_SUMMARY: ${SPACE_ATTENTION_SUMMARY:-0}

@@ -10,6 +10,7 @@
 
 use axum::Router;
 
+pub mod browser;
 mod approvals;
 mod artifacts;
 mod attention;
