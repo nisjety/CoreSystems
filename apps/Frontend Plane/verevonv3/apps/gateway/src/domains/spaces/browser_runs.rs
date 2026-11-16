@@ -1054,16 +1054,16 @@ pub(crate) async fn submit_start(
             && refusal_code(&response) == Some("space_authority_stale")
             && attempt == 0
         {
-            revoke_session_grant(state, user, headers, &grant).await;
+            crate::domains::browser::revoke_session_grant(state, user, headers, &grant).await;
             continue;
         }
         if !status.is_success() {
-            revoke_session_grant(state, user, headers, &grant).await;
+            crate::domains::browser::revoke_session_grant(state, user, headers, &grant).await;
             return start_relay_refusal(status, &response);
         }
         if response.get("idempotent_replay").and_then(Value::as_bool) == Some(true) {
             // A keyed retry: the run this key names already holds its own grant, so this one is not needed.
-            revoke_session_grant(state, user, headers, &grant).await;
+            crate::domains::browser::revoke_session_grant(state, user, headers, &grant).await;
         }
         // The run is live: Model Plane revokes the parent grant when the run ends (W3-DEC-GRANT).
         return started(&response);

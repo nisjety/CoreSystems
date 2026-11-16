@@ -7,6 +7,7 @@
 // one of those sites for no behavioral gain, so the trade-off is accepted
 // crate-wide rather than suppressed function-by-function.
 #![allow(clippy::result_large_err)]
+#![recursion_limit = "256"]
 
 use std::{env, net::SocketAddr};
 
