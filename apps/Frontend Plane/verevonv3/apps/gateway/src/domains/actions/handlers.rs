@@ -133,6 +133,10 @@ use super::dispatchers_spaces::ws19::{
 use super::dispatchers_browser_policy::{
     dispatch_browser_get_org_policy, dispatch_browser_set_org_policy,
 };
+use super::dispatchers_spaces::org_agents::{
+    dispatch_spaces_reactivate_org_agent, dispatch_spaces_retire_org_agent,
+    dispatch_spaces_suspend_org_agent,
+};
 use super::dispatchers_spaces::ws03::{
     dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
 };
@@ -1312,6 +1316,15 @@ pub(super) async fn execute_action(
                 )
             })
             .await
+        }
+        "spaces.suspend_org_agent" => {
+            boxed_dispatch(|| dispatch_spaces_suspend_org_agent(&state, &user, &body.input)).await
+        }
+        "spaces.reactivate_org_agent" => {
+            boxed_dispatch(|| dispatch_spaces_reactivate_org_agent(&state, &user, &body.input)).await
+        }
+        "spaces.retire_org_agent" => {
+            boxed_dispatch(|| dispatch_spaces_retire_org_agent(&state, &user, &body.input)).await
         }
         "spaces.set_effect_entitlements" => {
             boxed_dispatch(|| {

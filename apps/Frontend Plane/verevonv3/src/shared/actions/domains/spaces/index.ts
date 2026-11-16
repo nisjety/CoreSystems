@@ -19,6 +19,7 @@ import { ws12SpaceActions } from './ws12'
 import { ws14SpaceActions } from './ws14'
 import { ws16SpaceActions } from './ws16'
 import { ws17SpaceActions } from './ws17'
+import { ws17OrgAgentActions } from './ws17-org-agents'
 import { ws18SpaceActions } from './ws18'
 import { ws19SpaceActions } from './ws19'
 import { ws20SpaceActions } from './ws20'
@@ -38,6 +39,7 @@ export const spaceActions = [
   ...ws14SpaceActions,
   ...ws16SpaceActions,
   ...ws17SpaceActions,
+  ...ws17OrgAgentActions,
   ...ws18SpaceActions,
   ...ws19SpaceActions,
   ...ws20SpaceActions,

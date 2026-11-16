@@ -9,6 +9,7 @@ mod roles;
 pub(crate) mod settings;
 mod shared;
 pub(crate) mod browser_policy;
+pub(crate) mod org_agents;
 pub(crate) mod space_policy;
 pub(crate) mod switch;
 mod website;
@@ -100,6 +101,20 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orgs/{id}/space-policy/events",
             get(space_policy::list_space_policy_events),
+        )
+        // W3-DEC-ORGAGENT (D19): org-admin management of the org-visible agents (Control owns the rows).
+        .route("/api/v1/orgs/{id}/agents", get(org_agents::list_org_agents))
+        .route(
+            "/api/v1/orgs/{id}/agents/{agent_subject_id}/suspend",
+            put(org_agents::suspend_org_agent),
+        )
+        .route(
+            "/api/v1/orgs/{id}/agents/{agent_subject_id}/reactivate",
+            put(org_agents::reactivate_org_agent),
+        )
+        .route(
+            "/api/v1/orgs/{id}/agents/{agent_subject_id}",
+            delete(org_agents::retire_org_agent),
         )
         // Members
         .route("/api/v1/orgs/{id}/members", get(members::list_members))

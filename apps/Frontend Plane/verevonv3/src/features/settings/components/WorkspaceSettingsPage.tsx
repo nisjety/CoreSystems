@@ -25,6 +25,7 @@ import { SsoPolicyPanel } from '@/features/settings/components/SsoPolicyPanel'
 import { ScimPanel } from '@/features/settings/components/ScimPanel'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePolicySection'
+import { OrgAgentsSection } from '@/features/settings/components/OrgAgentsSection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
@@ -552,6 +553,7 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'space-policy'}>
         <OrgSpacePolicySection />
+        <OrgAgentsSection />
       </Match>
       <Match when={props.section === 'memory'}>
         <MemorySection />
