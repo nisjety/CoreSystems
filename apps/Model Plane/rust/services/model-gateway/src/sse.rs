@@ -29768,6 +29768,7 @@ mod citation_passage_tests {
             source_group_label: "Notion".to_owned(),
             number,
             origin: crate::retrieval::KNOWLEDGE_ORIGIN.to_owned(),
+            space_ref: None,
         };
         let fact = |document_id: &str, chunk_index: i32, text: &str| crate::retrieval::GroundingFact {
             knowledge_id: "kid-1".to_owned(),

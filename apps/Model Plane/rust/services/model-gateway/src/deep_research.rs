@@ -8346,6 +8346,7 @@ mod tests {
                 source_group_label: "SharePoint".to_owned(),
                 number: 1,
                 origin: crate::retrieval::KNOWLEDGE_ORIGIN.to_owned(),
+                space_ref: None,
             }
         }
 

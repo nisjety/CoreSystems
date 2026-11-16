@@ -19,6 +19,7 @@ use std::{
 use mp_contracts::dataplane::retrieval_v2::{
     ContextFact, RetrieveRequest, RetrieveResponse, Source,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -113,6 +114,10 @@ pub struct GroundingCitation {
     /// server can defensively verify, which family a citation actually came
     /// from.
     pub origin: String,
+    /// The Space this citation's chunk was retrieved under (WS17-S9): the chunk's own `space_ref` label. `None`
+    /// where no label applies, an unscoped answer or a chunk the Data Plane did not label. A Space-scoped answer
+    /// keeps only chunks labelled with the requested Space (`enforce_space_labels`), so its citations all carry it.
+    pub space_ref: Option<String>,
 }
 
 /// Every [`GroundingCitation`] this module produces is org-knowledge-sourced.
@@ -449,6 +454,7 @@ fn build_context_entries(
                 title,
                 url,
                 provider_slug,
+                None,
             );
             if entries.len() >= MAX_ENTRIES {
                 break;
@@ -482,6 +488,7 @@ fn build_context_entries(
             title,
             url,
             provider_slug,
+            chunk_space_ref(cand),
         );
     }
 
@@ -499,6 +506,7 @@ fn add_context_entry(
     title: Option<String>,
     url: String,
     provider_slug: String,
+    space_ref: Option<&str>,
 ) {
     if entries.len() >= MAX_ENTRIES {
         return;
@@ -552,6 +560,7 @@ fn add_context_entry(
                 source_group_label: source_label(&provider_slug),
                 number,
                 origin: KNOWLEDGE_ORIGIN.to_owned(),
+                space_ref: space_ref.map(str::to_owned),
             });
         }
     } else {
@@ -582,6 +591,76 @@ fn read_score(
     } else {
         packed.map_or(0.0, |fact| fact.score)
     }
+}
+
+/// The Space a chunk was retrieved under: the `space_ref` label the Data Plane writes on the chunk's own
+/// `metadata` Struct (WS17-S9). It reads as `None` on every unscoped chunk, and on every chunk of this transport
+/// today, because the Data Plane's gRPC candidates carry no metadata.
+fn chunk_space_ref(candidate: &mp_contracts::dataplane::retrieval_v2::Candidate) -> Option<&str> {
+    use prost_types::value::Kind;
+    match candidate.metadata.as_ref()?.fields.get("space_ref")?.kind.as_ref()? {
+        Kind::StringValue(label) => Some(label.as_str()).filter(|label| !label.is_empty()),
+        _ => None,
+    }
+}
+
+/// The Space a Control-issued retrieval decision names: the `space_ref` claim of the signed envelope
+/// `v2.<key id>.<payload>.<signature>` (WS17-S9). It is read WITHOUT verifying the signature. The Data Plane verifies
+/// this same token before it returns any chunk and writes each chunk's label from that verified Space, so the value
+/// is only compared with those labels and can never widen what is retrieved. An envelope that names no Space is `None`.
+fn decision_space_ref(space_decision: &str) -> Option<String> {
+    let parts: Vec<&str> = space_decision.split('.').collect();
+    let [version, _key_id, payload, _signature] = parts.as_slice() else {
+        return None;
+    };
+    if *version != "v2" {
+        return None;
+    }
+    let claims: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(*payload).ok()?).ok()?;
+    claims
+        .get("space_ref")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|space| !space.is_empty())
+        .map(str::to_owned)
+}
+
+/// What [`enforce_space_labels`] withheld from a Space-scoped answer, counted by reason. Counts only: the withheld
+/// text is never logged.
+#[derive(Debug, Default)]
+struct SpaceLabelDrops {
+    unlabeled: usize,
+    other_space: usize,
+    pack_facts: usize,
+}
+
+impl SpaceLabelDrops {
+    fn total(&self) -> usize {
+        self.unlabeled + self.other_space + self.pack_facts
+    }
+}
+
+/// WS17-S9: keeps only the chunks of a Space-scoped answer that carry the requested Space's label. A chunk with no
+/// label is withheld (fail closed), and so is one labelled for another Space. The context pack's facts carry no label
+/// on this transport, so they are withheld whole and the answer is built from labelled candidates only.
+fn enforce_space_labels(resp: &mut RetrieveResponse, space_ref: &str) -> SpaceLabelDrops {
+    let mut dropped = SpaceLabelDrops::default();
+    if let Some(pack) = resp.context_pack.as_mut() {
+        dropped.pack_facts = std::mem::take(&mut pack.facts).len();
+    }
+    resp.candidates.retain(|candidate| match chunk_space_ref(candidate) {
+        Some(label) if label == space_ref => true,
+        Some(_) => {
+            dropped.other_space += 1;
+            false
+        }
+        None => {
+            dropped.unlabeled += 1;
+            false
+        }
+    });
+    dropped
 }
 
 fn build_grounding_facts(
@@ -1011,19 +1090,20 @@ async fn load_graph_grounding(
     zdr_mode: Option<String>,
     space_decision: Option<&str>,
 ) -> Option<GroundingGraph> {
-    // MODEL_GATEWAY_GRAPH_SPACE_SCOPE off: the request is what it has always been. On, a scoped turn
-    // sends its decision, and one whose decision is unusable never reaches the organisation-wide graph.
-    let scoped_token = if graph_space_scope_enabled() {
-        match scoped_retrieval_token(space_decision) {
-            Ok(token) => token,
-            Err(()) => {
-                tracing::warn!(org_id = %org_id, "scoped graph grounding suppressed because retrieval authority is absent");
-                return None;
-            }
+    // A Space-scoped turn never reaches the organisation-wide graph (WS17-S9). MODEL_GATEWAY_GRAPH_SPACE_SCOPE on, a
+    // scoped turn sends its decision. Off, a scoped turn has no graph leg: an unscoped call would read the whole
+    // organisation's graph into a Space's answer.
+    let scoped_token = match scoped_retrieval_token(space_decision) {
+        Ok(token) => token,
+        Err(()) => {
+            tracing::warn!(org_id = %org_id, "scoped graph grounding suppressed because retrieval authority is absent");
+            return None;
         }
-    } else {
-        None
     };
+    if scoped_token.is_some() && !graph_space_scope_enabled() {
+        tracing::warn!(org_id = %org_id, "scoped graph grounding suppressed while MODEL_GATEWAY_GRAPH_SPACE_SCOPE is off");
+        return None;
+    }
     let request = match build_graph_grounding_request(
         &state.http_client,
         &retrieval_http_base_url(),
@@ -1194,6 +1274,18 @@ pub async fn retrieve_checked(
             return Ok(None);
         }
     };
+    // WS17-S9: a Space-scoped answer keeps only the chunks labelled with the Space its decision names, so that Space is
+    // read before the Data Plane is asked anything. A decision that names no Space is no authority: withheld.
+    let requested_space = match scoped_token {
+        None => None,
+        Some(token) => match decision_space_ref(token) {
+            Some(space) => Some(space),
+            None => {
+                tracing::warn!(org_id = %org_id, "scoped grounding suppressed because the Space decision names no Space");
+                return Ok(None);
+            }
+        },
+    };
     if let Some(token) = scoped_token {
         let metadata = match tonic::metadata::MetadataValue::try_from(token) {
             Ok(metadata) => metadata,
@@ -1218,7 +1310,20 @@ pub async fn retrieve_checked(
             // all. The `grounded` bool fed into confidence scoring
             // (`grounding.is_some_and(|g| !g.citations.is_empty())`) is
             // unaffected since it already requires non-empty citations.
-            let mut grounding = build_grounding(query, &resp.into_inner());
+            let mut resp = resp.into_inner();
+            if let Some(space) = requested_space.as_deref() {
+                let dropped = enforce_space_labels(&mut resp, space);
+                if dropped.total() > 0 {
+                    tracing::warn!(
+                        org_id = %org_id,
+                        dropped_unlabeled = dropped.unlabeled,
+                        dropped_other_space = dropped.other_space,
+                        dropped_pack_facts = dropped.pack_facts,
+                        "scoped grounding withheld chunks without the Space's label"
+                    );
+                }
+            }
+            let mut grounding = build_grounding(query, &resp);
             if let Some(notice) = grounding.notice.take() {
                 match crate::retrieval_metadata::notice_for_mode(notice, notice_mode.as_deref()) {
                     Some(stated) => grounding.notice = Some(stated),
@@ -2007,6 +2112,7 @@ mod tests {
                 source_group_label: source_label("https://kb/alpha"),
                 number: 1,
                 origin: KNOWLEDGE_ORIGIN.to_owned(),
+                space_ref: None,
             }
         );
         assert_eq!(g.citations[1].number, 2, "second citable entry gets [2]");
