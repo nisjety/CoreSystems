@@ -511,6 +511,7 @@ impl MemoryGrpc {
                 idempotency_key,
                 audience_hash: &verified.recipient_audience_hash,
                 audience_revision: verified.recipient_audience_revision,
+                authority_revision: verified.authority_revision,
             },
         )
         .await?;

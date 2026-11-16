@@ -4780,11 +4780,13 @@ pub(crate) const MEMORY_DECLASSIFY_OPERATION_DECLASSIFY: &str = "declassify";
 pub(crate) const MEMORY_DECLASSIFY_OPERATION_RETRACT: &str = "retract";
 
 /// What a verified memory declassify decision tells the writer: the audience the room row is stamped
-/// with (hash and revision) and the zero-retention claim.
+/// with (hash and revision), the Space authority revision the decision binds (W3-DEC-ORDER2: the ordering key the share's
+/// ledger row records) and the zero-retention claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedMemoryDeclassify {
     pub(crate) recipient_audience_hash: String,
     pub(crate) recipient_audience_revision: i64,
+    pub(crate) authority_revision: i64,
     pub(crate) zero_data_retention: bool,
 }
 
@@ -4948,9 +4950,12 @@ fn verify_memory_declassify_decision_with_key(
     }
     let recipient_audience_revision = i64::try_from(claims.recipient_audience_revision)
         .map_err(|_| Status::permission_denied(DENIED))?;
+    let authority_revision =
+        i64::try_from(claims.authority_revision).map_err(|_| Status::permission_denied(DENIED))?;
     Ok(VerifiedMemoryDeclassify {
         recipient_audience_hash: claims.recipient_audience_hash,
         recipient_audience_revision,
+        authority_revision,
         zero_data_retention: claims.zero_data_retention,
     })
 }

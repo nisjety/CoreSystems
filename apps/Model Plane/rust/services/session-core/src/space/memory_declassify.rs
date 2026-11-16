@@ -12,20 +12,23 @@
 //! before this module is called.
 //!
 //! W3 D1: a membership fact that removes a subject from a Space, or leaves them below editor, retracts that
-//! subject's live shares in the Space through [`retract_removed_subject`], from the membership consumer in
-//! `space_membership_retract_nats.rs`. A share and that retraction take the same per-subject lock, and a share
-//! re-checks the revocation under it, so a removal cannot be overtaken by a share it did not see.
+//! subject's live shares in the Space through [`retract_removed_subject`], from `space_membership_retract_nats.rs`.
+//! A share and that retraction take the same per-subject lock, and a share re-checks the revocation and the retraction
+//! marks under it, so a removal cannot be overtaken by a share it did not see.
+//!
+//! W3-DEC-ORDER2: a share records the Control authority revision its decision binds (`authority_revision`). A removal
+//! or demotion at revision R retracts only the subject's shares below R, so a share made after a later re-add survives.
 
 use chrono::{DateTime, Utc};
 use mp_ids::new_ulid;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use tonic::Status;
 
 use crate::space::memory_scope::ORIGIN_DECLASSIFIED;
 use crate::space_memory::{SOURCE_MEMBER_SAVE, SPACE_SCOPE};
 
 /// One declassify, already authorised: the Control decision is verified and the caller is the source row's
-/// owner. `audience_hash` and `audience_revision` are the verified decision's, never the request's.
+/// owner. `audience_hash`, `audience_revision` and `authority_revision` are the verified decision's, never the request's.
 pub(crate) struct DeclassifyInput<'a> {
     pub(crate) org_id: &'a str,
     pub(crate) user_id: &'a str,
@@ -37,6 +40,8 @@ pub(crate) struct DeclassifyInput<'a> {
     pub(crate) idempotency_key: &'a str,
     pub(crate) audience_hash: &'a str,
     pub(crate) audience_revision: i64,
+    /// The Space authority revision the verified decision binds (W3-DEC-ORDER2), recorded on the ledger row.
+    pub(crate) authority_revision: i64,
 }
 
 /// What a declassify produced: the room row, and whether this decision or key had already produced it.
@@ -124,6 +129,23 @@ pub(crate) async fn declassify_into_room(
         });
     }
 
+    // W3-DEC-ORDER2: a removal or demotion at a later revision has already retracted this subject's shares, and this
+    // decision predates it. Refuse, rather than leave a copy that retraction has already passed.
+    let retracted_through: Option<i64> = sqlx::query_scalar(
+        "SELECT retract_seq FROM space_membership_retract_marks WHERE space_ref = $1 AND subject_id = $2",
+    )
+    .bind(input.space_id)
+    .bind(input.user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?;
+    if retracted_through.is_some_and(|seq| seq > input.authority_revision) {
+        tx.rollback().await.map_err(internal)?;
+        return Err(Status::permission_denied(
+            "Space membership changed after this memory decision was issued",
+        ));
+    }
+
     // The source row: the caller's own, current, accepted, not expired and not forgotten personal row. It is
     // locked for the share so a concurrent forget or edit waits for the share to finish.
     let source: Option<(String, f64)> = sqlx::query_as(
@@ -199,8 +221,8 @@ pub(crate) async fn declassify_into_room(
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO memory_declassifications \
          (decision_ref, org_id, space_ref, source_memory_id, room_memory_id, subject_id, idempotency_key, \
-          content_digest, audience_hash, audience_revision) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+          content_digest, audience_hash, audience_revision, authority_revision) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT DO NOTHING \
          RETURNING decision_ref",
     )
@@ -214,6 +236,7 @@ pub(crate) async fn declassify_into_room(
     .bind(input.content_digest)
     .bind(input.audience_hash)
     .bind(input.audience_revision)
+    .bind(input.authority_revision)
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal)?;
@@ -302,25 +325,31 @@ pub(crate) async fn retract_declassified_row(
     Ok(deleted.is_some())
 }
 
-/// W3 D1: retract every live declassified copy one subject holds in one Space, as their owner's retract would. Used
-/// when Control says the subject was removed (`revoke`, which also writes the revocation row in this transaction,
-/// as the membership consumer does) or demoted below editor (`revoke` false). The room row is deleted and every live
-/// ledger row of it is stamped, with the same statements as `retract_declassified_row`, in one transaction under the
-/// lock shared with `declassify_into_room`. Returns the room rows deleted. A repeat finds no live row and deletes
-/// nothing, so a replayed fact or a sweep is a no-op. The source rows are never changed.
+/// W3 D1 and W3-DEC-ORDER2: retract the live declassified shares one subject made in one Space, when Control says the
+/// subject was removed (`revoke`, which also writes the revocation row, as the membership consumer does), demoted below
+/// editor (`revoke` false), or on the sweep. `before` is the Space authority revision of that change. Only the subject's
+/// shares whose recorded revision is below it are retracted; a share with a NULL revision (written before the column
+/// existed) always is. `None` (an unordered fact) retracts every live share of the subject. `before` also records the
+/// revision in `space_membership_retract_marks`, so `declassify_into_room` refuses a share authorised below it from now on.
+///
+/// The caller holds the subject's ordering lock and runs this inside its transaction. This takes the (org, Space, subject)
+/// lock that declassify shares, so the two serialise. Per room row, in row order: the room row is locked, this subject's
+/// shares of it are stamped, and the row is deleted only when no live share of any member still holds it (a copy another
+/// member shared after the change stays). Returns the shares retracted. A repeat finds no live share and changes nothing.
+/// The source rows are never changed.
 pub(crate) async fn retract_removed_subject(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     org_id: &str,
     space_id: &str,
     subject_id: &str,
     revoke: bool,
+    before: Option<i64>,
 ) -> Result<u64, sqlx::Error> {
-    let mut tx = pool.begin().await?;
     sqlx::query(LOCK_MEMBER_SQL)
         .bind(org_id)
         .bind(space_id)
         .bind(subject_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if revoke {
         sqlx::query(
@@ -330,44 +359,77 @@ pub(crate) async fn retract_removed_subject(
         .bind(space_id)
         .bind(org_id)
         .bind(subject_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
+        .await?;
+    }
+    if let Some(space_seq) = before {
+        sqlx::query(
+            "INSERT INTO space_membership_retract_marks (space_ref, subject_id, org_id, retract_seq) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (space_ref, subject_id) DO UPDATE \
+             SET org_id = EXCLUDED.org_id, \
+                 retract_seq = GREATEST(space_membership_retract_marks.retract_seq, EXCLUDED.retract_seq), \
+                 applied_at = NOW()",
+        )
+        .bind(space_id)
+        .bind(subject_id)
+        .bind(org_id)
+        .bind(space_seq)
+        .execute(&mut **tx)
         .await?;
     }
     let room_ids: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT room_memory_id FROM memory_declassifications \
-         WHERE org_id = $1 AND space_ref = $2 AND subject_id = $3 AND retracted_at IS NULL",
+         WHERE org_id = $1 AND space_ref = $2 AND subject_id = $3 AND retracted_at IS NULL \
+           AND ($4::bigint IS NULL OR authority_revision IS NULL OR authority_revision < $4) \
+         ORDER BY room_memory_id",
     )
     .bind(org_id)
     .bind(space_id)
     .bind(subject_id)
-    .fetch_all(&mut *tx)
+    .bind(before)
+    .fetch_all(&mut **tx)
     .await?;
-    let mut deleted: u64 = 0;
+    let mut retracted: u64 = 0;
     for memory_id in &room_ids {
-        let removed: Option<String> = sqlx::query_scalar(
+        // Lock the room row before the ledger is read again. A share of the same text holds this row until it commits, so
+        // the delete below sees that share's ledger row, and a share that starts after this waits for the delete.
+        sqlx::query(
+            "SELECT id FROM agent_memory WHERE id = $1 AND org_id = $2 AND scope = 'space' AND scope_id = $3 \
+               AND origin_kind = 'declassified' FOR UPDATE",
+        )
+        .bind(memory_id)
+        .bind(org_id)
+        .bind(space_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        retracted += sqlx::query(
+            "UPDATE memory_declassifications SET retracted_at = now() \
+             WHERE org_id = $1 AND space_ref = $2 AND subject_id = $3 AND room_memory_id = $4 AND retracted_at IS NULL \
+               AND ($5::bigint IS NULL OR authority_revision IS NULL OR authority_revision < $5)",
+        )
+        .bind(org_id)
+        .bind(space_id)
+        .bind(subject_id)
+        .bind(memory_id)
+        .bind(before)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+        sqlx::query(
             "DELETE FROM agent_memory \
              WHERE id = $1 AND org_id = $2 AND scope = 'space' AND scope_id = $3 \
                AND origin_kind = 'declassified' \
-             RETURNING id",
+               AND NOT EXISTS (SELECT 1 FROM memory_declassifications \
+                               WHERE org_id = $2 AND space_ref = $3 AND room_memory_id = $1 AND retracted_at IS NULL)",
         )
         .bind(memory_id)
         .bind(org_id)
         .bind(space_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        deleted += u64::from(removed.is_some());
-        sqlx::query(
-            "UPDATE memory_declassifications SET retracted_at = now() \
-             WHERE org_id = $1 AND space_ref = $2 AND room_memory_id = $3 AND retracted_at IS NULL",
-        )
-        .bind(org_id)
-        .bind(space_id)
-        .bind(memory_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    tx.commit().await?;
-    Ok(deleted)
+    Ok(retracted)
 }
 
 /// W3 D1 backstop: the live declassified shares whose subject holds a revocation row in their Space, as
