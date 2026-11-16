@@ -36,6 +36,8 @@
 //! - [`self_api`]: `SpaceRunActions`, the run-bound owner path of the agent self-API: rename and pin on the run's own
 //!   thread under a Control `run-action-v1` decision, receipts and the probe (WS18-S3; receipts are migration 0084,
 //!   the switch is `SPACE_SELF_API_SESSION_CORE`).
+//! - [`browser_read`]: `SpaceBrowserRead`, the room browser run's per-Space count and run Space lookup (WS20-S3;
+//!   read-only, no migration).
 
 pub(crate) mod append;
 pub(crate) mod approval_gate;
@@ -45,6 +47,7 @@ pub(crate) mod attention;
 pub(crate) mod attention_outbox;
 pub(crate) mod audience_window;
 pub(crate) mod authz;
+pub(crate) mod browser_read;
 pub(crate) mod entry;
 pub(crate) mod events;
 pub(crate) mod history;

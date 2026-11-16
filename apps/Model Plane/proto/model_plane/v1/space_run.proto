@@ -10,7 +10,8 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 // through a registry action (`space.thread.rename`, `space.thread.pin`, `space.thread.post_card`).
 // Session Core verifies a Control `run-action-v1` decision and recomputes the payload digest from the
 // typed arguments; the model supplies argument values only. Receipts and events carry ids, kinds and
-// digests only. WS20-S4 adds its read service to this file (`SpaceBrowserRead`).
+// digests only. WS20-S3 adds `SpaceBrowserRead` to this file (the room browser run's count and run
+// Space lookup); WS20-S4 adds its read RPCs to that service.
 service SpaceRunActions {
   // Apply one registry action to the run's own thread. The caller is the run's owner (a user
   // principal). A zero-retention credential is refused with `zdr_durable_mutation_forbidden`.
@@ -104,4 +105,46 @@ message ProbeRunThreadActionsResponse {
   bool schema_present = 2;
   // The value of SPACE_SELF_API_SESSION_CORE as read at boot.
   bool flag_on = 3;
+}
+
+// SpaceBrowserRead: the room-scoped browser run reads that Session Core answers for model-gateway
+// (build plan WS20-S3; S4 adds the timeline, list and evidence RPCs here). Each call carries the
+// caller's verified user credential; the org is checked against it, and a zero-retention credential
+// is refused with the typed `browser_run` refusal.
+service SpaceBrowserRead {
+  // The browser runs of one Space still in flight, for the per-Space cap. Counts only runs started by
+  // the gateway's browser source in threads of that Space. `exclude_start_key` leaves out one run (the
+  // run a keyed replay names), so a replay of an admitted start is not refused by its own run.
+  rpc CountActiveRoomBrowserRuns(CountActiveRoomBrowserRunsRequest) returns (CountActiveRoomBrowserRunsResponse);
+
+  // The Space a run belongs to, read for execution-core's three-way Space agreement. The caller must be
+  // the run's owner. An empty `space_id` names a run that is not in a Space.
+  rpc ResolveRunSpace(ResolveRunSpaceRequest) returns (ResolveRunSpaceResponse);
+}
+
+message CountActiveRoomBrowserRunsRequest {
+  // Must be the caller's own org.
+  string org_id = 1;
+  // The Space whose runs are counted.
+  string space_id = 2;
+  // A run start key to leave out of the count (empty leaves none out).
+  string exclude_start_key = 3;
+}
+
+message CountActiveRoomBrowserRunsResponse {
+  // Browser runs of the Space still in flight, not counting `exclude_start_key`.
+  uint32 active_runs = 1;
+}
+
+message ResolveRunSpaceRequest {
+  string run_id = 1;
+  // Must be the caller's own org.
+  string org_id = 2;
+  // Must be the caller's own user id; the run must be this user's.
+  string user_id = 3;
+}
+
+message ResolveRunSpaceResponse {
+  // The run's Space, or empty when the run is not in a Space.
+  string space_id = 1;
 }

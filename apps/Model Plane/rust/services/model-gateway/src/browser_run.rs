@@ -44,6 +44,10 @@ use crate::{
         VerifiedInferenceBearer, VerifiedSessionBearer,
     },
     http_routes::grpc_status_to_http,
+    space_routes::browser::{
+        admit_room_run, check_profile_request, derive_room_run_grant, room_cost_cap, typed_error,
+        RoomRunStart, RoomStartInput, SpaceBrowserAuthority,
+    },
     state::AppState,
 };
 
@@ -132,14 +136,15 @@ fn reject_unsupported_browser_approval(request: &BrowserRunStartRequest) -> Resu
     Ok(())
 }
 
-/// The standalone browser-run path creates a personal run and does not verify a
-/// Space decision. Refuse an explicit Space target before creating any grant or
-/// run instead of silently ignoring it and reporting a personal run as shared.
+/// A personal run never names a Space. The Space path (WS20-S3) is taken only with a verified Control
+/// browser authority: a Space id or reference in the body is refused, and Space contexts without that
+/// authority are refused, before any grant, thread or run is written. Refuse an explicit Space target
+/// instead of silently ignoring it and reporting a personal run as shared.
 fn reject_unbound_space(request: &BrowserRunStartRequest) -> Result<(), ApiError> {
+    let space_contexts = request.space_context.is_some() || request.space_append_context.is_some();
     if request.space_id.is_some()
         || request.space_ref.is_some()
-        || request.space_context.is_some()
-        || request.space_browser_authority.is_some()
+        || (space_contexts && request.space_browser_authority.is_none())
     {
         return Err((
             StatusCode::PRECONDITION_FAILED,
@@ -190,7 +195,7 @@ fn parse_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError
 /// under another grant (or from another user) is a different run, and the raw
 /// key never leaves this function. Parts are length-prefixed, so `("a","bc")`
 /// and `("ab","c")` cannot collide.
-fn keyed_run_key(org_id: &str, user_id: &str, parent_grant_id: &str, key: &str) -> String {
+pub(crate) fn keyed_run_key(org_id: &str, user_id: &str, parent_grant_id: &str, key: &str) -> String {
     use std::fmt::Write as _;
     let mut hasher = Sha256::new();
     for part in [
@@ -268,15 +273,20 @@ struct BrowserRunStartRequest {
     space_id: Option<Value>,
     #[serde(default, alias = "spaceRef")]
     space_ref: Option<Value>,
+    /// The thread's Control create decision, for a new thread only (WS20-S3).
     #[serde(default, alias = "spaceContext")]
-    space_context: Option<Value>,
+    space_context: Option<crate::session_flow::ThreadSpaceContext>,
+    /// The goal turn's Control append decision (WS20-S3).
+    #[serde(default, alias = "spaceAppendContext")]
+    space_append_context: Option<crate::session_flow::ThreadSpaceContext>,
+    /// The Control browser-run authority of a room run (WS20-S3). Its presence selects the Space path.
     #[serde(
         default,
         alias = "spaceBrowserAuthority",
         alias = "space_authority",
         alias = "spaceAuthority"
     )]
-    space_browser_authority: Option<Value>,
+    space_browser_authority: Option<SpaceBrowserAuthority>,
     #[serde(default)]
     thread_id: Option<String>,
     goal: String,
@@ -1932,6 +1942,74 @@ async fn derive_run_grant(
     })
 }
 
+/// A room run's grant (WS20-S3). The starter's session grant named in the body is validated, then the run
+/// grant is derived from it under the decision's hosts, lifetime and bounds (S2's derive). The derived grant
+/// must be a run grant under that parent, not zero-retention, canonical and narrower than the decision, and
+/// a start URL must lie inside it. The grant names no Space (C1).
+async fn room_browser_grant(
+    state: &AppState,
+    request: &BrowserRunStartRequest,
+    browser_bearer: &VerifiedBrowserBearer,
+    org_id: &str,
+    run_key: &str,
+    room: &RoomRunStart,
+) -> Result<ResolvedBrowserGrant, ApiError> {
+    let parent = request.grant_id.trim();
+    if parent.is_empty() {
+        return Err(bad_request("grant_id must not be empty"));
+    }
+    let mut broker = state.browser_client.clone();
+    let session = broker
+        .validate_grant(authenticated_browser_request(
+            ValidateGrantRequest {
+                grant_id: parent.to_owned(),
+            },
+            browser_bearer,
+        )?)
+        .await
+        .map_err(|status| browser_grant_status_to_http(&status))?
+        .into_inner();
+    if !session.active || session.grant_id.trim() != parent || session.zdr {
+        return Err(browser_grant_forbidden());
+    }
+    let derived = derive_room_run_grant(
+        &mut broker,
+        browser_bearer,
+        parent,
+        run_key,
+        org_id,
+        &room.verified,
+    )
+    .await?;
+    if derived.parent_grant_id != parent || derived.zdr {
+        return Err(browser_grant_forbidden());
+    }
+    let allowed_domains = canonical_browser_domains(&derived.allowed_domains)
+        .map_err(|()| browser_grant_forbidden())?;
+    if allowed_domains != derived.allowed_domains {
+        return Err(browser_grant_forbidden());
+    }
+    if let Some(start_url) = request
+        .start_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    {
+        if !url_is_allowed_by_policy(start_url, &allowed_domains) {
+            return Err(bad_request("start_url is outside the broker grant policy"));
+        }
+    }
+    Ok(ResolvedBrowserGrant {
+        grant_id: derived.grant_id.trim().to_owned(),
+        allowed_domains,
+        parent_grant_id: Some(parent.to_owned()),
+        budget: BudgetClaim::from_wire(
+            derived.budget_micro_usd,
+            derived.budget_max_steps,
+            derived.budget_max_runtime_s,
+        ),
+    })
+}
+
 /// Why model-gateway revokes a run grant it derived. A short label, never a
 /// host or URL (the broker stores it as the revoke reason).
 const REVOKE_REASON_START_FAILED: &str = "run_start_failed";
@@ -2204,7 +2282,9 @@ async fn browser_run_start(
     headers: HeaderMap,
     Json(req): Json<BrowserRunStartRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let keyed = headers.contains_key(IDEMPOTENCY_KEY_HEADER);
+    // A room start runs to completion in its own task like a keyed start, so a dropped connection cannot
+    // leave it half-admitted (WS20-S3).
+    let keyed = headers.contains_key(IDEMPOTENCY_KEY_HEADER) || req.space_browser_authority.is_some();
     let start = browser_run_start_inner(
         State(state),
         Extension(claims),
@@ -2245,7 +2325,7 @@ async fn browser_run_start_inner(
     browser_bearer: VerifiedBrowserBearer,
     capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     headers: HeaderMap,
-    Json(req): Json<BrowserRunStartRequest>,
+    Json(mut req): Json<BrowserRunStartRequest>,
 ) -> Result<Json<Value>, ApiError> {
     reject_unbound_space(&req)?;
     if browser_run_zdr_blocked(&claims, req.zdr)? {
@@ -2273,6 +2353,54 @@ async fn browser_run_start_inner(
         return Err(bad_request("goal must not be empty"));
     }
     reject_unsupported_browser_approval(&req)?;
+    // The Space path (WS20-S3): a room run is admitted only with its verified Control authority, the
+    // rollout switch first. Admission writes nothing; it reads the per-Space count from Session Core.
+    let room = match req.space_browser_authority.clone() {
+        Some(authority) => {
+            check_profile_request(
+                req.profile_id.is_some(),
+                req.require_approval.is_some(),
+                req.zdr,
+            )?;
+            if req.attach_session_id.is_some()
+                || req.attach_tab.is_some()
+                || req.recipe.is_some()
+                || req.policy.is_some()
+                || req.tab_mark_on_complete.is_some()
+                || req.plan_mode == Some(true)
+            {
+                return Err(typed_error(
+                    StatusCode::BAD_REQUEST,
+                    "room_browser_profile_forbidden",
+                    "a room browser run takes no attach, recipe, policy or plan mode",
+                ));
+            }
+            let admitted = admit_room_run(
+                &state,
+                &session_bearer,
+                (claims.org_id.as_str(), claims.user_id.as_str()),
+                RoomStartInput {
+                    goal: &req.goal,
+                    grant_id: req.grant_id.as_str(),
+                    thread_id: non_empty(req.thread_id.as_deref()).unwrap_or(""),
+                    authority: &authority,
+                    space_context: req.space_context.clone(),
+                    append_context: req.space_append_context.clone(),
+                },
+            )
+            .await?;
+            Some(admitted)
+        }
+        None => None,
+    };
+    // A room run's bounds are the verified decision's, never the body's: the step and runtime limits are
+    // the decision's, and the cost is capped here (the decision signs no money cap).
+    if let Some(room) = room.as_ref() {
+        req.max_steps = Some(i32::try_from(room.verified.claims.max_steps).unwrap_or(i32::MAX));
+        req.max_runtime_s =
+            Some(i32::try_from(room.verified.claims.max_runtime_s).unwrap_or(i32::MAX));
+        req.max_cost_usd = Some(room_cost_cap(req.max_cost_usd));
+    }
     // A saved recipe (Q4-E4.2-3i) needs its strict flag and a well-formed ask;
     // refused before any grant, thread or run write. It belongs to the person
     // of the verified claims, so a credential without one cannot name a recipe.
@@ -2311,8 +2439,14 @@ async fn browser_run_start_inner(
     let tab_mark = tab_mark_for(&req, attach_session.as_deref())?;
     let run_source = run_source_of(&req);
     let request_id = request_id_for(&headers);
-    let idempotency_key = parse_idempotency_key(&headers)?;
-    if idempotency_key.is_some() && non_empty(req.thread_id.as_deref()).is_some() {
+    // A room run is keyed by the decision's own idempotency key (WS20-S3): a replayed decision, valid for two
+    // minutes, names the same run, and the header never keys a room run.
+    let idempotency_key = match room.as_ref() {
+        Some(room) => Some(room.start_key.clone()),
+        None => parse_idempotency_key(&headers)?,
+    };
+    if room.is_none() && idempotency_key.is_some() && non_empty(req.thread_id.as_deref()).is_some()
+    {
         return Err(bad_request("idempotency_key_requires_a_new_thread"));
     }
     // Tenant/user identity is always server-derived from the verified bearer
@@ -2356,9 +2490,15 @@ async fn browser_run_start_inner(
             Json(json!({ "error": "idempotency_key_reused" })),
         ));
     }
-    let mint = mint_budget(&state, &req, &org_id).await;
-    let browser_grant =
-        resolve_browser_grant(&state, &req, &browser_bearer, &org_id, &run_key, &mint).await?;
+    let browser_grant = match room.as_ref() {
+        Some(room) => {
+            room_browser_grant(&state, &req, &browser_bearer, &org_id, &run_key, room).await?
+        }
+        None => {
+            let mint = mint_budget(&state, &req, &org_id).await;
+            resolve_browser_grant(&state, &req, &browser_bearer, &org_id, &run_key, &mint).await?
+        }
+    };
     // A run grant the caller presented may back one live run at a time: the
     // broker's record of it carries no session key to bind it to the run being
     // started (D1-001). A keyed retry of the run that holds it is not a second
@@ -2381,8 +2521,30 @@ async fn browser_run_start_inner(
         false
     };
 
-    let run = match idempotency_key {
-        Some(_) => {
+    let run = match (room.as_ref(), idempotency_key.is_some()) {
+        // A room run starts in its Space's thread, under the thread and goal decisions (WS20-S3).
+        (Some(room), _) => {
+            crate::session_flow::prepare_managed_run_authenticated(
+                &state,
+                req.thread_id.as_deref(),
+                None,
+                &org_id,
+                &user_id,
+                &req.goal,
+                "browser-agent",
+                "execute",
+                &run_key,
+                mp_contracts::model_plane::v1::ManagedRunSource::GatewayBrowser,
+                false,
+                &session_bearer,
+                room.space_context.as_ref(),
+                Some(&room.append_context),
+                false,
+                None,
+            )
+            .await
+        }
+        (None, true) => {
             crate::session_flow::prepare_idempotent_browser_run(
                 &state,
                 &org_id,
@@ -2393,7 +2555,7 @@ async fn browser_run_start_inner(
             )
             .await
         }
-        None => {
+        (None, false) => {
             crate::session_flow::prepare_managed_run_authenticated(
                 &state,
                 req.thread_id.as_deref(),
@@ -2577,6 +2739,10 @@ async fn browser_run_start_inner(
     // borrowable here; the rules then move into the task with the request.
     let hook_context = crate::runtime_registries::hook_context_json(&state.hooks, &org_id);
     let step_id = new_ulid();
+    // The room's Space on the step (empty for a personal run); execution-core checks it against the durable
+    // run's Space, and a room run's result turn is written from the terminal path below (WS20-S3).
+    let dispatch_space_id = room.as_ref().map(|room| room.space_id.clone()).unwrap_or_default();
+    let room_run = room.is_some();
     let dispatch_run_id = run_id.clone();
     let revoke_bearer = browser_bearer.clone();
     let revoke_grant = browser_grant.clone();
@@ -2595,13 +2761,8 @@ async fn browser_run_start_inner(
             // browser_agent never reaches knowledge_search, so there is no
             // sovereignty derivation for this field to feed.
             min_privacy_tier: mp_contracts::model_plane::v1::PrivacyTier::Unspecified as i32,
-            // Always empty here, not yet a deliberate choice: BrowserRunStartRequest
-            // (this handler's own HTTP request type) carries no Space context
-            // field at all today, unlike the chat/invoke path's ThreadSpaceContext
-            // (see S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 phase A,
-            // which wired code_interpreter's ExecuteStepRequest.space_id but
-            // explicitly left this path's own separate gap for a follow-up).
-            space_id: String::new(),
+            // The run's Space: empty for a personal run, the room's Space for a room run (WS20-S3).
+            space_id: dispatch_space_id,
             thread_id: String::new(),
             // browser_agent reads no attached files.
             attachments: Vec::new(),
@@ -2681,6 +2842,27 @@ async fn browser_run_start_inner(
                         terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
                         // The loop has finished: its run grant has no further use.
                         revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
+                        // A room run's one durable result turn, written before the run is terminal (WS20-S3).
+                        // If it cannot be written the run stays non-terminal and retriable, never a silent
+                        // loss of the result.
+                        if room_run {
+                            let outcome = match terminal {
+                                crate::session_flow::BrowserAgentTerminal::Completed => "completed",
+                                crate::session_flow::BrowserAgentTerminal::Failed(_) => "failed",
+                            };
+                            if let Err(error) = crate::space_routes::browser::append_room_result(
+                                &terminal_state,
+                                &terminal_run,
+                                &session_bearer,
+                                outcome,
+                                &resp.output,
+                            )
+                            .await
+                            {
+                                warn!(%error, run_id = %dispatch_run_id, "room browser result turn could not be appended; run remains retriable");
+                                return;
+                            }
+                        }
                         if let Err(error) =
                             crate::session_flow::terminalize_browser_agent_run_authenticated(
                                 &terminal_state,
@@ -3379,6 +3561,7 @@ mod tests {
             space_id: None,
             space_ref: None,
             space_context: None,
+            space_append_context: None,
             space_browser_authority: None,
             thread_id: None,
             goal: "safe browser task".to_owned(),

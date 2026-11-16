@@ -198,6 +198,13 @@ pub struct AppState {
     /// Session Core's SpaceRoomReadService (the room's read aggregates), on the same endpoint as
     /// `session_client` (WS07-S9).
     pub space_room_read_client: SpaceRoomReadServiceClient<Channel>,
+    /// Session Core's SpaceBrowserRead (the room browser run's per-Space count and run Space lookup), on the
+    /// same endpoint as `session_client` (WS20-S3).
+    pub space_browser_read_client:
+        mp_contracts::model_plane::v1::space_browser_read_client::SpaceBrowserReadClient<Channel>,
+    /// The room browser run's verifier and rollout switch `SPACE_BROWSER_RUN_API`, read once at start-up
+    /// (WS20-S2, WS20-S3). A rollout control, never an authorization input.
+    pub space_browser_run: crate::space_routes::browser::SpaceBrowserRunPolicy,
     /// Session Core's SpaceHistoryService (message search and resolve), on the same endpoint as
     /// `session_client` (WS13-S2).
     pub space_history_client: SpaceHistoryServiceClient<Channel>,
@@ -573,6 +580,11 @@ impl AppState {
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             space_events_client: SpaceEventsClient::new(session_channel.clone()),
             space_room_read_client: SpaceRoomReadServiceClient::new(session_channel.clone()),
+            space_browser_read_client:
+                mp_contracts::model_plane::v1::space_browser_read_client::SpaceBrowserReadClient::new(
+                    session_channel.clone(),
+                ),
+            space_browser_run: crate::space_routes::browser::SpaceBrowserRunPolicy::off(),
             space_history_client: SpaceHistoryServiceClient::new(session_channel.clone()),
             space_message_search_api_enabled: false,
             space_attention_client: SpaceAttentionClient::new(session_channel.clone()),
@@ -837,6 +849,10 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let space_browser_read_client =
+            mp_contracts::model_plane::v1::space_browser_read_client::SpaceBrowserReadClient::new(
+                Self::lazy_channel("SESSION_CORE_URL", "SESSION_CORE_ADDR", "http://localhost:9091")?,
+            );
         let space_history_client = SpaceHistoryServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
@@ -1093,11 +1109,14 @@ impl AppState {
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;
             state.space_room_read_client = space_room_read_client;
+            state.space_browser_read_client = space_browser_read_client;
             state.space_history_client = space_history_client;
             state.space_message_search_api_enabled =
                 mp_contracts::space_history::api_enabled();
             state.space_attention_client = space_attention_client;
             state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
+            state.space_browser_run = crate::space_routes::browser::SpaceBrowserRunPolicy::from_env()
+                .unwrap_or_else(|_| crate::space_routes::browser::SpaceBrowserRunPolicy::off());
             state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
@@ -1174,11 +1193,14 @@ impl AppState {
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;
             state.space_room_read_client = space_room_read_client;
+            state.space_browser_read_client = space_browser_read_client;
             state.space_history_client = space_history_client;
             state.space_message_search_api_enabled =
                 mp_contracts::space_history::api_enabled();
             state.space_attention_client = space_attention_client;
             state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
+            state.space_browser_run = crate::space_routes::browser::SpaceBrowserRunPolicy::from_env()
+                .unwrap_or_else(|_| crate::space_routes::browser::SpaceBrowserRunPolicy::off());
             state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);

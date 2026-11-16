@@ -90,6 +90,18 @@ trait RunOwnershipResolver: Send + Sync {
         user_id: &str,
         bearer: &str,
     ) -> Result<bool, Status>;
+
+    /// The Space the durable run was started in, empty for a run outside any Space (WS20-S3). Fails
+    /// closed for a resolver that does not answer it: a browser step never runs on an unread Space.
+    async fn resolve_space(
+        &self,
+        _run_id: &str,
+        _org_id: &str,
+        _user_id: &str,
+        _bearer: &str,
+    ) -> Result<String, Status> {
+        Err(Status::unavailable("run Space unavailable"))
+    }
 }
 
 struct SessionCoreRunOwnershipResolver {
@@ -125,6 +137,39 @@ impl RunOwnershipResolver for SessionCoreRunOwnershipResolver {
                 }
                 warn!(code = ?error.code(), "Session Core run ownership lookup unavailable");
                 Status::unavailable("run ownership unavailable")
+            })
+    }
+
+    async fn resolve_space(
+        &self,
+        run_id: &str,
+        org_id: &str,
+        user_id: &str,
+        bearer: &str,
+    ) -> Result<String, Status> {
+        let mut client = mp_contracts::model_plane::v1::space_browser_read_client::SpaceBrowserReadClient::new(
+            self.channel.clone(),
+        );
+        client
+            .resolve_run_space(authenticated_session_request(
+                pb::ResolveRunSpaceRequest {
+                    run_id: run_id.to_owned(),
+                    org_id: org_id.to_owned(),
+                    user_id: user_id.to_owned(),
+                },
+                bearer,
+            )?)
+            .await
+            .map(|response| response.into_inner().space_id)
+            .map_err(|error| {
+                // The owner refusal and a typed refusal are the answer and pass through.
+                if error.code() == tonic::Code::PermissionDenied
+                    || mp_contracts::zdr_refusal::Refusal::from_status(&error).is_some()
+                {
+                    return error;
+                }
+                warn!(code = ?error.code(), "Session Core run Space lookup unavailable");
+                Status::unavailable("run Space unavailable")
             })
     }
 }
@@ -1582,6 +1627,20 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
+        // WS20-S3: a browser step names the Space its durable run was started in, and only that one.
+        // The grant names no Space (C1), so the run is the authority for the Space of this step.
+        if req.tool_name == "browser_agent" {
+            let durable_space = self
+                .ownership
+                .resolve_space(
+                    &req.run_id,
+                    &caller.org_id,
+                    &caller.user_id,
+                    session_bearer.as_str(),
+                )
+                .await?;
+            crate::space_browser::check_run_space(&req.space_id, &durable_space)?;
+        }
         reject_direct_owner_action(
             crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
             &req.tool_name,

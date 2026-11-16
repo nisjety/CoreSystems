@@ -37,6 +37,7 @@ use mp_contracts::model_plane::v1::{
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
     skill_version_service_server::SkillVersionServiceServer,
     space_attention_server::SpaceAttentionServer,
+    space_browser_read_server::SpaceBrowserReadServer,
     space_events_server::SpaceEventsServer,
     space_history_service_server::SpaceHistoryServiceServer,
     space_room_read_service_server::SpaceRoomReadServiceServer,
@@ -13007,6 +13008,8 @@ pub async fn serve(
     let letta_for_revisions = letta_memory.clone();
     // Space run actions (WS18-S3): its own handle on the pool, taken before `pool` moves.
     let space_run_actions_pool = pool.clone();
+    // Space browser reads (WS20-S3): the room run's per-Space count and run Space lookup.
+    let space_browser_read_pool = pool.clone();
     let session = SessionService {
         pool,
         retrieval_client,
@@ -13139,6 +13142,11 @@ pub async fn serve(
         // WS18-S3: SpaceRunActions, the run-bound owner path of the agent self-API.
         .add_service(SpaceRunActionsServer::with_interceptor(
             crate::space::self_api::SpaceRunActionsGrpc::new(space_run_actions_pool),
+            auth.clone(),
+        ))
+        // WS20-S3: SpaceBrowserRead, the room browser run's count and run Space lookup.
+        .add_service(SpaceBrowserReadServer::with_interceptor(
+            crate::space::browser_read::SpaceBrowserReadGrpc::new(space_browser_read_pool),
             auth.clone(),
         ))
         .add_service(SpaceHistoryServiceServer::with_interceptor(
