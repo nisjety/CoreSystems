@@ -39,7 +39,7 @@ use mp_contracts::space_browser::{
     capacity_admits, check_audience_revisions_agree, goal_digest, profile_request_admitted,
     room_grant_ttl_seconds, space_browser_run_api_enabled, verify_browser_run_decision,
     BrowserRunExpectation, BrowserRunRefusal, ControlDecisionKey, VerifiedBrowserRun,
-    CONTROL_KEY_ID_ENV, CONTROL_PUBLIC_KEY_ENV, SPACE_BROWSER_RUN_API_ENV,
+    CONTROL_KEY_ID_ENV, CONTROL_PUBLIC_KEY_ENV, SPACE_BROWSER_RUN_API_ENV, THREAD_MODE_NEW,
 };
 use mp_contracts::zdr_refusal::Refusal;
 use serde::Deserialize;
@@ -48,7 +48,7 @@ use tonic::transport::Channel;
 use tracing::warn;
 
 use crate::auth::{Claims, VerifiedBrowserBearer, VerifiedSessionBearer};
-use crate::browser_run::{authenticated_browser_request, keyed_run_key};
+use crate::browser_run::{authenticated_browser_request, keyed_room_run_key};
 use crate::quarry::QuarryError;
 use crate::session_flow::{SessionRun, ThreadSpaceContext};
 use crate::state::AppState;
@@ -159,9 +159,8 @@ pub(crate) struct SpaceBrowserAuthority {
 /// The request fields of a room start that admission reads.
 pub(crate) struct RoomStartInput<'a> {
     pub(crate) goal: &'a str,
-    /// The starter's session grant the run derives from (the body's `grant_id`); it keys the run.
-    pub(crate) grant_id: &'a str,
-    /// The thread the run uses; empty when the run starts a new thread.
+    /// The thread the run runs in: the one the gateway created for a new-thread decision (D4), or the body's own
+    /// thread. Never empty; the room run key takes no grant (W3-DEC-BROWSER).
     pub(crate) thread_id: &'a str,
     pub(crate) authority: &'a SpaceBrowserAuthority,
     /// The thread decision (a new thread only).
@@ -220,27 +219,25 @@ pub(crate) async fn admit_room_run(
     if space_id.trim().is_empty() {
         return Err(invalid_run("the goal's append decision names no Space"));
     }
-    match (input.thread_id.is_empty(), input.space_context.as_ref()) {
-        (true, None) => return Err(invalid_run("the new thread's create decision is required")),
-        (false, Some(_)) => {
-            return Err(invalid_run("a thread create decision is only for a new thread"))
-        }
-        _ => {}
+    // The gateway names the run's thread on every room start: the one it created for a new-thread decision (D4), or the
+    // body's own. A thread create decision is never a room run's, since the gateway creates the thread itself.
+    if input.thread_id.is_empty() {
+        return Err(invalid_run("the room run's thread is required"));
     }
-    if input
-        .space_context
-        .as_ref()
-        .is_some_and(|context| context.space_id != space_id)
-    {
-        return Err(invalid_run("the thread and goal decisions name different Spaces"));
+    if input.space_context.is_some() {
+        return Err(invalid_run("a room run takes no thread create decision"));
     }
+    // A new-thread decision binds no thread id (D4), so its expectation is empty. The run's own thread is the one the
+    // gateway created for it, whose goal is that thread's first post; an existing-thread decision binds the thread.
+    let new_thread = input.authority.claims.get("thread_mode").and_then(Value::as_str) == Some(THREAD_MODE_NEW);
+    let decision_thread = if new_thread { "" } else { input.thread_id };
     let goal_hash = goal_digest(input.goal);
     let claims_json = input.authority.claims.to_string();
     let expect = BrowserRunExpectation {
         org_id,
         subject_id: user_id,
         space_ref: &space_id,
-        thread_id: input.thread_id,
+        thread_id: decision_thread,
         goal_digest: &goal_hash,
         idempotency_key: &input.authority.idempotency_key,
         now: Utc::now(),
@@ -255,14 +252,10 @@ pub(crate) async fn admit_room_run(
         &verified,
         i64::try_from(append.recipient_audience_revision).unwrap_or(i64::MAX),
     )?;
-    // The run key the handler derives from the same decision key, grant and org (`keyed_run_key`). The count
-    // leaves that run out, so a keyed replay of an admitted run is not refused by its own run.
-    let run_key = keyed_run_key(
-        org_id,
-        user_id,
-        input.grant_id.trim(),
-        &input.authority.idempotency_key,
-    );
+    // The run key the handler derives from the decision's idempotency key and the verified org and user only
+    // (`keyed_room_run_key`), so a retry that presents a new grant still names the same run. The count leaves that run
+    // out, so a keyed replay of an admitted run is not refused by its own run.
+    let run_key = keyed_room_run_key(org_id, user_id, &input.authority.idempotency_key);
     let active = count_room_runs(state, org_id, &space_id, &run_key, session_bearer).await?;
     check_capacity(active)?;
     Ok(RoomRunStart {

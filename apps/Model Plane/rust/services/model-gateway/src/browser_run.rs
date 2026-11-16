@@ -216,6 +216,25 @@ pub(crate) fn keyed_run_key(org_id: &str, user_id: &str, parent_grant_id: &str, 
     format!("browser-idem-{hex}")
 }
 
+/// The run key of a room run (W3-DEC-BROWSER): one name for the managed run, its thread and its derived run grant,
+/// scoped to the verified org and user and to the decision's own idempotency key only. It takes no grant id: the
+/// starter's parent grant is issued anew on every attempt, so a grant-scoped key let a retry with the same client send
+/// id start a second live run while the first one was live. Non-room keys keep `keyed_run_key`.
+pub(crate) fn keyed_room_run_key(org_id: &str, user_id: &str, key: &str) -> String {
+    use std::fmt::Write as _;
+    let mut hasher = Sha256::new();
+    for part in ["model-gateway/browser-room-run/v1", org_id, user_id, key] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(32);
+    for byte in &digest[..16] {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("browser-idem-{hex}")
+}
+
 /// The plan id of a keyed start whose body names none, so a replay answers
 /// with the plan the first attempt reported.
 fn keyed_plan_id(run_key: &str) -> String {
@@ -2434,7 +2453,6 @@ async fn browser_run_start_inner(
                 (claims.org_id.as_str(), claims.user_id.as_str()),
                 RoomStartInput {
                     goal: &req.goal,
-                    grant_id: req.grant_id.as_str(),
                     thread_id: non_empty(req.thread_id.as_deref()).unwrap_or(""),
                     authority: &authority,
                     space_context: req.space_context.clone(),
@@ -2513,9 +2531,12 @@ async fn browser_run_start_inner(
     // fresh per request unless the client sent an `Idempotency-Key`: then it
     // is derived from that key, and a retried POST finds the same run and the
     // same run grant.
-    let run_key = match idempotency_key.as_deref() {
-        Some(key) => keyed_run_key(&org_id, &user_id, req.grant_id.trim(), key),
-        None => format!("browser-{}", new_ulid()),
+    // A room run is keyed by the decision's idempotency key only (W3-DEC-BROWSER): a retry that presents a new parent
+    // grant names the same run. Non-room keys keep the grant-scoped key.
+    let run_key = match (room.as_ref(), idempotency_key.as_deref()) {
+        (Some(room), _) => keyed_room_run_key(&org_id, &user_id, &room.start_key),
+        (None, Some(key)) => keyed_run_key(&org_id, &user_id, req.grant_id.trim(), key),
+        (None, None) => format!("browser-{}", new_ulid()),
     };
     let plan_id = non_empty(req.plan_id.as_deref()).map_or_else(
         || {
@@ -2575,9 +2596,25 @@ async fn browser_run_start_inner(
     };
 
     let run = match (room.as_ref(), idempotency_key.is_some()) {
-        // A room run starts in its Space's thread, under the thread and goal decisions (WS20-S3).
+        // A new-thread room run starts in the thread its gateway created with the goal as that thread's first post
+        // (D4): the run appends no goal turn and only starts (W3-DEC-BROWSER).
+        (Some(room), _) if room.verified.claims.thread_mode == mp_contracts::space_browser::THREAD_MODE_NEW => {
+            crate::session_flow::prepare_managed_run_on_posted_goal(
+                &state,
+                non_empty(req.thread_id.as_deref()).unwrap_or_default(),
+                &org_id,
+                &user_id,
+                &req.goal,
+                &run_key,
+                mp_contracts::model_plane::v1::ManagedRunSource::GatewayBrowser,
+                &session_bearer,
+            )
+            .await
+        }
+        // A room run in an existing thread starts in its Space's thread, under the thread and goal decisions (WS20-S3).
+        // Its goal turn is keyed by the start key, so a replay of the decision does not append it a second time.
         (Some(room), _) => {
-            crate::session_flow::prepare_managed_run_authenticated(
+            crate::session_flow::prepare_managed_run_authenticated_with_receipt(
                 &state,
                 req.thread_id.as_deref(),
                 None,
@@ -2593,6 +2630,9 @@ async fn browser_run_start_inner(
                 room.space_context.as_ref(),
                 Some(&room.append_context),
                 false,
+                None,
+                Some(room.start_key.as_str()),
+                None,
                 None,
             )
             .await

@@ -40,6 +40,12 @@ const (
 	BrowserViewOwner = "owner"
 	BrowserViewRoom  = "room"
 
+	// The thread mode a decision signs (D4). A run in a thread binds that thread. A run
+	// that names no thread is the new-thread mode: the decision binds no thread id, and the
+	// gateway creates the thread under its own thread-create decision before the start.
+	browserThreadModeExisting = "existing"
+	browserThreadModeNew      = "new"
+
 	// SD-23 fixes the v1 limits: at most 10 minutes and 8 hosts per run. The step
 	// bounds are the gateway's R1 range (default 20).
 	browserMinSteps               = 5
@@ -111,6 +117,7 @@ func (r BrowserRunDecisionRequest) Validate() error {
 // claim fails closed. AllowedDomains is in canonical (sorted) order.
 type BrowserRunClaims struct {
 	ThreadID       string   `json:"thread_id"`
+	ThreadMode     string   `json:"thread_mode"`
 	GoalDigest     string   `json:"goal_digest"`
 	AllowedDomains []string `json:"allowed_domains"`
 	ProfileScope   string   `json:"profile_scope"`
@@ -167,6 +174,16 @@ func validBrowserHost(host string) bool {
 		}
 	}
 	return strings.ContainsAny(labels[len(labels)-1], "abcdefghijklmnopqrstuvwxyz")
+}
+
+// browserThreadModeOf is the thread mode a decision signs. A run that names no thread is
+// the new-thread mode (D4): the decision binds no thread id, and the gateway's thread
+// create and model-gateway's start take the thread from there. The Space is bound either way.
+func browserThreadModeOf(threadID string) string {
+	if threadID == "" {
+		return browserThreadModeNew
+	}
+	return browserThreadModeExisting
 }
 
 // canonicalBrowserDomains returns a sorted copy, so the digest and the claims do not
@@ -258,6 +275,7 @@ func browserRunPayloadDigest(evidence PersonalThreadDecisionEvidence, request Br
 		{"user_id", evidence.Membership.SubjectID},
 		{"space_id", evidence.Membership.SpaceRef},
 		{"thread_id", claims.ThreadID},
+		{"thread_mode", claims.ThreadMode},
 		{"goal_digest", claims.GoalDigest},
 		{"allowed_domains", strings.Join(claims.AllowedDomains, "\n")},
 		{"profile_scope", claims.ProfileScope},
@@ -312,6 +330,7 @@ func IssueBrowserRunDecision(evidence PersonalThreadDecisionEvidence, request Br
 	}
 	claims := BrowserRunClaims{
 		ThreadID:       request.ThreadID,
+		ThreadMode:     browserThreadModeOf(request.ThreadID),
 		GoalDigest:     request.GoalDigest,
 		AllowedDomains: canonicalBrowserDomains(request.AllowedDomains),
 		ProfileScope:   BrowserProfileEphemeral,

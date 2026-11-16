@@ -839,9 +839,10 @@ fn browser_evidence_withheld() -> Response {
 // R1: the room browser run start (WS20-S5). `submit_start` is the one core function: the REST route and the
 // `spaces.browser_run.start` action both call it. Order: the rollout flag (404), the org (403), the Space reference
 // (400), zero retention (412, before any Control or model call), the body (400), the Space lifecycle, the bearers, then
-// per attempt: Control's browser-run decision and the goal's thread-append decision, the starter's parent grant, and
-// model-gateway's room start. The gateway stores nothing and decides nothing. A refused attempt revokes the grant it
-// issued, and a stale decision is minted again once.
+// a new thread when the body names none (W3-DEC-BROWSER, D4: Control's thread-decision, then the shared-room create with
+// the goal as its first post), then per attempt: Control's browser-run decision and the goal's thread-append decision,
+// the starter's parent grant, and model-gateway's room start. The gateway stores nothing and decides nothing. A refused
+// attempt revokes the grant it issued, and a stale decision is minted again once.
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// The start's answer: a status and its JSON body (the route and the action both take this shape).
@@ -885,7 +886,8 @@ struct StartRunBody {
     client_send_id: Option<String>,
 }
 
-/// A start the body and the bounds allow, in the form every later step reads.
+/// A start the body and the bounds allow, in the form every later step reads. `thread_id` is empty for a run that starts
+/// a new thread (D4); the gateway creates that thread before the start.
 struct ValidStart {
     thread_id: String,
     goal: String,
@@ -981,9 +983,29 @@ pub(crate) async fn submit_start(
         Ok(token) => token,
         Err(cause) => return crate::domains::chat::shared::delegated_auth_unavailable(cause),
     };
+    // A run that names no thread starts one (D4): the shared-room create of WS01, before any browser decision or model
+    // start. Get-or-create on the send key, so a retry lands on the same thread and the same first post.
+    let thread_id = if start.thread_id.is_empty() {
+        match create_run_thread(
+            state,
+            user,
+            &org_id,
+            space_ref,
+            &start,
+            model_bearer.as_deref(),
+            &session_bearer,
+        )
+        .await
+        {
+            Ok(thread_id) => thread_id,
+            Err(refusal) => return refusal,
+        }
+    } else {
+        start.thread_id.clone()
+    };
     let url = format!("{}/v1/browser/runs", state.model_gateway_url);
     for attempt in 0..2 {
-        let decisions = match mint_start_decisions(state, user, &org_id, space_ref, &start).await {
+        let decisions = match mint_start_decisions(state, user, &org_id, space_ref, &start, &thread_id).await {
             Ok(decisions) => decisions,
             Err(refusal) => return refusal,
         };
@@ -998,7 +1020,7 @@ pub(crate) async fn submit_start(
             state,
             Method::POST,
             &url,
-            Some(start_request(&start, &grant, &decisions)),
+            Some(start_request(&start, &thread_id, &grant, &decisions)),
             model_bearer.as_deref(),
             Some(&session_bearer),
             user,
@@ -1030,9 +1052,9 @@ pub(crate) async fn submit_start(
     )
 }
 
-/// The body and its checks. The goal is trimmed once: the digest Control signs and the text model-gateway appends are
-/// the same bytes. A new thread is refused here (`thread_required`): Control binds the goal's append decision to a
-/// thread that already exists.
+/// The body and its checks. The goal is trimmed once: the digest Control signs and the goal text the run stores are the
+/// same bytes. An empty `thread_id` starts a new thread (D4, W3-DEC-BROWSER): the gateway creates it under the shared-room
+/// thread-create decision before the start, so the run never lands in a personal thread.
 fn parse_start(body: &Value) -> Result<ValidStart, Reply> {
     let parsed: StartRunBody = serde_json::from_value(body.clone()).map_err(|_| invalid_start("body"))?;
     if parsed.share_view == Some(true) {
@@ -1051,10 +1073,7 @@ fn parse_start(body: &Value) -> Result<ValidStart, Reply> {
         ));
     }
     let thread_id = parsed.thread_id.as_deref().unwrap_or_default().trim().to_owned();
-    if thread_id.is_empty() {
-        return Err(invalid_start("thread_required"));
-    }
-    if !valid_id(&thread_id) {
+    if !thread_id.is_empty() && !valid_id(&thread_id) {
         return Err(invalid_start("thread_id"));
     }
     let goal = parsed.goal.as_deref().unwrap_or_default().trim().to_owned();
@@ -1119,8 +1138,11 @@ async fn mint_start_decisions(
     org_id: &str,
     space_ref: &str,
     start: &ValidStart,
+    thread_id: &str,
 ) -> Result<StartDecisions, Reply> {
     let digest = sha256_digest(&start.goal);
+    // A new-thread run's browser decision binds no thread (D4); its thread is the one created above.
+    let browser_thread = if start.thread_id.is_empty() { "" } else { thread_id };
     let key = format!("{START_KEY_PREFIX}{}", start.client_send_id);
     let actor = ActionActor {
         user_id: user.user_id.clone(),
@@ -1135,7 +1157,7 @@ async fn mint_start_decisions(
         "browser-run-decision",
         json!({
             "space_ref": space_ref,
-            "thread_id": start.thread_id,
+            "thread_id": browser_thread,
             "goal_digest": digest,
             "allowed_domains": start.hosts,
             "view_scope": VIEW_OWNER,
@@ -1155,7 +1177,7 @@ async fn mint_start_decisions(
         "thread-append-decision",
         json!({
             "space_ref": space_ref,
-            "thread_id": start.thread_id,
+            "thread_id": thread_id,
             "content_digest": digest,
             "idempotency_key": format!("{APPEND_KEY_PREFIX}{}", start.client_send_id),
         }),
@@ -1208,6 +1230,76 @@ async fn mint_control_decision(
     })
 }
 
+/// The new thread of a run that names none (D4, W3-DEC-BROWSER): the shared-room create of WS01 (`human_posts.rs`), with
+/// the goal as the thread's first human post. Control's `thread-decision` is minted under the send key, then model-gateway's
+/// `POST /v1/threads` creates the thread (get-or-create on that key) and stores the post under the same key, so a retry
+/// finds the same thread and the same post. No personal or workspace thread is created here; a refusal is typed.
+async fn create_run_thread(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    start: &ValidStart,
+    model_bearer: Option<&str>,
+    session_bearer: &str,
+) -> Result<String, Reply> {
+    let send_key = format!("{START_KEY_PREFIX}{}", start.client_send_id);
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let minted = mint_control_decision(
+        state,
+        org_id,
+        &actor,
+        "thread-decision",
+        json!({
+            "space_ref": space_ref,
+            "session_key": send_key,
+            "idempotency_key": send_key,
+        }),
+    )
+    .await?;
+    let space_context = space_context_from_decision(&minted.decision, &minted.token)?;
+    let url = format!("{}/v1/threads", state.model_gateway_url);
+    let (status, Json(response)) = crate::domains::chat::shared::proxy_model_json_with_session(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "space_context": space_context,
+            "session_key": send_key,
+            "first_message": {
+                "content": start.goal,
+                "post_kind": "post",
+                "client_message_id": send_key,
+            },
+        })),
+        model_bearer,
+        Some(session_bearer),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(start_relay_refusal(status, &response));
+    }
+    response
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| valid_id(id))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            start_refusal(
+                StatusCode::BAD_GATEWAY,
+                "invalid_model_gateway_response",
+                "Model Gateway returned an invalid browser run answer.",
+            )
+        })
+}
+
 /// The starter's parent grant for one attempt: a session grant of the starter's own, narrowed to the run's hosts and
 /// given the run's lifetime (W3-DEC-GRANT). Model Plane derives the room's run grant from it and revokes it when the
 /// run ends. `None` when this gateway issues none, so the start refuses before any model call.
@@ -1236,9 +1328,9 @@ async fn issue_parent_grant(
 
 /// The body model-gateway's room start reads. The browser's authority is the two decision contexts and the grant id; no
 /// other field of the browser's body is forwarded as authority.
-fn start_request(start: &ValidStart, grant_id: &str, decisions: &StartDecisions) -> Value {
+fn start_request(start: &ValidStart, thread_id: &str, grant_id: &str, decisions: &StartDecisions) -> Value {
     let mut body = json!({
-        "thread_id": start.thread_id,
+        "thread_id": thread_id,
         "goal": start.goal,
         "grant_id": grant_id,
         "max_steps": start.max_steps,

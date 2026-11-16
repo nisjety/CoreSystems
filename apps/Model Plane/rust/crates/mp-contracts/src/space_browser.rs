@@ -56,6 +56,11 @@ pub const PERMISSION_RUN: &str = "space:browser:run";
 pub const PERMISSION_VIEW_ROOM: &str = "space:browser:view_room";
 /// The only browser profile a room run may use. Control forces it.
 pub const PROFILE_EPHEMERAL: &str = "ephemeral";
+/// The thread mode of a run that names its thread: the decision binds that thread id.
+pub const THREAD_MODE_EXISTING: &str = "existing";
+/// The thread mode of a run that starts a new thread (D4): the decision binds no thread id, and
+/// the gateway creates the thread before the start.
+pub const THREAD_MODE_NEW: &str = "new";
 /// The view of the run's starter alone.
 pub const VIEW_OWNER: &str = "owner";
 /// The view the room may also see. v1 gives the room receipts only (SD-23).
@@ -236,6 +241,7 @@ pub struct SignedDecision {
 #[serde(deny_unknown_fields)]
 pub struct BrowserRunClaims {
     pub thread_id: String,
+    pub thread_mode: String,
     pub goal_digest: String,
     pub allowed_domains: Vec<String>,
     pub profile_scope: String,
@@ -253,7 +259,9 @@ pub struct BrowserRunExpectation<'a> {
     pub subject_id: &'a str,
     /// The Space named in the route path, checked against membership and lifecycle by the caller.
     pub space_ref: &'a str,
-    /// The thread the run uses. Empty for a run that starts in a new thread, as Control signs it.
+    /// The thread the decision binds: empty when the decision is the new-thread mode (D4). The caller then
+    /// checks the run's own thread (the one its gateway created for the decision) itself; otherwise it is
+    /// the run's thread, which must equal the decision's.
     pub thread_id: &'a str,
     /// `sha256:` plus the digest of the goal text the gateway will start the run with.
     pub goal_digest: &'a str,
@@ -375,9 +383,18 @@ fn check_shape(decision: &SignedDecision) -> Result<(), BrowserRunRefusal> {
 
 /// The room policy every claim must meet: the ephemeral profile, a known view scope, the step and
 /// runtime bounds, 1 to 8 canonical hosts (sorted and distinct, as Control writes them) and a
-/// well-formed goal commitment and thread id.
+/// well-formed goal commitment and thread id. The thread mode must agree with the thread id: a
+/// new-thread decision names no thread, and an existing-thread decision names one.
 fn check_claims(claims: &BrowserRunClaims) -> Result<(), BrowserRunRefusal> {
-    if !valid_goal_digest(&claims.goal_digest) || claims.thread_id.len() > MAX_THREAD_ID_BYTES {
+    let thread_mode_ok = match claims.thread_mode.as_str() {
+        THREAD_MODE_NEW => claims.thread_id.is_empty(),
+        THREAD_MODE_EXISTING => !claims.thread_id.is_empty(),
+        _ => false,
+    };
+    if !valid_goal_digest(&claims.goal_digest)
+        || claims.thread_id.len() > MAX_THREAD_ID_BYTES
+        || !thread_mode_ok
+    {
         return Err(BrowserRunRefusal::Malformed);
     }
     let hosts = &claims.allowed_domains;
@@ -403,6 +420,11 @@ fn bind(
     claims: &BrowserRunClaims,
     expect: &BrowserRunExpectation<'_>,
 ) -> Result<(), BrowserRunRefusal> {
+    let expected_mode = if expect.thread_id.is_empty() {
+        THREAD_MODE_NEW
+    } else {
+        THREAD_MODE_EXISTING
+    };
     let same_binding = decision.org_id == expect.org_id
         && decision.subject_id == expect.subject_id
         && decision.space_ref == expect.space_ref
@@ -411,6 +433,7 @@ fn bind(
         && decision.action_schema_hash == BROWSER_RUN_SCHEMA
         && decision.idempotency_key == expect.idempotency_key
         && claims.thread_id == expect.thread_id
+        && claims.thread_mode == expected_mode
         && claims.goal_digest == expect.goal_digest;
     if !same_binding || decision.payload_digest != payload_digest(decision, claims) {
         return Err(BrowserRunRefusal::Mismatch);
@@ -469,6 +492,7 @@ pub fn payload_digest(decision: &SignedDecision, claims: &BrowserRunClaims) -> S
         ("user_id", decision.subject_id.as_str()),
         ("space_id", decision.space_ref.as_str()),
         ("thread_id", claims.thread_id.as_str()),
+        ("thread_mode", claims.thread_mode.as_str()),
         ("goal_digest", claims.goal_digest.as_str()),
         ("allowed_domains", domains.as_str()),
         ("profile_scope", claims.profile_scope.as_str()),

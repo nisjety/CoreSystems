@@ -977,6 +977,48 @@ pub async fn prepare_managed_run_authenticated_with_receipt(
     .await
 }
 
+/// A room browser run that starts in a thread its gateway created moments earlier under the shared-room create
+/// (W3-DEC-BROWSER, D4). That create wrote the goal as the thread's first human post under the Control
+/// thread-create decision, so the run appends no goal turn and only starts. An empty thread is refused: a missing
+/// thread must never fall through to a personal or new thread created here.
+pub(crate) async fn prepare_managed_run_on_posted_goal(
+    state: &AppState,
+    thread_id: &str,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    start_key: &str,
+    source: ManagedRunSource,
+    bearer: &VerifiedSessionBearer,
+) -> Result<SessionRun> {
+    if thread_id.trim().is_empty() {
+        anyhow::bail!("a run on a posted goal needs its thread");
+    }
+    prepare_managed_run_with_bearer(
+        state,
+        Some(thread_id),
+        None,
+        org_id,
+        user_id,
+        goal,
+        "browser-agent",
+        "execute",
+        start_key,
+        source,
+        false,
+        Some(bearer.as_str()),
+        None,
+        None,
+        false,
+        None,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+}
+
 /// Crate-internal managed-start adapter for an ingress boundary that already
 /// verified and bound a dedicated user `aud=session-core` bearer. It is never
 /// valid to pass a raw caller credential to this function.
