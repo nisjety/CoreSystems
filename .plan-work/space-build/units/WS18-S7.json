@@ -1,0 +1,41 @@
+{
+  "slice": "WS18-S7",
+  "status": "built",
+  "commit": "47a910cb3",
+  "files": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/rust/services/session-core/src/space/entry.rs",
+    "apps/Model Plane/rust/services/session-core/src/space/self_api.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/space_routes/posts.rs",
+    "apps/Model Plane/rust/services/execution-core/src/space_self_api.rs",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/entry-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/AgentCardEntry.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/space-entries.css",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/sidepane/SpaceTurnList.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/core.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/agent-self-api.ts"
+  ],
+  "compile": "not-checked: code-only wave",
+  "migrations": [],
+  "flags": [
+    "SPACE_SELF_API_SESSION_CORE default 0 (existing WS18-S3 switch, unchanged; gates the card write)",
+    "EXECUTION_CORE_SPACE_SELF_API default 0 (existing WS18-S4 switch, unchanged; gates the offer)"
+  ],
+  "tests_owed": [
+    "apps/Model Plane/rust/services/session-core/src/space/entry.rs (unit): plain_card_text refuses blank, over-long and control-character text (a line break only in a body) and any '://' or 'www.'; agent_card_json round-trips through entry_from_stored; a bad payload or a newer version reads as kind and version only; validate_entry refuses kind agent_card on a human post",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs (unit): card_reply_slot_is_open is true only for an assistant last row whose card_run_id equals a non-blank reply run id; false for a user row, another run's card, or a missing id",
+    "apps/Model Plane/rust/services/session-core/src/space/self_api.rs (DB, #[ignore]): card_then_final_assistant_reply_still_appends; card_slot_not_opened_by_client_metadata; one assistant row with card_run_id, post_kind turn, the thread's stamps and metadata.entry only; per_run_cap at three; replay and changed-digest conflict for a card; receipts_cascade_on_thread_delete; events_carry_ids_only with no THREAD_PRESENTATION_UPDATED for a card; zdr_caller_refused",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs (DB): a card row is absent from load_pending_messages",
+    "apps/Model Plane/rust/services/execution-core/src/space_self_api.rs (unit): post_card offered only when built and golden phase 1; parse_arguments refuses a link, a control character, a blank value, an unknown tone and nine fields; execute refuses a non-phase-1 row before any Control call; the card digest equals session-core's digest over the same bytes",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto: buf lint and buf breaking; buf generate for the Go, Python and TS mirrors (owed, not run per rule)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/entry-registry.test.ts (owed): turnEntryFromWire keeps every agent_card as a card; version 1 with a payload fills title, tone and fields (control characters stripped, unknown tone dropped, fields capped at eight); registerTurnEntryCard with replacesBody sets turnEntryReplacesBody",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/AgentCardEntry.test.tsx (new): title, tone word, body and fields render as text; no anchor renders even when the body holds a link; registered with replacesBody",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/sidepane/SpaceTurnList.test.tsx (owed): an agent-card turn renders its card and no ChatMarkdown body; a turn without an entry renders as before",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/agent-self-api.test.ts (WS18-S6, owed update): offered rows now include space.thread.post_card (rename, pin and post_card)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client (owed): normalizeSpaceThreadTurns carries a well-formed entry object and drops a non-object entry"
+  ],
+  "notes": "Card = assistant row with messages.card_run_id (0084), metadata.entry agent_card, body = content; slot rule through append_reply_in_tx (terminalization only). Golden unchanged (post_card already phase 1); no copies or sha pins touched. capability-core admission row stays declared (see depth P1). model-gateway posts.rs:138 one-line compile fix outside the lock group. Nothing compiled or tested."
+}

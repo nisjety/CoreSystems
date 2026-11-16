@@ -1,0 +1,10 @@
+- P2 gap: `space.thread.post_card` is still `declared` in capability-core admission (WS18-S7 P1 carried), so the new `ACTION_TOOL_NAMES` entry does nothing in production until that row is enabled.
+- P2 deviation: `space_routes/timeline.rs` keeps a local copy of the owner|agent map because the lock group left `http_routes::provenance_token` private; one shared helper is the follow-up.
+- P2 deviation: the gateway also closes the card tone to info, progress, done or blocked (omitted otherwise), which the brief did not ask for but the proto comment and the SPA check both name.
+- P2 deviation: the commit subject follows the brief (`fix(space): W3-FIX-16`) rather than the rules file template (`feat(space):`).
+- P2 risk: UNVERIFIED, the prost shapes (`MessageEntry.agent_card` as `Option<AgentCard>`, `AgentCard.tone` as `String`, `fields` as `Vec<AgentCardField>`) were inferred from sessions.proto and not checked against generated code, and the partial moves out of the owned `MessageEntry` in `thread_message_entry` are unchecked by a compiler.
+- P2 test-gap: nothing was written or run; the owed tests are listed in `units/W3-FIX-16.json`.
+- P2 follow-up: `core.ts` line 155 (`pinned_source`) still says "Absent until the listing carries it", the same stale wording as the title comment; left alone because the lock group names one comment.
+- P3 bug: pre-existing, `space_routes/timeline.rs` `summary_json` still hard-codes `starred` and `unread` to false, so windowed rows never show those states (W3-FIX-15 P3, unchanged).
+- P3 decision: the windowed summary has no typed entry (`ThreadSummary` has none), so cards and link previews reach the SPA through the transcript read, and the windowed tail read uses the same `list_thread_messages` mapping.
+- P3 decision: checked with no mismatch: `entry-registry.ts` reads the wire names kind, version, agent_card, title, tone, fields, label and value; its caps (120, 8, 40, 200) match session-core's `CARD_*` constants; the BFF transcript and windowed posts relay JSON unchanged, and the SPA windowed store keeps thread objects whole.
