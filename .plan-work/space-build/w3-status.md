@@ -600,3 +600,9 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - P1 NOT WIRED -> W3-DEC-KIND2 running: SPA sends no space_ref, so the claim path is inert (fails closed, no regression).
 - P1: Go/Python memory.proto bindings stale (buf generate owed).
 - P2: claim replayable 2 min by same subject/Space (no nonce); route not in decision-audit table; a row linking to multiple unrecorded threads only covers one Space per claim.
+
+### W3-DEC-ORGAGENT (e8008895d) BUILT
+- Control: list/suspend/reactivate/retire ownerless org agents (settles admissions + seats in every room on suspend/retire); gateway routes + proxy; 3 actions; SPA admin section in settings; registry +8 rows (315 total), pins 7a691a2c...
+- Scope: "edit" not built (would widen UpdateAgentAccess) -- LEAD DECISION: accept suspend/reactivate/retire as the delivered admin controls for this release; editing an org agent's instructions can reuse the existing UpdateAgentAccess path gated on org-admin in a later pass if wanted.
+- P1 gap: agent-action-admission.json rows for the 3 new action ids not added (schemaHash needs the generator) -> admission-contract test fails until added.
+- P1 PIN CHURN: registry touched by 6+ builders this round; final consolidated re-pin needed once all registry-touching builders are done (lead task, before test phase).
