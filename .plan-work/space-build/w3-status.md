@@ -443,3 +443,122 @@ Out of scope this wave: WS20-S6..S9 (blocked by SD-23 default and sibling Quarry
 - POST /api/v1/me/agents refuses ZDR (412) before any Convex call; other personal_agents writes are ids-only.
 - P1 PRE-EXISTING (open): POST /api/v1/spaces/{ref}/agents (mod.rs create_space_agent) stores systemPrompt with no ZDR guard, registry row Config/n/a -> reclassify DurableWrite/refuse + guard.
 - P1 PRE-EXISTING (open): PUT /api/v1/agents/{id}/draft (agent_actions.rs save_agent_draft) stores systemPrompt, no ZDR check, no registry row.
+
+## Decision phase
+| id | decisions | status | commit |
+|---|---|---|---|
+| W3-DEC-CTL1 | D7, D12, D10 (Control) | built | 6b873a411 |
+| W3-DEC-CARD | D3 | built | e3ff62e22 |
+| W3-DEC-ZDR | D14 | built | 840526f3c |
+| W3-DEC-ZDR2 | D14 follow-up (publish + agent_actions survey) | built | 5fe670ac7 |
+| W3-DEC-GRANT | D5 | built | 5e78930c8 |
+| W3-DEC-NOTES | D9 | built | 53704acfc |
+| W3-DEC-BROWSER | D4 + run-key fix + revoke bearer | built (revoke bearer blocked: owner) | 4ce271bc8 |
+| W3-DEC-RETRACT | D1 + D9 follow-up | partial (D1 built, D9 blocked: owner) | cd61d2bd9 |
+| W3-DEC-CANVAS | D2 + copy stragglers | built | 376af8b81 |
+| W3-DEC-GWFIX | live ZDR posture + 403 relay | built | c78c029e8 |
+| W3-DEC-GWFIX2 | browser start live ZDR + 422 relay + copy | built | 734cce02d + copy commit |
+| queued | D15 registry extension, D13 runbook note, then compile pass | | |
+| design first | D8 room history | awaiting owner confirmation | |
+
+### W3-DEC-ZDR (840526f3c)
+- create_space_agent and save_agent_draft refuse ZDR; registry rows reclassified/added; pins 67c6a872...
+- P1 -> W3-DEC-ZDR2: publish route copies system prompt, unguarded.
+- P1 test-pin: zdr-contract-sync.test.sh:235 must read 67c6a872... (will change again after ZDR2).
+- P1 test-gap: create_space_agent_response tests lack org-core posture stub (503).
+- P2: durable_write_refusal uses cached org posture (up to 60 s stale); org_posture_live exists -- all W3 guards inherit this.
+- P2: no lint checks that DurableWrite handlers call a guard.
+
+### W3-DEC-CARD (e3ff62e22)
+- capability-core 0047 flips post_card admission to enabled (guarded UPDATE; to switch off set `retired`, not `declared`); toggle copy says rename, pin and post cards; attester already covers post_card.
+- Ops: cards still need MODEL_ACTION_ADMISSION=table (core .env), EXECUTION_CORE_SPACE_SELF_API=1, SPACE_SELF_API_SESSION_CORE=1, and CONTROL_SPACE_SELF_API_ACTIONS naming space.thread.post_card with rename/pin.
+- Copy stragglers -> fold into D2 SPA work: ws18.ts:29 "and later post cards"; SpacePage.tsx:1806; core.ts:1127.
+
+### W3-DEC-CTL1 (6b873a411)
+- D7 browser out of agent_computer preset; D12 migration 049 memory_personal_turn_entitled + own resolver; D10 org agents registered ownerless, sweeper only owner-visible.
+- P1 deviation: migration 049 (048 reserved for WS20-S9). Deploy 049 before Control image.
+- P1 decision (lead: accept; safe): org-visible registration refuses non-members 403; gateway maps registration 403 -> 503 (gateway follow-up to relay typed).
+- P1 test pins: explicitOnlyEntitlements, zdrProbes (~160), TestRegisterIsOwnerDerivedAndFirstWriterWins.
+- P2 gap: ownerless org agents have no org-admin edit/suspend/retire route; owner->org flip keeps owner.
+- P2: full-state entitlement writes must include memory_personal_turn.
+
+### W3-DEC-GRANT (5e78930c8)
+- Parent grant narrowed to the decision's hosts, 600 s TTL (model-gateway grant route gains ttl_s, session kind only); revoked at complete/cancel/refusals; gateway already revoked on failed start.
+- P1 -> W3-DEC-BROWSER: run-end revoke uses the ingress bearer (~300 s) -> refused on long runs (grants still die at TTL <= 600 s).
+- P1 PRE-EXISTING -> W3-DEC-BROWSER: keyed_run_key includes the parent grant id; a retry with the same client_send_id starts a second live run.
+- P2: org site policy refusal at issuance reaches SPA as 502 browser_grant_unavailable (untyped); dispatch failures that never terminalize skip the revoke (TTL bound).
+
+### W3-DEC-NOTES (53704acfc)
+- RestoreMemory (session-core, owner-only, ZDR first, room-checked under row+thread locks); model-gateway + gateway routes; action memory.restore; SPA Restore control.
+- P1 -> W3-DEC-RETRACT: threads with no recorded space_kind refused (thread_kind_unknown) -- the exact D9 case; resolve via Control Space kind.
+- P1 process: builder ran `git reset -q --` (mixed); lead verified index clean and all commits intact.
+- P1: memory.proto rpc added -> buf generate. P2 test: action-registry.test.ts:1828 count 382->383 (plus other W3 additions).
+- P2 UNVERIFIED: Letta copy of restored note not handled; lock order row->threads could deadlock vs thread-first writers.
+
+### W3-DEC-ZDR2 (5fe670ac7)
+- publish + 14 more agent_actions content routes refuse ZDR (skills, plugins, cron, event triggers); 10 left (deletes, ids, config, dry run); registry 286 rows, pins 6fb0226a...
+- P1 test-gap: in-file skill/import/cron/publish tests now 503 (no org-core posture stub).
+- P1 test-pin: zdr-contract-sync.test.sh:235 (digest will move again with CANVAS).
+- P2 owner: registry marks skill/plugin/cron DELETE allowed under ZDR but proxy_to_capability_core refuses every non-GET for ZDR; cron PATCH row says refuse though it is config.
+- P2: event_trigger_routes.rs not in the model-gateway lint file list.
+
+### W3-DEC-RETRACT (cd61d2bd9) PARTIAL
+- D1: Control publishes role_changed via the durable outbox; session-core consumer retracts a removed/demoted (<editor) member's shared copies (advisory lock, same statements as owner retract), retries + 10-min sweep; declassify re-checks revocation in-tx. member_left treated as removal.
+- D9 BLOCKED (owner): session-core cannot read Control's Space kind (gateway-delegation-only route). Options: (a) Control-signed kind token relayed by gateway; (b) new authz read for session-core on owner assertion; (c) status quo: restorable after the owner's next verified append stamps the kind.
+- P1 gap: a missed demotion older than the 24 h re-announce window is never retracted (sweep covers removals only); durable JetStream consumer provisioning owed.
+- P2 PRE-EXISTING SECURITY BUG -> queue W3-DEC-ORDER: space_membership_nats.rs clears the revocation row on ANY active=true fact, so a stale active=true event after a removal can reopen access up to 10 min. Needs revision ordering.
+- P2: shared identical text = one room row, removal deletes it for both sharers.
+
+### W3-DEC-BROWSER (4ce271bc8)
+- D4: Control signs thread_mode (new|existing); gateway creates the room thread (Control thread-decision + /v1/threads, goal as first post) before the browser decision; verifier + golden updated (old digests reproduced first).
+- Run key fixed: room runs keyed by org+user+decision key; existing-thread goal append keyed by start key.
+- BLOCKED (owner): run-end revoke needs a service principal with browser:write on the broker; none exists. Grants end at TTL (<=10 min). Options: grant model-gateway a broker principal with browser:write, or accept TTL.
+- P1: new-thread run's goal is the thread's first post; Session Core managed start on such a thread UNVERIFIED; tie to the created thread relies on the trusted gateway.
+- P2 deploy: Control + model-gateway before gateway (all browser digests changed).
+- SPA start panel still sends the current thread id (new-thread entry owed).
+
+### W3-DEC-GWFIX (c78c029e8)
+- durable_write_refusal reads org posture live (org_posture_live); admit_for_bind relays Control 403 agent_access_forbidden.
+- P1 -> GWFIX2: browser start zdr_gate still uses the 60 s cache.
+- P2 cost: one extra uncached org-core GET per durable write on hot paths (chat, posts, files...); coalescing cache is the follow-up if load matters.
+
+### W3-DEC-GWFIX2 (734cce02d)
+- Browser start uses live ZDR posture; admit_for_bind relays 422 agent_policy_invalid.
+- LEAD TODO: errors.ts agent_access_forbidden neutral copy is uncommitted in the worktree (mixed with CANVAS hunks); check after CANVAS commits.
+- P2: agent_policy_invalid copy misleads on the bind route; room-create (mod.rs:4049) maps admit refusals to 502.
+- P3: room reads (R2-R4) stay on 60 s cache after a ZDR switch-on (lead: accept; reads persist nothing new).
+
+### W3-DEC-CANVAS (376af8b81)
+- Own switch canvasToolsEnabled (Convex), gateway PUT .../canvas-tools (SPACE_AGENT_CANVAS_TOOLS_API off in prod), marker space_canvas_tools; tool_profile is a +-joined list (field 28); model-gateway honours marker behind MODEL_GATEWAY_SPACE_CANVAS_TOOLS; execution-core offered_under_profile default deny; SPA toggle; copy stragglers fixed; registry pins a281d2bc...
+- P1 pin: zdr-contract-sync.test.sh:235 -> a281d2bc... (latest).
+- P1: client-named space_canvas_tools stripped only where space_self_api is; sweep BFF chat paths before enabling.
+- P1 interpretation (lead: accept): canvas switch PUT allowed under ZDR (writes a boolean); grant refused for ZDR.
+- P2: compose lines for SPACE_AGENT_CANVAS_TOOLS_API / MODEL_GATEWAY_SPACE_CANVAS_TOOLS not added (per D13 cores own .env).
+| W3-DEC-ORDER | stale membership fact fix | built | 9c2972423 |
+| W3-DEC-REG | D15 registry + D13 runbook | built | 7878a4d59 |
+| W3-DEC-WIKIZDR | wiki-store typed ZDR refusal | built | bd0308170 |
+| W3-DEC-ORDER2 | removal retracts pre-removal copies even after quick re-add | built | d7a041f7a |
+
+### W3-DEC-ORDER (9c2972423)
+- Membership facts applied only if space_seq newer (session-core migration 0132 fact-order table, per-subject advisory lock); closes stale active=true reopen bug.
+- P1 -> ORDER2 (lead ruling): quick re-add skipped the removal's retraction; retract copies shared before the removal regardless.
+- P2: declassify revocation check not serialised with the membership consumer (argued safe, confirm in test phase).
+
+### W3-DEC-REG (7878a4d59)
+- 20 rows (14 ctl:, 6 data:) + `planes` key; registry 307 rows; pins 09b8c2f5... (zdr-contract-sync.test.sh:235 must read this).
+- Runbook: MODEL_ACTION_ADMISSION per-core .env; canvas-tools and card switches added.
+- P1 -> WIKIZDR: wiki-store canvas refusal zdr_persistence_forbidden not in the typed catalogue.
+- Lints for ctl:/data: rows owed (test phase).
+
+### W3-DEC-ORDER2 (d7a041f7a)
+- Removal/demotion always retracts the subject's shares authorised below the fact's revision (migration 0133 adds memory_declassifications.authority_revision); retract_marks table closes the late-commit race (kept, lead accepts).
+- P1 hotspot approval: 3 lines in grpc.rs + memory_grpc.rs.
+- P2: shared room row kept while another member holds it (owner retract still deletes for all -- paths differ).
+- P2: pre-0133 shares (NULL revision) retracted by any later removal (fails closed).
+
+### W3-DEC-WIKIZDR (bd0308170)
+- Canvas ZDR refusal now 412 zdr_durable_mutation_forbidden (details.surface room_canvas) on human and agent paths; gateway relays it; OpenAPI updated.
+- P1 PRE-EXISTING: non-canvas wiki writes (wiki.go:105-107 via authctx.go:237) still answer non-catalogue 403 zdr_persistence_forbidden; SPA WikiProposalsReview.tsx:141 keys on it.
+- P2: registry reason text for canvas rows still says 403 (re-pin needed); stale code in DATA_PLANE_CODES.
+
+## Compile pass (started)
