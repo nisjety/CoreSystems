@@ -1300,7 +1300,7 @@ impl HealthAttestor {
     /// build executes (WS18-S4). A probe that does not complete, or that reports the verifier, the registry
     /// or the switch as not ready, attests nothing, so the rows lapse inside their TTL. Returns the number
     /// attested.
-    pub async fn attest_space_owner_round(
+    pub(crate) async fn attest_space_owner_round(
         &self,
         probe: &crate::space_self_api::SessionProbe,
     ) -> usize {
