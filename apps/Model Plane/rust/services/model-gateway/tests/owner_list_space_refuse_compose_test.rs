@@ -2,7 +2,7 @@
 //!
 //! The code side is pinned where it is read: model-gateway's `owner_list_space_refuse_enabled` (strict, and not
 //! decided by the retrieval switch) and execution-core's Space listing gate. This is the compose side. One switch,
-//! `OWNER_LIST_SPACE_REFUSE`, is set on both services that read it, interpolated with an off default. The production
+//! `OWNER_LIST_SPACE_REFUSE`, is set on both services that read it, interpolated with an on default (W3-FIX-8). The production
 //! overlay must not pin it: a deployment that turns on `MODEL_ACTION_ADMISSION=table` with Spaces has to be able to
 //! turn the refusal on through its runtime environment, without editing the overlay.
 
@@ -51,15 +51,15 @@ fn entries(block: &[String]) -> Vec<String> {
 }
 
 #[test]
-fn the_base_file_sets_the_listing_switch_once_on_each_reader_and_defaults_it_off() {
+fn the_base_file_sets_the_listing_switch_once_on_each_reader_and_defaults_it_on() {
     let base = compose("docker-compose.yml").expect("the base compose file is readable");
     for service in READERS {
         let block = service_block(&base, service);
         assert!(!block.is_empty(), "the {service} block is in the base file");
         assert_eq!(
             entries(&block),
-            vec![format!("{VARIABLE}: ${{{VARIABLE}:-false}}")],
-            "{service} sets the listing switch once, and it defaults to off"
+            vec![format!("{VARIABLE}: ${{{VARIABLE}:-true}}")],
+            "{service} sets the listing switch once, and it defaults to on"
         );
     }
 }
@@ -76,7 +76,7 @@ fn the_production_overlay_declares_the_listing_switch_on_each_reader_without_pin
         );
         assert_eq!(
             entries(&block),
-            vec![format!("{VARIABLE}: ${{{VARIABLE}:-false}}")],
+            vec![format!("{VARIABLE}: ${{{VARIABLE}:-true}}")],
             "the production {service} declares the listing switch once, interpolated, not pinned"
         );
     }
@@ -98,8 +98,8 @@ fn no_compose_file_turns_the_listing_switch_on_or_pins_it_to_another_value() {
             .filter(|line| line.trim_start().starts_with(&format!("{VARIABLE}:")))
         {
             assert!(
-                line.trim().ends_with(&format!("${{{VARIABLE}:-false}}")),
-                "{name} sets the listing switch to something other than the off default: {line}"
+                line.trim().ends_with(&format!("${{{VARIABLE}:-true}}")),
+                "{name} sets the listing switch to something other than the on default: {line}"
             );
         }
     }

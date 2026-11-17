@@ -25,3 +25,20 @@ pub fn hint_sentence(locale: Option<&str>) -> Option<&'static str> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::hint_sentence;
+
+    /// WS16-S6: each stamped locale has its own one-sentence hint, and an absent or unknown locale has none.
+    #[test]
+    fn each_stamped_locale_has_its_sentence_and_nothing_else_does() {
+        let norwegian = hint_sentence(Some("nb-NO")).expect("nb-NO has a sentence");
+        assert!(norwegian.contains("Norwegian Bokmal"), "{norwegian}");
+        let english = hint_sentence(Some("en-US")).expect("en-US has a sentence");
+        assert!(english.contains("English"), "{english}");
+        assert_ne!(norwegian, english);
+        assert_eq!(hint_sentence(Some("de-DE")), None, "an unknown locale");
+        assert_eq!(hint_sentence(None), None, "an absent locale");
+    }
+}

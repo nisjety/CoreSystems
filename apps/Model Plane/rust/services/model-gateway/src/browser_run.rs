@@ -3459,6 +3459,8 @@ mod tests {
         derive: Option<Result<DeriveRunGrantResponse, tonic::Code>>,
         derive_requests: Arc<Mutex<Vec<DeriveRunGrantRequest>>>,
         revoke_requests: Arc<Mutex<Vec<RevokeGrantRequest>>>,
+        /// The `authorization` each RevokeGrant presented, in call order (W3-DEC-REVOKE).
+        revoke_authorizations: Arc<Mutex<Vec<String>>>,
         /// Models the broker's replay rule for `derive` (see `sameDeriveBudget`
         /// in the broker): the first derive of a session_key issues the grant with
         /// the claim it asked for; a replay that asks for a claim must ask for the
@@ -3476,6 +3478,7 @@ mod tests {
                 derive: None,
                 derive_requests: Arc::new(Mutex::new(Vec::new())),
                 revoke_requests: Arc::new(Mutex::new(Vec::new())),
+                revoke_authorizations: Arc::new(Mutex::new(Vec::new())),
                 stateful_derive: false,
                 issued: Arc::new(Mutex::new(std::collections::HashMap::new())),
             }
@@ -3495,6 +3498,16 @@ mod tests {
             &self,
             request: tonic::Request<RevokeGrantRequest>,
         ) -> Result<Response<RevokeGrantResponse>, Status> {
+            if let Some(value) = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+            {
+                self.revoke_authorizations
+                    .lock()
+                    .expect("revoke bearer recorder")
+                    .push(value.to_owned());
+            }
             self.revoke_requests
                 .lock()
                 .expect("revoke recorder")
@@ -3770,17 +3783,14 @@ mod tests {
 
     #[test]
     fn standalone_browser_start_refuses_explicit_space_binding() {
+        // The context and authority forms (space_context, space_browser_authority and their aliases) are typed Control
+        // decisions since WS20-S3: a bare object does not parse as them, and a room start verifies them. Their
+        // refusal is covered by the room start tests, so only the identifier forms are listed here.
         for field in [
             "space_id",
             "spaceId",
             "space_ref",
             "spaceRef",
-            "space_context",
-            "spaceContext",
-            "space_browser_authority",
-            "spaceBrowserAuthority",
-            "space_authority",
-            "spaceAuthority",
         ] {
             let mut body = json!({ "goal": "read the page", "grant_id": "grant-1" });
             body[field] = json!({ "id": "space-1" });
@@ -5944,7 +5954,18 @@ mod tests {
         broker: TestBrowserBroker,
         request: BrowserRunStartRequest,
     ) -> (Result<Json<Value>, ApiError>, usize) {
+        start_with_admin_tokens(broker, request, None).await
+    }
+
+    /// [`start_with`] with the browser-broker revoke credential provider the gateway would hold
+    /// (`None`: the revoke bearer is always the ingress bearer, as before W3-DEC-REVOKE).
+    async fn start_with_admin_tokens(
+        broker: TestBrowserBroker,
+        request: BrowserRunStartRequest,
+        browser_admin_tokens: Option<Arc<crate::browser_admin_auth::BrowserAdminTokenProvider>>,
+    ) -> (Result<Json<Value>, ApiError>, usize) {
         let (mut state, broker_handle) = state_with_browser_broker(broker).await;
+        state.browser_admin_tokens = browser_admin_tokens;
         let (channel, connections, session_handle) = counting_session_core().await;
         state.session_client =
             mp_contracts::model_plane::v1::session_core_client::SessionCoreClient::new(
@@ -6048,6 +6069,175 @@ mod tests {
         );
     }
 
+    // ---- W3-DEC-REVOKE: the bearer a run-end or start-failure revoke presents ----
+
+    /// A browser-broker revoke credential whose Auth Core mint is served by `auth`.
+    fn revoke_credential_for(auth: &wiremock::MockServer) -> crate::browser_admin_auth::BrowserAdminTokenProvider {
+        crate::browser_admin_auth::BrowserAdminTokenProvider::new(
+            &auth.uri(),
+            "model-gateway-browser-admin".to_owned(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        )
+        .expect("the revoke token client builds")
+    }
+
+    async fn mount_browser_broker_mint(auth: &wiremock::MockServer, status: u16) {
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/browser-broker/internal-token"))
+            .and(wiremock::matchers::body_json(json!({
+                "orgId": "org-a",
+                "scopes": ["browser:write"],
+                "reason": "model-gateway browser run revoke",
+            })))
+            .respond_with(if status == 200 {
+                wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                    "token": "minted-browser-broker-token",
+                    "expiresInSeconds": 300,
+                    "audience": "browser-broker",
+                }))
+            } else {
+                wiremock::ResponseTemplate::new(status)
+            })
+            .expect(1)
+            .mount(auth)
+            .await;
+    }
+
+    // A start that fails after its derive revokes the derived grant with the organization's browser-broker
+    // service token when Auth Core mints it. Only the derived grant is named, and the ingress bearer is not used.
+    #[tokio::test]
+    async fn a_start_failure_revokes_with_the_minted_org_token_when_the_credential_is_configured() {
+        let auth = wiremock::MockServer::start().await;
+        mount_browser_broker_mint(&auth, 200).await;
+        let broker = session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        );
+        let (result, _) = start_with_admin_tokens(
+            broker.clone(),
+            browser_request("session-1"),
+            Some(Arc::new(revoke_credential_for(&auth))),
+        )
+        .await;
+        assert_eq!(result.expect_err("session-core is down").0, StatusCode::BAD_GATEWAY);
+        let revokes = broker.revoke_requests.lock().expect("recorder").clone();
+        assert_eq!(revokes.len(), 1, "one revoke for the derived grant");
+        assert_eq!(revokes[0].grant_id, "run-1");
+        assert_eq!(revokes[0].reason, REVOKE_REASON_START_FAILED);
+        assert_eq!(
+            *broker.revoke_authorizations.lock().expect("bearer recorder"),
+            vec!["Bearer minted-browser-broker-token".to_owned()]
+        );
+    }
+
+    // With no revoke credential configured, the revoke presents the ingress bearer, as before W3-DEC-REVOKE.
+    #[tokio::test]
+    async fn a_start_failure_presents_the_ingress_bearer_when_no_revoke_credential_is_configured() {
+        let broker = session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        );
+        let (result, _) = start_with(broker.clone(), browser_request("session-1")).await;
+        assert_eq!(result.expect_err("session-core is down").0, StatusCode::BAD_GATEWAY);
+        assert_eq!(broker.revoke_requests.lock().expect("recorder").len(), 1);
+        assert_eq!(
+            *broker.revoke_authorizations.lock().expect("bearer recorder"),
+            vec!["Bearer browser-user-token".to_owned()]
+        );
+    }
+
+    // Auth Core refusing the revoke credential falls back to the ingress bearer: the revoke still goes out.
+    #[tokio::test]
+    async fn a_start_failure_presents_the_ingress_bearer_when_auth_core_refuses_the_mint() {
+        let auth = wiremock::MockServer::start().await;
+        mount_browser_broker_mint(&auth, 403).await;
+        let broker = session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        );
+        let (result, _) = start_with_admin_tokens(
+            broker.clone(),
+            browser_request("session-1"),
+            Some(Arc::new(revoke_credential_for(&auth))),
+        )
+        .await;
+        assert_eq!(result.expect_err("session-core is down").0, StatusCode::BAD_GATEWAY);
+        let revokes = broker.revoke_requests.lock().expect("recorder").clone();
+        assert_eq!(revokes.len(), 1);
+        assert_eq!(revokes[0].grant_id, "run-1");
+        assert_eq!(
+            *broker.revoke_authorizations.lock().expect("bearer recorder"),
+            vec!["Bearer browser-user-token".to_owned()]
+        );
+    }
+
+    // A room run's end revokes its derived grant, then its starter parent, both with the one minted token for the
+    // run's organization. Each revoke names only its own grant id.
+    #[tokio::test]
+    async fn a_room_run_end_revokes_the_derived_grant_then_the_parent_with_the_minted_token() {
+        let auth = wiremock::MockServer::start().await;
+        mount_browser_broker_mint(&auth, 200).await;
+        let broker = TestBrowserBroker::validating(Err(tonic::Code::NotFound));
+        let (mut state, broker_task) = state_with_browser_broker(broker.clone()).await;
+        state.browser_admin_tokens = Some(Arc::new(revoke_credential_for(&auth)));
+        let room_grant = ResolvedBrowserGrant {
+            grant_id: "run-1".to_owned(),
+            allowed_domains: vec!["example.com".to_owned()],
+            parent_grant_id: Some("parent-1".to_owned()),
+            budget: None,
+            room_parent: true,
+        };
+        let ingress = VerifiedBrowserBearer::for_test("browser-user-token");
+        assert!(
+            revoke_derived_run_grant(&state, &ingress, "org-a", &room_grant, REVOKE_REASON_RUN_ENDED).await,
+            "the derived grant's revoke succeeded"
+        );
+        broker_task.abort();
+        let revokes = broker.revoke_requests.lock().expect("recorder").clone();
+        let named: Vec<(&str, &str)> = revokes
+            .iter()
+            .map(|revoke| (revoke.grant_id.as_str(), revoke.reason.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![("run-1", REVOKE_REASON_RUN_ENDED), ("parent-1", REVOKE_REASON_RUN_ENDED)]
+        );
+        assert_eq!(
+            *broker.revoke_authorizations.lock().expect("bearer recorder"),
+            vec![
+                "Bearer minted-browser-broker-token".to_owned(),
+                "Bearer minted-browser-broker-token".to_owned(),
+            ]
+        );
+    }
+
+    // A personal run's end revokes its derived grant alone: a personal run has no room parent to end (W3-DEC-GRANT).
+    #[tokio::test]
+    async fn a_personal_run_end_revokes_only_its_derived_grant() {
+        let broker = TestBrowserBroker::validating(Err(tonic::Code::NotFound));
+        let (state, broker_task) = state_with_browser_broker(broker.clone()).await;
+        let personal_grant = ResolvedBrowserGrant {
+            grant_id: "run-1".to_owned(),
+            allowed_domains: vec!["example.com".to_owned()],
+            parent_grant_id: Some("session-1".to_owned()),
+            budget: None,
+            room_parent: false,
+        };
+        let ingress = VerifiedBrowserBearer::for_test("browser-user-token");
+        assert!(
+            revoke_derived_run_grant(&state, &ingress, "org-a", &personal_grant, REVOKE_REASON_RUN_ENDED).await
+        );
+        broker_task.abort();
+        let revokes = broker.revoke_requests.lock().expect("recorder").clone();
+        assert_eq!(revokes.len(), 1, "the session parent is not the run's to revoke");
+        assert_eq!(revokes[0].grant_id, "run-1");
+        assert_eq!(revokes[0].reason, REVOKE_REASON_RUN_ENDED);
+        assert_eq!(
+            *broker.revoke_authorizations.lock().expect("bearer recorder"),
+            vec!["Bearer browser-user-token".to_owned()]
+        );
+    }
+
     // A run grant the caller presented is not ours to revoke.
     #[tokio::test]
     async fn a_failed_start_never_revokes_a_presented_run_grant() {
@@ -6075,6 +6265,19 @@ mod tests {
             );
         }
         headers
+    }
+
+    /// W3-DEC-BROWSER: the room run key takes no grant id, so one decision key names one run for its organization and
+    /// user, and it never equals the personal run key of the same inputs.
+    #[test]
+    fn keyed_room_run_key_is_scoped_to_org_user_and_decision_key_only() {
+        let key = keyed_room_run_key("org-a", "user-a", "decision-1");
+        assert_eq!(key, keyed_room_run_key("org-a", "user-a", "decision-1"));
+        assert_ne!(key, keyed_room_run_key("org-a", "user-a", "decision-2"));
+        assert_ne!(key, keyed_room_run_key("org-a", "user-b", "decision-1"));
+        assert_ne!(key, keyed_room_run_key("org-b", "user-a", "decision-1"));
+        assert_ne!(key, keyed_run_key("org-a", "user-a", "parent-1", "decision-1"));
+        assert!(key.starts_with("browser-idem-") && key.len() == "browser-idem-".len() + 32, "{key}");
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl BrowserAdminTokenProvider {
         Self::new(&auth_core_url, service_id, credential)
     }
 
-    fn new(
+    pub(crate) fn new(
         auth_core_url: &str,
         service_id: String,
         credential: String,
@@ -186,4 +186,117 @@ fn required_env(name: &'static str) -> Result<String, BrowserAdminTokenError> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or(BrowserAdminTokenError::Configuration(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BrowserAdminTokenError, BrowserAdminTokenProvider};
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SERVICE_ID: &str = "model-gateway-browser-admin";
+    // A fake credential of repeated letters, so the secret scanner passes it.
+    const CREDENTIAL: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const MINTED: &str = "minted-browser-broker-token";
+
+    fn provider_for(auth_core_url: &str) -> BrowserAdminTokenProvider {
+        BrowserAdminTokenProvider::new(auth_core_url, SERVICE_ID.to_owned(), CREDENTIAL.to_owned())
+            .expect("the revoke token client builds")
+    }
+
+    fn minted(expires_in_seconds: u64, audience: &str, token: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": token,
+            "expiresInSeconds": expires_in_seconds,
+            "audience": audience,
+        }))
+    }
+
+    #[tokio::test]
+    async fn mints_an_org_scoped_browser_write_token_and_serves_the_second_call_from_cache() {
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/browser-broker/internal-token"))
+            .and(header("x-service-id", SERVICE_ID))
+            .and(header("x-service-api-key", CREDENTIAL))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-a",
+                "scopes": ["browser:write"],
+                "reason": "model-gateway browser run revoke",
+            })))
+            .respond_with(minted(300, "browser-broker", MINTED))
+            .expect(1)
+            .mount(&auth)
+            .await;
+
+        let provider = provider_for(&auth.uri());
+        assert_eq!(provider.token("org-a").await.expect("mint succeeds"), MINTED);
+        // The mock allows exactly one POST, so this call is served from the cache.
+        assert_eq!(provider.token(" org-a ").await.expect("cache hit"), MINTED);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_from_auth_core_is_refused_and_never_followed() {
+        let auth = MockServer::start().await;
+        let elsewhere = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/browser-broker/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/elsewhere", elsewhere.uri())),
+            )
+            .expect(1)
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(minted(300, "browser-broker", MINTED))
+            .expect(0)
+            .mount(&elsewhere)
+            .await;
+
+        let error = provider_for(&auth.uri())
+            .token("org-a")
+            .await
+            .expect_err("a redirect is not a token");
+        assert!(matches!(
+            error,
+            BrowserAdminTokenError::Refused(status)
+                if status == reqwest::StatusCode::TEMPORARY_REDIRECT
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_token_for_another_audience_or_an_out_of_range_ttl_or_an_empty_token_is_invalid() {
+        let cases = [
+            ("session-core", 300, MINTED),
+            ("", 300, MINTED),
+            ("browser-broker", 0, MINTED),
+            ("browser-broker", 3601, MINTED),
+            ("browser-broker", 300, "   "),
+        ];
+        for (audience, ttl, token) in cases {
+            let auth = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/browser-broker/internal-token"))
+                .respond_with(minted(ttl, audience, token))
+                .mount(&auth)
+                .await;
+            let error = provider_for(&auth.uri())
+                .token("org-a")
+                .await
+                .expect_err("an unusable token is refused");
+            assert!(
+                matches!(error, BrowserAdminTokenError::InvalidResponse),
+                "audience {audience:?}, ttl {ttl}, token {token:?}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_organization_is_refused_before_any_mint() {
+        assert!(matches!(
+            provider_for("http://unused.invalid").token("   ").await,
+            Err(BrowserAdminTokenError::MissingOrganization)
+        ));
+    }
 }

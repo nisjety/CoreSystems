@@ -13147,8 +13147,9 @@ mod tests {
     }
 
     /// C-05 on the real dispatch, both switch states. `OWNER_LIST_SPACE_REFUSE` alone decides the refusal on a
-    /// Space-scoped turn: `AGENTIC_SPACE_RETRIEVAL_ENABLED` does not gate it, and only the literal `true` enables it.
+    /// Space-scoped turn: `AGENTIC_SPACE_RETRIEVAL_ENABLED` does not gate it, and only the literal `false` lifts it (W3-FIX-7).
     #[tokio::test]
+    #[serial_test::serial]
     async fn knowledge_list_documents_in_a_space_follows_owner_list_space_refuse_alone() {
         const REFUSED: &str = "knowledge_list_documents refused: space_scoped";
         const NEEDS_BEARER: &str = "knowledge.list_documents requires a verified user bearer";
@@ -13158,9 +13159,9 @@ mod tests {
         let cases = [
             (Some("true"), None, "space_1", REFUSED),
             (Some("true"), Some("true"), "space_1", REFUSED),
-            (None, Some("true"), "space_1", NEEDS_BEARER),
+            (None, Some("true"), "space_1", REFUSED),
             (Some("false"), Some("true"), "space_1", NEEDS_BEARER),
-            (Some("1"), None, "space_1", NEEDS_BEARER),
+            (Some("1"), None, "space_1", REFUSED),
             (Some("true"), Some("true"), "", NEEDS_BEARER),
         ];
         for (owner, agentic, space_id, expected) in cases {
@@ -13171,6 +13172,70 @@ mod tests {
                 error.as_deref(),
                 Some(expected),
                 "OWNER_LIST_SPACE_REFUSE={owner:?} AGENTIC_SPACE_RETRIEVAL_ENABLED={agentic:?} space_id={space_id:?}"
+            );
+        }
+    }
+
+    /// W3-FIX-7: `OWNER_LIST_SPACE_REFUSE` is off only for the literal `false`. Unset, empty, `true`, `1`, `TRUE` and a
+    /// padded `false` all keep the refusal on.
+    #[test]
+    #[serial_test::serial]
+    fn owner_list_space_refuse_is_off_only_for_the_literal_false() {
+        for (value, on) in [
+            (None, true),
+            (Some(""), true),
+            (Some("true"), true),
+            (Some("1"), true),
+            (Some("TRUE"), true),
+            (Some(" false"), true),
+            (Some("false"), false),
+        ] {
+            let _owner = SpaceListEnv::set("OWNER_LIST_SPACE_REFUSE", value);
+            assert_eq!(owner_list_space_refuse_on(), on, "OWNER_LIST_SPACE_REFUSE={value:?}");
+        }
+    }
+
+    /// W3-FIX-7: a Space-scoped turn is offered none of the four organisation-wide knowledge reads, and the document
+    /// inventory too unless the owner opts out. A turn with no Space keeps its whole set.
+    #[test]
+    #[serial_test::serial]
+    fn a_space_turn_withholds_the_knowledge_reads_and_the_inventory_unless_the_owner_opts_out() {
+        let names = [
+            "knowledge_search",
+            "knowledge_graph_search",
+            "knowledge_wiki_search",
+            "knowledge_contradictions",
+            "knowledge_list_documents",
+            "web_search",
+        ];
+        let offered = || -> Vec<ToolDefinition> {
+            names
+                .iter()
+                .map(|name| ToolDefinition {
+                    name: (*name).to_owned(),
+                    description: String::new(),
+                    parameters_json: "{}".to_owned(),
+                })
+                .collect()
+        };
+        let kept = |tools: Vec<ToolDefinition>| -> Vec<String> {
+            tools.into_iter().map(|tool| tool.name).collect()
+        };
+        {
+            let _owner = SpaceListEnv::set("OWNER_LIST_SPACE_REFUSE", None);
+            assert_eq!(kept(tools_for_space_scope(offered(), "space_1")), vec!["web_search".to_owned()]);
+            assert_eq!(
+                kept(tools_for_space_scope(offered(), "")),
+                names.map(str::to_owned).to_vec(),
+                "a personal turn keeps its whole set"
+            );
+        }
+        {
+            let _owner = SpaceListEnv::set("OWNER_LIST_SPACE_REFUSE", Some("false"));
+            assert_eq!(
+                kept(tools_for_space_scope(offered(), "space_1")),
+                vec!["knowledge_list_documents".to_owned(), "web_search".to_owned()],
+                "the literal false opts the inventory out, and the four reads stay withheld"
             );
         }
     }

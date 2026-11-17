@@ -1175,6 +1175,40 @@ mod tests {
         }
     }
 
+    /// W3-DEC-GRANT: only an ordinary session grant takes a requested lifetime. The broker gets that lifetime, or
+    /// zero when none is asked for. A lifetime outside 30 to 900 seconds, or on a kind the broker times itself, is
+    /// refused before any broker call.
+    #[tokio::test]
+    async fn a_session_issue_sends_its_ttl_and_refuses_one_out_of_band_or_on_another_kind() {
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), user_claims(false), true).await;
+        let mut body = issue_body();
+        body["ttl_s"] = json!(600);
+        let (status, response) = send(router, "POST", "/v1/browser/grants", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{response}");
+        assert_eq!(recorder.acquired.lock().unwrap()[0].ttl_seconds, 600);
+
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), user_claims(false), true).await;
+        let (status, response) = send(router, "POST", "/v1/browser/grants", issue_body()).await;
+        assert_eq!(status, StatusCode::CREATED, "{response}");
+        assert_eq!(recorder.acquired.lock().unwrap()[0].ttl_seconds, 0);
+
+        for body in [
+            json!({ "allowed_domains": ["example.com"], "ttl_s": 29 }),
+            json!({ "allowed_domains": ["example.com"], "ttl_s": 901 }),
+            json!({ "kind": "human_browse", "ttl_s": 600 }),
+            json!({ "kind": "assistant_task", "allowed_domains": ["example.com"], "ttl_s": 600 }),
+        ] {
+            let recorder = Recorder::default();
+            let router = app(recorder.clone(), user_claims(false), true).await;
+            let (status, response) = send(router, "POST", "/v1/browser/grants", body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(response["error"], "invalid_ttl", "{body}");
+            assert!(recorder.acquired.lock().unwrap().is_empty(), "{body}");
+        }
+    }
+
     #[tokio::test]
     async fn issue_human_browse_is_allowed_under_zdr_and_stays_ephemeral() {
         let recorder = Recorder::default();

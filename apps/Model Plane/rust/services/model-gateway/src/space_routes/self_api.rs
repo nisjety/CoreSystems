@@ -73,3 +73,61 @@ pub(crate) fn tool_profile_for_run(
     }
     markers.join(PROFILE_JOIN)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn features(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// W3-DEC-CANVAS: a canvas marker needs its own switch and its own grant, and the two markers join in one profile.
+    #[test]
+    fn canvas_tools_are_offered_with_only_their_switch_and_grant() {
+        let canvas = features(&["agentic", SPACE_CANVAS_TOOLS_FEATURE]);
+        assert_eq!(tool_profile_for_run(false, true, &canvas, "space-1", false, false), "space_canvas_tools");
+        let both = features(&["agentic", SPACE_SELF_API_FEATURE, SPACE_CANVAS_TOOLS_FEATURE]);
+        assert_eq!(
+            tool_profile_for_run(true, true, &both, "space-1", false, false),
+            "space_self_api+space_canvas_tools"
+        );
+        assert_eq!(tool_profile_for_run(false, false, &canvas, "space-1", false, false), "", "no canvas switch");
+        assert_eq!(tool_profile_for_run(true, false, &canvas, "space-1", false, false), "", "self switch, no grant");
+    }
+
+    /// W3-DEC-CANVAS: the turn rules hold for every marker. No agentic turn, no Space, ZDR, or a waiver gives nothing.
+    #[test]
+    fn no_profile_without_agentic_space_zdr_or_a_waiver() {
+        let all = features(&["agentic", SPACE_SELF_API_FEATURE, SPACE_CANVAS_TOOLS_FEATURE]);
+        assert_eq!(
+            tool_profile_for_run(true, true, &all, "space-1", false, false),
+            "space_self_api+space_canvas_tools"
+        );
+        let no_agentic = features(&[SPACE_SELF_API_FEATURE, SPACE_CANVAS_TOOLS_FEATURE]);
+        assert_eq!(tool_profile_for_run(true, true, &no_agentic, "space-1", false, false), "", "no agentic");
+        assert_eq!(tool_profile_for_run(true, true, &all, "  ", false, false), "", "an empty space");
+        assert_eq!(tool_profile_for_run(true, true, &all, "space-1", true, false), "", "zdr");
+        assert_eq!(tool_profile_for_run(true, true, &all, "space-1", false, true), "", "waived");
+    }
+
+    /// WS18-S5: the self-API marker follows its switch, its grant and the same turn rules.
+    #[test]
+    fn the_self_api_profile_follows_its_switch_grant_and_turn_rules() {
+        let granted = features(&["agentic", SPACE_SELF_API_FEATURE]);
+        assert_eq!(
+            tool_profile_for_run(true, false, &granted, "space-1", false, false),
+            SPACE_SELF_API_TOOL_PROFILE
+        );
+        assert_eq!(tool_profile_for_run(false, false, &granted, "space-1", false, false), "", "switch off");
+        assert_eq!(
+            tool_profile_for_run(true, false, &features(&[SPACE_SELF_API_FEATURE]), "space-1", false, false),
+            "",
+            "no agentic"
+        );
+        assert_eq!(tool_profile_for_run(true, false, &features(&["agentic"]), "space-1", false, false), "", "no grant");
+        assert_eq!(tool_profile_for_run(true, false, &granted, "", false, false), "", "empty space");
+        assert_eq!(tool_profile_for_run(true, false, &granted, "space-1", true, false), "", "zdr");
+        assert_eq!(tool_profile_for_run(true, false, &granted, "space-1", false, true), "", "waived");
+    }
+}

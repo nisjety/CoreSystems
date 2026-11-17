@@ -1584,6 +1584,95 @@ mod tests {
     use super::*;
     use mp_contracts::dataplane::retrieval_v2::{Candidate, ContextFact, ContextPack};
 
+    /// A candidate whose metadata carries `space_ref` as a string label, or no metadata at all for `None`.
+    fn labelled(label: Option<&str>) -> Candidate {
+        let metadata = label.map(|space| prost_types::Struct {
+            fields: [(
+                "space_ref".to_owned(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StringValue(space.to_owned())),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        });
+        Candidate {
+            metadata,
+            ..Default::default()
+        }
+    }
+
+    /// W3-FIX-3 and WS17-S9b: a Space-scoped answer keeps only the chunks labelled with the requested Space. An
+    /// unlabelled chunk, another Space's chunk and every context-pack fact are withheld, and each is counted.
+    #[test]
+    fn enforce_space_labels_keeps_only_the_requested_space_and_counts_each_withheld_kind() {
+        let mut resp = RetrieveResponse {
+            candidates: vec![
+                labelled(Some("space-a")),
+                labelled(None),
+                labelled(Some("space-b")),
+                labelled(Some("")),
+            ],
+            context_pack: Some(ContextPack {
+                facts: vec![ContextFact::default(), ContextFact::default()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dropped = enforce_space_labels(&mut resp, "space-a");
+        assert_eq!(resp.candidates.len(), 1);
+        assert_eq!(chunk_space_ref(&resp.candidates[0]), Some("space-a"));
+        assert!(resp.context_pack.as_ref().expect("pack").facts.is_empty());
+        assert_eq!((dropped.unlabeled, dropped.other_space, dropped.pack_facts), (2, 1, 2));
+        assert_eq!(dropped.total(), 5);
+    }
+
+    /// WS17-S9b: a chunk's Space is a string label, and anything else reads as no label.
+    #[test]
+    fn chunk_space_ref_reads_only_a_non_empty_string_label() {
+        assert_eq!(chunk_space_ref(&labelled(Some("space-a"))), Some("space-a"));
+        assert_eq!(chunk_space_ref(&labelled(None)), None, "no metadata");
+        assert_eq!(chunk_space_ref(&labelled(Some(""))), None, "an empty string");
+        let no_key = Candidate {
+            metadata: Some(prost_types::Struct::default()),
+            ..Default::default()
+        };
+        assert_eq!(chunk_space_ref(&no_key), None, "no space_ref key");
+        let not_a_string = Candidate {
+            metadata: Some(prost_types::Struct {
+                fields: [(
+                    "space_ref".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::NumberValue(7.0)),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(chunk_space_ref(&not_a_string), None, "a non-string value");
+    }
+
+    /// WS17-S9b: the Space a decision names is read from a v2 envelope's payload, and from nothing else.
+    #[test]
+    fn decision_space_ref_reads_the_v2_envelope_space_and_nothing_else() {
+        let encode = |json: &str| URL_SAFE_NO_PAD.encode(json.as_bytes());
+        let envelope = |payload: &str| format!("v2.key-1.{payload}.sig");
+        assert_eq!(
+            decision_space_ref(&envelope(&encode(r#"{"space_ref":" space-a "}"#))),
+            Some("space-a".to_owned())
+        );
+        assert_eq!(
+            decision_space_ref(&format!("v1.key-1.{}.sig", encode(r#"{"space_ref":"space-a"}"#))),
+            None,
+            "another version"
+        );
+        assert_eq!(decision_space_ref(&envelope("!!not base64!!")), None, "a non-base64 payload");
+        assert_eq!(decision_space_ref(&envelope(&encode(r#"{"sub":"u"}"#))), None, "no space_ref");
+        assert_eq!(decision_space_ref(&envelope(&encode(r#"{"space_ref":"  "}"#))), None, "an empty space_ref");
+    }
+
     #[test]
     fn scoped_grounding_never_downgrades_to_an_unscoped_data_call() {
         assert_eq!(scoped_retrieval_token(None), Ok(None));

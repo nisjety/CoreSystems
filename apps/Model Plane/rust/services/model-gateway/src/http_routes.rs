@@ -26585,3 +26585,281 @@ mod approval_projection_tests {
         }
     }
 }
+
+/// W3-DEC-ZDRDEL and W3-DEC-ZDRDEL2: the shared capability-core proxy exempts exactly the six removals that
+/// `zdr_allowed_removal` names under a ZDR claim. Every other non-GET it is asked for keeps refusing a ZDR claim
+/// before anything is sent, and a waived token keeps its route mismatch on a removal.
+#[cfg(test)]
+mod zdr_removal_proxy_tests {
+    use super::*;
+    use wiremock::matchers::{any, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn claims(payload: Value) -> Claims {
+        let mut base = json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+        });
+        base.as_object_mut()
+            .expect("base claims are an object")
+            .extend(payload.as_object().expect("payload is an object").clone());
+        serde_json::from_value(base).expect("a minted token's payload is valid Claims")
+    }
+
+    /// A ZDR claim: the user's own retention is ZDR, as a ZDR org's member carries it.
+    fn zdr_claims() -> Claims {
+        claims(json!({ "zdr": true, "org_zdr": true }))
+    }
+
+    /// A waived claim: the org is ZDR, and the caller holds a waiver bound to one connection.
+    fn waived_claims() -> Claims {
+        claims(json!({
+            "zdr": false,
+            "org_zdr": true,
+            "zdr_waiver": {
+                "version": 1,
+                "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+                "connection": "conn-1",
+            },
+        }))
+    }
+
+    /// An upstream that must receive nothing (`expect(0)`), for the refusals.
+    async fn silent_upstream() -> MockServer {
+        let upstream = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+        upstream
+    }
+
+    #[tokio::test]
+    async fn the_six_removals_are_forwarded_under_a_zdr_claim() {
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        // The method and the path the proxy is given, one per `zdr_allowed_removal` arm.
+        let removals = [
+            ("DELETE", "cron/cron-1"),
+            ("DELETE", "skills/skill-1"),
+            ("DELETE", "skills/skill-1/draft"),
+            ("DELETE", "plugins/plugin-1"),
+            ("POST", "plugins/plugin-1/uninstall"),
+            ("DELETE", "plugin-kill-list?digest=abc&scope=org"),
+        ];
+        for (method_name, route) in removals {
+            let upstream = MockServer::start().await;
+            let target = format!("/api/v1/{}", route.split_once('?').map_or(route, |(r, _)| r));
+            Mock::given(method(method_name))
+                .and(path(target.as_str()))
+                .and(header("authorization", "Bearer capability-test-bearer"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let mut state = AppState::new();
+            state.capability_core_base_url = upstream.uri();
+            let forwarded = proxy_to_capability_core(&state, &zdr_claims(), &bearer, route, method_name, None)
+                .await;
+            assert!(forwarded.is_ok(), "{method_name} {route} is a D20 removal and must be forwarded: {forwarded:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_other_non_get_stays_refused_under_a_zdr_claim_and_sends_nothing() {
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        // The org-hook row is history, so its delete stays refused; the rest are near misses of the six or
+        // configuration and content writes, none of which D20 exempts.
+        let refused = [
+            ("DELETE", "org-hooks/hook-1"),
+            ("DELETE", "skills/skill-1/versions/2"),
+            ("DELETE", "skills/skill-1/draft/extra"),
+            ("DELETE", "plugin-kill-list/entry-1"),
+            ("PATCH", "cron/cron-1"),
+            ("POST", "plugins/plugin-1/install"),
+            ("POST", "plugin-catalog/plugin-1/approve"),
+            ("PUT", "skills/skill-1"),
+        ];
+        for (method_name, route) in refused {
+            let upstream = silent_upstream().await;
+            let mut state = AppState::new();
+            state.capability_core_base_url = upstream.uri();
+            let error = proxy_to_capability_core(&state, &zdr_claims(), &bearer, route, method_name, None)
+                .await
+                .expect_err("a ZDR claim is refused for a write the D20 allowlist does not name");
+            assert_eq!(error.0, StatusCode::PRECONDITION_FAILED, "{method_name} {route}");
+            assert_eq!(
+                error.1 .0["error"]["code"],
+                mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN,
+                "{method_name} {route}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_waived_removal_answers_the_route_mismatch_and_sends_nothing() {
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let upstream = silent_upstream().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = upstream.uri();
+        let error = proxy_to_capability_core(&state, &waived_claims(), &bearer, "cron/cron-1", "DELETE", None)
+            .await
+            .expect_err("a waiver binds one route, and a cron delete is not it");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1 .0["error"]["code"], "zdr_waiver_route_mismatch");
+    }
+}
+
+/// W3-DEC-KIND, W3-DEC-NOTES and W3-FIX-15: the restore route's evidence and refusal mapping, and the listing's
+/// provenance word.
+#[cfg(test)]
+mod restore_and_provenance_unit_tests {
+    use super::*;
+
+    #[test]
+    fn restore_space_kind_evidence_is_the_trimmed_token_and_empty_otherwise() {
+        assert_eq!(restore_space_kind_evidence(br#"{"space_kind_evidence":"  personal  "}"#), "personal");
+        assert_eq!(restore_space_kind_evidence(b""), "", "an absent body");
+        assert_eq!(restore_space_kind_evidence(b"{not json"), "", "invalid JSON");
+        assert_eq!(restore_space_kind_evidence(br#"{"space_kind_evidence":"   "}"#), "", "a blank field");
+        let too_long = format!(r#"{{"space_kind_evidence":"{}"}}"#, "x".repeat(RESTORE_MAX_EVIDENCE_BYTES + 1));
+        assert_eq!(restore_space_kind_evidence(too_long.as_bytes()), "", "an over-long value");
+    }
+
+    #[test]
+    fn restore_reason_passes_only_the_three_closed_tokens_and_reads_the_rest_as_unknown() {
+        assert_eq!(restore_reason("memory_restore_refused:not_withheld"), "not_withheld");
+        assert_eq!(restore_reason("memory_restore_refused:thread_is_shared_room"), "thread_is_shared_room");
+        assert_eq!(restore_reason("memory_restore_refused:thread_kind_unknown"), "thread_kind_unknown");
+        for other in ["memory_restore_refused:anything_else", "not_withheld", "", "memory_restore_refused:"] {
+            assert_eq!(restore_reason(other), "unknown", "{other:?}");
+        }
+    }
+
+    #[test]
+    fn restore_error_maps_each_refusal_and_never_relays_the_upstream_message() {
+        let (status, Json(body)) =
+            restore_error(&tonic::Status::failed_precondition("memory_restore_refused:not_withheld"));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "memory_restore_refused");
+        assert_eq!(body["error"]["details"]["reason"], "not_withheld");
+
+        let (status, Json(body)) = restore_error(&tonic::Status::failed_precondition("a sentence from upstream"));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["details"]["reason"], "unknown", "the upstream text does not cross");
+        assert!(!body.to_string().contains("a sentence from upstream"));
+
+        let (status, _) = restore_error(&tonic::Status::not_found("gone"));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = restore_error(&tonic::Status::permission_denied("no"));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_a_zdr_claim_before_the_upstream_call() {
+        let claims: Claims = serde_json::from_value(json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+            "zdr": true,
+            "org_zdr": true,
+        }))
+        .expect("claims");
+        let result = restore_memory_entry(
+            State(AppState::new()),
+            Extension(claims),
+            VerifiedModelBearer::for_test("model-token"),
+            Path("memory-1".to_owned()),
+            axum::body::Bytes::new(),
+        )
+        .await;
+        let (status, Json(body)) = result.expect_err("a ZDR claim is refused before any upstream call");
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN);
+    }
+
+    #[test]
+    fn provenance_token_keeps_owner_and_agent_and_drops_every_other_word() {
+        assert_eq!(provenance_token("owner"), "owner");
+        assert_eq!(provenance_token("agent"), "agent");
+        for other in ["", "Agent", "system", "owner of the thread"] {
+            assert_eq!(provenance_token(other), "", "{other:?}");
+        }
+    }
+}
+
+/// W3-FIX-16: the transcript entry an agent card or a link preview rides on. A card keeps its title, its named tone
+/// and its labelled fields; an unnamed tone reads as no tone; a link-preview entry carries no card.
+#[cfg(test)]
+mod thread_entry_unit_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::{AgentCard, AgentCardField, LinkPreview, MessageEntry};
+
+    fn card_entry(tone: &str) -> MessageEntry {
+        MessageEntry {
+            kind: "agent_card".to_owned(),
+            version: 1,
+            link_previews: Vec::new(),
+            agent_card: Some(AgentCard {
+                title: "Build".to_owned(),
+                tone: tone.to_owned(),
+                fields: vec![AgentCardField {
+                    label: "Step".to_owned(),
+                    value: "2 of 5".to_owned(),
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn an_agent_card_keeps_its_title_named_tone_and_fields_and_an_unnamed_tone_reads_as_none() {
+        let kept = thread_message_entry(Some(card_entry("progress"))).expect("an agent_card entry");
+        let card = kept.agent_card.expect("the card rides along");
+        assert_eq!(card.title, "Build");
+        assert_eq!(card.tone, "progress");
+        assert_eq!(card.fields.len(), 1);
+        assert_eq!((card.fields[0].label.as_str(), card.fields[0].value.as_str()), ("Step", "2 of 5"));
+        for unnamed in ["warning", "Info", ""] {
+            let entry = thread_message_entry(Some(card_entry(unnamed))).expect("still an entry");
+            assert_eq!(entry.agent_card.expect("the card").tone, "", "{unnamed:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_preview_entry_carries_its_previews_and_no_card() {
+        let previews = MessageEntry {
+            kind: "link_previews".to_owned(),
+            version: 1,
+            link_previews: vec![LinkPreview {
+                url: "https://example.com/a".to_owned(),
+                ..Default::default()
+            }],
+            agent_card: None,
+        };
+        let entry = thread_message_entry(Some(previews)).expect("a link_previews entry");
+        assert!(entry.agent_card.is_none());
+        assert_eq!(entry.link_previews.len(), 1);
+    }
+
+    #[test]
+    fn an_agent_card_kind_with_no_payload_keeps_only_its_kind_and_version() {
+        let bare = thread_message_entry(Some(MessageEntry {
+            kind: "agent_card".to_owned(),
+            version: 3,
+            ..Default::default()
+        }))
+        .expect("an entry with a kind is kept");
+        assert_eq!((bare.kind.as_str(), bare.version), ("agent_card", 3));
+        assert!(bare.agent_card.is_none());
+    }
+}

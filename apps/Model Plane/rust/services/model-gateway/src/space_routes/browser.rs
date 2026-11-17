@@ -1093,3 +1093,44 @@ async fn read_room_browser_evidence(
     )
         .into_response()
 }
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    /// WS20-S2: a room run takes no profile, no approval requirement and no zero-retention caller.
+    #[test]
+    fn a_room_run_refuses_a_profile_an_approval_or_a_zero_retention_caller() {
+        assert!(check_profile_request(false, false, false).is_ok());
+        for (profile, approval, zdr) in [(true, false, false), (false, true, false), (false, false, true)] {
+            let (status, Json(body)) =
+                check_profile_request(profile, approval, zdr).expect_err("refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{profile} {approval} {zdr}");
+            assert!(body.to_string().contains("room_browser_profile_forbidden"), "{body}");
+        }
+    }
+
+    /// WS20-S2: the room browser capacity admits below its limit and refuses at two active runs with 429.
+    #[test]
+    fn check_capacity_admits_below_the_limit_and_refuses_at_two() {
+        assert!(check_capacity(0).is_ok());
+        assert!(check_capacity(1).is_ok());
+        let (status, Json(body)) = check_capacity(2).expect_err("at the limit");
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(body.to_string().contains("browser_capacity"), "{body}");
+    }
+
+    /// WS20-S4: a requested limit defaults when absent or blank, is admitted up to the most, and is refused at zero,
+    /// beyond the most, or when it is not a number.
+    #[test]
+    fn room_limit_defaults_when_absent_and_refuses_zero_or_beyond_the_most() {
+        assert_eq!(room_limit(None, 20, 100).expect("default"), 20);
+        assert_eq!(room_limit(Some("  "), 20, 100).expect("blank reads as absent"), 20);
+        assert_eq!(room_limit(Some("100"), 20, 100).expect("the most is admitted"), 100);
+        for refused in ["0", "101", "abc"] {
+            assert!(room_limit(Some(refused), 20, 100).is_err(), "{refused}");
+        }
+    }
+}
