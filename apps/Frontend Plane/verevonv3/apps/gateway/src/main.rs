@@ -514,6 +514,51 @@ mod tests {
         }
     }
 
+    /// Stack for a test body that drives a request through the whole router to `execute_action`.
+    /// A libtest thread gets 2 MiB unless RUST_MIN_STACK says otherwise, so such a body names its
+    /// stack here instead of inheriting whatever the environment provides.
+    pub(crate) const LARGE_TEST_STACK_BYTES: usize = 32 * 1024 * 1024;
+
+    /// Runs one async test body to completion on a current-thread tokio runtime (the runtime that
+    /// `#[tokio::test]` builds) on a thread with [`LARGE_TEST_STACK_BYTES`] of stack. The body is
+    /// created on that thread, so it need not be `Send`. A panic in the body is re-raised on the
+    /// calling test thread with its original payload.
+    pub(crate) fn block_on_large_stack<F, Fut>(body: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        std::thread::Builder::new()
+            .name("large-stack-test".to_owned())
+            .stack_size(LARGE_TEST_STACK_BYTES)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime")
+                    .block_on(body())
+            })
+            .expect("spawn the large-stack test thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    /// A 4 MiB frame is more than a libtest thread's 2 MiB default, so this body only passes if it
+    /// really runs on the explicit stack that `block_on_large_stack` names.
+    #[test]
+    fn the_body_gets_the_large_stack_not_the_libtest_default() {
+        block_on_large_stack(|| async {
+            let frame = [0u8; 4 * 1024 * 1024];
+            std::hint::black_box(&frame);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "the body failed")]
+    fn a_panic_in_the_body_reaches_the_test_with_its_message() {
+        block_on_large_stack(|| async { panic!("the body failed") });
+    }
+
     pub(crate) fn test_state(allow_dev_actor_headers: bool) -> AppState {
         AppState {
             client: reqwest::Client::new(),

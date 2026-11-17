@@ -12,7 +12,7 @@
 //! the gateway; Integration Core checks the same role again.
 
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{rejection::JsonRejection, Extension, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -119,16 +119,21 @@ fn binding_body(body: Value) -> Value {
     Value::Object(forwarded)
 }
 
-/// Stores one credential binding for the caller's organisation. The secret is sent once and is never logged.
+/// Stores one credential binding for the caller's organisation. The secret is sent once and is never logged. The body
+/// is taken as a `Result`, so the switch answers before a body that is not JSON or is over the limit is refused.
 pub(crate) async fn create_credential_binding(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     if !state.credential_bindings_enabled {
         return disabled_response();
     }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
+    };
     if let Some(refusal) = admin_refusal(&user) {
         return refusal;
     }
@@ -193,16 +198,21 @@ pub(crate) async fn revoke_credential_binding(
 }
 
 /// Creates a custom REST connector that calls through one of the organisation's bindings. The body names the
-/// connector and the binding. The host, methods and path prefixes are the binding's, not the body's.
+/// connector and the binding. The host, methods and path prefixes are the binding's, not the body's. The body is taken
+/// as a `Result` for the same reason as [`create_credential_binding`].
 pub(crate) async fn create_custom_rest_connector(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     if !state.credential_bindings_enabled {
         return disabled_response();
     }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
+    };
     if let Some(refusal) = admin_refusal(&user) {
         return refusal;
     }

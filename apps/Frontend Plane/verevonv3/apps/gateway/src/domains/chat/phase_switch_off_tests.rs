@@ -4,7 +4,11 @@
 //!
 //! * Switch off: every route answers 404 with its own disabled code and nothing reaches an
 //!   upstream. The switch is the first refusal each module documents ("each step is a refusal
-//!   before the next one runs"), so a malformed id or body is not looked at either.
+//!   before the next one runs"), so a malformed id or body is not looked at either. That covers a
+//!   body that is not JSON, a query that does not parse and a body over the route's limit: the
+//!   extractors' refusals (400, 413) are only surfaced once the switch is on.
+//! * Switch on: those extractor refusals are what they were before the switch was checked first
+//!   (400 for a body or query that does not parse, 413 for an oversized body), and nothing is relayed.
 //! * CHAT_MEDIA_TRANSCRIPTS_ENABLED on, ZDR org: the transcript route refuses before the recording
 //!   leaves the gateway, with a typed refusal from the ZDR catalogue (project rule: ZDR fails closed
 //!   with typed refusals from the catalogue).
@@ -110,6 +114,15 @@ impl Upstreams {
                 .len();
         }
         count
+    }
+
+    /// Org-core saw nothing: the org routes read it only once the switch is on and the request has parsed.
+    async fn org_core_calls(&self) -> usize {
+        self.org_core
+            .received_requests()
+            .await
+            .expect("recording on")
+            .len()
     }
 }
 
@@ -306,6 +319,204 @@ async fn with_every_switch_off_a_malformed_request_is_the_same_disabled_404() {
             "{verb} {uri}: nothing relayed"
         );
     }
+}
+
+/// A JSON object of at least `len` bytes, so a body of this shape is over any limit of `len` bytes.
+fn oversized_json(len: usize) -> String {
+    let pad = "x".repeat(len);
+    format!(r#"{{"pad":"{pad}"}}"#)
+}
+
+/// With the switch off, a body that is not JSON, a query that does not parse and a body over the route's limit each get
+/// the disabled 404 with its code, and nothing is relayed. Without the switch checked first, the extractors answer 400 or
+/// 413 instead. The oversized bodies are over each route's limit: 16 KiB for the credential routes, axum's default
+/// (2 MB) for the model-entitlement and snapshot grant routes (4 MiB here), and the audio limit for transcripts.
+#[tokio::test]
+async fn with_every_switch_off_a_malformed_or_oversized_request_is_the_disabled_404() {
+    let over_16k = oversized_json(16 * 1024);
+    let over_default = oversized_json(4 * 1024 * 1024);
+    let over_audio = oversized_json(crate::domains::ai::AI_AUDIO_BODY_LIMIT_BYTES);
+    for (verb, uri, body, code) in [
+        (
+            "POST",
+            "/api/v1/credential-bindings",
+            Some("not json"),
+            "credential_bindings_disabled",
+        ),
+        (
+            "POST",
+            "/api/v1/credential-bindings",
+            Some(over_16k.as_str()),
+            "credential_bindings_disabled",
+        ),
+        (
+            "POST",
+            "/api/v1/connectors/custom-rest",
+            Some("not json"),
+            "credential_bindings_disabled",
+        ),
+        (
+            "POST",
+            "/api/v1/connectors/custom-rest",
+            Some(over_16k.as_str()),
+            "credential_bindings_disabled",
+        ),
+        (
+            "PUT",
+            "/api/v1/orgs/org-1/model-entitlement",
+            Some("not json"),
+            "not_found",
+        ),
+        (
+            "PUT",
+            "/api/v1/orgs/org-1/model-entitlement",
+            Some(over_default.as_str()),
+            "not_found",
+        ),
+        (
+            "GET",
+            "/api/v1/chat/runs/run-1/processes/p-1/output?space_ref=space-1&after_seq=abc",
+            None,
+            "process_output_disabled",
+        ),
+        (
+            "GET",
+            "/api/v1/chat/runs/run-1/processes/p-1/output?space_ref=space-1&max_bytes=x",
+            None,
+            "process_output_disabled",
+        ),
+        (
+            "POST",
+            "/api/v1/chat/snapshots/snap-1/grants",
+            Some("not json"),
+            "chat_snapshots_disabled",
+        ),
+        (
+            "POST",
+            "/api/v1/chat/snapshots/snap-1/grants",
+            Some(over_default.as_str()),
+            "chat_snapshots_disabled",
+        ),
+        (
+            "DELETE",
+            "/api/v1/chat/snapshots/snap-1/grants",
+            Some("not json"),
+            "chat_snapshots_disabled",
+        ),
+        (
+            "DELETE",
+            "/api/v1/chat/snapshots/snap-1/grants",
+            Some(over_default.as_str()),
+            "chat_snapshots_disabled",
+        ),
+        (
+            "POST",
+            "/api/v1/chat/transcripts",
+            Some(over_audio.as_str()),
+            "media_transcripts_disabled",
+        ),
+    ] {
+        let upstreams = Upstreams::start(false).await;
+        let (status, answered) = send(upstreams.state(), verb, uri, body).await;
+        assert_eq!(status, 404, "{verb} {uri}: {answered}");
+        assert_eq!(answered["error"]["code"], code, "{verb} {uri}: {answered}");
+        assert_eq!(
+            upstreams.relayed().await,
+            0,
+            "{verb} {uri}: nothing relayed"
+        );
+        assert_eq!(
+            upstreams.org_core_calls().await,
+            0,
+            "{verb} {uri}: org-core not asked"
+        );
+    }
+}
+
+/// With the switches on, the same malformed and oversized requests keep the answers they had before the switch was checked
+/// first: 400 for a body or query that does not parse (a grant body that is not JSON is refused by the grant itself, as
+/// `invalid_request`), 413 for a body over the limit, and nothing relayed.
+#[tokio::test]
+async fn with_the_switches_on_a_malformed_or_oversized_request_is_refused_as_before() {
+    let over_16k = oversized_json(16 * 1024);
+    let over_default = oversized_json(4 * 1024 * 1024);
+    let over_audio = oversized_json(crate::domains::ai::AI_AUDIO_BODY_LIMIT_BYTES);
+    let upstreams = Upstreams::start(false).await;
+
+    let mut credentials = upstreams.state();
+    credentials.credential_bindings_enabled = true;
+    for (uri, body, expected) in [
+        ("/api/v1/credential-bindings", "not json", 400),
+        ("/api/v1/credential-bindings", over_16k.as_str(), 413),
+        ("/api/v1/connectors/custom-rest", "not json", 400),
+        ("/api/v1/connectors/custom-rest", over_16k.as_str(), 413),
+    ] {
+        let (status, answered) = send(credentials.clone(), "POST", uri, Some(body)).await;
+        assert_eq!(status, expected, "{uri}: {answered}");
+    }
+
+    let mut entitlement = upstreams.state();
+    entitlement.model_entitlement_admin_enabled = true;
+    for (body, expected) in [("not json", 400), (over_default.as_str(), 413)] {
+        let (status, answered) = send(
+            entitlement.clone(),
+            "PUT",
+            "/api/v1/orgs/org-1/model-entitlement",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, expected, "{answered}");
+    }
+
+    let mut output = upstreams.state();
+    output.chat_process_output_enabled = true;
+    let (status, answered) = send(
+        output,
+        "GET",
+        "/api/v1/chat/runs/run-1/processes/p-1/output?space_ref=space-1&after_seq=abc",
+        None,
+    )
+    .await;
+    assert_eq!(status, 400, "{answered}");
+
+    let mut snapshots = upstreams.state();
+    snapshots.chat_snapshots_enabled = true;
+    for verb in ["POST", "DELETE"] {
+        let (status, answered) = send(
+            snapshots.clone(),
+            verb,
+            "/api/v1/chat/snapshots/snap-1/grants",
+            Some("not json"),
+        )
+        .await;
+        assert_eq!(
+            (status, answered["error"]["code"].as_str()),
+            (400, Some("invalid_request")),
+            "{verb}: {answered}"
+        );
+        let (status, _) = send(
+            snapshots.clone(),
+            verb,
+            "/api/v1/chat/snapshots/snap-1/grants",
+            Some(over_default.as_str()),
+        )
+        .await;
+        assert_eq!(status, 413, "{verb}");
+    }
+
+    let mut transcripts = upstreams.state();
+    transcripts.space_features.chat_media_transcripts = true;
+    let (status, _) = send(
+        transcripts,
+        "POST",
+        "/api/v1/chat/transcripts",
+        Some(over_audio.as_str()),
+    )
+    .await;
+    assert_eq!(status, 413);
+
+    assert_eq!(upstreams.relayed().await, 0, "nothing relayed");
+    assert_eq!(upstreams.org_core_calls().await, 0, "org-core not asked");
 }
 
 /// A ZDR org's transcript request is refused before the recording leaves the gateway, and the

@@ -17,6 +17,7 @@ mod insights_tests;
 mod preparation_tests;
 #[cfg(test)]
 mod analytics_sync_tests;
+#[cfg(test)]
 mod website_list_tests;
 #[cfg(test)]
 mod public_signals_tests;

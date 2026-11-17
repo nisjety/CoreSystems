@@ -27,7 +27,7 @@
 //! never cached.
 
 use axum::{
-    extract::{Extension, Path, Query, State},
+    extract::{rejection::QueryRejection, Extension, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -74,8 +74,21 @@ pub(super) async fn get_run_process_output(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path((run_id, pid)): Path<(String, String)>,
-    Query(query): Query<ProcessOutputQuery>,
+    query: Result<Query<ProcessOutputQuery>, QueryRejection>,
 ) -> Response {
+    // 1. The rollout switch, read once by build_state, is answered before the query is read. Off, the route is not
+    // there for anyone, so a malformed query gets the same 404 as any other request.
+    if !state.chat_process_output_enabled {
+        return no_store(refuse(
+            StatusCode::NOT_FOUND,
+            "process_output_disabled",
+            "Reading background process output is not enabled.",
+        ));
+    }
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(rejection) => return rejection.into_response(),
+    };
     no_store(read_process_output(&state, &user, &headers, &run_id, &pid, query).await)
 }
 
@@ -87,14 +100,6 @@ async fn read_process_output(
     pid: &str,
     query: ProcessOutputQuery,
 ) -> Response {
-    // 1. The rollout switch, read once by build_state. Off, the route is not there for anyone.
-    if !state.chat_process_output_enabled {
-        return refuse(
-            StatusCode::NOT_FOUND,
-            "process_output_disabled",
-            "Reading background process output is not enabled.",
-        );
-    }
     // 2. Membership, then shape, with Model Gateway's own checks.
     let org_id = authorized_org_id(state, user).await;
     if org_id.trim().is_empty() {

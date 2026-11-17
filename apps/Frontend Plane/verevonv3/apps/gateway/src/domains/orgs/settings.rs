@@ -1051,8 +1051,12 @@ mod tests {
         assert_eq!(up.catalogue_requests().await, 0);
     }
 
-    #[tokio::test]
-    async fn the_agent_action_route_is_gated_the_same_way() {
+    #[test]
+    fn the_agent_action_route_is_gated_the_same_way() {
+        crate::tests::block_on_large_stack(the_agent_action_route_is_gated_the_same_way_body);
+    }
+
+    async fn the_agent_action_route_is_gated_the_same_way_body() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let up = Upstreams::with_default_mint("admin").await;
         up.catalogue_answers(
@@ -1075,8 +1079,12 @@ mod tests {
         assert_eq!(up.org_core_requests().await, 0);
     }
 
-    #[tokio::test]
-    async fn the_agent_action_route_can_still_turn_zdr_off() {
+    #[test]
+    fn the_agent_action_route_can_still_turn_zdr_off() {
+        crate::tests::block_on_large_stack(the_agent_action_route_can_still_turn_zdr_off_body);
+    }
+
+    async fn the_agent_action_route_can_still_turn_zdr_off_body() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let up = Upstreams::with_default_mint("admin").await;
         up.org_core_accepts(json!({"zeroDataRetention": false}), stored_zdr(false))

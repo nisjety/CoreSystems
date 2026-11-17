@@ -36,7 +36,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{Extension, Path, State},
+    extract::{rejection::BytesRejection, Extension, Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -174,11 +174,15 @@ pub(super) async fn grant_snapshot(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(snapshot_id): Path<String>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     if !state.chat_snapshots_enabled {
         return disabled_response();
     }
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
+    };
     relay_grant(&state, &user, &headers, &snapshot_id, Method::POST, &body).await
 }
 
@@ -188,11 +192,15 @@ pub(super) async fn ungrant_snapshot(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(snapshot_id): Path<String>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     if !state.chat_snapshots_enabled {
         return disabled_response();
     }
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
+    };
     relay_grant(&state, &user, &headers, &snapshot_id, Method::DELETE, &body).await
 }
 
@@ -404,8 +412,8 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-/// The answer while the rollout switch is off. Every public handler returns it before it checks the id or the body,
-/// so a malformed request gets the same answer as a well-formed one.
+/// The answer while the rollout switch is off. Every public handler returns it before it checks the id, the body or the
+/// body's size, so a malformed or oversized request gets the same answer as a well-formed one.
 fn disabled_response() -> Response {
     no_store(refuse(
         StatusCode::NOT_FOUND,

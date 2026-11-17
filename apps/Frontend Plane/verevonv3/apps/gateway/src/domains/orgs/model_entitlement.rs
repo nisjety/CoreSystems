@@ -17,8 +17,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use axum::{
-    extract::{Extension, Path, Query, State},
+    extract::{rejection::JsonRejection, Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use reqwest::Method;
@@ -164,6 +165,29 @@ pub(crate) async fn put_model_entitlement(
         None,
     )
     .await
+}
+
+/// The PUT route as the router mounts it. While the switch is off, the 404 is answered before a body that is not JSON
+/// or is over the limit is refused, so such a request gets the same `not_found` as any other. The handler above keeps
+/// its signature because the action dispatcher calls it with a body it has already parsed.
+pub(crate) async fn put_model_entitlement_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if !state.model_entitlement_admin_enabled {
+        return not_enabled().into_response();
+    }
+    match body {
+        Ok(Json(body)) => {
+            put_model_entitlement(State(state), Extension(user), headers, Path(id), Json(body))
+                .await
+                .into_response()
+        }
+        Err(rejection) => rejection.into_response(),
+    }
 }
 
 /// GET /api/v1/orgs/:id/model-entitlement/explain[?user_id=]: why the caller
@@ -1218,8 +1242,14 @@ mod tests {
         assert_eq!(up.model_gateway_requests().await, 0);
     }
 
-    #[tokio::test]
-    async fn the_set_model_entitlement_action_goes_through_the_same_guard_as_the_route() {
+    #[test]
+    fn the_set_model_entitlement_action_goes_through_the_same_guard_as_the_route() {
+        crate::tests::block_on_large_stack(
+            the_set_model_entitlement_action_goes_through_the_same_guard_as_the_route_body,
+        );
+    }
+
+    async fn the_set_model_entitlement_action_goes_through_the_same_guard_as_the_route_body() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let up = Upstreams::start("owner").await;
         up.org_core_organization(zdr_organization(true)).await;

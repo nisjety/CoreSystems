@@ -13,7 +13,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{Extension, State},
+    extract::{rejection::BytesRejection, Extension, State},
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -60,12 +60,13 @@ fn accepted_audio(mime: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// POST /api/v1/chat/transcripts: the body is `{audio_base64, mime, title, thread_id?}`. See the module doc.
+/// POST /api/v1/chat/transcripts: the body is `{audio_base64, mime, title, thread_id?}`. See the module doc. The body is
+/// taken as a `Result`, so the switch answers before a body over the route's limit is refused.
 pub(crate) async fn create_chat_transcript(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     if !state.space_features.chat_media_transcripts {
         return (
@@ -77,6 +78,10 @@ pub(crate) async fn create_chat_transcript(
         )
             .into_response();
     }
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
+    };
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return invalid_body(
             "Expected a JSON object with `audio_base64`, `mime`, `title` and an optional `thread_id`.",

@@ -975,8 +975,14 @@ async fn continue_relays_org_policy_unavailable_only_under_its_own_status() {
 /// `cancel_run` call the orchestration handlers directly. An agent action names no connection, so
 /// even with the waiver switch on, a waived decision available, and connection keys planted in the
 /// action input, nothing is asked of Auth Core and every bearer is minted without a waiver.
-#[tokio::test]
-async fn the_action_surface_continuations_never_ask_and_never_waive() {
+#[test]
+fn the_action_surface_continuations_never_ask_and_never_waive() {
+    crate::tests::block_on_large_stack(
+        the_action_surface_continuations_never_ask_and_never_waive_body,
+    );
+}
+
+async fn the_action_surface_continuations_never_ask_and_never_waive_body() {
     for (action_id, input, upstream_path) in [
         (
             "orchestration.decide_approval",

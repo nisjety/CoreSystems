@@ -66,7 +66,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orgs/{id}/model-entitlement",
             get(model_entitlement::get_model_entitlement)
-                .put(model_entitlement::put_model_entitlement),
+                .put(model_entitlement::put_model_entitlement_route),
         )
         .route(
             "/api/v1/orgs/{id}/model-entitlement/explain",
